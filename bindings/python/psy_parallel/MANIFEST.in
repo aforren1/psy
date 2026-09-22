@@ -1,0 +1,18 @@
+# An sdist must carry everything the build needs. setup.py compiles
+# psy_parallel.h straight into the extension, and that header includes psy_rt.h.
+# Both live at the repository root, which an sdist cannot reach, so stage a
+# copy of the two next to setup.py first:
+#
+#     cp ../../../psy_parallel.h ../../../psy_rt.h .
+#     python -m build --sdist
+#
+# CI copies the same two headers in the "Stage headers into the package" step
+# of .github/workflows/ci.yml before cibuildwheel runs. The staged copies are
+# gitignored; setup.py prefers the repository root when it is present, so a
+# copy cannot shadow a newer header in a development tree.
+include psy_parallel.h
+include psy_rt.h
+# setup.py names the extension source by absolute path, which sdist does not
+# pick up on its own.
+include psy_parallel_ext.c
+include example.py

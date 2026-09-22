@@ -1,9 +1,10 @@
 # psy.serial Python binding
 
 A small CPython extension wrapping the
-[psy_serial.h](../../../psy_serial.h) single-header library. It uses the plain
-CPython C API (no nanobind/pybind/Cython) to stay dependency-free, and is
-built against the **Limited API / stable ABI** (`Py_LIMITED_API =
+[psy_serial.h](../../../psy_serial.h) single-header library, which builds on
+the shared [psy_rt.h](../../../psy_rt.h). It uses the plain CPython C API (no
+nanobind/pybind/Cython) to stay dependency-free, and is built against the
+**Limited API / stable ABI** (`Py_LIMITED_API =
 0x03080000`), so a single `psy/serial.abi3.so` works on CPython 3.8+ without a
 rebuild per version.
 
@@ -26,9 +27,21 @@ The in-place build drops the extension into `psy/`, an otherwise empty
 directory kept in git for exactly that purpose (the `psy` namespace has no
 source of its own).
 
-The library implementation is compiled directly into the extension. On
-Linux/macOS the build links `-pthread` for the async-pulse worker; on Windows
-it links `setupapi` and `advapi32` for port enumeration.
+setup.py finds the headers at the repository root in a development tree. A
+build outside the tree, such as an sdist or a cibuildwheel run, sees only this
+directory, so copy `psy_serial.h` and `psy_rt.h` next to `setup.py` first:
+
+```sh
+cp ../../../psy_serial.h ../../../psy_rt.h .
+```
+
+Both copies are gitignored, and the repository root still wins when it is
+there, so a stale copy cannot shadow a newer header.
+
+The implementation of `psy_serial.h`, and of the `psy_rt.h` it includes, is
+compiled directly into the extension. On Linux/macOS the build links
+`-pthread` for the async-pulse worker; on Windows it links `setupapi` and
+`advapi32` for port enumeration.
 
 ## Use
 
@@ -52,7 +65,23 @@ with ps.Port(device, baud=115200) as port:
 
 `read` returns `b""` on timeout. A disconnect, an `interrupt()` or a closed
 port raise instead, so a listener with a long timeout cannot spin on a dead
-port.
+port. `timeout_ms` must fit in 32 bits: a negative value raises
+`OverflowError` rather than becoming `TIMEOUT_INFINITE`.
+
+Timestamp a trigger against the library's own clock, so your numbers and its
+deadlines share one base:
+
+```python
+t0 = ps.now_us()                # monotonic microseconds
+port.write_byte(0x55)
+t1 = ps.now_us()
+```
+
+The physical onset lies after `t0` and, over USB, after the next frame
+boundary; `t1 - t0` is the syscall cost. Neither is the onset, they bound it.
+See TIMING in [psy_serial.h](../../../psy_serial.h). `psy.parallel.now_us()`
+reads the same clock: both libraries build on `psy_rt.h`, so one time base
+covers the whole rig.
 
 See [example.py](example.py).
 
@@ -101,6 +130,7 @@ port.close()            # now it is safe
 
 | | |
 |---|---|
+| `ps.now_us() -> int` | monotonic microseconds from the clock the library times its own deadlines against |
 | `ps.list_ports() -> list[dict]` | enumerate ports (`name`, `description`, `serial_number`, `location`, `vid`, `pid`) |
 | `ps.find_ports(vid=0, pid=0, serial_number=None, location=None, description=None, name=None) -> list[dict]` | the matching subset; zero/`None` matches anything |
 | `ps.Port(device, baud=0, data_bits=0, parity=PARITY_NONE, stop_bits=STOP_BITS_1, flow=FLOW_NONE, write_timeout_ms=0, exclusive=False, low_latency=False, dtr_low_on_open=False, rts_low_on_open=False, keep_dtr_on_close=False, rt_runtime_ns=0, rt_deadline_ns=0, rt_period_ns=0)` | open a port; `device` is required, a zero field means the library default |
@@ -123,7 +153,9 @@ Read-only properties: `is_open`, `device`, `baud`, `data_bits`, `parity`,
 `async_policy`, `rd_oserr`, `wr_oserr`, `misc_oserr`. The effective settings
 are what the driver accepted, not what you asked for. Log `async_policy`
 (`ASYNC_*`) next to timing data: `SCHED_DEADLINE` is refused without
-`CAP_SYS_NICE` or under CPU pinning, and the library falls back silently.
+`CAP_SYS_NICE` or under CPU pinning, and the library falls back silently. The
+`ASYNC_*` values come from `psy_rt.h` and mean the same thing in
+`psy.parallel`.
 
 Tune the async-pulse worker's real-time reservation (Linux
 [SCHED_DEADLINE](https://www.kernel.org/doc/html/latest/scheduler/sched-deadline.html); ns):

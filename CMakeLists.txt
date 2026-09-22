@@ -4,7 +4,8 @@ project(psy LANGUAGES C CXX)
 # Consumers: add_subdirectory(psy) then target_link_libraries(app PRIVATE psy::psy).
 # The target carries the include path plus what an IMPLEMENTATION translation
 # unit needs to link: pthreads on POSIX (async workers), setupapi on Windows
-# (serial-port enumeration). Each header is still standalone.
+# (serial-port enumeration). A header needs nothing else but psy_rt.h, which
+# the include path above already resolves.
 find_package(Threads REQUIRED)
 add_library(psy INTERFACE)
 add_library(psy::psy ALIAS psy)
@@ -27,8 +28,15 @@ option(PSY_BUILD_LOOPBACK "Build the loopback tests in tests/loopback/ (needs ha
 # append <name>, set its macro prefix, the platforms it supports, and whether
 # it has a PSY<X>_NO_THREADS build. Compile checks come from
 # tests/compile/psy_<name>.{c,cpp} and examples from examples/<name>_*.c, both
-# found by name and gated by platform.
-set(PSY_LIBS parallel serial)
+# found by name and gated by platform. The transport headers include psy_rt.h,
+# which the include path above resolves from the repository root, so the
+# compiler's own header dependencies rebuild every target after a psy_rt.h
+# edit. rt comes first so its compile checks run before its dependents'.
+set(PSY_LIBS rt parallel serial)
+
+set(PSY_PREFIX_rt          PSYRT)
+set(PSY_PLATFORMS_rt       Windows Linux Darwin)
+set(PSY_THREADS_rt         ON)
 
 set(PSY_PREFIX_parallel    PSYP)
 set(PSY_PLATFORMS_parallel Windows Linux)

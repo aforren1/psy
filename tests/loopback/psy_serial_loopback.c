@@ -19,7 +19,8 @@
  * threading promise of the library.
  */
 #define PSY_SERIAL_IMPLEMENTATION
-#include "psy_serial.h"   /* first include: it sets _DEFAULT_SOURCE for glibc */
+#include "psy_serial.h"   /* first include: it sets _DEFAULT_SOURCE for glibc,
+                           * and it pulls in psy_rt.h, which must be beside it */
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -204,7 +205,12 @@ int main(int argc, char** argv) {
     }
     bool same = (strcmp(argv[1], argv[2]) == 0);
 
+    /* Zeroed, as the header requires: psys_open() refuses a handle whose
+     * is_open flag is set, and an automatic variable's is set to whatever was
+     * on the stack. */
     psys_port a, b;
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
     /* A short write timeout on the handle under test, so the "peer stops
      * draining" check below does not sit for the 1 s default. Writes into an
      * empty transmit buffer never reach it. */
@@ -224,6 +230,15 @@ int main(int argc, char** argv) {
 
     psys_purge(lb_w, PSYS_PURGE_RX | PSYS_PURGE_TX);
     if (!same) psys_purge(lb_r, PSYS_PURGE_RX | PSYS_PURGE_TX);
+
+    /* 0. Reopening an open handle is refused, not honored: without the guard
+     * it memsets the handle and loses the descriptor and the worker thread.
+     * Checked first, because a failure here would leak for the rest of the
+     * run. The handle must still be usable afterwards, which everything
+     * below exercises. */
+    lb_check(!psys_open(lb_w, &da), "open on an open handle is refused",
+             "error: %s", psys_error(lb_w));
+    lb_check(psys_is_open(lb_w), "the handle survives the refusal", "%s", "is_open");
 
     /* 1. N bytes out, exactly N back. */
     uint8_t out[64], in[128];
@@ -366,6 +381,35 @@ int main(int argc, char** argv) {
                  got > 0 ? pb[0] : 0, got > 1 ? pb[1] : 0);
     }
 
+    /* 11b. The same cancel, raced against the worker's own dispatch. The width
+     *      here is short enough that the trailing byte is sometimes already on
+     *      its way to the writer mutex when the plain write takes it, which is
+     *      the window the armed/deadline token exists for: psyrt_worker_cancel
+     *      cannot reach a job that has left psy_rt.h's lock. Either order is
+     *      allowed on the wire. What must never happen is a 0xB2 AFTER the
+     *      0x42 that means "hold this". */
+    {
+        const int rounds = 30;
+        int raced = 0, undone = 0, odd = 0;
+        for (int i = 0; i < rounds; i++) {
+            uint8_t px[8];
+            /* Alternating widths, because the two sides of the race need
+             * different ones: a zero width is due the moment it is submitted,
+             * so the worker is already running the callback, while 200 us
+             * usually lets the cancel land first. */
+            int rc = psys_pulse_async(lb_w, 0xB1, 0xB2, (i % 2) ? 200u : 0u);
+            int wr = psys_write_byte(lb_w, 0x42);
+            int got = psys_read(lb_r, px, 4, 20, PSYS_READ_ALL);
+            if (rc != 1 || wr != 1 || got < 2 || px[0] != 0xB1) { odd++; continue; }
+            if (px[got - 1] != 0x42) undone++;       /* the write was undone */
+            else if (got == 3 && px[1] == 0xB2) raced++;  /* off won, legally */
+            else if (got != 2) odd++;
+        }
+        lb_check(undone == 0 && odd == 0, "write cancels a dispatched off",
+                 "%d rounds: %d undone, %d where the off won the race first, "
+                 "%d unexpected", rounds, undone, raced, odd);
+    }
+
     /* 12. A second pulse moves the one pending trailing edge: two onsets, one
      *     off, and it is the newer off byte. */
     {
@@ -387,6 +431,7 @@ int main(int argc, char** argv) {
      *     Windows COM port will refuse (it is exclusive). */
     {
         psys_port c;
+        memset(&c, 0, sizeof c);
         psys_desc dc = { .device = argv[1], .baud = 115200 };
         if (!psys_open(&c, &dc)) {
             lb_info("close flushes a pending off", "no third handle: %s", psys_error(&c));

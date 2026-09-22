@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static void list_ports(void) {
     psys_port_info ports[32];
@@ -41,7 +42,11 @@ int main(int argc, char** argv) {
     }
     unsigned long code = (argc > 2) ? strtoul(argv[2], NULL, 0) : 0x01;
 
+    /* Zeroed, as the header requires: psys_open() refuses a handle whose
+     * is_open flag is set, and an automatic variable's is set to whatever was
+     * on the stack. */
     psys_port sp;
+    memset(&sp, 0, sizeof sp);
     psys_desc desc = {
         .device      = argv[1],
         .baud        = (argc > 3) ? (uint32_t)strtoul(argv[3], NULL, 0) : 0,  /* 0 = 115200 */

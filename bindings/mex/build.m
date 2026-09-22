@@ -40,9 +40,19 @@ function build(name)
             continue;
         end
         args = {['-I' root], srcs{i}};
-        if ~ispc
-            % The async-pulse workers use pthreads on Linux/macOS. On Windows
-            % they use Win32 threads, so no extra link library.
+        if ispc
+            % Windows async-pulse workers use Win32 threads, so no thread
+            % library. psy_serial.h does need SetupAPI and the registry for
+            % port enumeration, and its #pragma comment(lib) reaches MSVC
+            % only: MinGW Octave and MATLAB's MinGW-w64 add-on would fail to
+            % link with undefined SetupDi*. mex takes -l<name> on both
+            % toolchains (it becomes <name>.lib for MSVC), so one spelling
+            % covers them.
+            if strcmp(srcs{i}, 'psy_serial.c')
+                args(end+1:end+2) = {'-lsetupapi', '-ladvapi32'};   %#ok<AGROW>
+            end
+        else
+            % The async-pulse workers use pthreads on Linux/macOS.
             args{end+1} = '-lpthread';   %#ok<AGROW>
         end
         mex(args{:});

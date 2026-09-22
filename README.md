@@ -2,20 +2,21 @@
 
 Single-header C libraries for psychophysics and neuroscience rigs, in the
 style of [stb](https://github.com/nothings/stb) and
-[sokol](https://github.com/floooh/sokol). Each header is standalone, has no
-dependencies beyond the OS, compiles as C11 or C++17, and carries its own
-documentation in its top comment.
+[sokol](https://github.com/floooh/sokol). A header needs nothing but the OS
+and, for a transport, the shared `psy_rt.h`. Every header compiles as C11 or
+C++17 and carries its own documentation in its top comment.
 
 ## Libraries
 
 | Header | Purpose | Platforms | Status |
 |---|---|---|---|
-| [psy_parallel.h](psy_parallel.h) | Parallel port (LPT) trigger output and line input, blocking and async pulses. | Windows, Linux | v0.1. Linux tested; Windows backend compiled but not run on hardware. |
-| [psy_serial.h](psy_serial.h) | Serial port (RS-232, USB-serial, USB-CDC) byte I/O for trigger and response boxes, blocking and async pulses. | Windows, Linux, macOS | v0.2. Linux tested against a virtual port pair; the Windows backend compiles but has not run on a port; macOS not yet compiled. [Design notes](docs/psy_serial.md). |
+| [psy_rt.h](psy_rt.h) | The shared base: monotonic clock, deadline waits, thread elevation, and a one-shot deadline worker. The transport headers use it. | Windows, Linux, macOS | v0.2. Windows measured with [rt_jitter](examples/rt_jitter.c); Linux built and run under WSL2, worker clean under ThreadSanitizer; CI compiles the macOS backend as soon as this is pushed. No test host grants CAP_SYS_NICE, so the SCHED_DEADLINE, SCHED_FIFO and Mach time-constraint rungs are unexercised. |
+| [psy_parallel.h](psy_parallel.h) | Parallel port (LPT) trigger output and line input, blocking and async pulses. | Windows, Linux | v0.3, on psy_rt.h. Linux tested; Windows backend compiled but not run on hardware. |
+| [psy_serial.h](psy_serial.h) | Serial port (RS-232, USB-serial, USB-CDC) byte I/O for trigger and response boxes, blocking and async pulses. | Windows, Linux, macOS | v0.4, on psy_rt.h. Linux tested against a virtual port pair; the Windows and macOS backends compile in CI but have never run on a device. [Design notes](docs/psy_serial.md). |
 
 ## Quick start
 
-1. Copy the header you need into your project.
+1. Copy `psy_rt.h` and the header you need into your project.
 2. In exactly one `.c` or `.cpp` file, define the implementation macro before
    the include:
 
@@ -49,6 +50,7 @@ adds the include path.
 ## Layout
 
 ```
+psy_rt.h                  the shared base: clock, waits, scheduling, deadline worker
 psy_<name>.h              one library per header, at the root; the header is the documentation
 examples/<name>_*.c       runnable demos, one or more per library
 tests/compile/            per-header compile checks (C11, C++17, no-threads)
@@ -61,9 +63,21 @@ CMakeLists.txt            builds examples and compile checks; registers librarie
 
 ## Conventions
 
+- **Dependencies.** `psy_rt.h` is the one header the others use. It holds the
+  clock, the deadline waits, the thread elevation and the deadline worker. A
+  transport header includes it, so a user copies `psy_rt.h` and the transport
+  header. There are no other dependencies between headers. Two mechanics
+  follow from this. First, the transport's implementation block also
+  compiles the implementation of `psy_rt.h`, unless the same translation unit
+  already defined `PSY_RT_IMPLEMENTATION` and included `psy_rt.h` before it.
+  Either order gives exactly one copy of the implementation. Second,
+  `PSY<X>_NO_THREADS` also sets `PSYRT_NO_THREADS`. If you include `psy_rt.h`
+  first, it reads its own macro before the transport can set it, so define
+  both macros or neither.
 - **Names.** `psy_<name>.h` uses a short, unique function prefix `psy<x>_`
   and macro prefix `PSY<X>_`, registered in the table above: `psyp_`/`PSYP_`
-  for parallel, `psys_`/`PSYS_` for serial. One letter while it stays
+  for parallel, `psys_`/`PSYS_` for serial, `psyrt_`/`PSYRT_` for the
+  real-time timing primitives in `psy_rt.h`. One letter while it stays
   unique; a later `psy_screen.h` picks something like `psyscr_`. The
   implementation macro is `PSY_<NAME>_IMPLEMENTATION`. Private symbols use a
   double underscore (`psyp__now_ns`).
@@ -94,6 +108,8 @@ CMakeLists.txt            builds examples and compile checks; registers librarie
 
 1. Write `psy_<name>.h` with the top-comment manual, the API reference on
    each declaration, and the MIT-0 block, following the conventions above.
+   Build on `psy_rt.h` for the clock, the waits, the thread scheduling and
+   the deadline worker. Do not write those again.
 2. Add `tests/compile/psy_<name>.c` and `.cpp` (copy an existing pair and
    change the name).
 3. Register it in `CMakeLists.txt`: append to `PSY_LIBS`, set
@@ -116,13 +132,14 @@ what puts a header under test.
 - **Python**: one distribution per library under
   [bindings/python/](bindings/python/), each a dependency-free CPython
   extension on the Limited API (one abi3 wheel per platform for CPython
-  3.8+). They share the `psy` namespace (PEP 420, no `__init__.py`), so
+  3.8+). Each one compiles the transport header plus `psy_rt.h` into the
+  extension. They share the `psy` namespace (PEP 420, no `__init__.py`), so
   `pip install psy-parallel psy-serial` gives `import psy.parallel` and
   `import psy.serial`, and either installs alone. CI builds the wheels with
   cibuildwheel on Linux, Windows, and (serial only) macOS.
 - **MATLAB / Octave**: [bindings/mex/](bindings/mex/), one MEX function per
   library (`psy_parallel`, `psy_serial`) with ppdev-mex-style command
-  dispatch.
+  dispatch. Each one compiles the transport header plus `psy_rt.h`.
 
 ## License
 

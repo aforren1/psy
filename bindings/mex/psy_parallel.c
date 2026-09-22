@@ -20,13 +20,16 @@
  *     c = psy_parallel('control',h)            % read control register
  *     psy_parallel('control',    h, value)     % write control register
  *     rt = psy_parallel('sched', h)            % effective RT params struct
+ *     t  = psy_parallel('now_us')              % library clock (us), no handle
  *     psy_parallel('close',      h)
  *
  * Build with build.m (MATLAB or Octave). See README.md.
  *
  * NOTE: the handle table is freed (and every open port closed) on 'clear mex'
  * via mexAtExit, so a forgotten close cannot leave an async worker thread
- * pointing at a freed port.
+ * pointing at a freed port. A handle is a small counter, not a pointer: a
+ * freed port struct can be reallocated at the same address, and a stale
+ * pointer handle would then silently drive the port that took its place.
  */
 /* clock_gettime/nanosleep/pthread_*: ensure the feature macro is set before any
  * header. Guarded because some mex toolchains (MATLAB) already define it on the
@@ -43,12 +46,18 @@
 #include "psy_parallel.h"
 
 /* ---- handle table: tracks every open port for cleanup ------------------ */
+/* The handle is `id`, not the port address. malloc happily hands a new port
+ * the address a closed one just released, so a pointer handle held in a stale
+ * MATLAB variable would pass the lookup and drive someone else's port. Ids
+ * are never reused, so a stale handle always raises psy_parallel:handle. */
 typedef struct pp_node {
+    uint64_t        id;
     psyp_port*      port;
     struct pp_node* next;
 } pp_node;
 
 static pp_node* g_ports = NULL;
+static uint64_t g_next_id = 1;
 static int      g_atexit_registered = 0;
 
 static void pp_cleanup(void) {
@@ -62,12 +71,22 @@ static void pp_cleanup(void) {
     g_ports = NULL;
 }
 
-static void pp_register(psyp_port* port) {
+/* Takes ownership of `port` on success. On allocation failure the port is
+ * closed here: it would otherwise stay open with no handle to reach it. */
+static uint64_t pp_register(psyp_port* port) {
     pp_node* n = (pp_node*)malloc(sizeof(*n));
+    if (!n) {
+        psyp_close(port);
+        free(port);
+        mexErrMsgIdAndTxt("psy_parallel:mem", "out of memory");
+        return 0;
+    }
+    n->id = g_next_id++;
     n->port = port;
     n->next = g_ports;
     g_ports = n;
     if (!g_atexit_registered) { mexAtExit(pp_cleanup); g_atexit_registered = 1; }
+    return n->id;
 }
 
 static void pp_unregister(psyp_port* port) {
@@ -80,18 +99,17 @@ static void pp_unregister(psyp_port* port) {
 
 /* Resolve a handle arg to a registered port pointer; error if unknown. */
 static psyp_port* pp_handle(const mxArray* a) {
-    uint64_t bits;
+    uint64_t id;
     if (mxIsUint64(a))
-        bits = *(const uint64_t*)mxGetData(a);
+        id = *(const uint64_t*)mxGetData(a);
     else if (mxIsDouble(a) && mxGetNumberOfElements(a) == 1)
-        bits = (uint64_t)mxGetScalar(a);
+        id = (uint64_t)mxGetScalar(a);
     else {
         mexErrMsgIdAndTxt("psy_parallel:handle", "handle must be a scalar uint64");
         return NULL;
     }
-    psyp_port* port = (psyp_port*)(uintptr_t)bits;
     for (pp_node* n = g_ports; n; n = n->next)
-        if (n->port == port) return port;
+        if (n->id == id) return n->port;
     mexErrMsgIdAndTxt("psy_parallel:handle", "invalid or closed port handle");
     return NULL;
 }
@@ -119,6 +137,21 @@ static mxArray* pp_scalar_u8(uint8_t v) {
     mxArray* a = mxCreateNumericMatrix(1, 1, mxUINT8_CLASS, mxREAL);
     *(uint8_t*)mxGetData(a) = v;
     return a;
+}
+
+/* The policy the worker obtained, as a string, so a log is readable without a
+ * lookup table. psy_rt.h owns the names; it spells them in capitals, and this
+ * binding has always published lower case, so fold the case here rather than
+ * keep a second table that psy_rt.h could outgrow. */
+static mxArray* pp_policy_string(psyrt_policy pol) {
+    const char* name = psyrt_policy_name(pol);
+    char buf[32];
+    size_t i = 0;
+    for (; name[i] != 0 && i + 1 < sizeof(buf); i++)
+        buf[i] = (name[i] >= 'A' && name[i] <= 'Z')
+               ? (char)(name[i] - 'A' + 'a') : name[i];
+    buf[i] = 0;
+    return mxCreateString(buf);
 }
 
 static void check(psyp_port* port, int ok) {
@@ -179,10 +212,10 @@ static void cmd_open(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
         free(port);
         mexErrMsgIdAndTxt("psy_parallel:open", "%s", msg);
     }
-    pp_register(port);
+    uint64_t id = pp_register(port);
 
     mxArray* h = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
-    *(uint64_t*)mxGetData(h) = (uint64_t)(uintptr_t)port;
+    *(uint64_t*)mxGetData(h) = id;
     plhs[0] = h;
     (void)nlhs;
 }
@@ -221,6 +254,17 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         return;
     }
 
+    if (strcmp(cmd, "now_us") == 0) {
+        /* The clock the library times its own deadlines against, from
+         * psy_rt.h. Bracket a write with it so your timestamps and the
+         * library's share one base. psy_serial('now_us') reads the same
+         * clock. A double holds whole microseconds exactly up to 2^53, which
+         * is 285 years of uptime. */
+        plhs[0] = mxCreateDoubleScalar((double)psyrt_now_us());
+        mxFree(cmd);
+        return;
+    }
+
     /* all other commands take a handle as the 2nd argument */
     if (nrhs < 2) mexErrMsgIdAndTxt("psy_parallel:usage", "'%s' needs a port handle", cmd);
     psyp_port* port = pp_handle(prhs[1]);
@@ -241,18 +285,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
     } else if (strcmp(cmd, "sched") == 0) {
         /* effective async-worker RT params (ns) plus the policy the worker
-         * actually obtained, as a string so logs are readable without a
-         * lookup table */
-        static const char* const policy_names[] = {
-            "none", "deadline", "fifo", "time_critical", "normal" };
+         * actually obtained */
         const char* fields[] = { "runtime_ns", "deadline_ns", "period_ns", "policy" };
         mxArray* s = mxCreateStructMatrix(1, 1, 4, fields);
         mxSetField(s, 0, "runtime_ns",  mxCreateDoubleScalar((double)port->sched.runtime_ns));
         mxSetField(s, 0, "deadline_ns", mxCreateDoubleScalar((double)port->sched.deadline_ns));
         mxSetField(s, 0, "period_ns",   mxCreateDoubleScalar((double)port->sched.period_ns));
-        int pol = (int)port->async_policy;
-        if (pol < 0 || pol > 4) pol = 0;
-        mxSetField(s, 0, "policy", mxCreateString(policy_names[pol]));
+        mxSetField(s, 0, "policy", pp_policy_string(port->async_policy));
         plhs[0] = s;
 
     } else if (strcmp(cmd, "control") == 0) {

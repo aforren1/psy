@@ -1,13 +1,16 @@
 # psy_serial.h design
 
-Status: **v0.2, implemented.** Windows uses the Win32 COM API with overlapped
-I/O; Linux and macOS share a termios backend. Verified on Linux against a
+Status: **v0.4, implemented.** Windows uses the Win32 COM API with overlapped
+I/O; Linux and macOS share a termios backend. Since v0.4 the header depends on
+`psy_rt.h` for the clock, the waits, the scheduling ladder and the deadline
+worker; see [Depends on psy_rt.h](#depends-on-psy_rth). Verified on Linux against a
 socat pty pair, including a reader thread and a writer thread on one handle
-under ThreadSanitizer. The Windows backend compiles clean under MSVC but has
-not run on a port: its open-time validation and enumeration entry point run,
-but no byte has moved through it, for lack of a COM device. The macOS paths
-have not been compiled or run at all, for lack of a machine. No timing claim
-in the header has been measured yet, and the async worker has only ever run at
+under ThreadSanitizer and under AddressSanitizer plus UndefinedBehaviorSanitizer.
+The Windows backend compiles clean under MSVC but has not run on a port: its
+open-time validation and enumeration entry point run, but no byte has moved
+through it, for lack of a COM device. The macOS paths compile on macOS in CI
+but have never run on a device, for lack of a machine. No timing claim in the
+header has been measured yet, and the async worker has only ever run at
 `PSYS_ASYNC_NORMAL`: the test machine grants no `CAP_SYS_NICE`, so the
 `SCHED_DEADLINE` and `SCHED_FIFO` rungs of its ladder are written but
 unexercised. The header's top comment is the user-facing documentation
@@ -61,6 +64,88 @@ unexercised. The header's top comment is the user-facing documentation
 
 ## Decisions
 
+### Depends on psy_rt.h
+
+v0.4 deletes every line of timing code in this header and includes `psy_rt.h`
+instead: `psys_now_us` is `psyrt_now_us`, the pulse-width wait is
+`psyrt_sleep_until`, the reservation type is `psyrt_sched_deadline`, the policy
+enum is `psyrt_policy`, and the async-pulse thread is a `psyrt_worker`. It is a
+hard dependency, in the `stb_truetype.h` / `stb_rect_pack.h` and
+`sokol_gfx_imgui.h` / `sokol_gfx.h` sense: the user copies two files.
+
+Three arguments, none of them tidiness.
+
+- **Three copies of the same code were already drifting.** `psy_parallel.h`,
+  `psy_serial.h` and the experiment code each had a monotonic clock, a spin,
+  a sleep and an RT ladder. The header promised that a caller's
+  `psys_now_us()` timestamps and the library's deadlines "share one base";
+  with two copies of the conversion that was a claim about two pieces of code
+  agreeing, and it is now the same function call.
+- **The Windows spin bug existed only here.** This copy's blocking
+  `psys_pulse` busy-spun the entire pulse width on `QueryPerformanceCounter`,
+  where `psy_parallel.h` had long spun only the last ~1.14 ms and slept the
+  rest, and this copy's worker spin could not see a replacement pulse or a
+  close until v0.3 found it by hand. Neither bug was findable in the other
+  copies, because they were not in the other copies. One implementation is one
+  place to fix and one place to measure.
+- **The real-time rungs are untested everywhere.** No machine in this project
+  grants `CAP_SYS_NICE`, so `SCHED_DEADLINE` and `SCHED_FIFO` have never been
+  obtained by any of the copies. Three unexercised ladders are three times the
+  risk for none of the coverage; `psy_rt.h` at least has `examples/rt_jitter.c`
+  pointed at it, and `psys_port.async_policy` now reports the same rung, by the
+  same name, as everything else in the collection.
+
+What the user gives up is the single file. `psy_serial.h` alone no longer
+compiles, and the STATUS block, USAGE and BUILDING all say so. That is the
+whole cost, and it is paid once at copy time.
+
+#### The writer mutex stays here
+
+`psyrt_worker` runs its callback **with its own lock released**. That is not an
+oversight in `psy_rt.h`, it is what makes the callback usable: the callback may
+re-arm its own worker and may block, and a submit from another thread never
+waits behind it. But this library's trailing byte is a write into a byte stream
+that can block for up to `write_timeout_ms`, and the library's promise is that
+exactly one thread writes the port at a time. Running the callback under the
+worker's lock would buy that serialization and deadlock the first time a submit
+raced a stalled write; so a straight substitution of `psyrt_worker` for the old
+private worker would have quietly dropped the guarantee instead.
+
+The split: `psy_rt.h` owns *when*, this header owns *who writes*. `psys__async`
+holds one small writer mutex (a PI `pthread_mutex` where the platform has one,
+a `CRITICAL_SECTION` on Windows) plus the pending trailing byte, armed with the
+deadline it is due at. Every writer-role write takes the mutex; a user write
+disarms the pending byte, calls `psyrt_worker_cancel` and writes;
+`psys_pulse_async` writes the onset, arms and submits, all under the mutex; and
+the callback takes the mutex and writes only what is still armed and due.
+
+The arm flag plus the deadline is the token, and it is checked at write time
+rather than carried from submit time, because a `psyrt_job_fn` receives the
+same `ctx` for every job on a handle and cannot carry a per-job counter of its
+own. That turns out to be the stronger test anyway. `psyrt_worker_cancel`
+covers the ordinary case, where the job has not left `psy_rt.h`'s lock yet. It
+cannot reach the window between the worker releasing that lock and the callback
+acquiring the writer mutex, and in that window a user write may have disarmed
+the byte (the callback must write nothing) or a new pulse may have armed a
+different byte at a later deadline (the callback must leave it to its own
+deadline). Asking "what is armed, and is it due?" answers both, and a flush
+from `psyrt_worker_stop` writes whatever is armed at once, which is what
+`psys_close` needs.
+
+Lock order is writer mutex, then `psy_rt.h`'s lock; the callback holds nothing
+of `psy_rt.h`'s when it takes the writer mutex, so the cycle does not close.
+
+#### What the rename costs
+
+`psys_sched_deadline` is a typedef of `psyrt_sched_deadline` and
+`psys_async_policy` of `psyrt_policy`, with `PSYS_ASYNC_*` and
+`PSYS_DEFAULT_RT_*` kept as aliases, so source that used them still compiles.
+The enumerators' numeric values did change, because `psyrt_policy` has a macOS
+time-constraint rung between `DEADLINE` and `FIFO` that this header never had,
+and macOS `async_policy` can now report it. Anything that stored those integers
+has to be rebuilt rather than relinked; at v0.x, with the bindings built from
+the same tree, that is a recompile and a changelog line, not a migration.
+
 ### Return codes everywhere, a message only from psys_open
 
 `psys_open` returns `bool` and writes `psys_error()`, which its own `memset`
@@ -88,6 +173,35 @@ thread calling it would have scribbled over a failing reader's error number.
 otherwise looks like silence: macOS `read()` returns 0 (EOF), Linux `poll()`
 returns `POLLHUP` immediately, and a listener with a long timeout would spin
 at 100% CPU on a dead port.
+
+### The wait call, per POSIX platform
+
+Linux waits with `poll()`. macOS waits with `select()`, because Apple's
+`poll(2)` still carries the note that it does not support devices, and every
+descriptor this library waits on is one. pyserial makes the same split for the
+same reason, which is the only field evidence available for a platform nobody
+here can run.
+
+The alternative considered was keeping `poll()` on both and writing a note into
+the header that a Mac should be checked first. It was rejected: a note does not
+make a wait wake up. The macOS backend is entirely unverified either way, so
+`select()` costs no verification that existed, while `poll()` risks a listener
+thread that never wakes or a poll that reports nothing on a live port, which is
+a silent timing failure rather than a loud one.
+
+What `select()` gives up is the hangup bit: there is no `POLLHUP` equivalent,
+and `exceptfds` means nothing on a tty. A dead port on Darwin surfaces instead
+as a readable descriptor whose `read()` returns 0, or as `EIO`/`ENXIO` out of
+`read()` or `write()`, both already mapped to `PSYS_ERR_DISCONNECTED`. What it
+costs is `FD_SETSIZE`: `select()` cannot name a descriptor at or above it, so
+`psys_open()` refuses such a port on Darwin with a message instead of writing
+past an `fd_set`. Both waits sit behind one `psys__wait()` helper, so the
+reader and the writer have one shape and only the wait call differs.
+
+`read() == 0` is read as a hangup only because the wait reported the
+descriptor readable first. Ungated it would be ambiguous: with `VMIN = 0` and
+`VTIME = 0`, which is how this library configures the line, Linux `n_tty`
+returns 0 for "nothing buffered" as well.
 
 ### Interrupt
 
@@ -155,6 +269,25 @@ The `OVERLAPPED` structures live in the handle (`rd_ovl`, `wr_ovl`), never
 on the stack: a cancelled read that is not reaped with
 `GetOverlappedResult(TRUE)` would complete into a dead frame.
 
+An aborted read that carried no bytes does not end the call. `psys_interrupt`
+is checked at the top of every iteration, and a vanished device is asked about
+with `ClearCommError`, so an abort that is neither can only be this thread's own
+`psys_purge(PSYS_PURGE_RX)`. Returning 0 there would end a
+`PSYS_TIMEOUT_INFINITE` read with no data, no interrupt and no disconnect,
+which the header promises cannot happen, and would read as a deadline to the
+`PSYS_READ_ALL` loop. The read instead resumes, against an absolute deadline
+taken on entry so a finite timeout is not restarted by the abort.
+
+A failed `SetCommTimeouts` maps through the same disconnect test as everything
+else. It is where a reader on an unplugged port often fails first, and a
+`PSYS_ERR_IO` there would have hidden the unplug.
+
+On the write side, only `ERROR_OPERATION_ABORTED` on a live port is reported as
+a short count. Every other failure of `GetOverlappedResult` is an error code:
+a short count is how `psys_write` signals its timeout, so a driver error
+returned that way is indistinguishable from "the device is slow", and the
+documented response to a short count is to send the rest again.
+
 ### Write model
 
 `psys_write` blocks until the driver accepted every byte or `write_timeout_ms`
@@ -178,14 +311,15 @@ device-timed pulses.
 
 `psys_pulse_async(p, on, off, usec)` writes `on` on the calling thread and
 returns; a worker thread the library owns writes `off` at an absolute deadline
-taken right after the onset write. It mirrors `psyp_pulse_async`: worker
-started in `psys_open` so the policy is final before the first trial and no
-trial pays thread creation, a ready handshake so `psys_port.async_policy` is
-valid when the open returns, one pending job per handle, the RT ladder
-(`SCHED_DEADLINE` with `desc.sched`, then `SCHED_FIFO` 80, then a normal
-thread with the timer slack removed; `THREAD_PRIORITY_TIME_CRITICAL` with a
-high-resolution waitable timer and a QPC spin tail on Windows), and the same
-`psys_sched_deadline` contract validated in `psys_open` before any OS call.
+taken right after the onset write. Since v0.4 that thread is a `psyrt_worker`,
+so the ladder, the ready handshake that makes `psys_port.async_policy` final
+when `psys_open` returns, the one-pending-job rule, the deadline wait with its
+spin tail and the flush on stop are all `psy_rt.h`'s, and `psys_open` validates
+`desc.sched` with `psyrt_sched_normalize` before any OS call. What stays here
+is the writer mutex and the armed trailing byte; see
+[Depends on psy_rt.h](#depends-on-psy_rth). The shape still mirrors
+`psyp_pulse_async`: the worker starts in `psys_open`, so the policy is final
+before the first trial and no trial pays for thread creation.
 
 This was left out of v0.1, on two arguments that were both wrong. "A worker
 buys nothing measurable over USB" confused a floor with a budget: frame
@@ -202,9 +336,10 @@ trailing-edge precision alone; it is that the caller gets its thread back.
 What is genuinely different from the parallel port is that the trailing edge
 is a stream write, not an `outb`, so it can block. That makes the worker a
 second writer rather than an invisible helper, and it is documented as one:
-every writer-role write takes the worker's lock (PI mutex on POSIX, critical
-section on Windows), the worker reports failures through `wr_oserr` like any
-writer, and if a stalled device blocks one of them the other waits for up to
+every writer-role write takes the writer mutex (PI `pthread_mutex` where the
+platform has one, critical section on Windows), the worker reports failures
+through `wr_oserr` like any writer, and if a stalled device blocks one of them
+the other waits for up to
 `write_timeout_ms`. `psy_parallel.h` does not pay that because `outb` cannot
 block. The alternative, giving the worker its own queue and never blocking a
 user write, would reorder bytes on a stream where order is the protocol.
@@ -212,12 +347,36 @@ user write, would reorder bytes on a stream where order is the protocol.
 Two behaviors carried over because they are about correctness, not
 convenience. A plain `psys_write` / `psys_write_byte` / `psys_pulse` while a
 pulse is pending cancels the pending trailing byte, because a write means
-"hold this" and a stale `off` would undo it a few milliseconds later. And
+"hold this" and a stale `off` would undo it a few milliseconds later (v0.4
+keeps that promise with the arm token as well as with `psyrt_worker_cancel`,
+because a cancel cannot reach a job the worker has already dispatched). And
 `psys_close` stops the worker before it closes anything, which makes the
 worker write a pending `off` at once instead of waiting out the width, so a
 latching box is never left holding a trigger code. On Windows the worker
 carries its own `OVERLAPPED` and event (`pa_ovl`, `pa_event`): a transfer is
 reaped by the thread that started it, so it never borrows the user writer's.
+
+That flush is not free: it runs with the worker's lock held and `psys_close`
+is blocked in the join behind it, so "at once" is a statement about the
+deadline, not about the call returning. It is bounded by a fixed 50 ms rather
+than by `write_timeout_ms`, which a trigger sender may well have set to a
+second or to `PSYS_TIMEOUT_INFINITE`; a close that hangs forever on a wedged
+device is worse than a trailing byte that never lands. A healthy device takes
+one byte in microseconds, so the bound only ever fires on a device that is
+already lost, and the loopback check of this path measures a few hundred
+microseconds. The header states the 50 ms, because a promise of "at once" that
+is really "up to `write_timeout_ms`" is the kind of claim this collection must
+not make.
+
+The Windows worker's sub-millisecond spin used to re-check the quit flag and a
+job generation counter, a bug found and fixed here in v0.3 and nowhere else,
+which is one of the reasons there is now one worker for the whole collection.
+`psy_rt.h` keeps that behavior (its loop re-evaluates after every spin) and
+documents the race that remains: a submit or a cancel issued inside the final
+spin window is seen after the spin, not during, so a replacement pulse can be
+late by up to the spin window. That window is `PSYRT_DEFAULT_SPIN_NS`, wider on
+Windows (about 1.2 ms) than on Linux and macOS (200 us), for the reasons
+`psy_rt.h`'s WAITS section gives.
 
 ### Timing statement
 
@@ -226,7 +385,9 @@ The header states the USB latency budget up front (about 1 ms host-to-device,
 a parallel-port pulse. "Take your timestamp after the write" was a guess; the
 header now says to bracket the call with `psys_now_us()` and record both
 sides, and to measure the offset to the physical edge once with a scope.
-`psys_now_us` is public so the caller and the library share one clock base.
+`psys_now_us` is public so the caller and the library share one clock base, and
+since v0.4 it is literally `psyrt_now_us`, so that base is shared with
+`psy_rt.h` and with every other header built on it.
 
 ### Threading
 
@@ -254,25 +415,29 @@ A USB unplug must never look like silence. Windows: `ERROR_ACCESS_DENIED`,
 `ERROR_BAD_COMMAND`, `ERROR_DEVICE_NOT_CONNECTED`, `ERROR_GEN_FAILURE`,
 `ERROR_NOT_READY`, `ERROR_INVALID_HANDLE` and `ERROR_DEVICE_REMOVED` from a
 started or completed overlapped I/O all become `PSYS_ERR_DISCONNECTED`.
-`ERROR_OPERATION_ABORTED` is ambiguous, because `psys_purge(PSYS_PURGE_RX)`
-aborts a pending read with the same code, so the implementation asks
-`ClearCommError` whether the port is still there and reports 0 bytes (a
-cancelled read) if it is. Reporting 0 rather than an error is only safe
-because `PSYS_PURGE_RX` is a reader-role call: the thread that could have
-aborted this read is the thread that is in it. An aborted read still returns
-any bytes it transferred, because `serial.sys` fills in the count even on a
-cancelled IRP.
+`ERROR_OPERATION_ABORTED` is ambiguous, because `psys_purge` aborts a pending
+transfer with the same code, so the implementation asks `ClearCommError`
+whether the port is still there. On a dead port it is a disconnect. On a live
+one it was this thread's own purge, because `PSYS_PURGE_RX` is a reader-role
+call and `PSYS_PURGE_TX` a writer-role one: the thread that could have aborted
+this transfer is the thread that is in it. A read then resumes its wait rather
+than reporting 0, and a write reports what got through, which is the only place
+in the write path where a short count is not a timeout. An aborted transfer
+still returns any bytes it moved, because `serial.sys` fills in the count even
+on a cancelled IRP; the interrupted path and the completed-then-aborted path
+keep them on the same terms, which they did not in v0.2.
 
 One Windows failure mode has no clean mapping: some VCP drivers never complete
 a `ReadFile` that was pending when the device was unplugged. The read does not
 fail, it simply never returns, and no timeout applies because the total
 timeout is only armed while the driver is alive. `psys_interrupt` is the only
 thing that ends such a wait, which is another reason the shutdown recipe does
-not depend on the listener noticing a disconnect. POSIX: `POLLHUP`, `POLLERR` and `POLLNVAL` from
-`poll`, `read() == 0`, and `EIO`, `ENXIO`, `ENODEV`, `EPIPE`. `POLLIN` is
-examined before `POLLHUP` so bytes that arrived before the hangup are still
-delivered; a Linux pty discards them at master close anyway, but a
-USB-serial driver need not.
+not depend on the listener noticing a disconnect. POSIX: `POLLHUP`, `POLLERR`
+and `POLLNVAL` from `poll`, `read() == 0`, and `EIO`, `ENXIO`, `ENODEV`,
+`EPIPE`. Readability is examined before the hangup so bytes that arrived before
+it are still delivered; a Linux pty discards them at master close anyway, but a
+USB-serial driver need not. macOS has no hangup bit at all, because it waits
+with `select()`; see the wait-call section above.
 
 ### Enumeration, per platform
 
@@ -345,8 +510,10 @@ default port name on any platform.
 
 `keep_dtr_on_close` (clear `HUPCL`) is the real fix for Arduino-class boxes
 that reset on the DTR edge: the next open then sees no edge. `dtr_low_on_open`
-is best effort because Linux drivers assert DTR inside `open()` before user
-code runs.
+cannot do that job on Linux at all, and the header now says so rather than
+calling it best effort: the kernel raises DTR and RTS inside `open()` itself,
+`O_NONBLOCK` included, so by the time any user code runs the edge is already
+on the wire and the option only drops the line again afterwards.
 
 `keep_dtr_on_close` ended up POSIX-only. The v0.1 plan hoped the Windows
 driver would hold DTR while the handle count was nonzero, but the serial
@@ -367,13 +534,39 @@ ttyACM device would otherwise report `low_latency = true` while still holding
 bytes: a false claim about timing, which is the one thing this collection must
 not do. `psys_open` therefore reads
 `/sys/bus/usb-serial/devices/<tty>/latency_timer` afterwards and only reports
-success when the timer really is 1 ms. That file is also the supported way to
+success when the timer really is 1 ms. `<tty>` is the basename of the device
+after `realpath()`, not of `desc.device`: the header tells experiments to open
+the stable `/dev/serial/by-id/usb-..._-if00-port0` symlinks, whose basenames
+match nothing in sysfs, so without resolving the name first the attribute never
+opened and `low_latency` read false on exactly the FTDI devices whose timer
+`ftdi_sio` had just programmed. A fixed `PATH_MAX` buffer, because `psys_open`
+allocates nothing the caller did not ask for. An unreadable attribute still
+leaves `low_latency` false, which is the honest answer for `cdc_acm` and for
+every non-USB port. That file is also the supported way to
 set it for good, from udev, which survives a re-plug and needs no privilege in
 the experiment:
 
 ```
 SUBSYSTEM=="usb-serial", DRIVER=="ftdi_sio", ATTR{latency_timer}="1"
 ```
+
+### Reopening an open handle
+
+`psys_open` starts by zeroing the handle, which is also what clears the message
+buffer. On a handle that still owns a port that zeroing drops the descriptor or
+`HANDLE` and orphans the worker thread, with nothing left to close either with.
+One test of `is_open` before the `memset` turns that into a message and a
+`false`. It is not a general safety net, because the contract is "zeroed or
+closed" in both directions and an uninitialized handle has no valid flag to
+read; it catches the mistake that is actually made, which is reopening a handle
+the caller forgot to close. The repository's own example and loopback test had
+to start zeroing their stack handles when this landed, which is the argument
+for the check rather than against it.
+
+`PSYS_API` is on the definitions as well as the declarations, the sokol
+convention. With the keyword on the declarations alone, `-DPSYS_API=static`
+does not give a caller a private copy of the library; it gives a compile error,
+because the definitions are still external.
 
 ### Handle layout
 
@@ -382,9 +575,21 @@ error, write timeout), effective settings next, the two string buffers last,
 so the read and write paths do not straddle 384 bytes of text. Platform
 fields are public, as in `psy_parallel.h`, for inspection rather than for
 writing; the implementation needed no field the specification did not already
-declare. The Linux feature-test macro is
-`_DEFAULT_SOURCE`, not `_POSIX_C_SOURCE`: glibc hides `CRTSCTS`, `CMSPAR`
-and every `B*` rate above 38400 behind `__USE_MISC`.
+declare. The `psyrt_worker` handle is not one of them: it sits in the
+heap-allocated `psys__async` block that `psys_open` already allocates, not in
+`psys_port`, so the public handle the bindings mirror does not grow half a
+kilobyte of opaque OS storage and its size does not depend on whether the build
+has threads. Nothing allocates on a read, write or pulse path either way.
+
+The Linux feature-test macro is `_DEFAULT_SOURCE`, not `_POSIX_C_SOURCE`:
+glibc hides `CRTSCTS`, `CMSPAR` and every `B*` rate above 38400 behind
+`__USE_MISC`, and an explicit `_POSIX_C_SOURCE` switches `__USE_MISC` off for
+the whole translation unit. Since `psy_rt.h` v0.2 both headers ask for the same
+macro, on their first include, and both stand down when any of
+`_DEFAULT_SOURCE`, `_GNU_SOURCE`, `_POSIX_C_SOURCE` or `_XOPEN_SOURCE` is
+already set. The include order between them therefore does not matter. The one
+rule that remains is the rule for any system header: an implementation file
+that includes other system headers first defines `_DEFAULT_SOURCE` itself.
 
 ## Tests
 
@@ -392,6 +597,13 @@ and every `B*` rate above 38400 behind `__USE_MISC`.
   (`tests/compile/`, run by CMake and CI, warnings as errors). The `.cpp`
   wrapper should still be extended to call every public function once, so
   `extern "C"` and const-correctness are exercised and not just parsed.
+- Double implementation, by hand: a translation unit that defines both
+  `PSY_SERIAL_IMPLEMENTATION` and `PSY_RT_IMPLEMENTATION` compiles and links in
+  either include order, as C11 and as C++17, because `psy_rt.h`'s
+  implementation block guards itself. Since `psy_rt.h` v0.2 the `psy_rt.h`-first
+  order needs no `_DEFAULT_SOURCE` of its own: `psy_rt.h` sets it on its first
+  include, implementation or not, so `CRTSCTS` and `realpath` are still there
+  when `psy_serial.h` is compiled afterwards.
 - Loopback: `tests/loopback/psy_serial_loopback.c`, built with
   `-DPSY_BUILD_LOOPBACK=ON` and run by hand with two device names, either a
   virtual pair (`socat -d -d pty,raw,echo=0 pty,raw,echo=0`; com0com on
@@ -399,7 +611,8 @@ and every `B*` rate above 38400 behind `__USE_MISC`.
   `PSYS_READ_ALL` N and the payload, `PSYS_READ_ANY` with timeout 0 on an idle
   port (0 bytes, under 2 ms, so a poll cannot quietly become a wait),
   `PSYS_READ_ANY` with a 100 ms timeout on an idle port (0 bytes after 95 to
-  160 ms), `psys_available`, purge, the short count at a `PSYS_READ_ALL`
+  160 ms), that `psys_open` on an already-open handle is refused and leaves
+  the handle usable, `psys_available`, purge, the short count at a `PSYS_READ_ALL`
   deadline (200 ms nominal, 195 to 260 ms accepted), the write timeout with a
   peer that has stopped draining (a short count after 95 to 160 ms, skipped
   with a note if the transport never blocks), `psys_interrupt` on a reader
@@ -411,7 +624,11 @@ and every `B*` rate above 38400 behind `__USE_MISC`.
   then two `PSYS_READ_ANY` reads, timestamping each byte as the reader sees it,
   which is the spacing a device would see (the worker's deadline plus one
   transport hop at each end); a plain write while a pulse is pending, which
-  must cancel the trailing byte; two pulses 1 ms apart with different `off`
+  must cancel the trailing byte; thirty rounds of the same cancel raced against
+  the worker's own dispatch, alternating a zero width (due the moment it is
+  submitted) with 200 us, where either order on the wire is allowed but the
+  last byte must always be the write that means "hold this"; two pulses 1 ms
+  apart with different `off`
   bytes, which must yield two onsets and only the newer `off`; and
   `psys_close` on a third handle with a 1 s pulse pending, which must put the
   trailing byte on the wire within 5 ms of the close instead of after the
@@ -438,7 +655,8 @@ and every `B*` rate above 38400 behind `__USE_MISC`.
   verified.
 - Concurrency: the same loopback binary built with `-fsanitize=thread` and
   run on a socat pair, one reader thread and one writer thread on one handle
-  while the far end is fed and drained. Clean. This is what validates the
+  while the far end is fed and drained. Clean, as is the same run under
+  `-fsanitize=address,undefined`. This is what validates the
   error-code split. It does not prove the split is complete, because a
   function nobody calls concurrently in the test cannot race in the test; the
   argument for `misc_oserr` and for the message buffer belonging to
@@ -454,7 +672,8 @@ and every `B*` rate above 38400 behind `__USE_MISC`.
 - Custom baud rates on Linux (`termios2`/`BOTHER`) once a target device
   needs one.
 - `psys_wait_lines` if a device that signals on CTS/DSR shows up.
-- A clock header (`psy_clock.h`) if a third library needs `psys_now_us`.
+- ~~A clock header (`psy_clock.h`) if a third library needs `psys_now_us`.~~
+  Done in v0.4, as `psy_rt.h`, and it took the waits and the worker with it.
 
 ## Bindings
 

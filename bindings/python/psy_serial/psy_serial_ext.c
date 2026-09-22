@@ -116,7 +116,13 @@ static int Port_init(PyObject* self, PyObject* args, PyObject* kwds) {
 }
 
 static void Port_dealloc(PyObject* self) {
+    /* Same reason as Port_close: psys_close joins the async worker and can
+     * block in the driver for up to write_timeout_ms on a wedged device.
+     * Holding the GIL through that stalls every other Python thread, and a
+     * dealloc can run on any thread the last reference happens to die on. */
+    Py_BEGIN_ALLOW_THREADS
     psys_close(AS_PORT(self));
+    Py_END_ALLOW_THREADS
     /* Heap type: fetch tp_free via the stable ABI and release the type ref the
      * instance holds (PyType_GenericAlloc incref's the type since 3.8). */
     PyTypeObject* tp = Py_TYPE(self);
@@ -130,11 +136,21 @@ static void Port_dealloc(PyObject* self) {
 static PyObject* Port_read(PyObject* self, PyObject* args, PyObject* kwds) {
     static char* kw[] = { "n", "timeout_ms", "all", NULL };
     int n;
-    unsigned int timeout_ms;
+    PyObject* timeout_obj;
     int all = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "iI|p", kw, &n, &timeout_ms, &all))
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "iO|p", kw, &n, &timeout_obj, &all))
         return NULL;
     if (n < 0) { PyErr_SetString(PyExc_ValueError, "n must be >= 0"); return NULL; }
+    /* Not "I": PyArg_Parse does no range checking for it, so read(64, -1)
+     * would wrap to TIMEOUT_INFINITE and block the caller forever. */
+    unsigned long long t = PyLong_AsUnsignedLongLong(timeout_obj);
+    if (t == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
+    if (t > 0xFFFFFFFFull) {
+        PyErr_SetString(PyExc_OverflowError,
+                        "timeout_ms must fit in 32 bits (TIMEOUT_INFINITE is the maximum)");
+        return NULL;
+    }
+    unsigned int timeout_ms = (unsigned int)t;
     if (n == 0) return PyBytes_FromStringAndSize("", 0);
 
     char* buf = (char*)PyMem_Malloc((size_t)n);
@@ -537,7 +553,19 @@ static PyObject* mod_find_ports(PyObject* Py_UNUSED(self), PyObject* args, PyObj
     return ps_enumerate(&f);
 }
 
+/* The clock the library times its own deadlines against. Exposed so a caller
+ * can bracket a write with the same time base instead of mixing in
+ * time.monotonic(), which is a different clock on Windows. */
+static PyObject* mod_now_us(PyObject* Py_UNUSED(self), PyObject* Py_UNUSED(args)) {
+    return PyLong_FromUnsignedLongLong((unsigned long long)psys_now_us());
+}
+
 static PyMethodDef module_methods[] = {
+    { "now_us", mod_now_us, METH_NOARGS,
+      "now_us() -> int: monotonic microseconds from the clock the library uses "
+      "for its own deadlines (CLOCK_MONOTONIC / QueryPerformanceCounter). "
+      "Bracket a write with it: the physical onset lies after the first "
+      "reading, and the difference bounds the syscall cost." },
     { "list_ports", mod_list_ports, METH_NOARGS,
       "list_ports() -> list[dict]: enumerate serial ports without opening them. "
       "Each dict has 'name', 'description', 'serial_number', 'location', "
@@ -632,12 +660,16 @@ PyMODINIT_FUNC PyInit_serial(void) {
     PyModule_AddIntConstant(m, "ERR_CLOSED",       PSYS_ERR_CLOSED);
     PyModule_AddIntConstant(m, "ERR_INTERRUPTED",  PSYS_ERR_INTERRUPTED);
     PyModule_AddIntConstant(m, "ERR_ARG",          PSYS_ERR_ARG);
-    /* async-worker policy actually obtained (Port.async_policy) */
-    PyModule_AddIntConstant(m, "ASYNC_NONE",          PSYS_ASYNC_NONE);
-    PyModule_AddIntConstant(m, "ASYNC_DEADLINE",      PSYS_ASYNC_DEADLINE);
-    PyModule_AddIntConstant(m, "ASYNC_FIFO",          PSYS_ASYNC_FIFO);
-    PyModule_AddIntConstant(m, "ASYNC_TIME_CRITICAL", PSYS_ASYNC_TIME_CRITICAL);
-    PyModule_AddIntConstant(m, "ASYNC_NORMAL",        PSYS_ASYNC_NORMAL);
+    /* async-worker policy actually obtained (Port.async_policy). The values
+     * are psy_rt.h's psyrt_policy, which psy.parallel reports too, so one
+     * constant means the same thing in both modules. TIME_CONSTRAINT is the
+     * macOS rung. */
+    PyModule_AddIntConstant(m, "ASYNC_NONE",            PSYRT_POLICY_NONE);
+    PyModule_AddIntConstant(m, "ASYNC_DEADLINE",        PSYRT_POLICY_DEADLINE);
+    PyModule_AddIntConstant(m, "ASYNC_TIME_CONSTRAINT", PSYRT_POLICY_TIME_CONSTRAINT);
+    PyModule_AddIntConstant(m, "ASYNC_FIFO",            PSYRT_POLICY_FIFO);
+    PyModule_AddIntConstant(m, "ASYNC_TIME_CRITICAL",   PSYRT_POLICY_TIME_CRITICAL);
+    PyModule_AddIntConstant(m, "ASYNC_NORMAL",          PSYRT_POLICY_NORMAL);
     /* defaults */
     if (ps_add_uint(m, "TIMEOUT_INFINITE", PSYS_TIMEOUT_INFINITE) < 0 ||
         ps_add_uint(m, "DEFAULT_BAUD", PSYS_DEFAULT_BAUD) < 0 ||

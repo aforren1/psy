@@ -16,19 +16,26 @@
  *     data = psy_serial('read',      h, 64, 0)          % poll, [] if nothing
  *     psy_serial('pulse',      h, 85, 0, 2000)          % blocking 2 ms pulse
  *     psy_serial('pulseasync', h, 85, 0, 2000)          % non-blocking
- *     psy_serial('interrupt',  h)                       % wake a blocked read
+ *     t    = psy_serial('now_us')                       % library clock (us),
+ *                                                       % same clock as
+ *                                                       % psy_parallel('now_us')
  *     psy_serial('close',      h)
  *
  * Build with build.m (MATLAB or Octave). See README.md.
  *
  * NOTE: the handle table is freed (and every open port closed) on 'clear mex'
  * via mexAtExit, so a forgotten close cannot leave an async worker thread
- * pointing at a freed port.
+ * pointing at a freed port. A handle is a small counter, not a pointer: a
+ * freed port struct can be reallocated at the same address, and a stale
+ * pointer handle would then silently drive the port that took its place.
  *
- * NOTE: MATLAB and Octave are single-threaded here, so the header's
- * one-reader-one-writer rule collapses to "one call at a time"; 'interrupt'
- * is only reachable from a timer callback or a second MATLAB process that
- * shares no handle, which is why it exists mainly for symmetry with the C API.
+ * NOTE: a MEX call owns the interpreter thread for its whole duration. MATLAB
+ * timer callbacks and Octave's event loop are dispatched on that same thread,
+ * so nothing in the interpreter can run, let alone call 'interrupt', while a
+ * 'read' is blocked here. Never pass PSYS_TIMEOUT_INFINITE from MATLAB or
+ * Octave: poll in short slices instead (see README.md). 'interrupt' latches a
+ * wake that the NEXT read consumes, so from one thread it only makes that
+ * read return immediately; it exists for symmetry with the C API.
  */
 /* clock_gettime/nanosleep/pthread_* and the termios extensions (CRTSCTS,
  * CMSPAR, the B* rates above 38400) live behind this feature macro, and
@@ -47,12 +54,18 @@
 #include "psy_serial.h"
 
 /* ---- handle table: tracks every open port for cleanup ------------------ */
+/* The handle is `id`, not the port address. malloc happily hands a new port
+ * the address a closed one just released, so a pointer handle held in a stale
+ * MATLAB variable would pass the lookup and drive someone else's port. Ids
+ * are never reused, so a stale handle always raises psy_serial:handle. */
 typedef struct ps_node {
+    uint64_t        id;
     psys_port*      port;
     struct ps_node* next;
 } ps_node;
 
 static ps_node* g_ports = NULL;
+static uint64_t g_next_id = 1;
 static int      g_atexit_registered = 0;
 
 static void ps_cleanup(void) {
@@ -66,12 +79,22 @@ static void ps_cleanup(void) {
     g_ports = NULL;
 }
 
-static void ps_register(psys_port* port) {
+/* Takes ownership of `port` on success. On allocation failure the port is
+ * closed here: it would otherwise stay open with no handle to reach it. */
+static uint64_t ps_register(psys_port* port) {
     ps_node* n = (ps_node*)malloc(sizeof(*n));
+    if (!n) {
+        psys_close(port);
+        free(port);
+        mexErrMsgIdAndTxt("psy_serial:mem", "out of memory");
+        return 0;
+    }
+    n->id = g_next_id++;
     n->port = port;
     n->next = g_ports;
     g_ports = n;
     if (!g_atexit_registered) { mexAtExit(ps_cleanup); g_atexit_registered = 1; }
+    return n->id;
 }
 
 static void ps_unregister(psys_port* port) {
@@ -84,18 +107,17 @@ static void ps_unregister(psys_port* port) {
 
 /* Resolve a handle arg to a registered port pointer; error if unknown. */
 static psys_port* ps_handle(const mxArray* a) {
-    uint64_t bits;
+    uint64_t id;
     if (mxIsUint64(a))
-        bits = *(const uint64_t*)mxGetData(a);
+        id = *(const uint64_t*)mxGetData(a);
     else if (mxIsDouble(a) && mxGetNumberOfElements(a) == 1)
-        bits = (uint64_t)mxGetScalar(a);
+        id = (uint64_t)mxGetScalar(a);
     else {
         mexErrMsgIdAndTxt("psy_serial:handle", "handle must be a scalar uint64");
         return NULL;
     }
-    psys_port* port = (psys_port*)(uintptr_t)bits;
     for (ps_node* n = g_ports; n; n = n->next)
-        if (n->port == port) return port;
+        if (n->id == id) return n->port;
     mexErrMsgIdAndTxt("psy_serial:handle", "invalid or closed port handle");
     return NULL;
 }
@@ -150,8 +172,20 @@ static void ps_field_enum(const mxArray* s, const char* field,
 
 static const char* const ps_parity_names[] = { "none", "odd", "even", "mark", "space" };
 static const char* const ps_flow_names[]   = { "none", "rtscts", "xonxoff" };
-static const char* const ps_policy_names[] = { "none", "deadline", "fifo",
-                                               "time_critical", "normal" };
+/* The policy the worker obtained, as a string, so a log is readable without a
+ * lookup table. psy_rt.h owns the names; it spells them in capitals, and this
+ * binding has always published lower case, so fold the case here rather than
+ * keep a second table that psy_rt.h could outgrow. */
+static mxArray* ps_policy_string(psyrt_policy pol) {
+    const char* name = psyrt_policy_name(pol);
+    char buf[32];
+    size_t i = 0;
+    for (; name[i] != 0 && i + 1 < sizeof(buf); i++)
+        buf[i] = (name[i] >= 'A' && name[i] <= 'Z')
+               ? (char)(name[i] - 'A' + 'a') : name[i];
+    buf[i] = 0;
+    return mxCreateString(buf);
+}
 
 /* Turn a negative PSYS_ERR_* code into a MATLAB error. The identifier names
  * the code so a script can branch on it (a listener catching
@@ -294,10 +328,10 @@ static void cmd_open(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
         free(port);
         mexErrMsgIdAndTxt("psy_serial:open", "%s", msg);
     }
-    ps_register(port);
+    uint64_t id = ps_register(port);
 
     mxArray* h = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
-    *(uint64_t*)mxGetData(h) = (uint64_t)(uintptr_t)port;
+    *(uint64_t*)mxGetData(h) = id;
     plhs[0] = h;
     (void)nlhs;
 }
@@ -372,10 +406,9 @@ static mxArray* ps_info(const psys_port* p) {
                              "keep_dtr_on_close", "async_policy",
                              "rd_oserr", "wr_oserr", "misc_oserr" };
     mxArray* s = mxCreateStructMatrix(1, 1, 13, fields);
-    int parity = (int)p->parity, flow = (int)p->flow, policy = (int)p->async_policy;
+    int parity = (int)p->parity, flow = (int)p->flow;
     if (parity < 0 || parity > 4) parity = 0;
     if (flow < 0 || flow > 2) flow = 0;
-    if (policy < 0 || policy > 4) policy = 0;
     mxSetField(s, 0, "device",            mxCreateString(p->device));
     mxSetField(s, 0, "baud",              mxCreateDoubleScalar((double)p->baud));
     mxSetField(s, 0, "data_bits",         mxCreateDoubleScalar((double)p->data_bits));
@@ -386,9 +419,7 @@ static mxArray* ps_info(const psys_port* p) {
     mxSetField(s, 0, "write_timeout_ms",  mxCreateDoubleScalar((double)p->write_timeout_ms));
     mxSetField(s, 0, "low_latency",       mxCreateLogicalScalar(p->low_latency));
     mxSetField(s, 0, "keep_dtr_on_close", mxCreateLogicalScalar(p->keep_dtr_on_close));
-    /* The policy the worker actually obtained, as a string so logs are
-     * readable without a lookup table. */
-    mxSetField(s, 0, "async_policy",      mxCreateString(ps_policy_names[policy]));
+    mxSetField(s, 0, "async_policy",      ps_policy_string(p->async_policy));
     mxSetField(s, 0, "rd_oserr",          mxCreateDoubleScalar((double)p->rd_oserr));
     mxSetField(s, 0, "wr_oserr",          mxCreateDoubleScalar((double)p->wr_oserr));
     mxSetField(s, 0, "misc_oserr",        mxCreateDoubleScalar((double)p->misc_oserr));
@@ -411,6 +442,16 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
     if (strcmp(cmd, "list") == 0) {
         plhs[0] = ps_enumerate(NULL);
+        mxFree(cmd);
+        return;
+    }
+
+    if (strcmp(cmd, "now_us") == 0) {
+        /* The clock the library times its own deadlines against. Bracket a
+         * write with it so your timestamps and the library's share one base
+         * (see TIMING in psy_serial.h). A double holds whole microseconds
+         * exactly up to 2^53, which is 285 years of uptime. */
+        plhs[0] = mxCreateDoubleScalar((double)psys_now_us());
         mxFree(cmd);
         return;
     }

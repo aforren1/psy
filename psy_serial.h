@@ -1,13 +1,64 @@
-/* psy_serial.h - v0.2 - public domain single-header serial-port library
+/* psy_serial.h - v0.4 - public domain single-header serial-port library
+ *
+ *   REQUIRES psy_rt.h, its sibling in this collection, on the include path.
+ *   This header includes it for the clock, the waits, the scheduling ladder
+ *   and the deadline worker that writes the trailing edge of an async pulse.
+ *   Copy TWO files, not one.
  *
  *   STATUS: IMPLEMENTED on Windows (Win32 COM API, overlapped I/O) and POSIX
  *   (Linux and macOS termios). Tested against a virtual port pair on Linux,
  *   including one reader thread plus one writer thread on a single handle
- *   under ThreadSanitizer. On Windows the backend compiles clean under MSVC
- *   and its open-time validation and enumeration entry point run, but no byte
- *   has moved through it: there was no COM device to test with. The macOS
- *   paths (IOSSIOSPEED, /dev/cu.* enumeration) have not been compiled or run
- *   at all. No timing number in this header has been measured on a rig yet.
+ *   under ThreadSanitizer. Windows and macOS compile clean in CI but have
+ *   never run on a device: on Windows the open-time validation and the
+ *   enumeration entry point run, but no byte has moved through the backend,
+ *   and on macOS (IOSSIOSPEED, /dev/cu.* enumeration, the select() waits)
+ *   nothing but the compiler has seen the code. No timing number in this
+ *   header has been measured on a rig yet. The timing code is psy_rt.h's, so
+ *   its STATUS block applies too: the real-time rungs of the worker's ladder
+ *   have never been granted on any machine here.
+ *
+ *   v0.4, the current version, deletes this header's private timing code and
+ *   depends on psy_rt.h for it:
+ *     - The monotonic clock, the pulse-width wait, the break sleep, the
+ *       SCHED_DEADLINE / SCHED_FIFO ladder, the sched_setattr declarations and
+ *       the async-pulse worker thread are all gone from here. psys_now_us() is
+ *       psyrt_now_us(), so "your timestamps and the library's share one base"
+ *       is true by construction instead of by two copies of the same code
+ *       agreeing. There were three such copies in this repository; the Windows
+ *       spin bug that only this one had is the reason there is now one.
+ *     - psys_sched_deadline is a typedef of psyrt_sched_deadline and
+ *       psys_async_policy of psyrt_policy. The PSYS_ASYNC_*, PSYS_DEFAULT_RT_*
+ *       and type names all still work, but the NUMERIC VALUES of the policy
+ *       enum changed, because psyrt_policy has a macOS rung between DEADLINE
+ *       and FIFO: recompile anything that stored those integers, do not just
+ *       relink it. On macOS async_policy can now report
+ *       PSYRT_POLICY_TIME_CONSTRAINT, a rung this header did not have.
+ *     - Blocking psys_pulse() no longer busy-spins the whole width on Windows.
+ *       It sleeps to the deadline and spins only the last
+ *       PSYRT_DEFAULT_SPIN_NS, as the async worker always did.
+ *     - The async worker is one psyrt_worker plus a small writer mutex that
+ *       stays here, because the mutex is about the byte stream, not about the
+ *       deadline. THREADING says what each one owns.
+ *
+ *   v0.3 was a correctness pass over the two backends nobody has run yet,
+ *   plus two documentation corrections:
+ *     - Windows: a failed GetOverlappedResult on a write no longer reports a
+ *       driver error as a short count (which a caller retries forever); an
+ *       aborted read that was neither an interrupt nor a disconnect waits out
+ *       the rest of its timeout instead of returning 0; a failed
+ *       SetCommTimeouts maps through the disconnect test; the worker's
+ *       sub-millisecond spin now yields to a replacement pulse and to quit.
+ *     - macOS: the reader and the writer wait with select(), not poll(),
+ *       because Apple's poll(2) still documents that it does not support
+ *       devices. Linux keeps poll(). See POSIX WAITS.
+ *     - Linux: the low_latency readback resolves the device name first, so a
+ *       /dev/serial/by-id/... symlink no longer leaves low_latency false.
+ *     - psys_close()'s flush of a pending trailing byte is bounded by 50 ms
+ *       instead of by write_timeout_ms, so a wedged device cannot hold a
+ *       close open for a second, or forever under PSYS_TIMEOUT_INFINITE.
+ *     - psys_open() refuses a handle that is still open instead of leaking
+ *       its descriptor and its worker thread.
+ *     - PSYS_API is on the definitions too, so `static` works.
  *
  *   v0.2 changed five signatures from the v0.1 specification: psys_interrupt,
  *   psys_purge, psys_send_break, psys_set_dtr and psys_set_rts return int
@@ -31,25 +82,36 @@
  *     - anything else that speaks bytes over a COM port.
  *
  *   Inspired by pyserial (https://github.com/pyserial/pyserial) and written
- *   in the single-header style of the stb / sokol libraries, as a sibling of
- *   psy_parallel.h. The two headers share conventions but not code.
+ *   in the single-header style of the stb / sokol libraries. It DEPENDS on
+ *   psy_rt.h for everything about time, the way stb_truetype.h depends on
+ *   stb_rect_pack.h: two files to copy, one library to use. With
+ *   psy_parallel.h it shares conventions but not code.
  *
  *   Targets Windows (Win32 COM API), Linux and macOS (POSIX termios).
  *
  *   ---------------------------------------------------------------------
  *   USAGE
  *   ---------------------------------------------------------------------
- *   Do this:
+ *   Copy psy_serial.h AND psy_rt.h into your project, so that
+ *   #include "psy_rt.h" resolves from wherever psy_serial.h sits. Then do
+ *   this:
  *
  *       #define PSY_SERIAL_IMPLEMENTATION
  *
  *   in *one* C or C++ file before including this header to create the
  *   implementation. Every other file just includes the header normally.
+ *   psy_rt.h's implementation comes along with it, in that same file. Defining
+ *   PSY_RT_IMPLEMENTATION there as well is fine, and so is implementing
+ *   another header that needs psy_rt.h there, because psy_rt.h's
+ *   implementation block guards itself and lands once. What does not work is
+ *   putting PSY_RT_IMPLEMENTATION in a SECOND file: that is a second copy of
+ *   psy_rt.h's code in the program, and the linker says so. One file
+ *   implements everything.
  *
  *       #define PSY_SERIAL_IMPLEMENTATION
  *       #include "psy_serial.h"
  *
- *       psys_port sp;
+ *       psys_port sp = { 0 };                  // zeroed, or closed; required
  *       psys_desc desc = {                     // designated init: C99 or C++20
  *           .device = "COM3",                  // or "/dev/ttyUSB0"
  *           .baud   = 115200,                  // 0 = default (115200)
@@ -140,6 +202,9 @@
  *     and record both. The physical edge lies after t0 and, on USB, after
  *     the next frame boundary following the driver's acceptance; t1 - t0 is
  *     the syscall cost (10 to 100 us). Neither is the onset; they bound it.
+ *     psys_now_us() IS psyrt_now_us(), not a second clock that agrees with
+ *     it, so these timestamps, psy_rt.h's deadlines and anything psy_rt.h
+ *     reports are all differences of one counter.
  *     Measure the offset once with a scope and apply it.
  *     psys_pulse() widths below a few milliseconds are unreliable over USB.
  *     If the device can time the pulse itself (StimTracker, TriggerBox Plus,
@@ -148,15 +213,22 @@
  *     PULSE WIDTH: WHO TIMES THE TRAILING EDGE
  *     psys_pulse() blocks the calling thread for the whole width and times the
  *     trailing edge on whatever thread the caller has, at whatever priority it
- *     has. psys_pulse_async() returns after the onset write and has a worker
- *     thread the library owns write the trailing byte at an absolute deadline
- *     taken right after that onset. The worker runs at an elevated policy
- *     (SCHED_DEADLINE, else SCHED_FIFO, else normal on POSIX;
- *     THREAD_PRIORITY_TIME_CRITICAL with a high-resolution timer on Windows),
- *     so its trailing edge is MORE precise than psys_pulse's, not less, and
- *     the caller is free during the width. psys_port.async_policy says which
- *     policy it got; log it with your numbers, because they mean different
- *     things under different policies.
+ *     has. It waits with psyrt_sleep_until() and PSYRT_DEFAULT_SPIN_NS, so the
+ *     OS gets the bulk of the width and only the tail is spun.
+ *     psys_pulse_async() returns after the onset write and has a psyrt_worker
+ *     the library owns write the trailing byte at an absolute deadline taken
+ *     right after that onset. That worker elevates itself up psy_rt.h's ladder
+ *     (SCHED_DEADLINE, else the macOS time-constraint policy, else SCHED_FIFO,
+ *     else normal; THREAD_PRIORITY_TIME_CRITICAL on Windows) and waits the
+ *     same way, so its trailing edge is MORE precise than psys_pulse's, not
+ *     less, and the caller is free during the width. psys_port.async_policy
+ *     says which rung it got; log it with your numbers, because they mean
+ *     different things under different policies.
+ *     What the wait itself is worth on your machine is psy_rt.h's WAITS
+ *     section, and examples/rt_jitter.c measures it there: it sweeps spin
+ *     windows and prints the wake-latency distribution of each, which is the
+ *     only honest number available for the trailing edge before the transport
+ *     gets involved.
  *     What neither call can do is beat the transport. Over USB-serial the
  *     jitter of an edge is bounded below by the frame period (1 ms full-speed,
  *     125 us high-speed) and above by OS scheduling plus the driver's own
@@ -177,16 +249,34 @@
  *     The async-pulse worker is a SECOND WRITER on the handle, so every
  *     writer-role write (psys_write, psys_write_byte, psys_pulse,
  *     psys_pulse_async's onset, and the worker's own trailing byte) is
- *     serialized under the worker's lock, and the worker reports through
- *     wr_oserr like any writer. The price, which the parallel port does not
+ *     serialized under one writer mutex this header owns, and the worker
+ *     reports through wr_oserr like any writer. That mutex is here rather than
+ *     in psy_rt.h because psyrt_worker runs its callback with its OWN lock
+ *     released, which is what lets the callback block on a stream write;
+ *     serializing the stream is this header's job. Next to the mutex sits the
+ *     pending trailing byte, armed with its deadline: psys_pulse_async() takes
+ *     the mutex, writes the onset and arms, every user write takes the mutex
+ *     and DISARMS before it writes, and the worker's callback takes the mutex
+ *     and writes only what is still armed and due. So a trailing byte the
+ *     worker had already dispatched when a user write got in first finds
+ *     nothing armed and writes nothing, and a stale `off` can never undo a
+ *     write that means "hold this". The price, which the parallel port does not
  *     pay because outb cannot block: if the worker's trailing write is stuck
  *     in the driver (a wedged device, a peer that stopped draining), a user
  *     write waits behind it for up to write_timeout_ms, and the other way
  *     round. One byte stream, one writer at a time.
- *     psys_close() stops the worker before it closes anything and writes any
- *     pending trailing byte at once, so a pulse in flight is never left
- *     hanging. psys_interrupt() is a reader-side wake and does not touch the
- *     worker.
+ *     psys_close() stops the worker before it closes anything and has it write
+ *     any pending trailing byte immediately instead of waiting out the rest of
+ *     the width, so a latching box is never left holding a trigger code
+ *     (psyrt_worker_stop() runs a pending job at once, with a flush flag the
+ *     callback reads). That one write happens with the writer mutex held, and
+ *     psys_close() joins the worker thread behind it, so "at once" is about the
+ *     deadline, not about the call returning: it is bounded by a fixed 50 ms
+ *     and NOT by write_timeout_ms,
+ *     so a wedged device delays a close by at most that, whatever
+ *     write_timeout_ms says and even at PSYS_TIMEOUT_INFINITE. A close with no
+ *     pulse pending does not wait at all.
+ *     psys_interrupt() is a reader-side wake and does not touch the worker.
  *     Nothing but psys_open and psys_close touches the message buffer, so the
  *     roles never race on it: psys_purge(PSYS_PURGE_RX) on the reader and
  *     psys_send_break on the writer are safe at the same time, and the
@@ -227,9 +317,14 @@
  *   default) and closing drops DTR. Arduino-class boards reset on a DTR
  *   edge, then spend about 2 s in the bootloader ignoring you. Options:
  *     desc.dtr_low_on_open      keep DTR low from the first moment the
- *                               library controls it. Best effort: some
- *                               drivers pulse DTR inside open() before any
- *                               user setting applies.
+ *                               library controls it, which is AFTER open().
+ *                               On Linux this cannot stop a USB-serial board
+ *                               from resetting: the kernel raises DTR and RTS
+ *                               inside open() itself, O_NONBLOCK included, so
+ *                               the edge has already happened and this option
+ *                               only drops the line again afterwards. Use
+ *                               keep_dtr_on_close in the session before, or
+ *                               wait out the bootloader.
  *     desc.keep_dtr_on_close    leave DTR asserted after psys_close()
  *                               (clears HUPCL on POSIX), so the NEXT open
  *                               sees no edge. The reliable software fix for
@@ -255,18 +350,51 @@
  *              cu.* (call-out) node, not tty.*, which blocks on carrier.
  *
  *   ---------------------------------------------------------------------
+ *   POSIX WAITS
+ *   ---------------------------------------------------------------------
+ *   Every wait in this library is against a deadline on a non-blocking
+ *   descriptor, but the call that does the waiting differs by platform.
+ *     Linux:   poll(), on the port descriptor and the interrupt pipe.
+ *     macOS:   select(). Apple's poll(2) still carries the note that it does
+ *              not support devices, and a serial port is a device; pyserial
+ *              uses select() on POSIX for the same reason. The cost is
+ *              FD_SETSIZE: select() cannot name a descriptor at or above it,
+ *              so psys_open() refuses the port with a message rather than
+ *              corrupting the stack, in the unlikely case that a process has
+ *              that many files open.
+ *   Neither path has run on a Mac yet. If a macOS reader never wakes, or
+ *   wakes without data, this is the first thing to check.
+ *
+ *   ---------------------------------------------------------------------
  *   BUILDING
  *   ---------------------------------------------------------------------
- *   Link -pthread on POSIX for the async-pulse worker; Windows needs no extra
- *   library for it. Define PSYS_NO_THREADS to drop the worker, and with it
- *   psys_pulse_async(), which then reports PSYS_ERR_IO.
+ *   psy_rt.h must be on the include path; nothing else is added to the build.
+ *   Link -pthread on POSIX for the async-pulse worker and for psy_rt.h's
+ *   scheduling calls; Windows needs no extra library for either.
+ *   Define PSYS_NO_THREADS to drop the worker, and with it psys_pulse_async(),
+ *   which then reports PSYS_ERR_IO. PSYS_NO_THREADS also defines
+ *   PSYRT_NO_THREADS before psy_rt.h is included, so the two headers agree
+ *   about whether psyrt_worker exists. The coupling has one direction only: if
+ *   YOU include psy_rt.h before psy_serial.h, define both macros or neither,
+ *   because by then psy_rt.h's declarations are already fixed.
+ *   The Linux feature-test macro has no such ordering rule. Both headers ask
+ *   for _DEFAULT_SOURCE on their first include and both stand down when any
+ *   of _DEFAULT_SOURCE, _GNU_SOURCE, _POSIX_C_SOURCE or _XOPEN_SOURCE is
+ *   already set, so either include order gives the same translation unit.
+ *   The one rule that remains is the usual one: an implementation file that
+ *   includes OTHER system headers before these defines _DEFAULT_SOURCE
+ *   itself.
  *   No other libraries on POSIX. The Windows port enumeration links setupapi
  *   and advapi32: MSVC gets both from a #pragma comment in the
  *   implementation, and CMake consumers of psy::psy already get setupapi from
  *   the target, so only a hand-written MinGW command line needs -lsetupapi
  *   (advapi32 is already a MinGW default). The implementation raises
  *   _WIN32_WINNT to 0x0600 if it is lower, for CancelIoEx. Define PSYS_API to
- *   override the default `extern` linkage.
+ *   override the default `extern` linkage. It sits on the definitions as well
+ *   as the declarations, so -DPSYS_API=static gives one translation unit a
+ *   private copy of the library (expect -Wunused-function for whatever that
+ *   unit does not call), and a decl-spec such as __declspec(dllexport)
+ *   reaches both.
  *
  *       cc -O2 -I. -o serial_trigger examples/serial_trigger.c
  *       cl /O2 /I. examples\serial_trigger.c
@@ -288,16 +416,35 @@
     #define _WIN32_WINNT 0x0600
 #endif
 
-/* Feature-test macro for the Linux implementation. _DEFAULT_SOURCE, not the
- * stricter _POSIX_C_SOURCE that psy_parallel.h uses: glibc hides CRTSCTS,
- * CMSPAR and every B* rate above 38400 behind __USE_MISC. Defined here,
- * before the first system header, so it takes effect when this header is
- * the implementation translation unit's first include. If you include other
- * system headers first, define _DEFAULT_SOURCE (or _GNU_SOURCE) yourself. */
+/* Feature-test macro for the Linux implementation. glibc hides CRTSCTS,
+ * CMSPAR and every B* rate above 38400 behind __USE_MISC, and realpath()
+ * behind more than strict C. Defined here, before the first system header, so
+ * it takes effect when this header is the translation unit's first include.
+ * If you include other system headers first, define _DEFAULT_SOURCE (or
+ * _GNU_SOURCE) yourself.
+ *
+ * All three psy headers ask for the same macro on Linux and each stands down
+ * once it is set, so the include order between them does not matter:
+ * whichever comes first settles it. psy_rt.h asks on its FIRST include,
+ * implementation or not, which is what keeps __USE_MISC in place for a
+ * translation unit that includes psy_rt.h before this header. */
 #if defined(PSY_SERIAL_IMPLEMENTATION) && defined(__linux__) && \
     !defined(_DEFAULT_SOURCE) && !defined(_GNU_SOURCE)
     #define _DEFAULT_SOURCE 1
 #endif
+
+/* One build flag, two headers: psy_rt.h owns the worker thread now, so its
+ * declarations have to disappear on the same terms as psys_pulse_async's.
+ * This only works while psy_serial.h is the first of the two to be included;
+ * see BUILDING. */
+#if defined(PSYS_NO_THREADS) && !defined(PSYRT_NO_THREADS)
+    #define PSYRT_NO_THREADS
+#endif
+
+/* The dependency. psys_desc.sched, psys_port.async_policy and psys_now_us()
+ * are psy_rt.h's types and psy_rt.h's clock, so it is included from the public
+ * section, not just from the implementation. */
+#include "psy_rt.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -307,6 +454,11 @@
 extern "C" {
 #endif
 
+/* Linkage of every public function, on the declarations below and on their
+ * definitions in the implementation. Both, so that -DPSYS_API=static really
+ * does make the library private to one translation unit; with the keyword on
+ * the declarations alone the definitions would still be external and the
+ * compiler would reject the pair. */
 #ifndef PSYS_API
 #define PSYS_API extern
 #endif
@@ -355,11 +507,13 @@ typedef enum psys_flow {
 #define PSYS_READ_ANY 0x00  /* return on the first byte(s) available            */
 #define PSYS_READ_ALL 0x01  /* keep reading until `cap` bytes or the timeout    */
 
-/* Real-time scheduling reservation for the async-pulse worker on Linux
- * (SCHED_DEADLINE). Times are in nanoseconds and must satisfy
- * runtime_ns <= deadline_ns <= period_ns. They do NOT set the pulse width
- * (that is clock-driven); they govern how fast and how predictably the worker
- * gets the CPU when it wakes to write the trailing byte, which is edge jitter.
+/* Real-time scheduling reservation for the async-pulse worker (Linux
+ * SCHED_DEADLINE, macOS THREAD_TIME_CONSTRAINT_POLICY). psy_rt.h's type and
+ * psy_rt.h's meaning, kept under the old name so existing call sites compile;
+ * psyrt_sched_deadline is the spelling to prefer in new code. Times are in
+ * nanoseconds. They do NOT set the pulse width (that is clock-driven); they
+ * govern how fast and how predictably the worker gets the CPU when it wakes to
+ * write the trailing byte, which is edge jitter.
  *
  *   runtime_ns  - CPU budget guaranteed (and capped) per period.
  *   deadline_ns - relative deadline; smaller = higher EDF priority = lower
@@ -368,32 +522,35 @@ typedef enum psys_flow {
  *
  * Leave all three zero for the defaults below. If you set any field, require
  * 0 < runtime_ns <= deadline_ns <= period_ns (a zero period_ns is taken as
- * "same as deadline_ns"); psys_open() rejects anything else. A valid
- * reservation the kernel cannot admit, and any value on macOS or Windows,
- * falls back to SCHED_FIFO / normal without failing the open. */
-typedef struct psys_sched_deadline {
-    uint64_t runtime_ns;
-    uint64_t deadline_ns;
-    uint64_t period_ns;
-} psys_sched_deadline;
+ * "same as deadline_ns"); psys_open() rejects anything else, through
+ * psyrt_sched_normalize(). A valid reservation the kernel cannot admit, and
+ * any value on Windows, falls back down the ladder without failing the open. */
+typedef psyrt_sched_deadline psys_sched_deadline;
 
-#define PSYS_DEFAULT_RT_RUNTIME_NS   1000000ull  /*  1 ms */
-#define PSYS_DEFAULT_RT_DEADLINE_NS 10000000ull  /* 10 ms */
-#define PSYS_DEFAULT_RT_PERIOD_NS   10000000ull  /* 10 ms */
+#define PSYS_DEFAULT_RT_RUNTIME_NS   PSYRT_DEFAULT_RT_RUNTIME_NS  /*  1 ms */
+#define PSYS_DEFAULT_RT_DEADLINE_NS  PSYRT_DEFAULT_RT_DEADLINE_NS /* 10 ms */
+#define PSYS_DEFAULT_RT_PERIOD_NS    PSYRT_DEFAULT_RT_PERIOD_NS   /* 10 ms */
 
-/* Scheduling policy the async-pulse worker actually obtained. Asking for
- * SCHED_DEADLINE is not getting it: the kernel refuses it without
- * CAP_SYS_NICE, and also when the thread's affinity is not the full root
- * domain (taskset, cpusets, an isolcpus-pinned experiment process), and the
- * library then falls back. Read psys_port.async_policy after psys_open() and
- * log it next to your timing data; jitter numbers without it are unlabeled. */
-typedef enum psys_async_policy {
-    PSYS_ASYNC_NONE = 0,       /* no worker (PSYS_NO_THREADS, or start failed) */
-    PSYS_ASYNC_DEADLINE,       /* Linux SCHED_DEADLINE with psys_desc.sched    */
-    PSYS_ASYNC_FIFO,           /* SCHED_FIFO, priority 80 or the system max    */
-    PSYS_ASYNC_TIME_CRITICAL,  /* Windows THREAD_PRIORITY_TIME_CRITICAL        */
-    PSYS_ASYNC_NORMAL          /* no real-time policy granted                  */
-} psys_async_policy;
+/* Scheduling policy the async-pulse worker actually obtained: psy_rt.h's
+ * ladder, psy_rt.h's enum. Asking for SCHED_DEADLINE is not getting it: the
+ * kernel refuses it without CAP_SYS_NICE, and also when the thread's affinity
+ * is not the full root domain (taskset, cpusets, an isolcpus-pinned experiment
+ * process), and the library then falls back. Read psys_port.async_policy after
+ * psys_open() and log it next to your timing data; jitter numbers without it
+ * are unlabeled. psyrt_policy_name() prints it.
+ *
+ * The PSYS_ASYNC_* names below are aliases of the psyrt_policy enumerators
+ * they always described. Their NUMERIC values changed in v0.4, because
+ * psyrt_policy carries a macOS rung this header never had, so async_policy can
+ * now also be PSYRT_POLICY_TIME_CONSTRAINT and nothing may store these
+ * integers across a rebuild. */
+typedef psyrt_policy psys_async_policy;
+
+#define PSYS_ASYNC_NONE          PSYRT_POLICY_NONE          /* no worker      */
+#define PSYS_ASYNC_DEADLINE      PSYRT_POLICY_DEADLINE      /* SCHED_DEADLINE */
+#define PSYS_ASYNC_FIFO          PSYRT_POLICY_FIFO          /* SCHED_FIFO 80  */
+#define PSYS_ASYNC_TIME_CRITICAL PSYRT_POLICY_TIME_CRITICAL /* Windows        */
+#define PSYS_ASYNC_NORMAL        PSYRT_POLICY_NORMAL        /* nothing granted */
 
 /* Open description. Use a designated initializer and set only what you need
  * (psys_desc d = { .device = "COM3" };); zero fields take the defaults noted
@@ -475,8 +632,8 @@ typedef struct psys_port {
     psys_flow      flow;
     bool           low_latency;     /* true if the driver accepted the request  */
     bool           keep_dtr_on_close;
-    psys_sched_deadline sched;      /* effective worker RT params (Linux)      */
-    psys_async_policy   async_policy; /* what the worker got; final once
+    psys_sched_deadline sched;      /* effective worker reservation            */
+    psys_async_policy   async_policy; /* rung the worker got; final once
                                        * psys_open() returns                   */
 
     char     device[128];           /* name as opened (with any \\.\ prefix)   */
@@ -557,7 +714,11 @@ PSYS_API int psys_find_ports(const psys_port_filter* filter, psys_port_info* out
 /* Open and configure a port per `desc`. Returns true on success; on failure
  * returns false and leaves a message in psys_error(). Validates every enum
  * and range before touching the OS. `p` must be zeroed or closed (see the
- * struct comment).
+ * struct comment); a handle whose is_open flag is still set is refused with a
+ * message rather than reopened, because reopening it would lose the old
+ * descriptor and orphan the old worker thread. A handle that was never zeroed
+ * has no valid flag, so that check cannot save a caller who ignores the
+ * contract in the other direction.
  *
  * It also starts the async-pulse worker, so psys_port.async_policy is final
  * before the first trial and no pulse pays for thread creation. A worker that
@@ -568,7 +729,9 @@ PSYS_API bool psys_open(psys_port* p, const psys_desc* desc);
 
 /* Interrupt, release and close the port. Safe to call on a zeroed or
  * already-closed handle. Both the reader and the writer must have returned;
- * see THREADING. */
+ * see THREADING. A pulse still pending has its trailing byte written first,
+ * immediately rather than at its deadline, so this can block for up to 50 ms
+ * on a wedged device; it never waits out write_timeout_ms. */
 PSYS_API void psys_close(psys_port* p);
 
 /* Wake a psys_read() blocked on another thread; it returns
@@ -590,9 +753,10 @@ PSYS_API const char* psys_strerror(int code);
 /* True if the handle currently owns an open port. */
 PSYS_API bool psys_is_open(const psys_port* p);
 
-/* Monotonic microseconds (CLOCK_MONOTONIC / QueryPerformanceCounter). The
- * clock the library uses for its own deadlines; use it to bracket writes so
- * your timestamps and the library's share one base. */
+/* Monotonic microseconds: psyrt_now_us(), which is CLOCK_MONOTONIC on POSIX
+ * and QueryPerformanceCounter on Windows. Use it to bracket writes. It is the
+ * same call, not a second clock that agrees with psy_rt.h's, so the one base
+ * this collection promises holds by construction. */
 PSYS_API uint64_t psys_now_us(void);
 
 /* --- output (writer role) ---------------------------------------------- */
@@ -622,8 +786,9 @@ PSYS_API int psys_purge(psys_port* p, int which);
  * BioSemi, DIY): on = code, off = 0x00. Do not use it with a command
  * protocol such as XID, where 0x00 is a protocol byte. Blocking; the hold
  * starts when the first write is accepted by the driver (see TIMING). The
- * wait is a busy spin on Windows and nanosleep on POSIX, so keep widths
- * short. Returns 2 on success, the count of bytes accepted on timeout, or a
+ * wait is psyrt_sleep_until() with the platform's default spin window, so the
+ * calling thread sleeps for most of the width and spins only the tail.
+ * Returns 2 on success, the count of bytes accepted on timeout, or a
  * PSYS_ERR_* code. */
 PSYS_API int psys_pulse(psys_port* p, uint8_t on, uint8_t off, uint32_t usec);
 
@@ -697,6 +862,15 @@ PSYS_API int psys_send_break(psys_port* p, uint32_t ms);
 #ifndef PSY_SERIAL_IMPLEMENTATION_GUARD
 #define PSY_SERIAL_IMPLEMENTATION_GUARD
 
+/* psy_rt.h's implementation, unless this translation unit already has it.
+ * Its implementation block sits outside its header guard and carries a guard
+ * of its own, so a unit that also defines PSY_RT_IMPLEMENTATION, or that also
+ * implements psy_parallel.h, still ends up with exactly one copy. */
+#ifndef PSY_RT_IMPLEMENTATION_GUARD
+    #define PSY_RT_IMPLEMENTATION
+    #include "psy_rt.h"
+#endif
+
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -747,6 +921,7 @@ PSYS_API int psys_send_break(psys_port* p, uint32_t ms);
         #include <linux/serial.h>   /* TIOCGSERIAL, ASYNC_LOW_LATENCY */
     #endif
     #if defined(__APPLE__)
+        #include <sys/select.h>   /* Darwin waits with select(); see POSIX WAITS */
         /* IOSSIOSPEED is spelled out instead of including <IOKit/serial/ioss.h>:
          * the ioctl number is stable ABI, and the header would drag the IOKit
          * SDK into every translation unit that defines the implementation. */
@@ -766,11 +941,11 @@ static void psys__set_error(psys_port* p, const char* fmt, ...) {
     va_end(ap);
 }
 
-const char* psys_error(const psys_port* p) {
+PSYS_API const char* psys_error(const psys_port* p) {
     return p ? p->error : "null port handle";
 }
 
-const char* psys_strerror(int code) {
+PSYS_API const char* psys_strerror(int code) {
     switch (code) {
         case PSYS_ERR_IO:           return "I/O error (see rd_oserr / wr_oserr)";
         case PSYS_ERR_DISCONNECTED: return "device disconnected";
@@ -781,14 +956,27 @@ const char* psys_strerror(int code) {
     }
 }
 
-bool psys_is_open(const psys_port* p) {
+PSYS_API bool psys_is_open(const psys_port* p) {
     return p && p->is_open;
 }
 
-/* Per-platform write that assumes an open port and a validated length and
- * takes no worker lock. The public psys_write() wraps it with the lock and the
- * pending-pulse cancel. */
-static int psys__write_nolock(psys_port* p, const void* buf, int len);
+/* How long psys_close() lets the worker's flush of a pending trailing byte
+ * block. The flush runs with the writer mutex held and psys_close() joins the
+ * worker thread behind it, so write_timeout_ms would make a wedged device hold
+ * a close for a second, and PSYS_TIMEOUT_INFINITE would hold it forever. A healthy device
+ * accepts one byte in microseconds, so this bound only ever fires on a device
+ * that is already lost. */
+#define PSYS__CLOSE_FLUSH_MS 50u
+
+/* Per-platform write that assumes an open port and a validated length, takes
+ * no writer mutex, and gives up after timeout_ms. The public psys_write()
+ * wraps it with the mutex and the pending-pulse cancel. */
+static int psys__write_timed(psys_port* p, const void* buf, int len, uint32_t timeout_ms);
+
+/* The ordinary writer-role write: the port's own timeout, as documented. */
+static int psys__write_nolock(psys_port* p, const void* buf, int len) {
+    return psys__write_timed(p, buf, len, p->write_timeout_ms);
+}
 
 #ifndef PSYS_NO_THREADS
 /* Defined in the ASYNC PULSE WORKER section below. */
@@ -798,49 +986,11 @@ static int  psys__write_cancel(psys_port* p, const void* buf, int len);
 static int  psys__async_submit(psys_port* p, uint8_t on, uint8_t off, uint32_t usec);
 #endif
 
-/* Monotonic microsecond clock. Integer arithmetic on Windows: converting QPC
- * ticks through a double loses microseconds once the counter is large. */
-uint64_t psys_now_us(void) {
-#if defined(PSYS__WINDOWS)
-    LARGE_INTEGER f, c;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&c);
-    uint64_t ticks = (uint64_t)c.QuadPart, freq = (uint64_t)f.QuadPart;
-    return (ticks / freq) * 1000000ull + (ticks % freq) * 1000000ull / freq;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
-#endif
-}
-
-/* Short wait for a pulse width. Windows spins on QPC because the scheduler
- * cannot sleep finer than ~1 ms; POSIX nanosleep is good to tens of
- * microseconds on a stock kernel. Not for long waits: see psys__sleep_ms. */
-static void psys__spin_us(uint32_t usec) {
-#if defined(PSYS__WINDOWS)
-    uint64_t end = psys_now_us() + usec;
-    while (psys_now_us() < end) YieldProcessor();
-#else
-    struct timespec ts;
-    ts.tv_sec  = usec / 1000000u;
-    ts.tv_nsec = (long)(usec % 1000000u) * 1000L;
-    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) { }
-#endif
-}
-
-/* Coarse sleep for psys_send_break, where a 250 ms wait must not burn a core. */
-static void psys__sleep_ms(uint32_t ms) {
-#if defined(PSYS__WINDOWS)
-    Sleep(ms);
-#else
-    /* Split instead of ms * 1000: the product overflows 32 bits above about
-     * 4295 s, and psys_send_break() takes the caller's number as given. */
-    struct timespec ts;
-    ts.tv_sec  = (time_t)(ms / 1000u);
-    ts.tv_nsec = (long)(ms % 1000u) * 1000000L;
-    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) { }
-#endif
+/* One clock for the library, the caller and psy_rt.h. A wrapper rather than a
+ * second reader of the same OS counter: two copies of this conversion are two
+ * things to keep in agreement, and the manual promises one base. */
+PSYS_API uint64_t psys_now_us(void) {
+    return psyrt_now_us();
 }
 
 /* Case-insensitive helpers; MSVC has no strcasestr/strcasecmp. */
@@ -881,7 +1031,8 @@ static void psys__append(char* dst, size_t cap, const char* src) {
 
 /* Milliseconds left until an absolute deadline, rounded up so a
  * sub-millisecond remainder still waits once instead of degrading into a
- * poll. Clamped to INT32_MAX because poll() takes an int. */
+ * poll. Clamped to INT32_MAX because poll() and select() take an int and a
+ * struct timeval built from one. */
 static uint32_t psys__remaining_ms(uint64_t deadline_us) {
     uint64_t now = psys_now_us();
     if (now >= deadline_us) return 0;
@@ -955,7 +1106,9 @@ static int psys__list_finish(psys__list* l, psys_port_info* out, int max) {
         }
         l->v[k] = tmp;
     }
-    if (out && max > 0) {
+    /* No ports means l->v was never allocated; memcpy's pointer arguments
+     * must be non-null even for a zero-length copy. */
+    if (out && max > 0 && n > 0) {
         int k = n < max ? n : max;
         memcpy(out, l->v, (size_t)k * sizeof(*out));
     }
@@ -1067,7 +1220,7 @@ static void psys__parse_instance_id(const char* id, psys_port_info* e) {
     }
 }
 
-int psys_list_ports(psys_port_info* out, int max) {
+PSYS_API int psys_list_ports(psys_port_info* out, int max) {
     HDEVINFO set = SetupDiGetClassDevsA(&psys__guid_comport, NULL, NULL,
                                         DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (set == INVALID_HANDLE_VALUE) return PSYS_ERR_IO;
@@ -1132,7 +1285,10 @@ static bool psys__open_fail(psys_port* p) {
 /* Read timeouts, in the one combination that gives "whatever is buffered now,
  * else the first byte within ms". SetCommTimeouts is port-global, so the write
  * constant is rewritten with the value psys_open() chose instead of being left
- * to whatever the driver defaulted to. */
+ * to whatever the driver defaulted to. On failure rd_oserr holds the Win32
+ * code and the caller decides what it means: after an unplug this call is
+ * where a reader first notices, and a disconnect must not be reported as an
+ * I/O error. */
 static bool psys__set_read_timeout(psys_port* p, uint32_t ms) {
     if (p->rd_timeout_applied_ms == ms) return true;
     COMMTIMEOUTS t;
@@ -1241,7 +1397,7 @@ static bool psys__open_platform(psys_port* p, const psys_desc* d) {
     return true;
 }
 
-void psys_close(psys_port* p) {
+PSYS_API void psys_close(psys_port* p) {
     if (!p || !p->is_open) return;
 #ifndef PSYS_NO_THREADS
     /* First, while the port is still open: this joins the worker and lets it
@@ -1261,7 +1417,7 @@ void psys_close(psys_port* p) {
     psys__open_fail(p); /* same teardown, ignores the return */
 }
 
-int psys_interrupt(psys_port* p) {
+PSYS_API int psys_interrupt(psys_port* p) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (!SetEvent((HANDLE)p->wake_event)) {
         p->misc_oserr = (int)GetLastError();
@@ -1275,7 +1431,7 @@ int psys_interrupt(psys_port* p) {
 /* One bounded write on the caller's own OVERLAPPED. The user's writer thread
  * and the async worker each bring their own, because on Windows a transfer is
  * reaped by the thread that started it. */
-static int psys__write_ovl(psys_port* p, const void* buf, int len,
+static int psys__write_ovl(psys_port* p, const void* buf, int len, uint32_t timeout_ms,
                            OVERLAPPED* ovl, HANDLE ev) {
     memset(ovl, 0, sizeof(*ovl));
     ovl->hEvent = ev;
@@ -1288,25 +1444,36 @@ static int psys__write_ovl(psys_port* p, const void* buf, int len,
             p->wr_oserr = (int)e;
             return psys__gone(e) ? PSYS_ERR_DISCONNECTED : PSYS_ERR_IO;
         }
-        /* The COMMTIMEOUTS write constant bounds this wait; a short count is
-         * the timeout, not an error. */
+        /* The COMMTIMEOUTS write constant already bounds the ordinary write,
+         * so that case simply reaps. A caller asking for a different bound
+         * (psys_close()'s flush) waits on the event itself and cancels the
+         * rest, because rewriting the port-global COMMTIMEOUTS for one byte
+         * would change the reader's timeouts too. */
+        if (timeout_ms != p->write_timeout_ms &&
+            WaitForSingleObject(ev, (DWORD)timeout_ms) != WAIT_OBJECT_0)
+            CancelIoEx((HANDLE)p->handle, ovl);
         if (!GetOverlappedResult((HANDLE)p->handle, ovl, &done, TRUE)) {
             e = GetLastError();
             p->wr_oserr = (int)e;
-            if (psys__gone(e)) return PSYS_ERR_DISCONNECTED;
-            if (e == ERROR_OPERATION_ABORTED && !psys__port_alive(p))
-                return PSYS_ERR_DISCONNECTED;
-            return (int)done;  /* a purge aborted us: report what got through */
+            /* Only a purge, our own cancel or a vanished device aborts a
+             * write. Every other failure is a driver error and must be said
+             * so: reporting it as a short count makes it indistinguishable
+             * from a write timeout, and the caller retries it forever. */
+            if (e != ERROR_OPERATION_ABORTED)
+                return psys__gone(e) ? PSYS_ERR_DISCONNECTED : PSYS_ERR_IO;
+            if (!psys__port_alive(p)) return PSYS_ERR_DISCONNECTED;
+            return (int)done;  /* a purge or our cancel: report what got through */
         }
     }
     return (int)done;
 }
 
-static int psys__write_nolock(psys_port* p, const void* buf, int len) {
-    return psys__write_ovl(p, buf, len, PSYS__OVL(p->wr_ovl), (HANDLE)p->wr_event);
+static int psys__write_timed(psys_port* p, const void* buf, int len, uint32_t timeout_ms) {
+    return psys__write_ovl(p, buf, len, timeout_ms,
+                           PSYS__OVL(p->wr_ovl), (HANDLE)p->wr_event);
 }
 
-int psys_drain(psys_port* p) {
+PSYS_API int psys_drain(psys_port* p) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (!FlushFileBuffers((HANDLE)p->handle)) {
         DWORD e = GetLastError();
@@ -1316,7 +1483,7 @@ int psys_drain(psys_port* p) {
     return 0;
 }
 
-int psys_purge(psys_port* p, int which) {
+PSYS_API int psys_purge(psys_port* p, int which) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (!(which & (PSYS_PURGE_RX | PSYS_PURGE_TX))) return PSYS_ERR_ARG;
     DWORD flags = 0;
@@ -1344,6 +1511,11 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
     HANDLE h = (HANDLE)p->handle;
     OVERLAPPED* ovl = PSYS__OVL(p->rd_ovl);
     bool infinite = (timeout_ms == PSYS_TIMEOUT_INFINITE);
+    /* An abort that was neither an interrupt nor a disconnect resumes the
+     * wait, so what is left of a finite timeout has to be measured against an
+     * absolute deadline rather than restarted from the caller's duration. */
+    uint64_t deadline = infinite ? 0 : psys_now_us() + (uint64_t)timeout_ms * 1000ull;
+    uint32_t remaining = timeout_ms;
 
     for (;;) {
         /* A latched interrupt wins over buffered data, so a reader that is
@@ -1357,8 +1529,9 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
         /* PSYS_TIMEOUT_INFINITE is MAXDWORD, which the timeout structure
          * reserves for its "return at once" case, so an infinite wait is a
          * loop over long finite ones. */
-        uint32_t slice = infinite ? 0x7FFFFFFFu : timeout_ms;
-        if (!psys__set_read_timeout(p, slice)) return PSYS_ERR_IO;
+        uint32_t slice = infinite ? 0x7FFFFFFFu : remaining;
+        if (!psys__set_read_timeout(p, slice))
+            return psys__gone((DWORD)p->rd_oserr) ? PSYS_ERR_DISCONNECTED : PSYS_ERR_IO;
 
         memset(ovl, 0, sizeof(*ovl));
         ovl->hEvent = (HANDLE)p->rd_event;
@@ -1382,11 +1555,16 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
                 bool woke = (w == WAIT_OBJECT_0 + 1);
                 p->rd_oserr = woke ? 0 : (int)GetLastError();
                 CancelIoEx(h, ovl);
-                BOOL reaped = GetOverlappedResult(h, ovl, &done, TRUE);
+                if (!GetOverlappedResult(h, ovl, &done, TRUE) &&
+                    GetLastError() != ERROR_OPERATION_ABORTED)
+                    done = 0;  /* only a cancelled IRP carries a count */
                 if (!woke) return PSYS_ERR_IO;
-                /* Bytes that beat the cancel are not thrown away; the wake
-                 * stays latched and the next read reports it. */
-                if (reaped && done > 0) return (int)done;
+                /* Bytes that beat the cancel are not thrown away, whether the
+                 * reap succeeded or reported the cancel: serial.sys fills in
+                 * the transfer count either way, and this must agree with the
+                 * completed-then-aborted case below, which keeps them. The
+                 * wake stays latched and the next read reports it. */
+                if (done > 0) return (int)done;
                 ResetEvent((HANDLE)p->wake_event);
                 return PSYS_ERR_INTERRUPTED;
             }
@@ -1400,11 +1578,19 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
                      * returned rather than dropped. */
                     if (done > 0) return (int)done;
                     /* A purge or a cancel aborts the read, and some drivers
-                     * report a vanished device the same way. Ask the port.
-                     * Reporting 0 here (no data, not an error) is safe only
-                     * because PSYS_PURGE_RX is a reader-role call: the thread
-                     * that aborted this read is this thread. */
-                    return psys__port_alive(p) ? 0 : PSYS_ERR_DISCONNECTED;
+                     * report a vanished device the same way. Ask the port. */
+                    if (!psys__port_alive(p)) return PSYS_ERR_DISCONNECTED;
+                    /* Alive, and an interrupt would have been seen at the top
+                     * of this loop, so the abort was a psys_purge(PSYS_PURGE_RX)
+                     * on this same thread. The wait it cut short is not over:
+                     * returning 0 would end a PSYS_TIMEOUT_INFINITE read with
+                     * no data, no interrupt and no disconnect, and would look
+                     * like a deadline to the PSYS_READ_ALL loop. Resume it. */
+                    if (!infinite) {
+                        remaining = psys__remaining_ms(deadline);
+                        if (remaining == 0) return 0;
+                    }
+                    continue;
                 }
                 return PSYS_ERR_IO;
             }
@@ -1414,7 +1600,7 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
     }
 }
 
-int psys_available(psys_port* p) {
+PSYS_API int psys_available(psys_port* p) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     DWORD errors = 0;
     COMSTAT st;
@@ -1438,18 +1624,18 @@ static int psys__escape(psys_port* p, DWORD fn) {
     return 0;
 }
 
-int psys_set_dtr(psys_port* p, bool on) {
+PSYS_API int psys_set_dtr(psys_port* p, bool on) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     return psys__escape(p, on ? SETDTR : CLRDTR);
 }
 
-int psys_set_rts(psys_port* p, bool on) {
+PSYS_API int psys_set_rts(psys_port* p, bool on) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (p->flow == PSYS_FLOW_RTSCTS) return 0; /* the driver owns RTS */
     return psys__escape(p, on ? SETRTS : CLRRTS);
 }
 
-int psys_get_lines(psys_port* p) {
+PSYS_API int psys_get_lines(psys_port* p) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     DWORD st = 0;
     if (!GetCommModemStatus((HANDLE)p->handle, &st)) {
@@ -1467,16 +1653,18 @@ int psys_get_lines(psys_port* p) {
     return mask;
 }
 
-int psys_send_break(psys_port* p, uint32_t ms) {
+PSYS_API int psys_send_break(psys_port* p, uint32_t ms) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (!SetCommBreak((HANDLE)p->handle)) {
         DWORD e = GetLastError();
         p->wr_oserr = (int)e;
         return psys__gone(e) ? PSYS_ERR_DISCONNECTED : PSYS_ERR_IO;
     }
-    /* Sleep() has the 15.6 ms system tick as its floor unless the process
-     * raised the timer resolution, so a break shorter than that overruns. */
-    psys__sleep_ms(ms);
+    /* psyrt_sleep_ns() hands the bulk of the wait to the OS and spins only its
+     * tail, so a break no longer has the 15.6 ms Windows tick as its floor.
+     * The multiply is 64-bit: ms * 1000000 overflows 32 bits at about 4.3 s,
+     * and this call takes the caller's number as given. */
+    (void)psyrt_sleep_ns((uint64_t)ms * 1000000ull);
     if (!ClearCommBreak((HANDLE)p->handle)) {
         DWORD e = GetLastError();
         p->wr_oserr = (int)e;
@@ -1495,6 +1683,71 @@ int psys_send_break(psys_port* p, uint32_t ms) {
 /* errno values that mean the device is gone rather than busy. */
 static bool psys__gone(int e) {
     return e == EIO || e == ENXIO || e == ENODEV || e == EPIPE;
+}
+
+/* What psys__wait() saw. */
+#define PSYS__W_IO   0x01   /* the port is ready in the direction asked for   */
+#define PSYS__W_WAKE 0x02   /* psys_interrupt() put a byte in the self-pipe   */
+#define PSYS__W_GONE 0x04   /* hangup or error on the port descriptor         */
+
+/* Wait until the port descriptor is ready, the interrupt pipe has a byte, or
+ * timeout_ms (-1 = forever) runs out. Returns a PSYS__W_* mask, 0 on timeout,
+ * or -1 with errno set. wake_fd < 0 means the caller has no interrupt to watch
+ * for, which is the writer.
+ *
+ * Linux polls; macOS selects. Apple's poll(2) still documents that it does not
+ * support devices, and every descriptor here is one, so the Darwin build uses
+ * the call pyserial uses on POSIX for the same reason. The price is that
+ * select() cannot express a hangup: on Darwin a dead port instead surfaces as
+ * a readable descriptor whose read() returns 0, or as EIO/ENXIO out of
+ * read()/write(), both of which the callers already map. psys_open() refuses
+ * descriptors at or above FD_SETSIZE, so FD_SET here is always in range. */
+static int psys__wait(int fd, int wake_fd, bool for_write, int timeout_ms) {
+#if defined(__APPLE__)
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(fd, &set);
+    int nfds = fd;
+    if (wake_fd >= 0) {
+        FD_SET(wake_fd, &set);
+        if (wake_fd > nfds) nfds = wake_fd;
+    }
+    struct timeval tv;
+    struct timeval* ptv = NULL;
+    if (timeout_ms >= 0) {
+        tv.tv_sec  = (time_t)(timeout_ms / 1000);
+        tv.tv_usec = (suseconds_t)(timeout_ms % 1000) * 1000;
+        ptv = &tv;
+    }
+    int r = select(nfds + 1, for_write ? NULL : &set, for_write ? &set : NULL,
+                   NULL, ptv);
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    int ev = 0;
+    if (FD_ISSET(fd, &set)) ev |= PSYS__W_IO;
+    if (wake_fd >= 0 && FD_ISSET(wake_fd, &set)) ev |= PSYS__W_WAKE;
+    return ev;
+#else
+    struct pollfd fds[2];
+    nfds_t n = 1;
+    fds[0].fd      = fd;
+    fds[0].events  = (short)(for_write ? POLLOUT : POLLIN);
+    fds[0].revents = 0;
+    if (wake_fd >= 0) {
+        fds[1].fd      = wake_fd;
+        fds[1].events  = POLLIN;
+        fds[1].revents = 0;
+        n = 2;
+    }
+    int r = poll(fds, n, timeout_ms);
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    int ev = 0;
+    if (fds[0].revents & (for_write ? POLLOUT : POLLIN)) ev |= PSYS__W_IO;
+    if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) ev |= PSYS__W_GONE;
+    if (n == 2 && (fds[1].revents & POLLIN)) ev |= PSYS__W_WAKE;
+    return ev;
+#endif
 }
 
 /* --- discovery ---------------------------------------------------------- */
@@ -1529,7 +1782,7 @@ static bool psys__is_usb_interface(const char* name) {
     return strchr(name, ':') != NULL && strchr(name, '-') != NULL;
 }
 
-int psys_list_ports(psys_port_info* out, int max) {
+PSYS_API int psys_list_ports(psys_port_info* out, int max) {
     DIR* dir = opendir("/sys/class/tty");
     if (!dir) return PSYS_ERR_IO;
     psys__list list;
@@ -1592,7 +1845,7 @@ int psys_list_ports(psys_port_info* out, int max) {
     return psys__list_finish(&list, out, max);
 }
 #else /* __APPLE__ */
-int psys_list_ports(psys_port_info* out, int max) {
+PSYS_API int psys_list_ports(psys_port_info* out, int max) {
     /* Names only. The USB fields would need IOKit, which means linking
      * -framework IOKit -framework CoreFoundation into every translation unit
      * that defines the implementation; that is a dependency this collection
@@ -1691,15 +1944,34 @@ static bool psys__baud_constant(uint32_t rate, speed_t* out) {
     return false;
 }
 
+/* select() indexes a fixed-size bitmap, so on Darwin a descriptor at or above
+ * FD_SETSIZE would write past the fd_set. Refusing the port at open time is
+ * the only honest answer. Linux polls, where the descriptor number is not
+ * bounded, so there this costs nothing and checks nothing. See POSIX WAITS. */
+static bool psys__fd_ok(psys_port* p, int fd, const char* what) {
+#if defined(__APPLE__)
+    if (fd >= FD_SETSIZE) {
+        psys__set_error(p, "%s got descriptor %d, at or above FD_SETSIZE (%d); "
+                           "macOS waits with select()", what, fd, (int)FD_SETSIZE);
+        return false;
+    }
+#else
+    (void)p; (void)fd; (void)what;
+#endif
+    return true;
+}
+
 static bool psys__open_platform(psys_port* p, const psys_desc* d) {
     /* O_NONBLOCK stays set for the life of the handle: every wait in this
-     * library is a poll() against a deadline, never a blocking descriptor.
-     * O_NOCTTY keeps a serial console from becoming this process's terminal. */
+     * library is against a deadline (poll on Linux, select on macOS), never a
+     * blocking descriptor. O_NOCTTY keeps a serial console from becoming this
+     * process's terminal. */
     p->fd = open(p->device, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (p->fd < 0) {
         psys__set_error(p, "open(%s): %s", p->device, strerror(errno));
         return false;
     }
+    if (!psys__fd_ok(p, p->fd, p->device)) return psys__open_fail(p);
     if (d->exclusive && ioctl(p->fd, TIOCEXCL) != 0) {
         psys__set_error(p, "TIOCEXCL(%s): %s", p->device, strerror(errno));
         return psys__open_fail(p);
@@ -1714,6 +1986,8 @@ static bool psys__open_platform(psys_port* p, const psys_desc* d) {
         return psys__open_fail(p);
     }
     for (int i = 0; i < 2; i++) {
+        if (!psys__fd_ok(p, p->wake_fd[i], "interrupt pipe"))
+            return psys__open_fail(p);
         int fl = fcntl(p->wake_fd[i], F_GETFL, 0);
         fcntl(p->wake_fd[i], F_SETFD, FD_CLOEXEC);
         fcntl(p->wake_fd[i], F_SETFL, (fl < 0 ? 0 : fl) | O_NONBLOCK);
@@ -1771,7 +2045,7 @@ static bool psys__open_platform(psys_port* p, const psys_desc* d) {
      * sessions; see DTR AND DEVICE RESET. */
     if (!p->keep_dtr_on_close) t.c_cflag |= (tcflag_t)HUPCL;
     /* Return from read() at once with whatever is there: the timeout lives in
-     * poll(), not in the driver. */
+     * the wait (see POSIX WAITS), not in the driver. */
     t.c_cc[VMIN]  = 0;
     t.c_cc[VTIME] = 0;
 
@@ -1807,9 +2081,12 @@ static bool psys__open_platform(psys_port* p, const psys_desc* d) {
 #endif
 
     /* DTR and RTS are asserted unless the caller asked otherwise (the pyserial
-     * default). Best effort: some drivers raise DTR inside open(), before this
-     * runs. RTS is left alone under a hardware handshake, where it belongs to
-     * the driver. */
+     * default). dtr_low_on_open cannot prevent an Arduino-class reset on
+     * Linux USB-serial: the kernel raises both lines inside open() itself,
+     * O_NONBLOCK included, so by the time this runs the edge is already on the
+     * wire and all it does is drop the line again. See DTR AND DEVICE RESET
+     * for what does work. RTS is left alone under a hardware handshake, where
+     * it belongs to the driver. */
     int dtr = TIOCM_DTR, rts = TIOCM_RTS;
     ioctl(p->fd, d->dtr_low_on_open ? TIOCMBIC : TIOCMBIS, &dtr);
     if (p->flow != PSYS_FLOW_RTSCTS)
@@ -1829,9 +2106,19 @@ static bool psys__open_platform(psys_port* p, const psys_desc* d) {
             ss.flags |= ASYNC_LOW_LATENCY;
             ioctl(p->fd, TIOCSSERIAL, &ss);
         }
-        char dir[PATH_MAX], val[32];
+        /* The sysfs directory is named after the real tty, so the device name
+         * has to be resolved first. DEVICE NAMES tells experiments to open the
+         * stable /dev/serial/by-id/... symlinks, and their basename matches
+         * nothing under /sys/bus/usb-serial/devices: without this the attribute
+         * never opens and low_latency reads false on exactly the devices whose
+         * timer ftdi_sio just programmed. A fixed buffer, because psys_open()
+         * allocates nothing the caller did not ask for. */
+        char real[PATH_MAX], dir[PATH_MAX], val[32];
+        const char* node = realpath(p->device, real) ? real : p->device;
         psys__copy(dir, sizeof(dir), "/sys/bus/usb-serial/devices/");
-        psys__append(dir, sizeof(dir), psys__basename(p->device));
+        psys__append(dir, sizeof(dir), psys__basename(node));
+        /* No such attribute (cdc_acm and every non-USB port): low_latency
+         * stays false, which is the honest answer. */
         if (psys__read_attr(dir, "latency_timer", val, sizeof(val)))
             p->low_latency = (strtol(val, NULL, 10) == 1);
     }
@@ -1843,7 +2130,7 @@ static bool psys__open_platform(psys_port* p, const psys_desc* d) {
     return true;
 }
 
-void psys_close(psys_port* p) {
+PSYS_API void psys_close(psys_port* p) {
     if (!p || !p->is_open) return;
 #ifndef PSYS_NO_THREADS
     /* First, while the fd is still valid: this joins the worker and lets it
@@ -1863,7 +2150,7 @@ void psys_close(psys_port* p) {
     psys__open_fail(p); /* same teardown, ignores the return */
 }
 
-int psys_interrupt(psys_port* p) {
+PSYS_API int psys_interrupt(psys_port* p) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     char x = 'x';
     ssize_t n = write(p->wake_fd[1], &x, 1);
@@ -1882,12 +2169,12 @@ int psys_interrupt(psys_port* p) {
 
 /* --- output ------------------------------------------------------------- */
 
-static int psys__write_nolock(psys_port* p, const void* buf, int len) {
+static int psys__write_timed(psys_port* p, const void* buf, int len, uint32_t timeout_ms) {
     const uint8_t* src = (const uint8_t*)buf;
     int got = 0;
-    bool infinite = (p->write_timeout_ms == PSYS_TIMEOUT_INFINITE);
+    bool infinite = (timeout_ms == PSYS_TIMEOUT_INFINITE);
     uint64_t deadline = infinite ? 0
-                                 : psys_now_us() + (uint64_t)p->write_timeout_ms * 1000ull;
+                                 : psys_now_us() + (uint64_t)timeout_ms * 1000ull;
     while (got < len) {
         ssize_t n = write(p->fd, src + got, (size_t)(len - got));
         if (n > 0) { got += (int)n; continue; }
@@ -1903,21 +2190,19 @@ static int psys__write_nolock(psys_port* p, const void* buf, int len) {
             }
         }
         /* The transmit buffer is full (or the peer is not draining it under
-         * flow control): wait for room, bounded by write_timeout_ms. */
+         * flow control): wait for room, bounded by the caller's timeout. */
         int tmo = infinite ? -1 : (int)psys__remaining_ms(deadline);
         if (tmo == 0) break;
-        struct pollfd pfd;
-        pfd.fd = p->fd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        int r = poll(&pfd, 1, tmo);
-        if (r < 0) {
+        int ev = psys__wait(p->fd, -1, true, tmo);
+        if (ev < 0) {
             if (errno == EINTR) continue;
             p->wr_oserr = errno;
             return PSYS_ERR_IO;
         }
-        if (r == 0) break;  /* timeout: report the count accepted so far */
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        if (ev == 0) break;  /* timeout: report the count accepted so far */
+        /* A hangup outranks writability: the room the wait reported leads
+         * nowhere on a port that is gone. */
+        if (ev & PSYS__W_GONE) {
             p->wr_oserr = 0;
             return PSYS_ERR_DISCONNECTED;
         }
@@ -1925,7 +2210,7 @@ static int psys__write_nolock(psys_port* p, const void* buf, int len) {
     return got;
 }
 
-int psys_drain(psys_port* p) {
+PSYS_API int psys_drain(psys_port* p) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     while (tcdrain(p->fd) != 0) {
         if (errno == EINTR) continue;
@@ -1935,7 +2220,7 @@ int psys_drain(psys_port* p) {
     return 0;
 }
 
-int psys_purge(psys_port* p, int which) {
+PSYS_API int psys_purge(psys_port* p, int which) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (!(which & (PSYS_PURGE_RX | PSYS_PURGE_TX))) return PSYS_ERR_ARG;
     int sel = ((which & PSYS_PURGE_RX) && (which & PSYS_PURGE_TX)) ? TCIOFLUSH
@@ -1960,34 +2245,30 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
     uint64_t deadline = infinite ? 0 : psys_now_us() + (uint64_t)timeout_ms * 1000ull;
 
     for (;;) {
-        struct pollfd fds[2];
-        fds[0].fd = p->fd;
-        fds[0].events = POLLIN;
-        fds[0].revents = 0;
-        fds[1].fd = p->wake_fd[0];
-        fds[1].events = POLLIN;
-        fds[1].revents = 0;
         int tmo = infinite ? -1 : (int)psys__remaining_ms(deadline);
-
-        int r = poll(fds, 2, tmo);
-        if (r < 0) {
+        int ev = psys__wait(p->fd, p->wake_fd[0], false, tmo);
+        if (ev < 0) {
             if (errno == EINTR) continue;
             p->rd_oserr = errno;
             return PSYS_ERR_IO;
         }
-        if (r == 0) return 0;
-        if (fds[1].revents & POLLIN) {
+        if (ev == 0) return 0;
+        if (ev & PSYS__W_WAKE) {
             /* Drain the whole pipe: several interrupts collapse into one. */
             char sink[16];
             while (read(p->wake_fd[0], sink, sizeof(sink)) > 0) { }
             p->rd_oserr = 0;
             return PSYS_ERR_INTERRUPTED;
         }
-        if (fds[0].revents & POLLIN) {
+        if (ev & PSYS__W_IO) {
             ssize_t n = read(p->fd, buf, (size_t)cap);
             if (n > 0) return (int)n;
-            /* EOF on a tty means the other end is gone (macOS reports the
-             * unplug this way), never "nothing yet". */
+            /* n == 0 is read as a hangup only because the wait just reported
+             * the port readable. Ungated it would be ambiguous: with VMIN = 0
+             * and VTIME = 0, which is how this library configures the line,
+             * Linux n_tty also returns 0 for "nothing buffered". After a
+             * readable report there is nothing to be had but end of file, and
+             * that is how macOS surfaces an unplug. */
             if (n == 0) { p->rd_oserr = 0; return PSYS_ERR_DISCONNECTED; }
             if (errno == EINTR) continue;
             if (errno == EAGAIN) continue;
@@ -1997,16 +2278,16 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
             p->rd_oserr = errno;
             return psys__gone(errno) ? PSYS_ERR_DISCONNECTED : PSYS_ERR_IO;
         }
-        /* Checked after POLLIN so buffered bytes are delivered before the
+        /* Checked after readability so buffered bytes are delivered before the
          * hangup that follows them. */
-        if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+        if (ev & PSYS__W_GONE) {
             p->rd_oserr = 0;
             return PSYS_ERR_DISCONNECTED;
         }
     }
 }
 
-int psys_available(psys_port* p) {
+PSYS_API int psys_available(psys_port* p) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     int n = 0;
     if (ioctl(p->fd, FIONREAD, &n) != 0) {
@@ -2027,18 +2308,18 @@ static int psys__modem_bit(psys_port* p, int bit, bool on) {
     return 0;
 }
 
-int psys_set_dtr(psys_port* p, bool on) {
+PSYS_API int psys_set_dtr(psys_port* p, bool on) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     return psys__modem_bit(p, TIOCM_DTR, on);
 }
 
-int psys_set_rts(psys_port* p, bool on) {
+PSYS_API int psys_set_rts(psys_port* p, bool on) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (p->flow == PSYS_FLOW_RTSCTS) return 0; /* the driver owns RTS */
     return psys__modem_bit(p, TIOCM_RTS, on);
 }
 
-int psys_get_lines(psys_port* p) {
+PSYS_API int psys_get_lines(psys_port* p) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     int st = 0;
     if (ioctl(p->fd, TIOCMGET, &st) != 0) {
@@ -2055,7 +2336,7 @@ int psys_get_lines(psys_port* p) {
     return mask;
 }
 
-int psys_send_break(psys_port* p, uint32_t ms) {
+PSYS_API int psys_send_break(psys_port* p, uint32_t ms) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     /* TIOCSBRK rather than tcsendbreak(), whose duration is 0.25 to 0.5 s and
      * not under the caller's control. */
@@ -2063,7 +2344,8 @@ int psys_send_break(psys_port* p, uint32_t ms) {
         p->wr_oserr = errno;
         return psys__gone(errno) ? PSYS_ERR_DISCONNECTED : PSYS_ERR_IO;
     }
-    psys__sleep_ms(ms);
+    /* 64-bit multiply: ms * 1000000 overflows 32 bits at about 4.3 s. */
+    (void)psyrt_sleep_ns((uint64_t)ms * 1000000ull);
     if (ioctl(p->fd, TIOCCBRK) != 0) {
         p->wr_oserr = errno;
         return psys__gone(errno) ? PSYS_ERR_DISCONNECTED : PSYS_ERR_IO;
@@ -2076,472 +2358,219 @@ int psys_send_break(psys_port* p, uint32_t ms) {
 /* ======================================================================= *
  *  ASYNC PULSE WORKER
  *
- *  One long-lived worker thread per handle writes the trailing byte of a
- *  non-blocking pulse. The leading edge is written by the caller inside
- *  psys_pulse_async(), so a trigger onset never waits for a thread to wake;
- *  the worker only sleeps until an absolute deadline and then writes `off`.
+ *  psy_rt.h owns the thread. One psyrt_worker per handle, started by
+ *  psys_open(), runs one callback at one absolute deadline and elevates
+ *  itself up psy_rt.h's scheduling ladder before psys_open() returns. What
+ *  stays here is the part that is about the byte stream rather than about
+ *  time.
  *
- *  The worker holds a single pending job. A pulse issued while one is pending
- *  replaces it (new deadline, new off byte), and any plain write cancels it,
- *  so the trailing byte lands at most once and never contradicts a later
- *  write.
+ *  psyrt_worker runs its callback with its OWN lock released, which is what
+ *  lets that callback block in a driver write without deadlocking a submit
+ *  from another thread. The price is that psy_rt.h serializes nothing for us,
+ *  and this library's threading promise is that exactly one thread writes the
+ *  port at a time. Hence the writer mutex below: every writer-role write, the
+ *  worker's trailing byte included, holds it.
  *
- *  Unlike psy_parallel.h's worker, which writes a byte to an I/O port, this
- *  one writes into a byte stream that can block. It is therefore a second
- *  writer on the handle rather than an invisible helper: every writer-role
- *  write takes its lock, and a stalled device makes the two wait for each
- *  other. See THREADING.
+ *  Next to the mutex sits the pending trailing byte, armed together with the
+ *  deadline it is due at. That pair is the token the callback checks: it
+ *  writes only what is still armed and due, so a byte the worker had already
+ *  dispatched when a user write, a replacement pulse or a close got the mutex
+ *  first is dropped instead of undoing that write. psyrt_worker_cancel()
+ *  handles the ordinary case, where the job has not been dispatched yet; the
+ *  token covers the window between psy_rt.h releasing its lock and the
+ *  callback taking ours, which no cancel can reach.
+ *
+ *  Lock order is writer mutex, then psy_rt.h's lock (psys__async_submit and
+ *  psys__write_cancel take both). The callback runs the other way round, but
+ *  it holds nothing of psy_rt.h's when it takes ours, so the cycle does not
+ *  close.
  * ======================================================================= */
 #ifndef PSYS_NO_THREADS
 
 #if defined(PSYS__POSIX)
-/* ---- POSIX: pthreads, RT policy where the OS has one ------------------- */
 #include <pthread.h>
-#include <sched.h>
-#if defined(__linux__)
-    #include <sys/syscall.h>
-    #include <sys/prctl.h>
-
-    #ifndef SCHED_DEADLINE
-    #define SCHED_DEADLINE 6
-    #endif
-
-/* glibc has no wrapper or type for sched_setattr; declare both here. */
-struct psys__sched_attr {
-    uint32_t size;
-    uint32_t sched_policy;
-    uint64_t sched_flags;
-    int32_t  sched_nice;
-    uint32_t sched_priority;
-    uint64_t sched_runtime;
-    uint64_t sched_deadline;
-    uint64_t sched_period;
-};
-
-static int psys__setattr(struct psys__sched_attr* a) {
-#if defined(SYS_sched_setattr)
-    return (int)syscall(SYS_sched_setattr, 0, a, 0u);
-#elif defined(__x86_64__)
-    return (int)syscall(314 /* __NR_sched_setattr */, 0, a, 0u);
+typedef pthread_mutex_t psys__mutex;
 #else
-    (void)a; errno = ENOSYS; return -1;
+typedef CRITICAL_SECTION psys__mutex;
 #endif
-}
-#endif /* __linux__ */
-
-/* Raise the calling (worker) thread as far up the ladder as the OS allows and
- * report which rung stuck: SCHED_DEADLINE with the caller's reservation, then
- * SCHED_FIFO 80 (above the kernel's IRQ threads at 50, below migration and
- * the watchdog at 99), then a normal thread with the default 50 us timer
- * slack removed. Darwin has neither SCHED_DEADLINE nor prctl, so it starts at
- * the FIFO rung, where its own maximum priority applies. */
-static psys_async_policy psys__worker_realtime(const psys_sched_deadline* rt) {
-#if defined(__linux__)
-    struct psys__sched_attr a;
-    memset(&a, 0, sizeof(a));
-    a.size           = (uint32_t)sizeof(a);
-    a.sched_policy   = SCHED_DEADLINE;
-    a.sched_runtime  = rt->runtime_ns;
-    a.sched_deadline = rt->deadline_ns;
-    a.sched_period   = rt->period_ns;
-    if (psys__setattr(&a) == 0) return PSYS_ASYNC_DEADLINE;
-#else
-    (void)rt;
-#endif
-    struct sched_param sp;
-    memset(&sp, 0, sizeof(sp));
-    sp.sched_priority = 80;
-    int top = sched_get_priority_max(SCHED_FIFO);
-    if (top > 0 && sp.sched_priority > top) sp.sched_priority = top;
-    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0)
-        return PSYS_ASYNC_FIFO;
-#if defined(__linux__)
-    (void)prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
-#endif
-    return PSYS_ASYNC_NORMAL;
-}
 
 typedef struct psys__async {
-    pthread_t       thread;
-    pthread_mutex_t mtx;
-    pthread_cond_t  cv;
-    int             ready;    /* worker published its policy; start may return */
-    int             quit;
-    int             has_job;
-    uint8_t         off_byte; /* the trailing byte of the pending pulse        */
-    struct timespec off_at;   /* absolute CLOCK_MONOTONIC target               */
-    psys_port*      port;
+    psyrt_worker rt;         /* psy_rt.h's thread; the handle is ours to hold */
+    psys__mutex  mtx;        /* one writer at a time on the byte stream       */
+    uint64_t     off_at_ns;  /* when the armed trailing byte is due           */
+    uint8_t      off_byte;
+    int          armed;      /* 0 = nothing pending; written under mtx only   */
+    psys_port*   port;
 } psys__async;
 
-static int psys__ts_before(const struct timespec* a, const struct timespec* b) {
-    if (a->tv_sec != b->tv_sec) return a->tv_sec < b->tv_sec;
-    return a->tv_nsec < b->tv_nsec;
+#if defined(PSYS__POSIX)
+/* Priority inheritance: a normal-priority submitter holds this mutex across
+ * the onset write, and without PI the real-time worker would wait behind
+ * whatever preempted that submitter. */
+static bool psys__mutex_init(psys_port* p, psys__mutex* m) {
+    pthread_mutexattr_t ma;
+    pthread_mutexattr_init(&ma);
+    pthread_mutexattr_setprotocol(&ma, PTHREAD_PRIO_INHERIT);
+    int rc = pthread_mutex_init(m, &ma);
+    pthread_mutexattr_destroy(&ma);
+    if (rc != 0) psys__set_error(p, "async pulse: mutex init: %s", strerror(rc));
+    return rc == 0;
 }
+static void psys__mutex_destroy(psys__mutex* m) { (void)pthread_mutex_destroy(m); }
+static void psys__lock(psys__async* a)   { (void)pthread_mutex_lock(&a->mtx); }
+static void psys__unlock(psys__async* a) { (void)pthread_mutex_unlock(&a->mtx); }
 
 /* The trailing-edge write. On POSIX a write touches nothing but the
- * descriptor, so this is the same code the user's writer thread runs; the lock
- * is what keeps the two apart. Failures land in wr_oserr, which is safe for
- * the same reason. */
-static int psys__write_worker(psys_port* p, uint8_t value) {
-    return psys__write_nolock(p, &value, 1);
+ * descriptor, so this is the same code the user's writer thread runs; the
+ * mutex is what keeps the two apart. Failures land in wr_oserr, which is safe
+ * for the same reason. */
+static int psys__write_worker(psys_port* p, uint8_t value, uint32_t timeout_ms) {
+    return psys__write_timed(p, &value, 1, timeout_ms);
 }
-
-static void* psys__worker_main(void* arg) {
-    psys__async* w = (psys__async*)arg;
-    psys_async_policy pol = psys__worker_realtime(&w->port->sched);
-
-    /* The mutex is held across the whole loop except while blocked in
-     * pthread_cond_*wait (which releases it atomically). Holding it around the
-     * trailing write is what serializes this thread with the caller's writes
-     * in psys__async_submit and psys__write_cancel. */
-    pthread_mutex_lock(&w->mtx);
-    /* Publish the policy and release psys__async_start(), which waits for it
-     * so p->async_policy is final when psys_open() returns. */
-    w->port->async_policy = pol;
-    w->ready = 1;
-    pthread_cond_broadcast(&w->cv);
-    while (!w->quit) {
-        if (!w->has_job) {
-            pthread_cond_wait(&w->cv, &w->mtx);
-            continue;
-        }
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        if (!psys__ts_before(&now, &w->off_at)) {
-            /* Deadline reached. This can block in the driver for up to
-             * write_timeout_ms with the lock held, which is the documented
-             * price of sharing one byte stream with the user's writer. */
-            (void)psys__write_worker(w->port, w->off_byte);
-            w->has_job = 0;
-            continue;
-        }
-        /* Wait for the deadline OR for a new submit / cancel / quit, then
-         * re-evaluate from the top, so a replacement job takes effect at once
-         * whether its deadline is earlier or later. */
-#if defined(__APPLE__)
-        /* Darwin has no pthread_condattr_setclock, so an absolute wait would
-         * be against CLOCK_REALTIME; wait relative to the monotonic `now`
-         * taken above instead. */
-        struct timespec rel;
-        rel.tv_sec  = w->off_at.tv_sec - now.tv_sec;
-        rel.tv_nsec = w->off_at.tv_nsec - now.tv_nsec;
-        if (rel.tv_nsec < 0) { rel.tv_nsec += 1000000000L; rel.tv_sec -= 1; }
-        pthread_cond_timedwait_relative_np(&w->cv, &w->mtx, &rel);
 #else
-        /* The condvar runs on CLOCK_MONOTONIC (set in psys__async_start) to
-         * match off_at. */
-        pthread_cond_timedwait(&w->cv, &w->mtx, &w->off_at);
+static bool psys__mutex_init(psys_port* p, psys__mutex* m) {
+    (void)p;
+    /* Since Vista this cannot fail, and there is no priority-inheritance
+     * option to ask for: Windows raises the owner of a critical section for
+     * a waiter on its own. */
+    InitializeCriticalSection(m);
+    return true;
+}
+static void psys__mutex_destroy(psys__mutex* m) { DeleteCriticalSection(m); }
+static void psys__lock(psys__async* a)   { EnterCriticalSection(&a->mtx); }
+static void psys__unlock(psys__async* a) { LeaveCriticalSection(&a->mtx); }
+
+/* The trailing-edge write, on the worker's own OVERLAPPED and event: a
+ * transfer is reaped by the thread that started it, and the callback below
+ * runs on psy_rt.h's worker thread, so it must never borrow the user writer's
+ * wr_ovl/wr_event. Failures land in wr_oserr, which is safe because this runs
+ * under the same mutex as psys_write. */
+static int psys__write_worker(psys_port* p, uint8_t value, uint32_t timeout_ms) {
+    return psys__write_ovl(p, &value, 1, timeout_ms,
+                           PSYS__OVL(p->pa_ovl), (HANDLE)p->pa_event);
+}
 #endif
+
+/* The trailing edge, on psy_rt.h's worker thread at psy_rt.h's policy.
+ *
+ * It asks what is armed NOW instead of carrying a decision from submit time,
+ * because between the worker choosing this job and this callback taking the
+ * mutex another thread may have disarmed it, or armed a different byte at a
+ * later deadline. Writing "whatever is armed and due" settles both: a
+ * canceled byte is not written at all, and a replacement is left to its own
+ * deadline unless it is already due, in which case writing it here is what
+ * its own callback would do a moment later anyway.
+ *
+ * A flush (psyrt_worker_stop, which is psys_close) writes whatever is armed
+ * at once, bounded by PSYS__CLOSE_FLUSH_MS rather than write_timeout_ms,
+ * because psys_close() is joining this thread behind the write. */
+static void psys__off_job(void* ctx, const psyrt_job_info* info) {
+    psys__async* a = (psys__async*)ctx;
+    psys__lock(a);
+    if (a->armed && (info->flushed || psyrt_now_ns() >= a->off_at_ns)) {
+        a->armed = 0;
+        (void)psys__write_worker(a->port, a->off_byte,
+                                 info->flushed ? PSYS__CLOSE_FLUSH_MS
+                                               : a->port->write_timeout_ms);
     }
-    /* On quit, write a pending trailing byte immediately rather than waiting
-     * out the remaining width: psys_close() is about to take the port away,
-     * and a device left holding a trigger code is worse than a short pulse. */
-    if (w->has_job) {
-        (void)psys__write_worker(w->port, w->off_byte);
-        w->has_job = 0;
-    }
-    pthread_mutex_unlock(&w->mtx);
-    return NULL;
+    psys__unlock(a);
 }
 
 static bool psys__async_start(psys_port* p) {
     if (p->async) return true;
-    psys__async* w = (psys__async*)calloc(1, sizeof(*w));
-    if (!w) { psys__set_error(p, "async pulse: out of memory"); return false; }
-    w->port = p;
-    /* Priority inheritance: the submitter holds the mutex across the onset
-     * write, and without PI the RT worker would wait behind any thread that
-     * preempts a normal-priority submitter. */
-    pthread_mutexattr_t ma;
-    pthread_mutexattr_init(&ma);
-    pthread_mutexattr_setprotocol(&ma, PTHREAD_PRIO_INHERIT);
-    int mtx_rc = pthread_mutex_init(&w->mtx, &ma);
-    pthread_mutexattr_destroy(&ma);
-    if (mtx_rc != 0) {
-        free(w);
-        psys__set_error(p, "async pulse: mutex init: %s", strerror(mtx_rc));
+    /* One allocation per open, and none on any write or pulse path. The
+     * psyrt_worker handle is caller-allocated and lives here rather than in
+     * psys_port, so the public handle the bindings mirror does not grow half a
+     * kilobyte of opaque OS storage, and so its size does not depend on
+     * whether the build has threads. */
+    psys__async* a = (psys__async*)calloc(1, sizeof(*a));
+    if (!a) { psys__set_error(p, "async pulse: out of memory"); return false; }
+    a->port = p;
+    if (!psys__mutex_init(p, &a->mtx)) { free(a); return false; }
+
+    psyrt_worker_desc wd;
+    memset(&wd, 0, sizeof(wd));
+    wd.sched = p->sched;   /* already normalized by psys_open() */
+    if (!psyrt_worker_start(&a->rt, &wd)) {
+        psys__set_error(p, "async pulse: %s", psyrt_worker_error(&a->rt));
+        psys__mutex_destroy(&a->mtx);
+        free(a);
         return false;
     }
-    pthread_condattr_t ca;
-    pthread_condattr_init(&ca);
-#if !defined(__APPLE__)
-    /* Absolute timed waits against off_at, which is CLOCK_MONOTONIC. Darwin
-     * lacks this attribute; its worker waits relative instead. */
-    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
-#endif
-    int cv_rc = pthread_cond_init(&w->cv, &ca);
-    pthread_condattr_destroy(&ca);
-    if (cv_rc != 0) {
-        pthread_mutex_destroy(&w->mtx);
-        free(w);
-        psys__set_error(p, "async pulse: cond init: %s", strerror(cv_rc));
-        return false;
-    }
-    /* pthread_create returns the error; it does not set errno. */
-    int rc = pthread_create(&w->thread, NULL, psys__worker_main, w);
-    if (rc != 0) {
-        pthread_cond_destroy(&w->cv);
-        pthread_mutex_destroy(&w->mtx);
-        free(w);
-        psys__set_error(p, "async pulse: thread create: %s", strerror(rc));
-        return false;
-    }
-    pthread_mutex_lock(&w->mtx);
-    while (!w->ready) pthread_cond_wait(&w->cv, &w->mtx);
-    pthread_mutex_unlock(&w->mtx);
-    p->async = w;
+    /* psyrt_worker_start() returns only once the thread has published its
+     * rung, so async_policy is final when psys_open() returns. */
+    p->async_policy = psyrt_worker_policy(&a->rt);
+    p->async = a;
     return true;
 }
 
 static void psys__async_stop(psys_port* p) {
-    psys__async* w = (psys__async*)p->async;
-    if (!w) return;
-    /* Clear p->async first: the worker's own trailing write goes through
-     * psys__write_nolock, and a psys_write() racing this teardown must not
-     * reach for a mutex that is about to be destroyed. */
+    psys__async* a = (psys__async*)p->async;
+    if (!a) return;
+    /* Clearing p->async before the stop is bookkeeping, not synchronization:
+     * a psys_write() racing this teardown may already have read p->async and
+     * be inside psys__write_cancel, so the order protects nothing. What makes
+     * the teardown safe is the role contract psys_close() states, that both
+     * the reader and the writer have returned before it is called. */
     p->async = NULL;
-    pthread_mutex_lock(&w->mtx);
-    w->quit = 1;
-    pthread_cond_signal(&w->cv);
-    pthread_mutex_unlock(&w->mtx);
-    pthread_join(w->thread, NULL);
-    pthread_cond_destroy(&w->cv);
-    pthread_mutex_destroy(&w->mtx);
-    free(w);
+    /* Runs a pending job immediately through psys__off_job with info->flushed
+     * set, then joins. Called without the mutex, because that callback takes
+     * it. */
+    psyrt_worker_stop(&a->rt);
+    psys__mutex_destroy(&a->mtx);
+    free(a);
     p->async_policy = PSYS_ASYNC_NONE;
 }
 
 static int psys__write_cancel(psys_port* p, const void* buf, int len) {
-    psys__async* w = (psys__async*)p->async;
-    pthread_mutex_lock(&w->mtx);
+    psys__async* a = (psys__async*)p->async;
+    psys__lock(a);
     /* A plain write means "hold this"; a pending trailing byte would silently
-     * undo it, so drop the job. The worker finds none when its timed wait
-     * expires and goes back to sleep. */
-    w->has_job = 0;
+     * undo it. Disarming is what stops it. The cancel only saves the worker a
+     * pointless wake, because a job it has already dispatched cannot be
+     * canceled and the callback waits behind this mutex either way. */
+    a->armed = 0;
+    (void)psyrt_worker_cancel(&a->rt);
     int r = psys__write_nolock(p, buf, len);
-    pthread_mutex_unlock(&w->mtx);
+    psys__unlock(a);
     return r;
 }
 
 static int psys__async_submit(psys_port* p, uint8_t on, uint8_t off, uint32_t usec) {
-    psys__async* w = (psys__async*)p->async;
-    pthread_mutex_lock(&w->mtx);
-    /* Onset under the lock, so the worker's trailing byte for an in-flight
-     * pulse cannot land between this write and the new deadline. */
+    psys__async* a = (psys__async*)p->async;
+    psys__lock(a);
+    /* Onset under the mutex, so the trailing byte of an in-flight pulse cannot
+     * land between this write and the new deadline. */
     int r = psys__write_nolock(p, &on, 1);
     if (r == 1) {
         /* The width runs from the onset write, not from entry, so the syscall
          * is not subtracted from it. */
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        uint64_t ns = (uint64_t)now.tv_nsec + (uint64_t)(usec % 1000000u) * 1000ull;
-        w->off_at.tv_sec  = now.tv_sec + (time_t)(usec / 1000000u)
-                          + (time_t)(ns / 1000000000ull);
-        w->off_at.tv_nsec = (long)(ns % 1000000000ull);
-        w->off_byte = off;
-        w->has_job  = 1;
-        pthread_cond_signal(&w->cv);
+        uint64_t at = psyrt_now_ns() + (uint64_t)usec * 1000ull;
+        a->off_byte  = off;
+        a->off_at_ns = at;
+        a->armed     = 1;
+        /* A positive return is this job's seq; only a negative one is an
+         * error. The armed/deadline pair is what this header identifies the
+         * pending byte by, so the seq is not kept. */
+        if (psyrt_worker_submit(&a->rt, at, psys__off_job, a) < 0) {
+            /* The worker refuses a submit only when it is not running, which
+             * the role contract forbids while a write is in flight. The onset
+             * is already on the wire, so the trailing byte goes out here
+             * rather than never: a latching box holding a trigger code is the
+             * worse failure. */
+            a->armed = 0;
+            (void)psys__write_nolock(p, &off, 1);
+        }
     } else {
         /* No onset, no trailing edge. A stale `off` from an earlier pulse is
          * worse than none, because the caller will report this one as failed. */
-        w->has_job = 0;
+        a->armed = 0;
+        (void)psyrt_worker_cancel(&a->rt);
     }
-    pthread_mutex_unlock(&w->mtx);
+    psys__unlock(a);
     return r;
 }
 
-#elif defined(PSYS__WINDOWS)
-/* ---- Windows: thread + waitable timer + TIME_CRITICAL ----------------- */
-
-typedef struct psys__async {
-    HANDLE           thread;
-    HANDLE           timer;   /* waitable timer, high-resolution if available */
-    HANDLE           wakeup;  /* auto-reset event: a job was submitted        */
-    HANDLE           ready;   /* worker published its policy                  */
-    CRITICAL_SECTION cs;
-    volatile LONG    quit;
-    volatile LONG    has_job;
-    uint8_t          off_byte;
-    LARGE_INTEGER    off_at;   /* absolute QPC target                         */
-    LARGE_INTEGER    qpc_freq;
-    LONGLONG         slack;    /* QPC ticks the timer may fire late; spun instead */
-    psys_port*       port;
-} psys__async;
-
-/* The trailing-edge write, on the worker's own OVERLAPPED and event: a
- * transfer is reaped by the thread that started it, so the worker never
- * borrows the user writer's wr_ovl/wr_event. Failures land in wr_oserr, which
- * is safe because this runs under the same lock as psys_write. */
-static int psys__write_worker(psys_port* p, uint8_t value) {
-    return psys__write_ovl(p, &value, 1, PSYS__OVL(p->pa_ovl), (HANDLE)p->pa_event);
-}
-
-static DWORD WINAPI psys__worker_main(LPVOID arg) {
-    psys__async* w = (psys__async*)arg;
-    w->port->async_policy =
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL)
-            ? PSYS_ASYNC_TIME_CRITICAL : PSYS_ASYNC_NORMAL;
-    SetEvent(w->ready); /* releases psys__async_start() */
-
-    /* State and every write are guarded by the critical section, which is
-     * released only while blocked in a wait. */
-    EnterCriticalSection(&w->cs);
-    while (!w->quit) {
-        if (!w->has_job) {
-            LeaveCriticalSection(&w->cs);
-            WaitForSingleObject(w->wakeup, INFINITE);
-            EnterCriticalSection(&w->cs);
-            continue;
-        }
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
-        LONGLONG rem = w->off_at.QuadPart - now.QuadPart;
-        if (rem <= 0) {
-            /* This can block in the driver for up to write_timeout_ms with the
-             * section held, which is the documented price of sharing one byte
-             * stream with the user's writer. */
-            (void)psys__write_worker(w->port, w->off_byte);
-            w->has_job = 0;
-            continue;
-        }
-        LONGLONG freq   = w->qpc_freq.QuadPart;
-        LONGLONG slack  = w->slack;
-        LONGLONG target = w->off_at.QuadPart;
-        LeaveCriticalSection(&w->cs);
-        if (rem > slack) {
-            /* Coarse wait on the timer, but also on the event, so a new submit
-             * or a quit re-evaluates at once. The tick-to-100ns conversion is
-             * split so a TSC-rate QPC (GHz) cannot overflow int64 on a long
-             * wait. */
-            LONGLONG t = rem - slack;
-            LARGE_INTEGER due; /* negative = relative, 100 ns units */
-            due.QuadPart = -((t / freq) * 10000000LL + (t % freq) * 10000000LL / freq);
-            HANDLE handles[2];
-            handles[0] = w->timer;
-            handles[1] = w->wakeup;
-            if (SetWaitableTimer(w->timer, &due, 0, NULL, NULL, FALSE))
-                WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-        } else {
-            /* Sub-millisecond remainder: busy-wait on QPC, where the scheduler
-             * cannot help. */
-            do { YieldProcessor(); QueryPerformanceCounter(&now); }
-            while (now.QuadPart < target);
-        }
-        EnterCriticalSection(&w->cs);
-    }
-    /* On quit, write a pending trailing byte immediately rather than waiting
-     * out the remaining width: psys_close() is about to take the port away,
-     * and a device left holding a trigger code is worse than a short pulse. */
-    if (w->has_job) {
-        (void)psys__write_worker(w->port, w->off_byte);
-        w->has_job = 0;
-    }
-    LeaveCriticalSection(&w->cs);
-    return 0;
-}
-
-static bool psys__async_start(psys_port* p) {
-    if (p->async) return true;
-    psys__async* w = (psys__async*)calloc(1, sizeof(*w));
-    if (!w) { psys__set_error(p, "async pulse: out of memory"); return false; }
-    w->port = p;
-    QueryPerformanceFrequency(&w->qpc_freq);
-    InitializeCriticalSection(&w->cs);
-    w->wakeup = CreateEventA(NULL, FALSE, FALSE, NULL);
-    w->ready  = CreateEventA(NULL, TRUE, FALSE, NULL);
-    /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION needs Win10 1803+; fall back. */
-    w->timer = CreateWaitableTimerExW(NULL, NULL,
-                   0x00000002 /*HIGH_RESOLUTION*/, TIMER_ALL_ACCESS);
-    bool hires = (w->timer != NULL);
-    if (!w->timer) w->timer = CreateWaitableTimerW(NULL, FALSE, NULL);
-    /* The timer is asked to fire `slack` early and the rest is spun on QPC:
-     * about 1.14 ms for the high-resolution timer, a whole 15.6 ms tick for
-     * the fallback (accuracy kept, CPU spent). */
-    LONGLONG freq = w->qpc_freq.QuadPart;
-    w->slack = hires ? (freq / 1000) + (freq / 7000) : (freq * 16) / 1000;
-    if (!w->wakeup || !w->ready || !w->timer) {
-        if (w->wakeup) CloseHandle(w->wakeup);
-        if (w->ready)  CloseHandle(w->ready);
-        if (w->timer)  CloseHandle(w->timer);
-        DeleteCriticalSection(&w->cs);
-        free(w);
-        psys__set_error(p, "async pulse: timer/event create failed (err %lu)",
-                        (unsigned long)GetLastError());
-        return false;
-    }
-    w->thread = CreateThread(NULL, 0, psys__worker_main, w, 0, NULL);
-    if (!w->thread) {
-        psys__set_error(p, "async pulse: thread create failed (err %lu)",
-                        (unsigned long)GetLastError());
-        CloseHandle(w->wakeup);
-        CloseHandle(w->ready);
-        CloseHandle(w->timer);
-        DeleteCriticalSection(&w->cs);
-        free(w);
-        return false;
-    }
-    WaitForSingleObject(w->ready, INFINITE); /* async_policy is now final */
-    p->async = w;
-    return true;
-}
-
-static void psys__async_stop(psys_port* p) {
-    psys__async* w = (psys__async*)p->async;
-    if (!w) return;
-    /* Clear p->async first: a psys_write() racing this teardown must not reach
-     * for a critical section that is about to be deleted. */
-    p->async = NULL;
-    EnterCriticalSection(&w->cs);
-    w->quit = 1;
-    LeaveCriticalSection(&w->cs);
-    SetEvent(w->wakeup); /* wake an idle or timer wait so it sees quit */
-    WaitForSingleObject(w->thread, INFINITE);
-    CloseHandle(w->thread);
-    CloseHandle(w->timer);
-    CloseHandle(w->wakeup);
-    CloseHandle(w->ready);
-    DeleteCriticalSection(&w->cs);
-    free(w);
-    p->async_policy = PSYS_ASYNC_NONE;
-}
-
-static int psys__write_cancel(psys_port* p, const void* buf, int len) {
-    psys__async* w = (psys__async*)p->async;
-    EnterCriticalSection(&w->cs);
-    /* See the POSIX twin: a plain write cancels a pending trailing byte. */
-    w->has_job = 0;
-    int r = psys__write_nolock(p, buf, len);
-    LeaveCriticalSection(&w->cs);
-    return r;
-}
-
-static int psys__async_submit(psys_port* p, uint8_t on, uint8_t off, uint32_t usec) {
-    psys__async* w = (psys__async*)p->async;
-    LONGLONG freq = w->qpc_freq.QuadPart;
-    /* Split so usec * freq cannot overflow int64 on a TSC-rate QPC. */
-    LONGLONG ticks = (LONGLONG)(usec / 1000000u) * freq
-                   + (LONGLONG)(usec % 1000000u) * freq / 1000000LL;
-    EnterCriticalSection(&w->cs);
-    /* Onset under the lock, so the worker's trailing byte for an in-flight
-     * pulse cannot land between this write and the new deadline. */
-    int r = psys__write_nolock(p, &on, 1);
-    if (r == 1) {
-        /* The width runs from the onset write, not from entry. */
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
-        w->off_at.QuadPart = now.QuadPart + ticks;
-        w->off_byte = off;
-        w->has_job  = 1;
-    } else {
-        /* No onset, no trailing edge; see the POSIX twin. */
-        w->has_job = 0;
-    }
-    LeaveCriticalSection(&w->cs);
-    if (r == 1) SetEvent(w->wakeup);
-    return r;
-}
-
-#endif /* platform */
 #endif /* PSYS_NO_THREADS */
 
 /* ======================================================================= *
@@ -2568,7 +2597,7 @@ static bool psys__port_matches(const psys_port_filter* f, const psys_port_info* 
     return true;
 }
 
-int psys_find_ports(const psys_port_filter* filter, psys_port_info* out, int max) {
+PSYS_API int psys_find_ports(const psys_port_filter* filter, psys_port_info* out, int max) {
     if (!filter) return psys_list_ports(out, max);
     int n = psys_list_ports(NULL, 0);
     if (n <= 0) return n;
@@ -2589,8 +2618,18 @@ int psys_find_ports(const psys_port_filter* filter, psys_port_info* out, int max
     return count;
 }
 
-bool psys_open(psys_port* p, const psys_desc* desc) {
+PSYS_API bool psys_open(psys_port* p, const psys_desc* desc) {
     if (!p) return false;
+    /* A handle that still owns a port would lose its descriptor (or HANDLE)
+     * and its worker thread to the memset below, with no way to get either
+     * back. One flag test is cheaper than the leak. It only catches a caller
+     * who broke the "zeroed or closed" contract in this direction: an
+     * uninitialized handle has no valid flag either way. */
+    if (p->is_open) {
+        psys__set_error(p, "psys_open: handle already open on %s; psys_close() it first",
+                        p->device);
+        return false;
+    }
     psys_desc d;
     memset(&d, 0, sizeof(d));
     if (desc) d = *desc;
@@ -2663,28 +2702,19 @@ bool psys_open(psys_port* p, const psys_desc* desc) {
     p->write_timeout_ms = d.write_timeout_ms ? d.write_timeout_ms : PSYS_DEFAULT_WRITE_TIMEOUT_MS;
     p->keep_dtr_on_close = d.keep_dtr_on_close;
 
-    /* Resolve the worker's RT reservation. All-zero means defaults. Otherwise
-     * normalize a zero period to the deadline (as the kernel does) and require
-     * 0 < runtime <= deadline <= period, so a half-filled struct fails loudly
-     * here instead of silently degrading to SCHED_FIFO (the kernel rejects
-     * deadline_ns == 0 with EINVAL). A valid reservation the kernel merely
-     * cannot admit still falls back. */
+    /* Resolve the worker's RT reservation with psy_rt.h's own rules, so the
+     * reservation this header accepts and the one psyrt_worker_start() accepts
+     * cannot drift apart. All-zero means defaults; a zero period becomes the
+     * deadline (as the kernel does); anything else that breaks
+     * 0 < runtime <= deadline <= period fails loudly here rather than silently
+     * degrading one rung (the kernel rejects deadline_ns == 0 with EINVAL). A
+     * valid reservation the kernel merely cannot admit still falls back. */
     p->sched = d.sched;
-    if (p->sched.runtime_ns == 0 && p->sched.deadline_ns == 0 &&
-        p->sched.period_ns == 0) {
-        p->sched.runtime_ns  = PSYS_DEFAULT_RT_RUNTIME_NS;
-        p->sched.deadline_ns = PSYS_DEFAULT_RT_DEADLINE_NS;
-        p->sched.period_ns   = PSYS_DEFAULT_RT_PERIOD_NS;
-    } else {
-        if (p->sched.period_ns == 0) p->sched.period_ns = p->sched.deadline_ns;
-        if (p->sched.runtime_ns == 0 || p->sched.deadline_ns == 0 ||
-            p->sched.runtime_ns > p->sched.deadline_ns ||
-            p->sched.deadline_ns > p->sched.period_ns) {
-            psys__set_error(p, "invalid desc.sched: require 0 < runtime_ns <= "
-                               "deadline_ns <= period_ns (period_ns 0 means "
-                               "same as deadline_ns)");
-            return false;
-        }
+    if (!psyrt_sched_normalize(&p->sched)) {
+        psys__set_error(p, "invalid desc.sched: require 0 < runtime_ns <= "
+                           "deadline_ns <= period_ns (period_ns 0 means "
+                           "same as deadline_ns)");
+        return false;
     }
 
     if (!psys__open_platform(p, &d)) return false;
@@ -2698,7 +2728,7 @@ bool psys_open(psys_port* p, const psys_desc* desc) {
     return true;
 }
 
-int psys_write(psys_port* p, const void* buf, int len) {
+PSYS_API int psys_write(psys_port* p, const void* buf, int len) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (!buf || len < 0) return PSYS_ERR_ARG;
     if (len == 0) return 0;
@@ -2710,11 +2740,11 @@ int psys_write(psys_port* p, const void* buf, int len) {
     return psys__write_nolock(p, buf, len);
 }
 
-int psys_write_byte(psys_port* p, uint8_t value) {
+PSYS_API int psys_write_byte(psys_port* p, uint8_t value) {
     return psys_write(p, &value, 1);
 }
 
-int psys_pulse_async(psys_port* p, uint8_t on, uint8_t off, uint32_t usec) {
+PSYS_API int psys_pulse_async(psys_port* p, uint8_t on, uint8_t off, uint32_t usec) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
 #ifndef PSYS_NO_THREADS
     if (p->async) return psys__async_submit(p, on, off, usec);
@@ -2729,15 +2759,21 @@ int psys_pulse_async(psys_port* p, uint8_t on, uint8_t off, uint32_t usec) {
     return PSYS_ERR_IO;
 }
 
-int psys_pulse(psys_port* p, uint8_t on, uint8_t off, uint32_t usec) {
+PSYS_API int psys_pulse(psys_port* p, uint8_t on, uint8_t off, uint32_t usec) {
     int r = psys_write_byte(p, on);
     if (r != 1) return r;
-    if (usec) psys__spin_us(usec);
+    /* The deadline is taken after the onset write, so the width does not
+     * include that write's own cost. The spin window is psy_rt.h's platform
+     * default; a caller who has measured its rig with examples/rt_jitter.c and
+     * wants a different one can call psyrt_sleep_until() around two
+     * psys_write_byte() calls, which is all this function is. */
+    if (usec) (void)psyrt_sleep_until(psyrt_now_ns() + (uint64_t)usec * 1000ull,
+                                      PSYRT_DEFAULT_SPIN_NS);
     r = psys_write_byte(p, off);
     return r < 0 ? r : 1 + r;
 }
 
-int psys_read(psys_port* p, void* buf, int cap, uint32_t timeout_ms, int flags) {
+PSYS_API int psys_read(psys_port* p, void* buf, int cap, uint32_t timeout_ms, int flags) {
     if (!psys_is_open(p)) return PSYS_ERR_CLOSED;
     if (!buf || cap < 0) return PSYS_ERR_ARG;
     if (cap == 0) return 0;

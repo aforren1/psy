@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Nothing here writes to the repository; artifacts need no repo scope.
+permissions:
+  contents: read
+
 jobs:
   # --------------------------------------------------------------------- #
   # Headers: CMake builds every registered header's compile checks (C11,  #
@@ -31,6 +35,14 @@ jobs:
       - name: Compile checks
         run: ctest --test-dir build -C Release --output-on-failure
 
+      # tests/loopback/ needs two device names wired together, so CI can never
+      # run it. Build it on one platform anyway, or it rots unnoticed.
+      - name: Build loopback tests (build only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cmake -B build-loopback -DCMAKE_BUILD_TYPE=Release -DPSY_BUILD_LOOPBACK=ON
+          cmake --build build-loopback
+
       # No hardware on CI. Each example must fail with its documented exit
       # code, not crash: a SIGSEGV or 0xC0000005 is a different number.
       - name: Run examples
@@ -51,6 +63,118 @@ jobs:
           fi
           expect 2 "$bin/serial_trigger"               # no args: usage
           expect 1 "$bin/serial_trigger" /dev/nothing  # open fails
+          # rt_jitter needs no hardware and no privilege: a refused real-time
+          # policy is one of its results, so it always exits 0. 40 short waits
+          # per spin window keeps a loaded CI runner under a second.
+          expect 0 "$bin/rt_jitter" 40 1000
+
+  # --------------------------------------------------------------------- #
+  # Extra Linux toolchains and flag sets, one matrix entry each:           #
+  #   clang        - a second compiler; the headers are warning-free on    #
+  #                  both or the build fails (-Werror).                    #
+  #   sanitizers   - ASan + UBSan over the compile checks and the          #
+  #                  examples, which is where the OS calls actually run.   #
+  #   nothreads-cxx- the PSY<X>_NO_THREADS path as C++17. CMake builds it  #
+  #                  as C only, and the defines reach the .cpp compile     #
+  #                  checks through CMAKE_CXX_FLAGS without a new target.  #
+  #                  A transport macro also sets PSYRT_NO_THREADS, but a   #
+  #                  command-line define reaches psy_rt.h first in the     #
+  #                  compile check that includes it directly, so name all  #
+  #                  three: define both of a pair, or neither.             #
+  # --------------------------------------------------------------------- #
+  linux-extra:
+    name: Linux ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: clang
+            cc: clang
+            cxx: clang++
+            cflags: ""
+            cxxflags: ""
+          - name: sanitizers
+            cc: gcc
+            cxx: g++
+            cflags: "-fsanitize=address,undefined -fno-omit-frame-pointer"
+            cxxflags: "-fsanitize=address,undefined -fno-omit-frame-pointer"
+          - name: nothreads-cxx
+            cc: gcc
+            cxx: g++
+            cflags: ""
+            cxxflags: "-DPSYS_NO_THREADS -DPSYP_NO_THREADS -DPSYRT_NO_THREADS"
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      # A sanitizer report must not be mistaken for an example's documented
+      # exit code (1 and 2 are both expected results below), so give it a
+      # number of its own. halt_on_error makes UBSan stop instead of logging.
+      ASAN_OPTIONS: exitcode=42
+      LSAN_OPTIONS: exitcode=42
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1:exitcode=42
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="${{ matrix.cflags }}" \
+            -DCMAKE_CXX_FLAGS="${{ matrix.cxxflags }}"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Compile checks
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run examples
+        if: matrix.name == 'sanitizers'
+        shell: bash
+        run: |
+          set -u
+          expect() {
+            local want=$1; shift
+            local got=0
+            if "$@"; then got=0; else got=$?; fi
+            if [ "$got" -ne "$want" ]; then echo "::error::$* exited $got, expected $want"; exit 1; fi
+          }
+          expect 1 build/parallel_trigger           # no port: open fails
+          expect 2 build/serial_trigger             # no args: usage
+          expect 1 build/serial_trigger /dev/nothing
+          expect 0 build/rt_jitter 40 1000
+
+  # --------------------------------------------------------------------- #
+  # MinGW: the headers carry explicit MinGW handling (no #pragma           #
+  # comment(lib), its own intrinsics), which no other job compiles. Build  #
+  # the compile checks only; the examples are covered elsewhere.           #
+  # --------------------------------------------------------------------- #
+  mingw:
+    name: MinGW (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      # Before checkout: every `run` below uses the shell it installs.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DPSY_BUILD_EXAMPLES=OFF
+
+      - name: Build compile checks
+        run: cmake --build build
+
+      - name: Compile checks
+        run: ctest --test-dir build --output-on-failure
 
   # --------------------------------------------------------------------- #
   # Python: cibuildwheel builds one abi3 wheel (Limited API, cp38+) per     #
@@ -71,9 +195,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Stage header into the package (isolated build needs it locally)
+      # cibuildwheel builds from the package directory alone, so every header
+      # the extension compiles must sit next to setup.py: the transport header
+      # and psy_rt.h, which the transport header includes.
+      - name: Stage headers into the package (isolated build needs them locally)
         shell: bash
-        run: cp ${{ matrix.package }}.h bindings/python/${{ matrix.package }}/
+        run: cp ${{ matrix.package }}.h psy_rt.h bindings/python/${{ matrix.package }}/
 
       - name: Build & test wheels
         uses: pypa/cibuildwheel@v4.1.0
@@ -113,28 +240,61 @@ jobs:
         working-directory: bindings/mex
         run: octave-cli -q --eval "build"
 
+      # The runner has no parallel or serial hardware, so both opens must fail.
+      # Check the identifier, not just that something was raised: a bad
+      # argument, a bad handle or a crash in the dispatcher would otherwise
+      # pass for the expected failure.
       - name: Smoke test (list ports; open is expected to fail on CI)
         working-directory: bindings/mex
         run: |
           octave-cli -q --eval "
+            % Both MEX files build on psy_rt.h, so both read one clock.
+            % A gap of seconds would mean two clocks, not a slow runner.
+            ts = psy_serial('now_us');
+            tp = psy_parallel('now_us');
+            printf('library clock: %.0f us (serial), %.0f us (parallel)\n', ts, tp);
+            if abs(tp - ts) > 1e6
+              error('psy:smoke', 'the two MEX clocks disagree by %.0f us', tp - ts);
+            end
             ports = psy_parallel('list');
             printf('detected %d parallel port(s)\n', numel(ports));
+            opened = false;
             try
               h = psy_parallel('open');
               psy_parallel('close', h);
-              disp('opened OK');
+              opened = true;
             catch e
+              if ~strcmp(e.identifier, 'psy_parallel:open')
+                error('psy:smoke', 'expected psy_parallel:open, got ''%s'': %s', e.identifier, e.message);
+              end
               printf('open failed as expected on CI: %s\n', e.message);
             end
+            if opened, disp('opened OK (hardware present)'); end
             ports = psy_serial('list');
             printf('detected %d serial port(s)\n', numel(ports));
+            opened = false;
             try
               h = psy_serial('open', '/dev/nothing');
               psy_serial('close', h);
-              disp('opened OK');
+              opened = true;
             catch e
+              if ~strcmp(e.identifier, 'psy_serial:open')
+                error('psy:smoke', 'expected psy_serial:open, got ''%s'': %s', e.identifier, e.message);
+              end
               printf('open failed as expected on CI: %s\n', e.message);
-            end"
+            end
+            if opened, disp('opened OK (hardware present)'); end
+            accepted = false;
+            try
+              psy_serial('read', uint64(123456), 1, 0);
+              accepted = true;
+            catch e
+              if ~strcmp(e.identifier, 'psy_serial:handle')
+                error('psy:smoke', 'expected psy_serial:handle, got ''%s''', e.identifier);
+              end
+              printf('unknown handle rejected: %s\n', e.message);
+            end
+            if accepted, error('psy:smoke', 'an unknown handle was accepted'); end"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -166,24 +326,56 @@ jobs:
           command: |
             addpath('bindings/mex');
             build;
+            % Both MEX files build on psy_rt.h, so both read one clock.
+            % A gap of seconds would mean two clocks, not a slow runner.
+            ts = psy_serial('now_us');
+            tp = psy_parallel('now_us');
+            fprintf('library clock: %.0f us (serial), %.0f us (parallel)\n', ts, tp);
+            if abs(tp - ts) > 1e6
+              error('psy:smoke', 'the two MEX clocks disagree by %.0f us', tp - ts);
+            end
             ports = psy_parallel('list');
             fprintf('detected %d parallel port(s)\n', numel(ports));
+            % Check the identifier, not just that something was raised: a bad
+            % argument or a crash in the dispatcher would otherwise pass for
+            % the expected no-hardware failure.
+            opened = false;
             try
               h = psy_parallel('open');
               psy_parallel('close', h);
-              disp('opened OK');
+              opened = true;
             catch e
+              if ~strcmp(e.identifier, 'psy_parallel:open')
+                error('psy:smoke', 'expected psy_parallel:open, got ''%s'': %s', e.identifier, e.message);
+              end
               fprintf('open failed as expected on CI: %s\n', e.message);
             end
+            if opened, disp('opened OK (hardware present)'); end
             ports = psy_serial('list');
             fprintf('detected %d serial port(s)\n', numel(ports));
+            opened = false;
             try
               h = psy_serial('open', '/dev/nothing');
               psy_serial('close', h);
-              disp('opened OK');
+              opened = true;
             catch e
+              if ~strcmp(e.identifier, 'psy_serial:open')
+                error('psy:smoke', 'expected psy_serial:open, got ''%s'': %s', e.identifier, e.message);
+              end
               fprintf('open failed as expected on CI: %s\n', e.message);
             end
+            if opened, disp('opened OK (hardware present)'); end
+            accepted = false;
+            try
+              psy_serial('read', uint64(123456), 1, 0);
+              accepted = true;
+            catch e
+              if ~strcmp(e.identifier, 'psy_serial:handle')
+                error('psy:smoke', 'expected psy_serial:handle, got ''%s''', e.identifier);
+              end
+              fprintf('unknown handle rejected: %s\n', e.message);
+            end
+            if accepted, error('psy:smoke', 'an unknown handle was accepted'); end
 
       - uses: actions/upload-artifact@v7
         with:
