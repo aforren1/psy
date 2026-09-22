@@ -1,17 +1,19 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "psy_parallel"
-version = "0.1.0"
+name = "psy-parallel"
+version = "0.1.0"  # tracks the psy_parallel.h version; keep the two in step
 description = "Parallel-port access (data/status/control, blocking and async pulses)"
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "MIT-0" }
+license = "MIT-0"
 
-# The C extension is declared in setup.py (Extension); this file just pins the
-# build backend so `pip install .` works.
+# The C extension is declared in setup.py (Extension) as psy.parallel; this file
+# just pins the build backend so `pip install .` works. `psy` is a PEP 420
+# implicit namespace package: no __init__.py is shipped, so psy-serial installs
+# next to this distribution without either one owning the namespace.
 
 [tool.cibuildwheel]
 # The extension is abi3 (Limited API): setup.py forces a cp38-abi3 wheel tag
@@ -23,7 +25,7 @@ build = "cp39-*"
 # macOS has no parallel port and the library #errors there; CI runs Linux + Windows.
 skip = "*-musllinux_*"
 # Smoke test: the module imports and the no-hardware path works on the runner.
-test-command = "python -c \"import psy_parallel as pp; assert pp.Port and pp.Error; print('ports:', pp.list_ports())\""
+test-command = "python -c \"import psy.parallel as pp; assert pp.Port and pp.Error; print('ports:', pp.list_ports())\""
 
 [tool.cibuildwheel.linux]
 # Ensure the Linux UAPI headers (<linux/ppdev.h>) are present in the manylinux

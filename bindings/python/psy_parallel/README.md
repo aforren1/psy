@@ -1,11 +1,16 @@
-# psy_parallel Python binding
+# psy.parallel Python binding
 
 A small CPython extension wrapping the
 [psy_parallel.h](../../../psy_parallel.h) single-header library. It uses the
 plain CPython C API (no nanobind/pybind/Cython) to stay dependency-free, and
 is built against the **Limited API / stable ABI** (`Py_LIMITED_API =
-0x03080000`), so a single `psy_parallel.abi3.so` works on CPython 3.8+ without
+0x03080000`), so a single `psy/parallel.abi3.so` works on CPython 3.8+ without
 a rebuild per version.
+
+The distribution is `psy-parallel` and the module is `psy.parallel`. `psy` is a
+[PEP 420](https://peps.python.org/pep-0420/) implicit namespace package (no
+`__init__.py`), so `psy-parallel` and `psy-serial` install independently or
+side by side.
 
 ## Build / install
 
@@ -17,13 +22,17 @@ pip install .                       # build + install an abi3 wheel
 python setup.py build_ext --inplace
 ```
 
+The in-place build drops the extension into `psy/`, an otherwise empty
+directory kept in git for exactly that purpose (the `psy` namespace has no
+source of its own).
+
 The library implementation is compiled directly into the extension. On
 Linux/macOS the build links `-pthread` for the async-pulse worker.
 
 ## Use
 
 ```python
-import psy_parallel as pp
+import psy.parallel as pp
 
 for info in pp.list_ports():            # enumerate without opening
     print(info)                         # {'name': '/dev/parport0', 'backend': 1, 'base_addr': 0}

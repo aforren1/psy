@@ -38,7 +38,14 @@ jobs:
         run: |
           set -u
           if [ "$RUNNER_OS" = Windows ]; then bin=build/Release; else bin=build; fi
-          expect() { local want=$1; shift; "$@"; local got=$?; if [ "$got" -ne "$want" ]; then echo "::error::$* exited $got, expected $want"; exit 1; fi; }
+          # The runner's bash has -e set, so the expected nonzero exit must be
+          # observed inside an `if`, where -e does not apply.
+          expect() {
+            local want=$1; shift
+            local got=0
+            if "$@"; then got=0; else got=$?; fi
+            if [ "$got" -ne "$want" ]; then echo "::error::$* exited $got, expected $want"; exit 1; fi
+          }
           if [ "$RUNNER_OS" != macOS ]; then
             expect 1 "$bin/parallel_trigger"           # no port: open fails
           fi
@@ -46,16 +53,20 @@ jobs:
           expect 1 "$bin/serial_trigger" /dev/nothing  # open fails
 
   # --------------------------------------------------------------------- #
-  # Python: build abi3 wheels (Limited API) on Linux + Windows for each   #
-  # binding package. Add a directory to the matrix when a binding lands.  #
+  # Python: cibuildwheel builds one abi3 wheel (Limited API, cp38+) per     #
+  # platform for each binding package. Add a directory to the matrix when  #
+  # a binding lands; exclude the platforms its header does not support.    #
   # --------------------------------------------------------------------- #
   python-wheels:
     name: Python ${{ matrix.package }} (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        package: [psy_parallel]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        package: [psy_parallel, psy_serial]
+        exclude:
+          - os: macos-latest      # psy_parallel.h #errors on macOS
+            package: psy_parallel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -107,10 +118,19 @@ jobs:
         run: |
           octave-cli -q --eval "
             ports = psy_parallel('list');
-            printf('detected %d port(s)\n', numel(ports));
+            printf('detected %d parallel port(s)\n', numel(ports));
             try
               h = psy_parallel('open');
               psy_parallel('close', h);
+              disp('opened OK');
+            catch e
+              printf('open failed as expected on CI: %s\n', e.message);
+            end
+            ports = psy_serial('list');
+            printf('detected %d serial port(s)\n', numel(ports));
+            try
+              h = psy_serial('open', '/dev/nothing');
+              psy_serial('close', h);
               disp('opened OK');
             catch e
               printf('open failed as expected on CI: %s\n', e.message);
@@ -125,9 +145,15 @@ jobs:
   # MATLAB: install MATLAB, build every MEX, and smoke-test.              #
   # https://github.com/matlab-actions                                     #
   # --------------------------------------------------------------------- #
+  # MathWorks licenses MATLAB on hosted runners for public repositories with
+  # no setup. A private fork fails here with "Unable to find a license" and
+  # needs a batch licensing token in the MLM_LICENSE_TOKEN secret
+  # (https://www.mathworks.com/help/install/ug/matlab-batch-licensing-token.html).
   matlab-mex:
     name: MATLAB MEX
     runs-on: ubuntu-latest
+    env:
+      MLM_LICENSE_TOKEN: ${{ secrets.MLM_LICENSE_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
@@ -141,10 +167,19 @@ jobs:
             addpath('bindings/mex');
             build;
             ports = psy_parallel('list');
-            fprintf('detected %d port(s)\n', numel(ports));
+            fprintf('detected %d parallel port(s)\n', numel(ports));
             try
               h = psy_parallel('open');
               psy_parallel('close', h);
+              disp('opened OK');
+            catch e
+              fprintf('open failed as expected on CI: %s\n', e.message);
+            end
+            ports = psy_serial('list');
+            fprintf('detected %d serial port(s)\n', numel(ports));
+            try
+              h = psy_serial('open', '/dev/nothing');
+              psy_serial('close', h);
               disp('opened OK');
             catch e
               fprintf('open failed as expected on CI: %s\n', e.message);

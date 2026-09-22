@@ -720,13 +720,18 @@ PSYS_API int psys_send_break(psys_port* p, uint32_t ms);
         #pragma comment(lib, "setupapi")  /* MinGW: link -lsetupapi yourself */
         #pragma comment(lib, "advapi32")  /* RegQueryValueEx, for PortName   */
     #endif
-    /* OVERLAPPED lives in the public handle as opaque storage. */
+    /* OVERLAPPED lives in the public handle as opaque storage. The third form
+     * covers MSVC's legacy C dialect, which is what setuptools and MATLAB's
+     * mex compile with unless told otherwise; a negative array bound fails
+     * the same way, with a worse message. */
     #if defined(__cplusplus)
         static_assert(sizeof(OVERLAPPED) <= 4 * sizeof(uint64_t),
                       "psys_port.rd_ovl is too small for OVERLAPPED");
-    #else
+    #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
         _Static_assert(sizeof(OVERLAPPED) <= 4 * sizeof(uint64_t),
                        "psys_port.rd_ovl is too small for OVERLAPPED");
+    #else
+        typedef char psys__ovl_fits[sizeof(OVERLAPPED) <= 4 * sizeof(uint64_t) ? 1 : -1];
     #endif
 #else
     #include <errno.h>
@@ -2212,9 +2217,21 @@ static void* psys__worker_main(void* arg) {
         }
         /* Wait for the deadline OR for a new submit / cancel / quit, then
          * re-evaluate from the top, so a replacement job takes effect at once
-         * whether its deadline is earlier or later. The condvar runs on
-         * CLOCK_MONOTONIC (set in psys__async_start) to match off_at. */
+         * whether its deadline is earlier or later. */
+#if defined(__APPLE__)
+        /* Darwin has no pthread_condattr_setclock, so an absolute wait would
+         * be against CLOCK_REALTIME; wait relative to the monotonic `now`
+         * taken above instead. */
+        struct timespec rel;
+        rel.tv_sec  = w->off_at.tv_sec - now.tv_sec;
+        rel.tv_nsec = w->off_at.tv_nsec - now.tv_nsec;
+        if (rel.tv_nsec < 0) { rel.tv_nsec += 1000000000L; rel.tv_sec -= 1; }
+        pthread_cond_timedwait_relative_np(&w->cv, &w->mtx, &rel);
+#else
+        /* The condvar runs on CLOCK_MONOTONIC (set in psys__async_start) to
+         * match off_at. */
         pthread_cond_timedwait(&w->cv, &w->mtx, &w->off_at);
+#endif
     }
     /* On quit, write a pending trailing byte immediately rather than waiting
      * out the remaining width: psys_close() is about to take the port away,
@@ -2247,7 +2264,11 @@ static bool psys__async_start(psys_port* p) {
     }
     pthread_condattr_t ca;
     pthread_condattr_init(&ca);
+#if !defined(__APPLE__)
+    /* Absolute timed waits against off_at, which is CLOCK_MONOTONIC. Darwin
+     * lacks this attribute; its worker waits relative instead. */
     pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+#endif
     int cv_rc = pthread_cond_init(&w->cv, &ca);
     pthread_condattr_destroy(&ca);
     if (cv_rc != 0) {

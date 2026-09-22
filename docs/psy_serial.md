@@ -456,13 +456,36 @@ and every `B*` rate above 38400 behind `__USE_MISC`.
 - `psys_wait_lines` if a device that signals on CTS/DSR shows up.
 - A clock header (`psy_clock.h`) if a third library needs `psys_now_us`.
 
-## Bindings plan
+## Bindings
 
-- `bindings/python/psy_serial/`: same layout as `psy_parallel`, Limited API,
-  a `Port` type with `read(n, timeout_ms, all=False) -> bytes` (raising
-  `Disconnected`/`Interrupted` subclasses of `Error`), `write(bytes)`,
-  `interrupt()`, `find_ports(vid=0, pid=0, serial_number=None, ...)`, and
-  `pulse` releasing the GIL. The one-reader-one-writer rule goes in its
-  README; Python threads can otherwise `close()` mid-read.
-- `bindings/mex/psy_serial.c`: command dispatch (`open`, `write`, `read`,
-  `pulse`, ...), picked up by the existing `build.m`.
+Done, both of them.
+
+- `bindings/python/psy_serial/`: distribution `psy-serial`, module
+  `psy.serial` (a PEP 420 namespace package shared with `psy-parallel`),
+  Limited API 0x03080000, one `psy/serial.abi3.so`. A heap-type `Port` built
+  with `PyType_FromSpec`, constructed with keywords that mirror `psys_desc`
+  (`device` required; `baud`, `data_bits`, `parity`, `stop_bits`, `flow`,
+  `write_timeout_ms`, `exclusive`, `low_latency`, `dtr_low_on_open`,
+  `rts_low_on_open`, `keep_dtr_on_close`, `rt_runtime_ns`, `rt_deadline_ns`,
+  `rt_period_ns`). Methods: `read(n, timeout_ms, all=False) -> bytes`,
+  `write(data) -> int`, `write_byte(value) -> int`, `pulse(on, off, usec)`,
+  `pulse_async(on, off, usec)`, `available()`, `drain()`,
+  `purge(rx=True, tx=False)`, `interrupt()`, `set_dtr(on)`, `set_rts(on)`,
+  `get_lines()`, `send_break(ms)`, `close()`, and the context-manager pair.
+  Read-only properties for the effective settings, `async_policy` and the
+  three `*_oserr` slots. Module level: `list_ports()`, `find_ports(vid=0,
+  pid=0, serial_number=None, location=None, description=None, name=None)`,
+  and a constant per `PSYS_*` enum, flag and default. Errors are `Error` with
+  `Disconnected`, `Interrupted` and `Closed` derived from it, carrying the
+  `psys_strerror()` text and the OS error of the failing role. `read`,
+  `write`, `drain`, `pulse`, `send_break` and `pulse_async`'s onset release
+  the GIL. The one-reader-one-writer rule and the interrupt-join-close
+  shutdown recipe are in its README; Python threads can otherwise `close()`
+  mid-read.
+- `bindings/mex/psy_serial.c`: command dispatch (`list`, `find`, `open`,
+  `write`, `writebyte`, `read`, `available`, `drain`, `purge`, `interrupt`,
+  `pulse`, `pulseasync`, `setdtr`, `setrts`, `lines`, `break`, `info`,
+  `close`), uint64 handles in a table that `mexAtExit` drains, and negative
+  codes raised as `error()` with the identifier `psy_serial:<code name>`.
+  Picked up by the existing `build.m`; no platform gate, because the header
+  supports all three.

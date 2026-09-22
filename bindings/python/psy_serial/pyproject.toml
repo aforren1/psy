@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psy-serial"
+version = "0.2.0"  # tracks the psy_serial.h version; keep the two in step
+description = "Serial-port byte I/O for trigger and response boxes"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT-0"
+
+# The C extension is declared in setup.py (Extension) as psy.serial; this file
+# just pins the build backend so `pip install .` works. `psy` is a PEP 420
+# implicit namespace package: no __init__.py is shipped, so psy-parallel
+# installs next to this distribution without either one owning the namespace.
+
+[tool.cibuildwheel]
+# The extension is abi3 (Limited API): setup.py forces a cp38-abi3 wheel tag
+# (py_limited_api="cp38"), so it installs on CPython 3.8+ regardless of which
+# interpreter builds it. We build on cp39 because cibuildwheel >=4 no longer
+# ships a cp38 build interpreter (3.8 is EOL); the resulting wheel is still
+# cp38-abi3. One build per platform serves every supported CPython.
+build = "cp39-*"
+skip = "*-musllinux_*"
+# Smoke test: the module imports and enumeration works with no device attached.
+test-command = "python -c \"import psy.serial as ps; assert ps.Port and ps.Error; print('ports:', ps.list_ports())\""
+
+[tool.cibuildwheel.macos]
+# One wheel for Intel and Apple silicon. cibuildwheel cross-compiles the
+# x86_64 half on an arm64 runner and runs the test-command on the native half.
+archs = ["universal2"]

@@ -1,0 +1,3 @@
+# Keeps the namespace directory in git so `python setup.py build_ext --inplace`
+# has somewhere to put psy/<name>.abi3.so. Not shipped: setup.py sets
+# packages=[], and wheels contain only the extension.

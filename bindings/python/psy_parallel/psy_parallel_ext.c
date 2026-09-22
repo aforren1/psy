@@ -1,4 +1,4 @@
-/* psy_parallel_ext.c - CPython extension wrapping psy_parallel.h
+/* psy_parallel_ext.c - CPython extension wrapping psy_parallel.h (module psy.parallel)
  *
  * A thin, dependency-free binding (no nanobind/pybind/Cython): it needs only
  * Python.h, matching the single-header library's zero-dependency style. The
@@ -9,7 +9,7 @@
  * rules out the static PyTypeObject layout, so the Port type is a heap type
  * created with PyType_FromSpec.
  *
- *     import psy_parallel as pp
+ *     import psy.parallel as pp
  *     for info in pp.list_ports():
  *         print(info)                    # {'name':..., 'backend':..., 'base_addr':...}
  *     with pp.Port() as port:            # defaults per platform
@@ -36,7 +36,7 @@ static PyObject* PpError; /* module-level exception type */
 
 #define AS_PORT(self) (&((PortObject*)(self))->port)
 
-/* Raise psy_parallel.Error carrying the library's last error string. */
+/* Raise psy.parallel.Error carrying the library's last error string. */
 static PyObject* pp_raise(psyp_port* port) {
     PyErr_SetString(PpError, psyp_error(port));
     return NULL;
@@ -277,7 +277,7 @@ static PyType_Slot Port_slots[] = {
 };
 
 static PyType_Spec Port_spec = {
-    .name = "psy_parallel.Port",
+    .name = "psy.parallel.Port",
     .basicsize = sizeof(PortObject),
     .itemsize = 0,
     .flags = Py_TPFLAGS_DEFAULT,
@@ -328,13 +328,15 @@ static PyMethodDef module_methods[] = {
 
 static PyModuleDef psy_parallel_module = {
     PyModuleDef_HEAD_INIT,
-    .m_name = "psy_parallel",
+    .m_name = "psy.parallel",
     .m_doc = "Parallel-port access (data/status/control, blocking and async pulses).",
     .m_size = -1,
     .m_methods = module_methods,
 };
 
-PyMODINIT_FUNC PyInit_psy_parallel(void) {
+/* The init function is named after the last dotted component: the loader looks
+ * for PyInit_parallel in psy/parallel.abi3.so. */
+PyMODINIT_FUNC PyInit_parallel(void) {
     PyObject* m = PyModule_Create(&psy_parallel_module);
     if (!m) return NULL;
 
@@ -344,7 +346,7 @@ PyMODINIT_FUNC PyInit_psy_parallel(void) {
         Py_DECREF(type); Py_DECREF(m); return NULL;
     }
 
-    PpError = PyErr_NewException("psy_parallel.Error", NULL, NULL);
+    PpError = PyErr_NewException("psy.parallel.Error", NULL, NULL);
     if (!PpError) { Py_DECREF(m); return NULL; }
     Py_INCREF(PpError);
     if (PyModule_AddObject(m, "Error", PpError) < 0) {

@@ -113,11 +113,16 @@ what puts a header under test.
 
 ## Bindings
 
-- **Python**: [bindings/python/psy_parallel/](bindings/python/psy_parallel/),
-  a dependency-free CPython extension on the Limited API (one abi3 wheel for
-  CPython 3.8+).
+- **Python**: one distribution per library under
+  [bindings/python/](bindings/python/), each a dependency-free CPython
+  extension on the Limited API (one abi3 wheel per platform for CPython
+  3.8+). They share the `psy` namespace (PEP 420, no `__init__.py`), so
+  `pip install psy-parallel psy-serial` gives `import psy.parallel` and
+  `import psy.serial`, and either installs alone. CI builds the wheels with
+  cibuildwheel on Linux, Windows, and (serial only) macOS.
 - **MATLAB / Octave**: [bindings/mex/](bindings/mex/), one MEX function per
-  library with ppdev-mex-style command dispatch.
+  library (`psy_parallel`, `psy_serial`) with ppdev-mex-style command
+  dispatch.
 
 ## License
 

@@ -41,8 +41,8 @@ function build(name)
         end
         args = {['-I' root], srcs{i}};
         if ~ispc
-            % psy_parallel's async-pulse worker uses pthreads on Linux/macOS.
-            % On Windows it uses Win32 threads, so no extra link library.
+            % The async-pulse workers use pthreads on Linux/macOS. On Windows
+            % they use Win32 threads, so no extra link library.
             args{end+1} = '-lpthread';   %#ok<AGROW>
         end
         mex(args{:});

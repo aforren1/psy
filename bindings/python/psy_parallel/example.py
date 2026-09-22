@@ -10,7 +10,7 @@ Run (Linux ppdev needs device access; see the BACKENDS section of psy_parallel.h
     python example.py 0x2A
 """
 import sys
-import psy_parallel as pp
+import psy.parallel as pp
 
 
 def main():

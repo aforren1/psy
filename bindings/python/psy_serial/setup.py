@@ -5,14 +5,20 @@ from setuptools import setup, Extension
 HERE = os.path.abspath(os.path.dirname(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 
-# psy_parallel.h lives at the repo root; that copy always wins in a dev tree so a
+# psy_serial.h lives at the repo root; that copy always wins in a dev tree so a
 # stale staged copy cannot shadow it. Isolated builds (sdist / cibuildwheel see
 # only this directory) get the header staged next to this file by CI.
-HEADER_DIR = REPO_ROOT if os.path.exists(os.path.join(REPO_ROOT, "psy_parallel.h")) else HERE
+HEADER_DIR = REPO_ROOT if os.path.exists(os.path.join(REPO_ROOT, "psy_serial.h")) else HERE
 
 extra_compile_args = []
 extra_link_args = []
-if sys.platform != "win32":
+libraries = []
+if sys.platform == "win32":
+    # Port enumeration uses SetupAPI and the registry. MSVC picks both up from
+    # a #pragma comment in the implementation; naming them here also covers a
+    # MinGW build, which has no such pragma.
+    libraries += ["setupapi", "advapi32"]
+else:
     # The async-pulse worker uses pthreads on Linux/macOS.
     extra_compile_args.append("-pthread")
     extra_link_args.append("-pthread")
@@ -21,24 +27,25 @@ if sys.platform != "win32":
 # Python versions. The macro must match Py_LIMITED_API in the C source.
 PY_LIMITED = 0x03080000
 
-# Dotted name: the extension is built as psy/parallel.abi3.so. There is no
+# Dotted name: the extension is built as psy/serial.abi3.so. There is no
 # psy/__init__.py anywhere, so `psy` is a PEP 420 implicit namespace package and
 # psy-parallel and psy-serial can be installed together or separately.
 ext = Extension(
-    name="psy.parallel",
-    sources=[os.path.join(HERE, "psy_parallel_ext.c")],
-    include_dirs=[HEADER_DIR],  # for "psy_parallel.h"
+    name="psy.serial",
+    sources=[os.path.join(HERE, "psy_serial_ext.c")],
+    include_dirs=[HEADER_DIR],  # for "psy_serial.h"
     define_macros=[("Py_LIMITED_API", hex(PY_LIMITED))],
     py_limited_api=True,
+    libraries=libraries,
     extra_compile_args=extra_compile_args,
     extra_link_args=extra_link_args,
 )
 
 setup(
-    name="psy-parallel",
-    version="0.1.0",  # tracks the psy_parallel.h version
-    description="Parallel-port access (data/status/control, blocking and async pulses)",
-    long_description="CPython binding for the psy_parallel single-header C library.",
+    name="psy-serial",
+    version="0.2.0",  # tracks the psy_serial.h version
+    description="Serial-port byte I/O for trigger and response boxes",
+    long_description="CPython binding for the psy_serial single-header C library.",
     ext_modules=[ext],
     # `psy` is a PEP 420 namespace: no __init__.py, nothing to package. An
     # explicit empty list also stops setuptools auto-discovery from treating
