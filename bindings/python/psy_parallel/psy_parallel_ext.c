@@ -33,15 +33,26 @@
 #endif
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
-#include <pythread.h>
-
 #define PSY_PARALLEL_IMPLEMENTATION
 #include "psy_parallel.h"
+
+/* An OS mutex, not PyThread_type_lock: the PyThread_* functions are listed
+ * in the stable ABI, but python3.dll did not export them before CPython 3.10
+ * (PC/python3dll.c), so an abi3 wheel built on 3.9 for Windows fails to link
+ * against them. */
+#if defined(_WIN32)
+    #include <windows.h>
+    typedef CRITICAL_SECTION pp_mutex;
+#else
+    #include <pthread.h>
+    typedef pthread_mutex_t pp_mutex;
+#endif
 
 typedef struct {
     PyObject_HEAD
     psyp_port port;
-    PyThread_type_lock lock;   /* serializes library calls on this handle */
+    pp_mutex  mu;        /* serializes library calls on this handle */
+    int       mu_ready;  /* mu is initialized; 0 until __init__ runs */
 } PortObject;
 
 static PyObject* PpError; /* module-level exception type */
@@ -53,18 +64,29 @@ static PyObject* PpError; /* module-level exception type */
  * switch. NULL means __new__ ran but __init__ did not, and there is nothing
  * open to protect. */
 static void pp_lock(PyObject* self) {
-    PyThread_type_lock lock = ((PortObject*)self)->lock;
-    if (!lock) return;
-    if (!PyThread_acquire_lock(lock, NOWAIT_LOCK)) {
-        Py_BEGIN_ALLOW_THREADS
-        PyThread_acquire_lock(lock, WAIT_LOCK);
-        Py_END_ALLOW_THREADS
-    }
+    PortObject* p = (PortObject*)self;
+    if (!p->mu_ready) return;
+#if defined(_WIN32)
+    if (TryEnterCriticalSection(&p->mu)) return;
+    Py_BEGIN_ALLOW_THREADS
+    EnterCriticalSection(&p->mu);
+    Py_END_ALLOW_THREADS
+#else
+    if (pthread_mutex_trylock(&p->mu) == 0) return;
+    Py_BEGIN_ALLOW_THREADS
+    pthread_mutex_lock(&p->mu);
+    Py_END_ALLOW_THREADS
+#endif
 }
 
 static void pp_unlock(PyObject* self) {
-    PyThread_type_lock lock = ((PortObject*)self)->lock;
-    if (lock) PyThread_release_lock(lock);
+    PortObject* p = (PortObject*)self;
+    if (!p->mu_ready) return;
+#if defined(_WIN32)
+    LeaveCriticalSection(&p->mu);
+#else
+    pthread_mutex_unlock(&p->mu);
+#endif
 }
 
 /* Raise psy.parallel.Error carrying the library's last error string. */
@@ -104,9 +126,13 @@ static int Port_init(PyObject* self, PyObject* args, PyObject* kwds) {
     desc.sched.period_ns = rt_period;
 
     PortObject* p = (PortObject*)self;
-    if (!p->lock) {
-        p->lock = PyThread_allocate_lock();
-        if (!p->lock) { PyErr_NoMemory(); return -1; }
+    if (!p->mu_ready) {
+#if defined(_WIN32)
+        InitializeCriticalSection(&p->mu);
+#else
+        if (pthread_mutex_init(&p->mu, NULL) != 0) { PyErr_NoMemory(); return -1; }
+#endif
+        p->mu_ready = 1;
     }
 
     /* Python can call __init__ on a live object; psyp_open would memset over
@@ -129,9 +155,13 @@ static void Port_dealloc(PyObject* self) {
     Py_BEGIN_ALLOW_THREADS
     psyp_close(AS_PORT(self));
     Py_END_ALLOW_THREADS
-    if (((PortObject*)self)->lock) {
-        PyThread_free_lock(((PortObject*)self)->lock);
-        ((PortObject*)self)->lock = NULL;
+    if (((PortObject*)self)->mu_ready) {
+#if defined(_WIN32)
+        DeleteCriticalSection(&((PortObject*)self)->mu);
+#else
+        pthread_mutex_destroy(&((PortObject*)self)->mu);
+#endif
+        ((PortObject*)self)->mu_ready = 0;
     }
     /* Heap type: fetch tp_free via the stable ABI and release the type ref the
      * instance holds (PyType_GenericAlloc incref's the type since 3.8). */

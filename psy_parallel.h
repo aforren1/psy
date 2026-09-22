@@ -468,8 +468,9 @@ typedef struct psyp_port {
     char         error[256];
 #if defined(_WIN32)
     void* dll;     /* HMODULE of the inpout DLL */
-    void* out_fn;  /* Out32 entry point         */
-    void* inp_fn;  /* Inp32 entry point         */
+    void (*out_fn)(void); /* Out32 entry point, generic function pointer: ISO C
+                           * has no object-to-function pointer conversion   */
+    void (*inp_fn)(void); /* Inp32 entry point                              */
 #else
     int  fd;       /* ppdev file descriptor (-1 if direct/closed) */
     bool claimed;  /* ppdev port claimed                          */
@@ -1090,8 +1091,11 @@ bool psyp_open(psyp_port* p, const psyp_desc* desc) {
         return false;
     }
 
-    psyp__out32_t out_fn = (psyp__out32_t)(void*)GetProcAddress(dll, "Out32");
-    psyp__inp32_t inp_fn = (psyp__inp32_t)(void*)GetProcAddress(dll, "Inp32");
+    /* FARPROC to the real signature by way of void (*)(void), the one
+     * function type GCC exempts from -Wcast-function-type; a void* detour is
+     * a pedantic error on MinGW. */
+    psyp__out32_t out_fn = (psyp__out32_t)(void (*)(void))GetProcAddress(dll, "Out32");
+    psyp__inp32_t inp_fn = (psyp__inp32_t)(void (*)(void))GetProcAddress(dll, "Inp32");
     if (!out_fn || !inp_fn) {
         psyp__set_error(p, "inpout DLL missing Out32/Inp32 entry points");
         FreeLibrary(dll);
@@ -1099,8 +1103,8 @@ bool psyp_open(psyp_port* p, const psyp_desc* desc) {
     }
 
     p->dll = (void*)dll;
-    p->out_fn = (void*)out_fn;
-    p->inp_fn = (void*)inp_fn;
+    p->out_fn = (void (*)(void))out_fn;
+    p->inp_fn = (void (*)(void))inp_fn;
     /* A previous client may have left a bidirectional port in reverse mode,
      * where the data pins are tri-stated and every trigger byte would float
      * instead of driving the recorder. */

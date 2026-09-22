@@ -1038,10 +1038,14 @@ bool psyrt_timer_resolution_begin(void) {
                                       LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!psyrt__winmm) return false;
     }
-    psyrt__timeperiod_fn begin =
-        (psyrt__timeperiod_fn)(void*)GetProcAddress(psyrt__winmm, "timeBeginPeriod");
-    psyrt__time_end =
-        (psyrt__timeperiod_fn)(void*)GetProcAddress(psyrt__winmm, "timeEndPeriod");
+    /* FARPROC to the real signature by way of void (*)(void): ISO C has no
+     * conversion between object and function pointers, so a void* detour is
+     * a pedantic error on MinGW, and GCC exempts only the generic function
+     * type from -Wcast-function-type. */
+    psyrt__timeperiod_fn begin = (psyrt__timeperiod_fn)(void (*)(void))
+        GetProcAddress(psyrt__winmm, "timeBeginPeriod");
+    psyrt__time_end = (psyrt__timeperiod_fn)(void (*)(void))
+        GetProcAddress(psyrt__winmm, "timeEndPeriod");
     if (!begin || !psyrt__time_end) return false;
     if (begin(1) != 0 /*TIMERR_NOERROR*/) return false;
     psyrt__timer_res_raised = true;
