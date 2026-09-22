@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # --------------------------------------------------------------------- #
+  # Headers: CMake builds every registered header's compile checks (C11,  #
+  # C++17, no-threads) and the examples, warnings as errors, on all three #
+  # platforms. CMakeLists.txt decides which headers apply to which OS.    #
+  # --------------------------------------------------------------------- #
+  headers:
+    name: Headers (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Compile checks
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # No hardware on CI. Each example must fail with its documented exit
+      # code, not crash: a SIGSEGV or 0xC0000005 is a different number.
+      - name: Run examples
+        shell: bash
+        run: |
+          set -u
+          if [ "$RUNNER_OS" = Windows ]; then bin=build/Release; else bin=build; fi
+          expect() { local want=$1; shift; "$@"; local got=$?; if [ "$got" -ne "$want" ]; then echo "::error::$* exited $got, expected $want"; exit 1; fi; }
+          if [ "$RUNNER_OS" != macOS ]; then
+            expect 1 "$bin/parallel_trigger"           # no port: open fails
+          fi
+          expect 2 "$bin/serial_trigger"               # no args: usage
+          expect 1 "$bin/serial_trigger" /dev/nothing  # open fails
+
+  # --------------------------------------------------------------------- #
+  # Python: build abi3 wheels (Limited API) on Linux + Windows for each   #
+  # binding package. Add a directory to the matrix when a binding lands.  #
+  # --------------------------------------------------------------------- #
+  python-wheels:
+    name: Python ${{ matrix.package }} (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        package: [psy_parallel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Stage header into the package (isolated build needs it locally)
+        shell: bash
+        run: cp ${{ matrix.package }}.h bindings/python/${{ matrix.package }}/
+
+      - name: Build & test wheels
+        uses: pypa/cibuildwheel@v4.1.0
+        with:
+          package-dir: bindings/python/${{ matrix.package }}
+          output-dir: wheelhouse
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.package }}-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  # --------------------------------------------------------------------- #
+  # Octave: build every MEX with mkoctfile and smoke-test.                #
+  # --------------------------------------------------------------------- #
+  octave-mex:
+    name: Octave 7.3 MEX
+    runs-on: ubuntu-latest
+    # Pin Octave 7.3.0 via Debian bookworm (the target version). This is also
+    # deterministic and avoids the liboctave-dev -> octave-dev package rename
+    # that newer distros made (octave-dev is correct on bookworm and noble).
+    container: debian:bookworm
+    steps:
+      - name: Install Octave 7.3 + build tools
+        run: |
+          apt-get update
+          # ca-certificates is required for actions/checkout's HTTPS git fetch
+          # (the bare bookworm image has none, and --no-install-recommends would
+          # not pull it in transitively).
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential octave octave-dev
+          octave-cli --version | head -1
+
+      - uses: actions/checkout@v7
+
+      - name: Build MEX
+        working-directory: bindings/mex
+        run: octave-cli -q --eval "build"
+
+      - name: Smoke test (list ports; open is expected to fail on CI)
+        working-directory: bindings/mex
+        run: |
+          octave-cli -q --eval "
+            ports = psy_parallel('list');
+            printf('detected %d port(s)\n', numel(ports));
+            try
+              h = psy_parallel('open');
+              psy_parallel('close', h);
+              disp('opened OK');
+            catch e
+              printf('open failed as expected on CI: %s\n', e.message);
+            end"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: octave-mex-bookworm
+          path: bindings/mex/psy_*.mex*
+
+  # --------------------------------------------------------------------- #
+  # MATLAB: install MATLAB, build every MEX, and smoke-test.              #
+  # https://github.com/matlab-actions                                     #
+  # --------------------------------------------------------------------- #
+  matlab-mex:
+    name: MATLAB MEX
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up MATLAB
+        uses: matlab-actions/setup-matlab@v3
+
+      - name: Build MEX + smoke test
+        uses: matlab-actions/run-command@v3
+        with:
+          command: |
+            addpath('bindings/mex');
+            build;
+            ports = psy_parallel('list');
+            fprintf('detected %d port(s)\n', numel(ports));
+            try
+              h = psy_parallel('open');
+              psy_parallel('close', h);
+              disp('opened OK');
+            catch e
+              fprintf('open failed as expected on CI: %s\n', e.message);
+            end
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: matlab-mex-linux
+          path: bindings/mex/psy_*.mex*
