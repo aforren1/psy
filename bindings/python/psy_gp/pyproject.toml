@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "psy-gp"
-version = "0.2.1"  # tracks the psy_gp.h version; keep the two in step
+version = "0.4.0"  # tracks the psy_gp.h version; keep the two in step
 description = "Gaussian-process adaptive psychophysics (AEPsych-style) with no dependencies"
 readme = "README.md"
 requires-python = ">=3.8"

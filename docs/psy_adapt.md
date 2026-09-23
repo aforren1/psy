@@ -1,7 +1,7 @@
 # Adaptive psychophysical methods: psy_stair.h, psy_quest.h, psy_gp.h
 
 Status: **implemented and compared.** psy_stair.h 0.1.1, psy_quest.h
-0.4.1, psy_gp.h 0.2.1, the pump in psy_rt.h 0.3.1 that their async layers
+0.4.1, psy_gp.h 0.4.0, the pump in psy_rt.h 0.3.1 that their async layers
 use, and a Python package for each under `bindings/python/`. All are
 registered in `CMakeLists.txt`, with self-checking tests under
 `tests/adapt/` that ctest runs, and CI runs them under sanitizers. Each
@@ -370,6 +370,66 @@ large intercept. With ceilings raised and the prior off it reaches 6 dB
 where the RBF kernel reaches 2. The manual says so with the numbers and
 names the way out, rescaling the intensity axis so the rise is of order
 one. Keeley's positive-slope constraint would not have changed this.
+
+### The transition band needs Keeley's model, not a kernel trick
+
+Both libraries leave a mean absolute error of about 0.22 in the transition
+band (true p between 0.05 and 0.95) of the audiogram: a stationary RBF
+fits one lengthscale per axis, 30 to 40 dB in intensity, and the true rise
+is 7 dB wide while the field is flat over 140 dB. Rescaling the intensity
+axis does not help the RBF (ARD already scales it); input warping bends
+the axis globally while the rise sits at a different intensity in every
+context; a Gibbs kernel with a local lengthscale would need to know where
+the threshold is. The model that represents the field is the
+semiparametric one in Keeley et al.'s own form: two latent GPs over the
+context, a threshold location m(c) in intensity units and a log-slope
+g(c), with f = exp(g(c)) (x - m(c)). Any rise width at any location,
+monotone in intensity by construction, the threshold curve a latent with
+its own posterior sd, and no intercept-scale defect because m has the
+box's units. It is Laplace over 2N latents with a 2 x 2 Hessian block per
+trial, which is the categorical machinery with a different likelihood.
+Added as `PSYGP_MODEL_PSYCHOMETRIC` beside the existing kernels (v0.3.0),
+so every earlier number reproduces. Two implementation facts: the exact
+Hessian is indefinite wherever a residual is nonzero, so the Newton step
+uses the Gauss-Newton W, which is rank one per trial and collapses the 2N
+system to one N x N Cholesky; and a normal prior on the mean log-slope is
+required, without it a separable early run drives the slope to its
+ceiling at trial 5 and the acquisition never moves again.
+
+Measured on the audiometric benchmark at 150 trials, 20 replications:
+field error falls 3 to 6 times against the RBF (0.012 to 0.036 against
+0.06 to 0.09), the transition band goes from 0.20 to 0.25 down to 0.16 to
+0.19 at beta 2, and on the metabolic phenotype every acquisition beats
+both the RBF and the staircase that was told the slope (1.4 to 1.9 dB
+against 2.0 to 2.6). On the sensory phenotype the medians are competitive
+but a few replications reach 7 to 12 dB: the threshold GP fits a
+3.8-octave lengthscale across a 27 dB climb and the log-slope GP absorbs
+the curvature by flattening the rise. The fix (v0.4.0) is the log-slope
+output-scale prior centered at 0.3 rather than 1, since psychometric
+slopes vary across context by tens of percent, not by factors of four:
+the worst sensory replication falls from 11.6 to 5.6 dB and the metabolic
+cells stay inside their intervals. (The first diagnosis, a long threshold
+lengthscale, was wrong; it came from one dumped replication and the
+manual says so.) The hyperparameter gradient is analytic, through one
+adjoint solve by preconditioned CG on the true Hessian, and the fit costs
+2.7 to 5.7 ms per trial against the GP model's 1.2; the Gauss-Newton mode
+search's linear convergence is what remains, and an exact-Newton attempt
+was measured slower and reverted. The look-ahead is rank one, not two,
+because the Gauss-Newton W of one trial is rank one on its context's
+(m, g), so EAVC and LOCALMI work on this model.
+
+Final audiometric table, 150 trials, 20 replications, threshold MAE in
+dB: on three of the four cells every acquisition on this model beats
+both the RBF and the staircase that was told the slope (BALD 0.93 to
+1.42 against the staircase's 2.06 to 2.60, worst replication 3.1 dB);
+on sensory at beta 0.5 EAVC and LOCALMI match the staircase (1.98 and
+2.05 against 1.90) and the per-point acquisitions do not. Field error is
+0.007 to 0.033 against the RBF's 0.06 to 0.09. Through the binding on the
+metabolic phenotype the model with EAVC reaches 1.26 +- 0.09 dB and a
+field error of 0.012, against AEPsych's best of 1.29 dB and 0.18. One
+known residual: the fitted mean slope is about half the true one
+(0.22 to 0.31 per dB against 0.5), which is what keeps the band error at
+0.15; the prior on the mean log-slope is the next thing to measure.
 
 ### Laplace, not variational, in psy_gp.h
 

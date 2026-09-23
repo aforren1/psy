@@ -137,8 +137,8 @@ static void test_version(void) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%d.%d.%d", PSYGP_VERSION_MAJOR,
              PSYGP_VERSION_MINOR, PSYGP_VERSION_PATCH);
-    CHECK(strcmp(psygp_version(), "0.2.1") == 0,
-          "psygp_version() is %s, expected 0.2.1", psygp_version());
+    CHECK(strcmp(psygp_version(), "0.4.0") == 0,
+          "psygp_version() is %s, expected 0.4.0", psygp_version());
     CHECK(strcmp(psygp_version(), PSYGP_VERSION_STRING) == 0,
           "psygp_version() %s disagrees with PSYGP_VERSION_STRING %s",
           psygp_version(), PSYGP_VERSION_STRING);
@@ -1561,6 +1561,661 @@ static void test_refine(void) {
     refine_session(PSYGP_ACQ_EAVC, PSYGP_LIK_BERNOULLI, "EAVC (straddle)");
     refine_session(PSYGP_ACQ_BALV, PSYGP_LIK_CATEGORICAL, "BALV, CATEGORICAL");
 }
+/* --- PSYGP_MODEL_PSYCHOMETRIC ------------------------------------------ */
+
+/* The observer the model is built for: a threshold that curves across a context
+ * c in [0, 1], and a probit rise of 7 dB from 10% to 90% along an intensity in
+ * [0, 100] dB. */
+#define PS_SIG  (7.0 / (2.0 * 1.2815515655446004))
+static double ps_thr50(double c) { return 40.0 + 20.0 * sin(3.0 * c); }
+static double ps_ptrue(const double* x) {
+    return 0.5 * erfc(-((x[1] - ps_thr50(x[0])) / PS_SIG) / sqrt(2.0));
+}
+
+static void ps_desc(psygp_desc* d, psygp_acq acq, psygp_model model) {
+    memset(d, 0, sizeof(*d));
+    d->n_dims = 2;
+    d->lo[0] = 0.0; d->hi[0] = 1.0;
+    d->lo[1] = 0.0; d->hi[1] = 100.0;
+    d->intensity_dim = 1;
+    d->acq = acq;
+    d->target_p = 0.75;
+    d->grid[0] = 11; d->grid[1] = 21;
+    d->n_init = 5;
+    d->model = model;
+}
+
+/* E[q] and Var[q] by the header's own scheme but with n outer nodes, so the
+ * node count can be checked for convergence against itself and against a
+ * brute-force two-dimensional rule. */
+static void ps_moments_n(const psygp_gp* g, const psygp__scr* s, double xint,
+                         const psygp__mg* o, int n, double* eq, double* vq) {
+    double gx[64], gw[64], e1 = 0.0, e2 = 0.0;
+    psygp__gh_init(gx, gw, n);
+    for (int k = 0; k < n; k++) {
+        double gk = o->mg + PSYGP__SQRT2 * sqrt(o->vg) * gx[k], muf, sdf, q1;
+        double w = gw[k] / PSYGP__SQRTPI;
+        psygp__ps_node(o, xint, gk, &muf, &sdf);
+        q1 = psygp__q_smooth(g, s, muf, sdf, 0.0);
+        e1 += w * q1;
+        e2 += w * (psygp__q_var(g, s, muf, sdf, 0.0) + q1 * q1);
+    }
+    *eq = e1;
+    *vq = e2 - e1 * e1;
+}
+
+/* The same two moments with q evaluated at the exact latent and nothing else
+ * shared with the header's scheme: 80 Gauss-Hermite nodes along g, and along m
+ * a midpoint rule of 20000 cells over +-9 sd, fine enough to resolve the link
+ * even where exp(g) makes it a step in m. */
+static void ps_moments_brute(const psygp_gp* g, double xint, const psygp__mg* o,
+                             double* eq, double* vq) {
+    const int nv = 20000;
+    double gx[80], gw[80];
+    double cm = o->cmg / o->vg, sm = sqrt(o->vm - o->cmg * o->cmg / o->vg);
+    double h = 18.0 / nv, e1 = 0.0, e2 = 0.0;
+    psygp__gh_init(gx, gw, 80);
+    for (int i = 0; i < 80; i++) {
+        double gv = o->mg + PSYGP__SQRT2 * sqrt(o->vg) * gx[i], b = exp(gv);
+        double a1 = 0.0, a2 = 0.0, ws = 0.0;
+        for (int j = 0; j < nv; j++) {
+            double v = -9.0 + (j + 0.5) * h, w = exp(-0.5 * v * v);
+            double q = psygp__q_of_f(g, b * (xint - (o->mm + cm * (gv - o->mg) + sm * v)), 0.0);
+            a1 += w * q; a2 += w * q * q; ws += w;
+        }
+        e1 += gw[i] / PSYGP__SQRTPI * a1 / ws;
+        e2 += gw[i] / PSYGP__SQRTPI * a2 / ws;
+    }
+    *eq = e1;
+    *vq = e2 - e1 * e1;
+}
+
+/* The dense posterior of (m, g) at the context of x from the 2N-latent
+ * reference: A = K2^-1 and S = Sigma. Fills K2^-1 k* for the m and g columns
+ * (2N each), the mean, and the 2 x 2 covariance. */
+static void ps_dense_point(const psygp_gp* g, int n, const double* A, const double* S,
+                           const double* hm, const double* hg, const double* x,
+                           double* am, double* ag, double* mean, double* cov) {
+    int n2 = 2 * n;
+    double km[64], kg[64], c_mm = 0.0, c_gg = 0.0, c_mg = 0.0;
+    for (int i = 0; i < n; i++) {
+        km[i] = psygp__kctx(g, 0, g->X + (size_t)i * 2, x);
+        kg[i] = psygp__kctx(g, 1, g->X + (size_t)i * 2, x);
+    }
+    for (int i = 0; i < n2; i++) {
+        double sa = 0.0, sb = 0.0;
+        for (int j = 0; j < n; j++) {
+            sa += A[(size_t)i * n2 + j] * km[j];
+            sb += A[(size_t)i * n2 + (n + j)] * kg[j];
+        }
+        am[i] = sa; ag[i] = sb;
+    }
+    mean[0] = g->hyper.mean; mean[1] = g->hyper.mean_g;
+    for (int i = 0; i < n2; i++) {
+        double zi = i < n ? hm[i] : hg[i - n];
+        mean[0] += am[i] * zi;
+        mean[1] += ag[i] * zi;
+    }
+    for (int i = 0; i < n2; i++) {
+        double sa = 0.0, sb = 0.0;
+        for (int j = 0; j < n2; j++) {
+            sa += S[(size_t)i * n2 + j] * am[j];
+            sb += S[(size_t)i * n2 + j] * ag[j];
+        }
+        c_mm += am[i] * sa; c_gg += ag[i] * sb; c_mg += am[i] * sb;
+    }
+    for (int j = 0; j < n; j++) { c_mm -= am[j] * km[j]; c_gg -= ag[n + j] * kg[j]; }
+    cov[0] = c_mm + psygp__kctx(g, 0, x, x);
+    cov[1] = c_mg;
+    cov[2] = c_gg + psygp__kctx(g, 1, x, x);
+}
+
+static void test_psychometric_math(psygp_link link, const char* name) {
+    enum { NT = 36 };
+    static double K2[4 * NT * NT], A[4 * NT * NT], S[4 * NT * NT];
+    psygp_desc d;
+    psygp_gp g;
+    psygp__scr s;
+    double ps_stat = 0.0, worst_mean = 0.0, worst_cov = 0.0;
+    double worst_q20 = 0.0, worst_qb = 0.0, worst_thr = 0.0;
+    double worst_q20v = 0.0, worst_qbv = 0.0;
+    int n, n2, ld, id = 1;
+    double *hm, *hg, *um, *ug;
+    rng_state = 0x243F6A8885A308D3ull + 0x5151ull + (uint64_t)link;
+    ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
+    d.link = link;
+    d.stop_trials = 200;
+    /* Fixed lengthscales and a jitter of 1e-3: the dense reference inverts the
+     * block prior outright, and at the default jitter the threshold GP's
+     * matrix (variance 625) has a condition number the reference cannot
+     * invert to better than 1e-5. The header never inverts it. */
+    d.hyper.lengthscale[0] = 0.15;
+    d.hyper.lengthscale_g[0] = 0.15;
+    d.jitter = 1e-3;
+    if (!psygp_open(&g, &d)) { CHECK(0, "open %s: %s", name, psygp_error(&g)); return; }
+    /* Trials spread over the box, the responses from the observer. */
+    for (int i = 0; i < NT; i++) {
+        double x[2], p[2];
+        x[0] = rng_u();
+        x[1] = ps_thr50(x[0]) + 12.0 * (rng_u() - 0.5);
+        p[1] = ps_ptrue(x); p[0] = 1.0 - p[1];
+        CHECK(psygp_update(&g, x, psygp_simulate_outcome(p, 2, rng_u())) == PSYGP_OK,
+              "%s: update %d", name, i);
+    }
+    n = g.N; n2 = 2 * n; ld = g.N_max;
+    psygp__scr_of(&g, &s);
+    hm = psygp__psv(&s, ld, PSYGP__PS_HM); hg = psygp__psv(&s, ld, PSYGP__PS_HG);
+    um = psygp__psv(&s, ld, PSYGP__PS_UM); ug = psygp__psv(&s, ld, PSYGP__PS_UG);
+
+    /* 1. The mode: z - mean = K grad log p(y | z), block by block. */
+    {
+        double gm[NT], gg[NT], hmax = 0.0;
+        for (int i = 0; i < n; i++) {
+            double xi = g.X[(size_t)i * 2 + id], b = exp(g.hyper.mean_g + hg[i]);
+            double fv = b * (xi - g.hyper.mean - hm[i]), lp, d1, d2, d3;
+            psygp__ll(&g, fv, g.y[i], &lp, &d1, &d2, &d3);
+            gm[i] = -d1 * b;
+            gg[i] = d1 * fv;
+            if (fabs(hm[i]) > hmax) hmax = fabs(hm[i]);
+            if (fabs(hg[i]) > hmax) hmax = fabs(hg[i]);
+        }
+        for (int i = 0; i < n; i++) {
+            double rm = hm[i], rg = hg[i];
+            for (int j = 0; j < n; j++) {
+                rm -= g.Kmat[(size_t)i * ld + j] * gm[j];
+                rg -= g.Kg[(size_t)i * ld + j] * gg[j];
+            }
+            track(&ps_stat, fabs(rm) / (1.0 + hmax));
+            track(&ps_stat, fabs(rg) / (1.0 + hmax));
+        }
+    }
+
+    /* 2. The dense 2N posterior: Sigma = (K2^-1 + W2)^-1 with K2 the
+     * block-diagonal prior and W2 = U U' the Gauss-Newton Hessian. */
+    memset(K2, 0, sizeof(double) * (size_t)n2 * n2);
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++) {
+            K2[(size_t)i * n2 + j] = g.Kmat[(size_t)i * ld + j];
+            K2[(size_t)(n + i) * n2 + (n + j)] = g.Kg[(size_t)i * ld + j];
+        }
+    memcpy(A, K2, sizeof(double) * (size_t)n2 * n2);
+    tinv(A, n2);                                  /* A = K2^-1 */
+    memcpy(S, A, sizeof(double) * (size_t)n2 * n2);
+    for (int i = 0; i < n; i++) {
+        S[(size_t)i * n2 + i] += um[i] * um[i];
+        S[(size_t)i * n2 + (n + i)] += um[i] * ug[i];
+        S[(size_t)(n + i) * n2 + i] += um[i] * ug[i];
+        S[(size_t)(n + i) * n2 + (n + i)] += ug[i] * ug[i];
+    }
+    {
+        /* 4. The log marginal likelihood, densely: Psi - 1/2 log|I + K2 W2|
+         * with log|I + K2 W2| = log|K2| + log|K2^-1 + W2|. */
+        static double T[4 * NT * NT];
+        double quad = 0.0, ll = 0.0, lm;
+        for (int i = 0; i < n2; i++) {
+            double zi = i < n ? hm[i] : hg[i - n], acc = 0.0;
+            for (int j = 0; j < n2; j++) acc += A[(size_t)i * n2 + j] * (j < n ? hm[j] : hg[j - n]);
+            quad += zi * acc;
+        }
+        for (int i = 0; i < n; i++) {
+            double xi = g.X[(size_t)i * 2 + id], b = exp(g.hyper.mean_g + hg[i]);
+            double lp, d1, d2, d3;
+            psygp__ll(&g, b * (xi - g.hyper.mean - hm[i]), g.y[i], &lp, &d1, &d2, &d3);
+            ll += lp;
+        }
+        memcpy(T, K2, sizeof(double) * (size_t)n2 * n2);
+        lm = -0.5 * quad + ll - 0.5 * tlogdet(T, n2);
+        memcpy(T, S, sizeof(double) * (size_t)n2 * n2);
+        lm -= 0.5 * tlogdet(T, n2);
+        CHECK(fabs(lm - psygp_log_marginal(&g)) < 1e-8 * tolx * (1.0 + fabs(lm)),
+              "%s: log marginal %.12g, dense %.12g", name, psygp_log_marginal(&g), lm);
+        track(&worst_lm, fabs(lm - psygp_log_marginal(&g)));
+    }
+    tinv(S, n2);                                  /* S = Sigma */
+    for (int t0 = 0; t0 < 5; t0++) {
+        double x[2], km[NT], kg[NT], am[2 * NT], ag[2 * NT];
+        double c_mm = 0.0, c_gg = 0.0, c_mg = 0.0, mm, mg;
+        psygp__mg o;
+        x[0] = 0.1 + 0.2 * t0; x[1] = 50.0;
+        psygp__ps_post(&g, &s, x, &o);
+        for (int i = 0; i < n; i++) {
+            km[i] = psygp__kctx(&g, 0, g.X + (size_t)i * 2, x);
+            kg[i] = psygp__kctx(&g, 1, g.X + (size_t)i * 2, x);
+        }
+        /* am = K2^-1 k*_m (a 2N column), ag likewise for the g column. */
+        for (int i = 0; i < n2; i++) {
+            double sa = 0.0, sb = 0.0;
+            for (int j = 0; j < n; j++) {
+                sa += A[(size_t)i * n2 + j] * km[j];
+                sb += A[(size_t)i * n2 + (n + j)] * kg[j];
+            }
+            am[i] = sa; ag[i] = sb;
+        }
+        mm = g.hyper.mean; mg = g.hyper.mean_g;
+        for (int i = 0; i < n2; i++) {
+            double zi = i < n ? hm[i] : hg[i - n];
+            mm += am[i] * zi;
+            mg += ag[i] * zi;
+        }
+        /* k*' K2^-1 k* and k*' K2^-1 S K2^-1 k*. */
+        for (int i = 0; i < n2; i++) {
+            double sa = 0.0, sb = 0.0;
+            for (int j = 0; j < n2; j++) {
+                sa += S[(size_t)i * n2 + j] * am[j];
+                sb += S[(size_t)i * n2 + j] * ag[j];
+            }
+            c_mm += am[i] * sa; c_gg += ag[i] * sb; c_mg += am[i] * sb;
+        }
+        for (int j = 0; j < n; j++) {
+            c_mm -= am[j] * km[j];
+            c_gg -= ag[n + j] * kg[j];
+        }
+        c_mm += psygp__kctx(&g, 0, x, x);
+        c_gg += psygp__kctx(&g, 1, x, x);
+        track(&worst_mean, fabs(mm - o.mm) / (1.0 + fabs(mm)));
+        track(&worst_mean, fabs(mg - o.mg) / (1.0 + fabs(mg)));
+        track(&worst_cov, fabs(c_mm - o.vm) / (1.0 + c_mm));
+        track(&worst_cov, fabs(c_gg - o.vg) / (1.0 + c_gg));
+        track(&worst_cov, fabs(c_mg - o.cmg) / (1.0 + sqrt(c_mm * c_gg)));
+
+        /* 5. The quadrature: 20 outer nodes against 60, and against a
+         * brute-force rule in both coordinates, at three intensities around
+         * the threshold at this context. */
+        for (int k = -1; k <= 1; k++) {
+            double xint = o.mm + k * 8.0, e20, v20, e60, v60, eb, vb, eh, vh;
+            ps_moments_n(&g, &s, xint, &o, 20, &e20, &v20);
+            ps_moments_n(&g, &s, xint, &o, 60, &e60, &v60);
+            psygp__ps_moments(&g, &s, xint, &o, &eh, &vh);
+            CHECK(eh == e20 && vh == v20, "%s: the header's rule is not the 20-node rule", name);
+            track(&worst_q20, fabs(e20 - e60));
+            track(&worst_q20v, fabs(v20 - v60));
+            if (t0 == 2) {
+                ps_moments_brute(&g, xint, &o, &eb, &vb);
+                track(&worst_qb, fabs(e20 - eb));
+                track(&worst_qbv, fabs(v20 - vb));
+            }
+        }
+
+        /* 6. The threshold's closed form against quadrature over g of the
+         * crossing m + f_t exp(-g), with m's conditional mean given g. */
+        {
+            double thr, lo, hi, ctx[1], ft = psygp__f_level(&g, 0.75);
+            double gx[40], gw[40], e1 = 0.0, e2 = 0.0, sd, var;
+            ctx[0] = x[0];
+            if (psygp_threshold(&g, ctx, 0.0, &thr, &lo, &hi) == PSYGP_OK) {
+                psygp__gh_init(gx, gw, 40);
+                for (int k = 0; k < 40; k++) {
+                    double gk = o.mg + PSYGP__SQRT2 * sqrt(o.vg) * gx[k];
+                    double w = gw[k] / PSYGP__SQRTPI;
+                    double mc = o.mm + o.cmg / o.vg * (gk - o.mg);
+                    double vc = o.vm - o.cmg * o.cmg / o.vg;
+                    double xv = mc + ft * exp(-gk);
+                    e1 += w * xv;
+                    e2 += w * (vc + xv * xv);
+                }
+                var = e2 - e1 * e1;
+                sd = var > 0.0 ? sqrt(var) : 0.0;
+                track(&worst_thr, fabs(thr - e1));
+                if (lo > d.lo[1] && hi < d.hi[1])
+                    track(&worst_thr, fabs((hi - lo) - 2.0 * 1.96 * sd));
+            }
+        }
+    }
+    CHECK(ps_stat < (real_is_double ? 1e-6 : 1e-3), "%s: mode stationarity %.2e",
+          name, ps_stat);
+    /* 8. The look-ahead: the cross-covariance of (m, g) between two contexts,
+     * from the V columns EAVC keeps, against the dense 2N posterior; and the
+     * rank-one update one more trial at the first makes at the second,
+     * against a dense Gaussian update of their joint 4 x 4 covariance. */
+    {
+        double xa[2] = { 0.3, 0.0 }, xb[2] = { 0.7, 50.0 };
+        double ama[2 * NT], aga[2 * NT], amb[2 * NT], agb[2 * NT];
+        double mua[2], mub[2], ca[3], cb[3], C[4][4], cab[2][2], dcab[2][2];
+        double v1a[NT], v2a[NT], J[2], d1, w, c, h[4], Ch[4], hCh = 0.0, vb[2];
+        double worst_x = 0.0, worst_u = 0.0;
+        psygp__mg oa, ob, ob2;
+        ps_dense_point(&g, n, A, S, hm, hg, xa, ama, aga, mua, ca);
+        ps_dense_point(&g, n, A, S, hm, hg, xb, amb, agb, mub, cb);
+        psygp__ps_post(&g, &s, xa, &oa);
+        memcpy(v1a, psygp__psv(&s, ld, PSYGP__PS_V1), sizeof(double) * (size_t)n);
+        memcpy(v2a, psygp__psv(&s, ld, PSYGP__PS_V2), sizeof(double) * (size_t)n);
+        psygp__ps_post(&g, &s, xb, &ob);
+        {
+            const double* v1b = psygp__psv(&s, ld, PSYGP__PS_V1);
+            const double* v2b = psygp__psv(&s, ld, PSYGP__PS_V2);
+            cab[0][0] = psygp__kctx(&g, 0, xa, xb) - psygp__dot(v1a, v1b, n);
+            cab[0][1] = -psygp__dot(v1a, v2b, n);
+            cab[1][0] = -psygp__dot(v2a, v1b, n);
+            cab[1][1] = psygp__kctx(&g, 1, xa, xb) - psygp__dot(v2a, v2b, n);
+        }
+        /* dense cross: K_ab - k_a' A k_b + (A k_a)' S (A k_b) */
+        for (int pq = 0; pq < 4; pq++) {
+            const double* ka = (pq / 2) ? aga : ama;
+            const double* kb = (pq % 2) ? agb : amb;
+            double acc = (pq == 0) ? psygp__kctx(&g, 0, xa, xb)
+                       : (pq == 3) ? psygp__kctx(&g, 1, xa, xb) : 0.0;
+            /* k_a' A k_b = sum over a's kernel column of (A k_b) */
+            for (int j = 0; j < n; j++) {
+                double kaj = (pq / 2) ? psygp__kctx(&g, 1, g.X + (size_t)j * 2, xa)
+                                      : psygp__kctx(&g, 0, g.X + (size_t)j * 2, xa);
+                acc -= kaj * kb[(pq / 2) ? n + j : j];
+            }
+            for (int i = 0; i < 2 * n; i++) {
+                double sb = 0.0;
+                for (int j = 0; j < 2 * n; j++) sb += S[(size_t)i * 2 * n + j] * kb[j];
+                acc += ka[i] * sb;
+            }
+            dcab[pq / 2][pq % 2] = acc;
+        }
+        for (int p0 = 0; p0 < 2; p0++)
+            for (int q0 = 0; q0 < 2; q0++)
+                track(&worst_x, fabs(cab[p0][q0] - dcab[p0][q0]) /
+                      (1.0 + sqrt((p0 ? ca[2] : ca[0]) * (q0 ? cb[2] : cb[0]))));
+        /* one more trial at a, outcome 1, 3 intensity units above its
+         * threshold mean */
+        psygp__ps_site(&g, &oa, oa.mm + 3.0, 1.0, J, &d1, &w, &c);
+        vb[0] = cab[0][0] * J[0] + cab[1][0] * J[1];
+        vb[1] = cab[0][1] * J[0] + cab[1][1] * J[1];
+        psygp__ps_lookahead(&ob, vb, d1, w, c, &ob2);
+        C[0][0] = ca[0]; C[0][1] = ca[1]; C[1][0] = ca[1]; C[1][1] = ca[2];
+        C[2][2] = cb[0]; C[2][3] = cb[1]; C[3][2] = cb[1]; C[3][3] = cb[2];
+        for (int p0 = 0; p0 < 2; p0++)
+            for (int q0 = 0; q0 < 2; q0++) {
+                C[p0][2 + q0] = dcab[p0][q0];
+                C[2 + q0][p0] = dcab[p0][q0];
+            }
+        h[0] = J[0]; h[1] = J[1]; h[2] = 0.0; h[3] = 0.0;
+        for (int i = 0; i < 4; i++) {
+            Ch[i] = 0.0;
+            for (int j = 0; j < 4; j++) Ch[i] += C[i][j] * h[j];
+        }
+        for (int i = 0; i < 4; i++) hCh += h[i] * Ch[i];
+        {
+            double den = 1.0 + w * hCh;
+            double m2 = mub[0] + Ch[2] * d1 / den, g2 = mub[1] + Ch[3] * d1 / den;
+            double vm2 = C[2][2] - Ch[2] * Ch[2] * w / den;
+            double vg2 = C[3][3] - Ch[3] * Ch[3] * w / den;
+            double cm2 = C[2][3] - Ch[2] * Ch[3] * w / den;
+            track(&worst_u, fabs(m2 - ob2.mm) / (1.0 + fabs(m2)));
+            track(&worst_u, fabs(g2 - ob2.mg) / (1.0 + fabs(g2)));
+            track(&worst_u, fabs(vm2 - ob2.vm) / (1.0 + vm2));
+            track(&worst_u, fabs(vg2 - ob2.vg) / (1.0 + vg2));
+            track(&worst_u, fabs(cm2 - ob2.cmg) / (1.0 + sqrt(vm2 * vg2)));
+            CHECK(fabs(vm2 - cb[0]) > 1e-6 * cb[0], "%s: the look-ahead did not move the "
+                  "second context at all", name);
+        }
+        CHECK(worst_x < 1e-7 * tolx, "%s: cross-covariance vs dense %.2e", name, worst_x);
+        CHECK(worst_u < 1e-7 * tolx, "%s: look-ahead vs dense update %.2e", name, worst_u);
+        track(&worst_look, worst_u);
+        printf("         look-ahead: cross-covariance of two contexts vs dense 2N %.1e, "
+               "rank-one update vs a dense 4 x 4 update %.1e\n", worst_x, worst_u);
+    }
+
+    CHECK(worst_mean < 1e-9 * tolx, "%s: predictive mean vs dense %.2e", name, worst_mean);
+    /* The reference inverts the block prior, whose condition number here is
+     * about 1e6, so 1e-7 is its resolution and not the header's. */
+    CHECK(worst_cov < 1e-7 * tolx, "%s: predictive covariance vs dense %.2e", name, worst_cov);
+    /* E[q] under the probit is closed form in m, so its only error is the 20
+     * nodes over g. Var[q], and under the logit E[q] too, go through the
+     * one-latent model's 20-node rule in f, which is good to about 1e-4 of
+     * probability when the latent sd is several units; that is the GP model's
+     * accuracy as well. The tolerances are the measured errors with room of
+     * about five. */
+    CHECK(worst_q20 < (link == PSYGP_LINK_PROBIT ? 1e-7 : 2e-3),
+          "%s: E[q], 20 vs 60 outer nodes %.2e", name, worst_q20);
+    CHECK(worst_qb < (link == PSYGP_LINK_PROBIT ? 1e-7 : 5e-4),
+          "%s: E[q] vs brute force %.2e", name, worst_qb);
+    CHECK(worst_q20v < 2e-3, "%s: Var[q], 20 vs 60 outer nodes %.2e", name, worst_q20v);
+    CHECK(worst_qbv < 5e-4, "%s: Var[q] vs brute force %.2e", name, worst_qbv);
+    CHECK(worst_thr < 1e-8, "%s: threshold closed form vs quadrature %.2e", name, worst_thr);
+    printf("  %-6s mode stationarity %.1e, predictive mean %.1e and covariance %.1e "
+           "vs dense 2N,\n"
+           "         E[q]: 20 vs 60 g-nodes %.1e, vs brute force %.1e; Var[q]: %.1e, "
+           "%.1e;\n         threshold closed form vs quadrature %.1e\n",
+           name, ps_stat, worst_mean, worst_cov, worst_q20, worst_qb, worst_q20v,
+           worst_qbv, worst_thr);
+
+    psygp_close(&g);
+}
+
+/* The analytic hyperparameter gradient of the psychometric model against
+ * central differences of its objective, over every free hyperparameter: the
+ * two lengthscales, the two output scales, the two means, and the cutpoint
+ * gaps under ORDINAL; with a floor and a ceiling too, where the Gauss-Newton
+ * W is clamped and the true Hessian is what the implicit term needs. The
+ * handle's Newton tolerance is 1e-13 here rather than the 1e-8 a session
+ * uses, because at 1e-8 the objective is only good to about 1e-8 and a
+ * difference step small enough to resolve 1e-4 divides that into 1e-3. */
+static void ps_grad_case(psygp_link link, bool ord, double guess, double lapse,
+                         const char* name) {
+    psygp_desc d;
+    psygp_gp g;
+    psygp__param pp[PSYGP__NTHETA];
+    double th[PSYGP__NTHETA], gr[PSYGP__NTHETA], tw[PSYGP__NTHETA], v, worst = 0.0;
+    int np;
+    rng_state = 0x243F6A8885A308D3ull + 0x6161ull + (uint64_t)link * 7u + (ord ? 3u : 0u);
+    ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
+    d.link = link; d.guess = guess; d.lapse = lapse; d.stop_trials = 100;
+    if (ord) { d.lik = PSYGP_LIK_ORDINAL; d.n_outcomes = 4; d.target_outcome = 1; }
+    if (!psygp_open(&g, &d)) { CHECK(0, "open %s: %s", name, psygp_error(&g)); return; }
+    g.ps_tol = real_is_double ? 1e-13 : 1e-6;
+    for (int i = 0; i < 40; i++) {
+        double x[2], f, pr[4];
+        x[0] = rng_u();
+        x[1] = ps_thr50(x[0]) + 14.0 * (rng_u() - 0.5);
+        f = (x[1] - ps_thr50(x[0])) / PS_SIG;
+        if (ord) {
+            double c1 = 0.5 * erfc(f / sqrt(2.0)), c2 = 0.5 * erfc((f - 1.0) / sqrt(2.0));
+            double c3 = 0.5 * erfc((f - 2.0) / sqrt(2.0));
+            pr[0] = c1; pr[1] = c2 - c1; pr[2] = c3 - c2; pr[3] = 1.0 - c3;
+            psygp_update(&g, x, psygp_simulate_outcome(pr, 4, rng_u()));
+        } else {
+            pr[1] = guess + (1.0 - guess - lapse) * 0.5 * erfc(-f / sqrt(2.0));
+            pr[0] = 1.0 - pr[1];
+            psygp_update(&g, x, psygp_simulate_outcome(pr, 2, rng_u()));
+        }
+    }
+    np = psygp__params(&g, pp);
+    psygp__theta_get(&g, pp, np, th);
+    /* Off the defaults, where the prior's own gradient is not zero. */
+    for (int i = 0; i < np; i++)
+        th[i] = psygp__clamp(th[i] + 0.1 * (double)(i % 3 - 1), pp[i].lo, pp[i].hi);
+    CHECK(psygp__fit_eval(&g, pp, np, th, &v, gr) == PSYGP_OK, "%s: gradient", name);
+    for (int i = 0; i < np; i++) {
+        double h = (real_is_double ? 1e-4 : 3e-3) * (1.0 + fabs(th[i])), vp, vm, fd;
+        memcpy(tw, th, sizeof(double) * (size_t)np);
+        tw[i] = th[i] + h;
+        psygp__fit_eval(&g, pp, np, tw, &vp, NULL);
+        tw[i] = th[i] - h;
+        psygp__fit_eval(&g, pp, np, tw, &vm, NULL);
+        fd = (vp - vm) / (2.0 * h);
+        track(&worst, fabs(gr[i] - fd) / (1e-3 + fabs(fd)));
+    }
+    track(&worst_grad, worst);
+    CHECK(np == (ord ? 8 : 6), "%s: %d free hyperparameters", name, np);
+    /* In float the objective is good to about 1e-6 of itself, so differences
+     * resolve the gradient to a few percent at best (7e-2 measured); the check
+     * that means something is the double one. */
+    CHECK(worst < (real_is_double ? 1e-4 : 0.15),
+          "%s: analytic gradient vs differences %.2e", name, worst);
+    printf("  %-24s analytic gradient vs central differences, %d hyperparameters: "
+           "%.1e\n", name, np, worst);
+    psygp_close(&g);
+}
+
+/* A whole session each, the psychometric model against the RBF GP, same
+ * streams: the threshold across 30 contexts and the field in and out of the
+ * transition band. */
+static void ps_session(psygp_acq acq, psygp_model model, int rep, int trials,
+                       double* thr_err, double* p_err, double* band_err) {
+    psygp_desc d;
+    psygp_gp g;
+    double e = 0.0, eb = 0.0, et = 0.0;
+    int nb = 0, nt = 0;
+    rng_state = 0x243F6A8885A308D3ull + 0x7171ull + (uint64_t)rep * 0x1000193ull;
+    ps_desc(&d, acq, model);
+    d.fit = true;
+    d.fit_every = 20;
+    d.stop_trials = trials;
+    if (!psygp_open(&g, &d)) { CHECK(0, "open session: %s", psygp_error(&g)); return; }
+    while (!psygp_done(&g)) {
+        double x[2], p[2];
+        int rc;
+        psygp_next(&g, x);
+        p[1] = ps_ptrue(x); p[0] = 1.0 - p[1];
+        rc = psygp_update(&g, x, psygp_simulate_outcome(p, 2, rng_u()));
+        CHECK(rc == PSYGP_OK, "session update: %s", psygp_strerror(rc));
+        if (rc != PSYGP_OK) break;
+    }
+    for (int i = 0; i < 30; i++) {
+        for (int j = 0; j < 30; j++) {
+            double x[2], pt, pp;
+            x[0] = i / 29.0; x[1] = 100.0 * j / 29.0;
+            pt = ps_ptrue(x);
+            pp = psygp_predict_p(&g, x);
+            e += fabs(pp - pt);
+            if (pt >= 0.05 && pt <= 0.95) { eb += fabs(pp - pt); nb++; }
+        }
+    }
+    for (int i = 0; i < 30; i++) {
+        double c[1], th, lo, hi;
+        c[0] = i / 29.0;
+        if (psygp_threshold(&g, c, 0.0, &th, &lo, &hi) == PSYGP_OK) {
+            et += fabs(th - (ps_thr50(c[0]) + 0.67448975019608171 * PS_SIG));
+            nt++;
+        }
+    }
+    *thr_err = nt ? et / nt : 1e9;
+    *p_err = e / 900.0;
+    *band_err = nb ? eb / nb : 1.0;
+    CHECK(nt == 30, "session: the threshold crossed in %d of 30 contexts", nt);
+    psygp_close(&g);
+}
+
+static void test_psychometric(void) {
+    psygp_desc d;
+    psygp_gp g;
+    printf("PSYGP_MODEL_PSYCHOMETRIC:\n");
+    /* What the model refuses. */
+    ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
+    d.stop_trials = 10;
+    d.lik = PSYGP_LIK_GAUSSIAN;
+    CHECK(!psygp_open(&g, &d), "open accepted the psychometric model under GAUSSIAN");
+    d.lik = PSYGP_LIK_CATEGORICAL; d.n_outcomes = 3;
+    CHECK(!psygp_open(&g, &d), "open accepted it under CATEGORICAL");
+    d.lik = PSYGP_LIK_BERNOULLI; d.n_outcomes = 0;
+    d.kernel = PSYGP_KERNEL_SEMIP;
+    CHECK(!psygp_open(&g, &d), "open accepted it with the SEMIP kernel");
+    d.kernel = PSYGP_KERNEL_RBF; d.model = (psygp_model)7;
+    CHECK(!psygp_open(&g, &d), "open accepted model = 7");
+
+    test_psychometric_math(PSYGP_LINK_PROBIT, "probit");
+    test_psychometric_math(PSYGP_LINK_LOGIT, "logit");
+    ps_grad_case(PSYGP_LINK_PROBIT, false, 0.0, 0.0, "probit");
+    ps_grad_case(PSYGP_LINK_LOGIT, false, 0.0, 0.0, "logit");
+    ps_grad_case(PSYGP_LINK_PROBIT, false, 0.5, 0.02, "probit, guess 0.5 lapse .02");
+    ps_grad_case(PSYGP_LINK_PROBIT, true, 0.0, 0.0, "ordinal, 4 outcomes");
+
+    /* Ordinal outcomes and a floor, run through whole sessions. */
+    {
+        int bad = 0;
+        rng_state = 0x243F6A8885A308D3ull + 0x9191ull;
+        ps_desc(&d, PSYGP_ACQ_BALD, PSYGP_MODEL_PSYCHOMETRIC);
+        d.lik = PSYGP_LIK_ORDINAL; d.n_outcomes = 3; d.target_outcome = 1;
+        d.fit = true; d.fit_every = 15; d.stop_trials = 45;
+        CHECK(psygp_open(&g, &d), "open ordinal: %s", psygp_error(&g));
+        while (!psygp_done(&g)) {
+            double x[2], pr[3], po[3], f;
+            psygp_next(&g, x);
+            f = (x[1] - ps_thr50(x[0])) / PS_SIG;
+            pr[0] = 1.0 - 0.5 * erfc(-f / sqrt(2.0));
+            pr[2] = 0.5 * erfc(-(f - 1.0) / sqrt(2.0));
+            pr[1] = 1.0 - pr[0] - pr[2];
+            if (psygp_update(&g, x, psygp_simulate_outcome(pr, 3, rng_u())) != PSYGP_OK) bad++;
+            if (psygp_predict_outcomes(&g, x, po) != PSYGP_OK ||
+                fabs(po[0] + po[1] + po[2] - 1.0) > 1e-9) bad++;
+        }
+        CHECK(bad == 0, "ordinal psychometric session: %d failures", bad);
+        psygp_close(&g);
+        bad = 0;
+        ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
+        d.guess = 0.5; d.lapse = 0.02; d.target_p = 0.75;
+        d.fit = true; d.fit_every = 15; d.stop_trials = 45;
+        CHECK(psygp_open(&g, &d), "open 2AFC: %s", psygp_error(&g));
+        while (!psygp_done(&g)) {
+            double x[2], p[2];
+            psygp_next(&g, x);
+            p[1] = 0.5 + 0.48 * ps_ptrue(x); p[0] = 1.0 - p[1];
+            if (psygp_update(&g, x, psygp_simulate_outcome(p, 2, rng_u())) != PSYGP_OK) bad++;
+        }
+        {
+            double ctx[1] = { 0.5 }, th, lo, hi;
+            CHECK(psygp_threshold(&g, ctx, 0.0, &th, &lo, &hi) == PSYGP_OK,
+                  "2AFC psychometric threshold did not resolve");
+        }
+        CHECK(bad == 0, "2AFC psychometric session: %d failures", bad);
+        psygp_close(&g);
+        printf("  ordinal (3 outcomes, BALD) and 2AFC (guess 0.5, lapse 0.02) "
+               "sessions ran clean\n");
+    }
+
+    /* The look-ahead acquisitions on the observer, and LocalMI's candidate
+     * score against its own point score (its refinement objective). */
+    {
+        double te, pe, be, worst_id = 0.0;
+        ps_session(PSYGP_ACQ_EAVC, PSYGP_MODEL_PSYCHOMETRIC, 0, 80, &te, &pe, &be);
+        printf("  EAVC, 80 trials: threshold error %.2f dB, field %.4f, band %.4f\n",
+               te, pe, be);
+        CHECK(te < 2.0, "psychometric EAVC threshold error %.2f dB", te);
+        ps_session(PSYGP_ACQ_LOCALMI, PSYGP_MODEL_PSYCHOMETRIC, 0, 80, &te, &pe, &be);
+        printf("  LOCALMI, 80 trials: threshold error %.2f dB, field %.4f, band %.4f\n",
+               te, pe, be);
+        CHECK(te < 2.0, "psychometric LOCALMI threshold error %.2f dB", te);
+        rng_state = 0x243F6A8885A308D3ull + 0x8181ull;
+        ps_desc(&d, PSYGP_ACQ_LOCALMI, PSYGP_MODEL_PSYCHOMETRIC);
+        d.stop_trials = 30;
+        CHECK(psygp_open(&g, &d), "open LOCALMI: %s", psygp_error(&g));
+        while (!psygp_done(&g)) {
+            double x[2], p[2];
+            psygp_next(&g, x);
+            if (psygp_n_trials(&g) >= d.n_init) {
+                psygp__scr s;
+                psygp__scr_of(&g, &s);
+                for (int j = 0; j < g.M; j += 17) {
+                    double sc = psygp_acq_score(&g, j);
+                    double pt = psygp__point_score(&g, &s, psygp__cand(&g, j));
+                    track(&worst_id, fabs(sc - pt) / (1.0 + fabs(sc)));
+                }
+            }
+            p[1] = ps_ptrue(x); p[0] = 1.0 - p[1];
+            psygp_update(&g, x, psygp_simulate_outcome(p, 2, rng_u()));
+        }
+        CHECK(worst_id == 0.0, "LOCALMI candidate vs point score %.2e", worst_id);
+        psygp_close(&g);
+    }
+
+    /* The observer it is for, against the RBF GP on the same streams. */
+    {
+        double t_ps = 0.0, p_ps = 0.0, b_ps = 0.0, t_gp = 0.0, p_gp = 0.0, b_gp = 0.0;
+        const int reps = 3, trials = 120;
+        for (int r = 0; r < reps; r++) {
+            double te, pe, be;
+            ps_session(PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC, r, trials, &te, &pe, &be);
+            t_ps += te / reps; p_ps += pe / reps; b_ps += be / reps;
+            ps_session(PSYGP_ACQ_LSE, PSYGP_MODEL_GP, r, trials, &te, &pe, &be);
+            t_gp += te / reps; p_gp += pe / reps; b_gp += be / reps;
+        }
+        printf("  curved threshold, 7 dB rise, %d trials, %d streams, LSE: threshold "
+               "error %.2f dB (GP %.2f),\n"
+               "         field MAE(p) %.4f (GP %.4f), in the transition band %.4f "
+               "(GP %.4f)\n", trials, reps, t_ps, t_gp, p_ps, p_gp, b_ps, b_gp);
+        CHECK(t_ps < 2.0, "psychometric threshold error %.2f dB", t_ps);
+        CHECK(b_ps < b_gp, "psychometric band error %.4f not below the GP's %.4f",
+              b_ps, b_gp);
+        CHECK(p_ps < 0.04, "psychometric field error %.4f", p_ps);
+    }
+}
+
 static void test_simulate_outcome(void) {
     double p[3] = { 0.2, 0.3, 0.5 };
     CHECK(psygp_simulate_outcome(p, 3, 0.0) == 0, "simulate at u = 0");
@@ -1861,6 +2516,7 @@ int main(void) {
     test_categorical_field();
     test_fit();
     test_fit_every_and_rng();
+    test_psychometric();
 #ifdef PSYGP_ASYNC
     printf("async layer (PSYGP_ASYNC):\n");
     test_async();

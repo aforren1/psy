@@ -99,6 +99,13 @@ fifth of the cost of the candidate sweep. On the audiometric benchmark of the
 header's manual it takes the LSE threshold error at 150 trials from 1.98 to
 1.50 dB.
 
+When the threshold is what you want and the context varies smoothly, try
+`model="psychometric"`. Every slice along the intensity is then a
+psychometric function by construction, and `threshold()` returns the
+posterior mean of m + f* exp(-g) in closed form, with a band of +-1.96
+posterior sd. A stationary GP needs one lengthscale for the whole intensity
+axis, so it cannot hold a rise that is narrow against the box.
+
 ## How to plot the field
 
 `predict_p_many()` evaluates the model at many points in one blocked pass.
@@ -176,6 +183,7 @@ default. `n_dims` comes from `len(lo)` unless you give it.
 | `intensity_dim` | int | the dimension that thresholds run along (default 0) |
 | `lik` | `LIK_*` or name | `"bernoulli"` (default), `"ordinal"`, `"categorical"`, `"gaussian"` |
 | `n_outcomes` | int | K, for ordinal and categorical |
+| `model` | `MODEL_*` or name | `"gp"` (default): one GP over the box. `"psychometric"`: a threshold GP m(c) and a log-slope GP g(c) over the context, f = exp(g) (x - m). Bernoulli or ordinal and the RBF kernel only; every acquisition works (EAVC and LOCALMI since psy_gp.h 0.4.0) |
 | `kernel` | `KERNEL_*` or name | `"rbf"` (default) or `"semip"` |
 | `link` | `LINK_*` or name | `"probit"` (default) or `"logit"` |
 | `guess`, `lapse` | float | floor and ceiling of p; fixed, never fitted |
@@ -206,7 +214,7 @@ A caller-owned memory buffer (`desc.memory`) is not exposed.
 | `acq_score(i) -> float` | the acquisition score of candidate `i` (NaN in the init phase) |
 | `update(x, outcome)` | record an outcome in 0..K-1 at the stimulus shown, and refit |
 | `update_real(x, y)` | the same for a continuous `y` under `"gaussian"` |
-| `predict_f(x, k=0) -> (mu, sd)` | latent `k` at `x` (k > 0 only under categorical) |
+| `predict_f(x, k=0) -> (mu, sd)` | latent `k` at `x` (k > 0 only under categorical); under `model="psychometric"`, k = 0 is the threshold m and k = 1 the log slope g at `x`'s context |
 | `predict_p(x) -> float` | the target quantity at `x`: E[P(y=1)], E[P(y>=k*)], E[P(y=k*)] or E[y] |
 | `predict_p_var(x) -> float` | its posterior variance (the BALV score) |
 | `predict_outcomes(x) -> list` | all K outcome probabilities |
@@ -216,7 +224,7 @@ A caller-owned memory buffer (`desc.memory`) is not exposed.
 | `fit()` | fit the free hyperparameters (tens of refits) |
 | `fit_step() -> bool` | one step of that fit; `True` while another step helps |
 | `refit()` | the exact refit that `refit_every` skips |
-| `hyper() -> dict` | `lengthscale`, `outputscale`, `mean`, `lengthscale_b`, `outputscale_b`, `cutpoint`, `noise_sd` |
+| `hyper() -> dict` | `lengthscale`, `outputscale`, `mean`, `lengthscale_b`, `outputscale_b`, `cutpoint`, `noise_sd`, `lengthscale_g`, `outputscale_g`, `mean_g`; under `model="psychometric"` the first three belong to the threshold GP and the `_g` fields to the log-slope GP |
 | `candidate(i) -> list` | candidate `i` |
 | `history() -> list[dict]` | every trial as `{'x', 'y', 'proposed', 'init'}` |
 | `close()` | free the handle; `GP` is also a context manager |
@@ -261,7 +269,7 @@ arguments raise `TypeError` or `ValueError`.
 
 Constants mirror the header: `LIK_*`, `KERNEL_*`, `LINK_*`, `ACQ_*`,
 `STOP_*`, `OK`, `ERR_*`, `POLICY_*`, `MAX_DIMS`, `MAX_OUTCOMES`,
-`MAX_TRIALS`, `QUAD_N`, `ASYNC_QUEUE`.
+`MAX_TRIALS`, `QUAD_N`, `ASYNC_QUEUE`, `MODEL_*`.
 
 ## Explanation
 

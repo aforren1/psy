@@ -414,7 +414,7 @@ static PyObject* gp_view(PyObject* bytes) {
 
 static const char* const hyper_keys[] = {
     "lengthscale", "outputscale", "mean", "lengthscale_b", "outputscale_b",
-    "cutpoint", "noise_sd", NULL
+    "cutpoint", "noise_sd", "lengthscale_g", "outputscale_g", "mean_g", NULL
 };
 
 static int gp_hyper_field(psygp_hyper* h, const char* key, PyObject* v) {
@@ -423,12 +423,16 @@ static int gp_hyper_field(psygp_hyper* h, const char* key, PyObject* v) {
         return gp_small_doubles(v, h->lengthscale, PSYGP_MAX_DIMS, "hyper.lengthscale") < 0 ? -1 : 0;
     if (!strcmp(key, "lengthscale_b"))
         return gp_small_doubles(v, h->lengthscale_b, PSYGP_MAX_DIMS, "hyper.lengthscale_b") < 0 ? -1 : 0;
+    if (!strcmp(key, "lengthscale_g"))
+        return gp_small_doubles(v, h->lengthscale_g, PSYGP_MAX_DIMS, "hyper.lengthscale_g") < 0 ? -1 : 0;
     if (!strcmp(key, "cutpoint"))
         return gp_small_doubles(v, h->cutpoint, PSYGP_MAX_OUTCOMES - 1, "hyper.cutpoint") < 0 ? -1 : 0;
     if (!strcmp(key, "outputscale"))   return gp_as_double(v, &h->outputscale);
     if (!strcmp(key, "mean"))          return gp_as_double(v, &h->mean);
     if (!strcmp(key, "outputscale_b")) return gp_as_double(v, &h->outputscale_b);
     if (!strcmp(key, "noise_sd"))      return gp_as_double(v, &h->noise_sd);
+    if (!strcmp(key, "outputscale_g")) return gp_as_double(v, &h->outputscale_g);
+    if (!strcmp(key, "mean_g"))        return gp_as_double(v, &h->mean_g);
     return -1;
 }
 
@@ -476,13 +480,16 @@ static PyObject* gp_hyper_dict(const psygp_hyper* h, const psygp_desc* d) {
     PyObject* ls = gp_list(h->lengthscale, d->n_dims);
     PyObject* lsb = gp_list(h->lengthscale_b, d->n_dims);
     PyObject* cut = gp_list(h->cutpoint, ncut > 0 ? ncut : 0);
+    PyObject* lsg = gp_list(h->lengthscale_g, d->n_dims);
     PyObject* out = NULL;
-    if (ls && lsb && cut)
-        out = Py_BuildValue("{s:O,s:d,s:d,s:O,s:d,s:O,s:d}",
+    if (ls && lsb && cut && lsg)
+        out = Py_BuildValue("{s:O,s:d,s:d,s:O,s:d,s:O,s:d,s:O,s:d,s:d}",
                             "lengthscale", ls, "outputscale", h->outputscale,
                             "mean", h->mean, "lengthscale_b", lsb,
                             "outputscale_b", h->outputscale_b, "cutpoint", cut,
-                            "noise_sd", h->noise_sd);
+                            "noise_sd", h->noise_sd, "lengthscale_g", lsg,
+                            "outputscale_g", h->outputscale_g, "mean_g", h->mean_g);
+    Py_XDECREF(lsg);
     Py_XDECREF(ls);
     Py_XDECREF(lsb);
     Py_XDECREF(cut);
@@ -501,6 +508,9 @@ static const gp_name kernel_names[] = {
     { "rbf", PSYGP_KERNEL_RBF }, { "semip", PSYGP_KERNEL_SEMIP }, { NULL, 0 } };
 static const gp_name link_names[] = {
     { "probit", PSYGP_LINK_PROBIT }, { "logit", PSYGP_LINK_LOGIT }, { NULL, 0 } };
+static const gp_name model_names[] = {
+    { "gp", PSYGP_MODEL_GP }, { "psychometric", PSYGP_MODEL_PSYCHOMETRIC },
+    { NULL, 0 } };
 static const gp_name acq_names[] = {
     { "lse", PSYGP_ACQ_LSE }, { "eavc", PSYGP_ACQ_EAVC },
     { "localmi", PSYGP_ACQ_LOCALMI }, { "balv", PSYGP_ACQ_BALV },
@@ -611,6 +621,7 @@ static int gp_parse_desc(PyObject* kw, psygp_desc* d, double** cand, PyObject** 
         else if (KEY("stop_context"))   rc = gp_small_doubles(v, d->stop_context, PSYGP_MAX_DIMS, "stop_context") < 0 ? -1 : 0;
         else if (KEY("max_trials"))     rc = gp_int(v, &d->max_trials);
         else if (KEY("refine_steps"))   rc = gp_int(v, &d->refine_steps);
+        else if (KEY("model"))          { rc = gp_enum(v, model_names, "model", &tmp); d->model = (psygp_model)tmp; }
         else {
             PyErr_Format(PyExc_TypeError, "GP() got an unexpected keyword %R", k);
             return -1;
@@ -1239,7 +1250,7 @@ static PyType_Slot GP_slots[] = {
                         "no_hyper_prior, refit_every, hyper_min, hyper_max, jitter, "
                         "acq, target_p, target_value, target_outcome, acq_beta, "
                         "n_init, rng, candidates, n_candidates, grid, stop_trials, "
-                        "stop_threshold_sd, stop_context, max_trials, refine_steps. An omitted "
+                        "stop_threshold_sd, stop_context, max_trials, refine_steps, model. An omitted "
                         "or zero field takes the library default." },
     { Py_tp_new, (void*)PyType_GenericNew },
     { Py_tp_init, (void*)GP_init },
@@ -1656,7 +1667,8 @@ PyMODINIT_FUNC PyInit_gp(void) {
 
     HyperType = gp_namespace_type(m, "Hyper",
         "Hyper(lengthscale=[...], outputscale=0, mean=0, lengthscale_b=[...], "
-        "outputscale_b=0, cutpoint=[...], noise_sd=0): hyperparameters for "
+        "outputscale_b=0, cutpoint=[...], noise_sd=0, lengthscale_g=[...], "
+        "outputscale_g=0, mean_g=0): hyperparameters for "
         "GP(hyper=...). A zero or missing field is a default, or fitted when "
         "fit=True. A dict with the same keys works too.");
     if (!HyperType) goto fail;
@@ -1676,6 +1688,8 @@ PyMODINIT_FUNC PyInit_gp(void) {
     C("LIK_ORDINAL", PSYGP_LIK_ORDINAL);
     C("LIK_CATEGORICAL", PSYGP_LIK_CATEGORICAL);
     C("LIK_GAUSSIAN", PSYGP_LIK_GAUSSIAN);
+    C("MODEL_GP", PSYGP_MODEL_GP);
+    C("MODEL_PSYCHOMETRIC", PSYGP_MODEL_PSYCHOMETRIC);
     C("KERNEL_RBF", PSYGP_KERNEL_RBF);
     C("KERNEL_SEMIP", PSYGP_KERNEL_SEMIP);
     C("LINK_PROBIT", PSYGP_LINK_PROBIT);

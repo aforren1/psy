@@ -35,7 +35,10 @@
  * LOCALMI, and PSYGP_ACQ_RANDOM as the paper's quasi-random baseline, each on
  * the RBF probit GP with fitted hyperparameters, plus three of them again on
  * the semiparametric kernel, this header's analog of the paper's
- * linear-additive model.
+ * linear-additive model, and five more (semip2-lse, -balv, -bald, -eavc and
+ * -localmi) on PSYGP_MODEL_PSYCHOMETRIC, Keeley et al. 2023's semiparametric
+ * model in its own form: a threshold GP and a log-slope GP over frequency and
+ * a probit in intensity.
  *
  * THE METRICS, as the paper defines them
  * On a 30 x 30 grid over the box, (a) the mean absolute error of the model's
@@ -43,7 +46,12 @@
  * threshold in dB: per context column, the two grid points that bracket 0.75
  * along intensity, linearly interpolated, done identically for the truth and
  * for the model, averaged over the columns where both cross. Columns where one
- * does not cross are counted and reported, not scored.
+ * does not cross are counted and reported, not scored. And (c), not the
+ * paper's: MAE(p) again over the transition band alone, the grid points whose
+ * true p is in [0.05, 0.95], as tests/compare/compare_gp_aepsych.py defines it.
+ * The band is a few points per column, so (a) mostly measures the flat floor
+ * and ceiling, and (c) is where a model has to represent the rise itself. The
+ * CSV carries it as a last column, mae_band.
  *
  * THE CLASSICAL BASELINE
  * Eight interleaved weighted 1-up-1-down staircases, one per measured
@@ -84,8 +92,9 @@
  *     gp_audiometric
  *         the no-argument configuration: metabolic+sensory, beta 2, 3
  *         replications, every method, metrics every 10 trials, no CSV, and a
- *         100-trial session rather than 150. 7.5 s at -O2 on one core of an
- *         x86-64 desktop under WSL2, so CI can run it inside 20 s.
+ *         100-trial session rather than 150, and every method but
+ *         semip2-eavc. About 10 s at -O2 on one core of an x86-64 desktop
+ *         under WSL2, so CI can run it inside 20 s.
  *     gp_audiometric all 2 20 all out.csv
  *         all four phenotypes at beta = 2, 20 replications, every method,
  *         per-trial curves to out.csv.
@@ -407,15 +416,24 @@ static void field_init(field* fd, int pheno, double beta) {
     }
 }
 
-/* The two metrics, given the model's E[p] on the same grid. */
+/* The two metrics, given the model's E[p] on the same grid, and MAE(p) again
+ * over the transition band alone, the grid points whose true p is in
+ * [0.05, 0.95] (the definition tests/compare/compare_gp_aepsych.py uses). The
+ * band is where a model has to represent the psychometric rise, and it is a
+ * few points per column, so the whole-grid MAE(p) mostly measures the flat
+ * floor and ceiling. */
 static void score(const field* fd, const double* model_p, double* mae_p,
-                  double* mae_thr, int* n_missing) {
-    double sp = 0.0, st = 0.0;
-    int i, j, nt = 0, miss = 0;
+                  double* mae_thr, int* n_missing, double* mae_band) {
+    double sp = 0.0, st = 0.0, sb = 0.0;
+    int i, j, nt = 0, miss = 0, nb = 0;
     for (i = 0; i < NGRID; i++) {
         double thr;
-        for (j = 0; j < NGRID; j++)
-            sp += fabs(model_p[i * NGRID + j] - fd->truth_p[i * NGRID + j]);
+        for (j = 0; j < NGRID; j++) {
+            double e = fabs(model_p[i * NGRID + j] - fd->truth_p[i * NGRID + j]);
+            double tp = fd->truth_p[i * NGRID + j];
+            sp += e;
+            if (tp >= 0.05 && tp <= 0.95) { sb += e; nb++; }
+        }
         if (column_threshold(&model_p[i * NGRID], fd->xi, TARGET_P, &thr)) {
             if (fd->truth_cross[i]) {
                 st += fabs(thr - fd->truth_thr[i]);
@@ -430,6 +448,7 @@ static void score(const field* fd, const double* model_p, double* mae_p,
     *mae_p = sp / (double)(NGRID * NGRID);
     *mae_thr = nt ? st / (double)nt : -1.0;
     *n_missing = miss;
+    *mae_band = nb ? sb / (double)nb : -1.0;
 }
 
 /* --- the generator ----------------------------------------------------- */
@@ -463,9 +482,9 @@ static double rng_for_gp(void* ctx) {
 #define NMARK 4
 static const int marks[NMARK] = { 25, 50, 100, 150 };
 
-#define NBOUND 5
+#define NBOUND 6
 static const char* const bound_name[NBOUND] = {
-    "ls_freq", "ls_int", "outscale", "mean", "outscale_b"
+    "ls_freq", "ls_int", "outscale", "mean", "outscale_b", "mean_g"
 };
 
 typedef struct method {
@@ -473,19 +492,28 @@ typedef struct method {
     int          is_stair;
     psygp_acq    acq;
     psygp_kernel kernel;
+    psygp_model  model;
 } method;
 
+/* semip2-* is PSYGP_MODEL_PSYCHOMETRIC, Keeley et al. 2023's semiparametric
+ * model in its own form: a threshold GP and a log-slope GP over frequency, and a
+ * probit in intensity. */
 static const method methods[] = {
-    { "lse",       0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF   },
-    { "eavc",      0, PSYGP_ACQ_EAVC,    PSYGP_KERNEL_RBF   },
-    { "localmi",   0, PSYGP_ACQ_LOCALMI, PSYGP_KERNEL_RBF   },
-    { "balv",      0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_RBF   },
-    { "bald",      0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_RBF   },
-    { "random",    0, PSYGP_ACQ_RANDOM,  PSYGP_KERNEL_RBF   },
-    { "semip-lse", 0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_SEMIP },
-    { "semip-balv",0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_SEMIP },
-    { "semip-bald",0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_SEMIP },
-    { "stair",     1, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF   }
+    { "lse",        0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
+    { "eavc",       0, PSYGP_ACQ_EAVC,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
+    { "localmi",    0, PSYGP_ACQ_LOCALMI, PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
+    { "balv",       0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
+    { "bald",       0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
+    { "random",     0, PSYGP_ACQ_RANDOM,  PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
+    { "semip-lse",  0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP },
+    { "semip-balv", 0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP },
+    { "semip-bald", 0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP },
+    { "semip2-lse", 0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC },
+    { "semip2-balv",0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC },
+    { "semip2-bald",0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC },
+    { "semip2-eavc",0, PSYGP_ACQ_EAVC,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC },
+    { "semip2-localmi",0, PSYGP_ACQ_LOCALMI, PSYGP_KERNEL_RBF, PSYGP_MODEL_PSYCHOMETRIC },
+    { "stair",      1, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP }
 };
 #define NMETHOD ((int)(sizeof(methods) / sizeof(methods[0])))
 
@@ -514,7 +542,7 @@ static double acc_ci(const acc* a) {
 }
 
 typedef struct mstat {
-    acc p[NMARK], thr[NMARK];
+    acc p[NMARK], thr[NMARK], band[NMARK];
     acc ms, logmarg, miss;
     int runs, numeric, multi_cross, failed;
     int bound[NBOUND];
@@ -534,20 +562,22 @@ static int is_scored(int n, int every) {
     return every > 0 && n % every == 0;
 }
 
-static void record(mstat* st, const double* mp, const double* mt) {
+static void record(mstat* st, const double* mp, const double* mt,
+                   const double* mb) {
     int i;
     for (i = 0; i < NMARK; i++) {
         if (mp[i] >= 0.0) acc_add(&st->p[i], mp[i]);
         if (mt[i] >= 0.0) acc_add(&st->thr[i], mt[i]);
+        if (mb[i] >= 0.0) acc_add(&st->band[i], mb[i]);
     }
 }
 
 static void csv_row(FILE* csv, const field* fd, const char* name, int rep,
                     int trial, double mae_p, double mae_thr, int miss,
-                    double ms) {
+                    double ms, double mae_band) {
     if (!csv) return;
-    fprintf(csv, "%s,%g,%s,%d,%d,%.6f,%.4f,%d,%.4f\n", pheno_name[fd->pheno],
-            fd->beta, name, rep, trial, mae_p, mae_thr, miss, ms);
+    fprintf(csv, "%s,%g,%s,%d,%d,%.6f,%.4f,%d,%.4f,%.6f\n", pheno_name[fd->pheno],
+            fd->beta, name, rep, trial, mae_p, mae_thr, miss, ms, mae_band);
 }
 
 /* --- the GP runs ------------------------------------------------------- */
@@ -567,6 +597,19 @@ static void check_bounds(const psygp_hyper* h, const psygp_desc* d, int* out) {
                    ? d->hyper_max.lengthscale[k] : 2.0 * span;
         if (h->lengthscale[k] <= ls_lo[k] * 1.001 ||
             h->lengthscale[k] >= ls_hi[k] * 0.999) out[k]++;
+    }
+    if (d->model == PSYGP_MODEL_PSYCHOMETRIC) {
+        /* The threshold GP's variance is in dB^2 and centered on a quarter of
+         * the axis squared; its mean lives on the intensity axis; and the mean
+         * log-slope has bounds of its own. psy_gp.h's defaults, restated. */
+        double span = XI_HI - XI_LO, os_m = 0.0625 * span * span;
+        os_lo = 0.1 * os_m;
+        os_hi = 10.0 * os_m;
+        if (h->outputscale <= os_lo * 1.001 || h->outputscale >= os_hi * 0.999) out[2]++;
+        if (h->mean <= XI_LO + 1e-6 * span || h->mean >= XI_HI - 1e-6 * span) out[3]++;
+        if (h->mean_g <= log(0.25 / span) + 1e-3 || h->mean_g >= log(256.0 / span) - 1e-3)
+            out[5]++;
+        return;
     }
     os_lo = d->hyper_min.outputscale > 0.0 ? d->hyper_min.outputscale : 0.1;
     os_hi = d->hyper_max.outputscale > 0.0 ? d->hyper_max.outputscale : 10.0;
@@ -588,11 +631,12 @@ static int run_gp(const field* fd, const method* m, int rep, const config* cfg,
                   mstat* st) {
     psygp_desc d;
     psygp_gp g;
-    double mp[NMARK], mt[NMARK], model_p[NGRID * NGRID];
+    double mp[NMARK], mt[NMARK], mb[NMARK], model_p[NGRID * NGRID];
     clock_t t_all, t_score = 0;
     int i, n = 0, last_miss = 0;
 
     memset(&d, 0, sizeof(d));
+    d.model = m->model;
     d.n_dims = 2;
     d.lo[0] = XC_LO; d.hi[0] = XC_HI;
     d.lo[1] = XI_LO; d.hi[1] = XI_HI;
@@ -622,7 +666,7 @@ static int run_gp(const field* fd, const method* m, int rep, const config* cfg,
         d.rng_ctx = NULL;
     }
 
-    for (i = 0; i < NMARK; i++) mp[i] = mt[i] = -1.0;
+    for (i = 0; i < NMARK; i++) mp[i] = mt[i] = mb[i] = -1.0;
     rng_seed(rep);
     if (!psygp_open(&g, &d)) {
         fprintf(stderr, "gp_audiometric: %s\n", psygp_error(&g));
@@ -651,7 +695,7 @@ static int run_gp(const field* fd, const method* m, int rep, const config* cfg,
         }
         n = psygp_n_trials(&g);
         if (is_scored(n, cfg->metric_every)) {
-            double mae_p, mae_thr, ms;
+            double mae_p, mae_thr, ms, mae_band;
             int miss, rcp;
             clock_t t0 = clock();
             ms = 1000.0 * (double)(t0 - t_all - t_score) / (double)CLOCKS_PER_SEC
@@ -663,12 +707,13 @@ static int run_gp(const field* fd, const method* m, int rep, const config* cfg,
                 st->failed++;
                 break;
             }
-            score(fd, model_p, &mae_p, &mae_thr, &miss);
+            score(fd, model_p, &mae_p, &mae_thr, &miss, &mae_band);
             last_miss = miss;
             for (i = 0; i < NMARK; i++) {
-                if (n == marks[i]) { mp[i] = mae_p; mt[i] = mae_thr; }
+                if (n == marks[i]) { mp[i] = mae_p; mt[i] = mae_thr; mb[i] = mae_band; }
             }
-            csv_row(cfg->csv, fd, m->name, rep, n, mae_p, mae_thr, miss, ms);
+            csv_row(cfg->csv, fd, m->name, rep, n, mae_p, mae_thr, miss, ms,
+                    mae_band);
             t_score += clock() - t0;
         }
     }
@@ -683,7 +728,7 @@ static int run_gp(const field* fd, const method* m, int rep, const config* cfg,
         acc_add(&st->miss, (double)last_miss);
         if (psygp_threshold_multi_cross(&g)) st->multi_cross++;
     }
-    record(st, mp, mt);
+    record(st, mp, mt, mb);
     psygp_close(&g);
     return 0;
 }
@@ -710,7 +755,7 @@ static double stair_curve(const double* thr, double xc) {
 static int run_stair(const field* fd, int rep, const config* cfg, mstat* st) {
     static psyst_stair s[NF];
     psyst_desc d;
-    double mp[NMARK], mt[NMARK], model_p[NGRID * NGRID], thr[NF];
+    double mp[NMARK], mt[NMARK], mb[NMARK], model_p[NGRID * NGRID], thr[NF];
     clock_t t_all, t_score = 0;
     int i, t, last_miss = 0;
 
@@ -732,7 +777,7 @@ static int run_stair(const field* fd, int rep, const config* cfg, mstat* st) {
     d.stop_trials = cfg->n_trials / NF + 2;
     d.stop_at_limit = 0;
 
-    for (i = 0; i < NMARK; i++) mp[i] = mt[i] = -1.0;
+    for (i = 0; i < NMARK; i++) mp[i] = mt[i] = mb[i] = -1.0;
     rng_seed(rep);
     for (i = 0; i < NF; i++) {
         if (!psyst_open(&s[i], &d)) {
@@ -754,7 +799,7 @@ static int run_stair(const field* fd, int rep, const config* cfg, mstat* st) {
             break;
         }
         if (is_scored(t, cfg->metric_every)) {
-            double mae_p, mae_thr, ms;
+            double mae_p, mae_thr, ms, mae_band;
             int miss, c, j;
             clock_t t0 = clock();
             ms = 1000.0 * (double)(t0 - t_all - t_score) / (double)CLOCKS_PER_SEC
@@ -771,19 +816,20 @@ static int run_stair(const field* fd, int rep, const config* cfg, mstat* st) {
                 for (j = 0; j < NGRID; j++)
                     model_p[c * NGRID + j] = normal_cdf((fd->xi[j] - th) / fd->beta);
             }
-            score(fd, model_p, &mae_p, &mae_thr, &miss);
+            score(fd, model_p, &mae_p, &mae_thr, &miss, &mae_band);
             last_miss = miss;
             for (i = 0; i < NMARK; i++) {
-                if (t == marks[i]) { mp[i] = mae_p; mt[i] = mae_thr; }
+                if (t == marks[i]) { mp[i] = mae_p; mt[i] = mae_thr; mb[i] = mae_band; }
             }
-            csv_row(cfg->csv, fd, "stair", rep, t, mae_p, mae_thr, miss, ms);
+            csv_row(cfg->csv, fd, "stair", rep, t, mae_p, mae_thr, miss, ms,
+                    mae_band);
             t_score += clock() - t0;
         }
     }
     acc_add(&st->ms, 1000.0 * (double)(clock() - t_all - t_score)
                      / (double)CLOCKS_PER_SEC / (double)cfg->n_trials);
     acc_add(&st->miss, (double)last_miss);
-    record(st, mp, mt);
+    record(st, mp, mt, mb);
     return 0;
 }
 
@@ -793,16 +839,17 @@ static void print_table(const char* title, const mstat* st, const int* use,
                         int n_use) {
     int i, k;
     printf("\n%s\n", title);
-    printf("method        trial        MAE(p)               MAE(thr, dB)"
-           "        ms/trial\n");
+    printf("method          trial        MAE(p)            band MAE(p)       "
+           "MAE(thr, dB)        ms/trial\n");
     for (i = 0; i < n_use; i++) {
         const mstat* s = &st[use[i]];
         int first = 1;
         for (k = 0; k < NMARK; k++) {
             if (s->p[k].n < 1.0) continue;
-            printf("%-12s  %5d   %6.4f +- %6.4f   ",
+            printf("%-14s  %5d   %6.4f +- %6.4f   %6.4f +- %6.4f   ",
                    first ? methods[use[i]].name : "",
-                   marks[k], acc_mean(&s->p[k]), acc_ci(&s->p[k]));
+                   marks[k], acc_mean(&s->p[k]), acc_ci(&s->p[k]),
+                   acc_mean(&s->band[k]), acc_ci(&s->band[k]));
             if (s->thr[k].n >= 1.0)
                 printf("%7.2f +- %6.2f", acc_mean(&s->thr[k]), acc_ci(&s->thr[k]));
             else
@@ -820,11 +867,11 @@ static void print_diag(const mstat* st, const int* use, int n_use) {
     int i, b;
     printf("\ndiagnostics (per run: 0.75 columns with no crossing out of %d, "
            "log marginal, bounds)\n", NGRID);
-    printf("method        runs  numeric  multi  nocross   logmarg   bounds hit\n");
+    printf("method          runs  numeric  multi  nocross   logmarg   bounds hit\n");
     for (i = 0; i < n_use; i++) {
         const mstat* s = &st[use[i]];
         if (!s->runs) continue;
-        printf("%-12s  %4d  %7d  %5d  %7.2f", methods[use[i]].name, s->runs,
+        printf("%-14s  %4d  %7d  %5d  %7.2f", methods[use[i]].name, s->runs,
                s->numeric, s->multi_cross, acc_mean(&s->miss));
         if (s->logmarg.n >= 1.0) printf("  %8.1f  ", acc_mean(&s->logmarg));
         else printf("         -  ");
@@ -931,7 +978,13 @@ int main(int argc, char** argv) {
         cfg.fit_every = (int)strtol(argv[6], NULL, 10);
         if (cfg.fit_every < 0) { usage(); return 2; }
     }
-    if (n_use == 0) for (i = 0; i < NMETHOD; i++) use[n_use++] = i;
+    /* Every method, except that the CI configuration leaves out semip2-eavc:
+     * at about 20 ms a trial it is 6 of the 20 seconds CI allows on its own. */
+    if (n_use == 0)
+        for (i = 0; i < NMETHOD; i++) {
+            if (argc == 1 && !strcmp(methods[i].name, "semip2-eavc")) continue;
+            use[n_use++] = i;
+        }
     if (pheno < 0) { pheno = 0; n_pheno = NPHENO; }
     if (csv_path) {
         cfg.csv = fopen(csv_path, "w");
@@ -940,7 +993,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         fprintf(cfg.csv, "phenotype,beta,method,rep,trial,mae_p,mae_thr_db,"
-                         "nocross_cols,ms_per_trial\n");
+                         "nocross_cols,ms_per_trial,mae_band\n");
     }
 
     printf("gp_audiometric: Owen et al. 2021 (arXiv:2104.09549) audiometric "
@@ -987,6 +1040,8 @@ int main(int argc, char** argv) {
                     a->p[k].s2 += s->p[k].s2;
                     a->thr[k].n += s->thr[k].n; a->thr[k].s += s->thr[k].s;
                     a->thr[k].s2 += s->thr[k].s2;
+                    a->band[k].n += s->band[k].n; a->band[k].s += s->band[k].s;
+                    a->band[k].s2 += s->band[k].s2;
                 }
                 a->ms.n += s->ms.n; a->ms.s += s->ms.s; a->ms.s2 += s->ms.s2;
                 a->miss.n += s->miss.n; a->miss.s += s->miss.s;

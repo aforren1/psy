@@ -117,6 +117,12 @@ class Field:
     def p(self, xc, xi):
         return ndtr((np.asarray(xi) - self.theta(xc)) / self.beta)
 
+    def band_mae(self, model_p):
+        """MAE of p over the transition band, the cells with true p in
+        0.05..0.95, where a stationary kernel's width shows."""
+        band = (self.truth_p >= 0.05) & (self.truth_p <= 0.95)
+        return float(np.mean(np.abs(np.asarray(model_p).reshape(NGRID, NGRID) - self.truth_p)[band]))
+
     def score(self, model_p):
         """(MAE of p, MAE of the 0.75 threshold in dB, columns not scored)."""
         model_p = np.asarray(model_p).reshape(NGRID, NGRID)
@@ -194,7 +200,7 @@ def run_psy(method, rep, args):
     g = pg.GP(lo=list(LO), hi=list(HI), intensity_dim=1, kernel=pg.KERNEL_RBF,
               acq=method, target_p=TARGET_P, grid=list(args.grid), n_init=N_INIT,
               fit=True, fit_every=args.fit_every, stop_trials=args.trials,
-              max_trials=args.trials, refine_steps=args.refine)
+              max_trials=args.trials, refine_steps=args.refine, model=args.model)
     rows, spent, numeric = [], 0.0, 0
     for t in range(args.trials):
         t0 = time.perf_counter()
@@ -211,7 +217,7 @@ def run_psy(method, rep, args):
         n = t + 1
         if n % args.every == 0 or n in MARKS:
             mp = np.frombuffer(g.predict_p_many(field.xs))
-            rows.append((n,) + field.score(mp) + (1000.0 * spent / n,))
+            rows.append((n,) + field.score(mp) + (1000.0 * spent / n, field.band_mae(mp)))
     extra = {"log_marginal": g.log_marginal, "numeric": numeric,
              "hyper": g.hyper()}
     return rows, extra
@@ -279,7 +285,8 @@ def run_aepsych(method, rep, args):
             strat._strat._model_is_fresh = True
             spent += time.perf_counter() - t0
             mp, _ = strat.model.predict(grid, probability_space=True)
-            rows.append((n,) + field.score(mp.detach().numpy()) + (1000.0 * spent / n,))
+            mp = mp.detach().numpy()
+            rows.append((n,) + field.score(mp) + (1000.0 * spent / n, field.band_mae(mp)))
     return rows, {"init_match": init_match}
 
 
@@ -539,6 +546,9 @@ def main():
     ap.add_argument("--fit-every", type=int, default=20, dest="fit_every")
     ap.add_argument("--refine", type=int, default=0,
                     help="psy.gp refine_steps: golden-section rounds off the grid (0 = off)")
+    ap.add_argument("--model", default="gp", choices=("gp", "psychometric"),
+                    help="psy.gp desc.model: one GP over the box, or the threshold "
+                         "and log-slope GPs over frequency (psy_gp.h >= 0.3.0)")
     ap.add_argument("--grid", default="11x21", type=parse_grid,
                     help="psy.gp candidate grid, frequency x intensity (default 11x21, M = 231)")
     ap.add_argument("--pheno", default="metabolic", choices=sorted(PHENO))
@@ -587,7 +597,8 @@ def main():
     print(f"observer: {args.pheno}, beta = {args.beta} dB; {args.trials} trials "
           f"({N_INIT} Sobol from {init_src}, shared); target p = {TARGET_P}")
     print(f"psy.gp candidates: {args.grid[0]} x {args.grid[1]} grid "
-          f"(M = {args.grid[0] * args.grid[1]}), refine_steps {args.refine}; "
+          f"(M = {args.grid[0] * args.grid[1]}), refine_steps {args.refine}, "
+          f"model {args.model}; "
           f"hyperparameters fitted every "
           f"{args.fit_every} trials")
     print(f"{args.reps} replications x {len(methods)} methods x {libs}; "
@@ -615,14 +626,14 @@ def main():
 
     if args.csv:
         with open(args.csv, "w") as fh:
-            fh.write("lib,method,rep,trial,mae_p,mae_thr_db,nocross_cols,ms_per_trial\n")
+            fh.write("lib,method,rep,trial,mae_p,mae_thr_db,nocross_cols,ms_per_trial,band_mae_p\n")
             for (lib, m, r), (rows, _, _) in sorted(results.items()):
                 for row in rows:
-                    fh.write(f"{lib},{m},{r},{row[0]},{row[1]:.6f},{row[2]:.4f},{row[3]},{row[4]:.3f}\n")
+                    fh.write(f"{lib},{m},{r},{row[0]},{row[1]:.6f},{row[2]:.4f},{row[3]},{row[4]:.3f},{row[5]:.6f}\n")
 
     print(f"\n== {args.pheno}, beta = {args.beta}, {args.reps} replications; "
           f"mean +- 1.96 sd / sqrt(n) over replications ==")
-    print("method lib      trial   MAE(p)              MAE(thr, dB)       nocross  ms/trial")
+    print("method lib      trial   MAE(p)              band MAE(p)         MAE(thr, dB)       nocross  ms/trial")
     for m in methods:
         for lib in libs:
             first = True
@@ -637,8 +648,9 @@ def main():
                 t, tc, nt = mean_ci([v[2] for v in vals])
                 miss = np.mean([v[3] for v in vals])
                 ms = np.mean([v[4] for v in vals])
+                b, bc, _ = mean_ci([v[5] for v in vals])
                 print(f"{m if first else '':6s} {lib if first else '':8s} {mark:5d}   "
-                      f"{p:.4f} +- {pc:.4f}   {t:6.2f} +- {tc:5.2f}"
+                      f"{p:.4f} +- {pc:.4f}   {b:.4f} +- {bc:.4f}   {t:6.2f} +- {tc:5.2f}"
                       f"{'' if nt == n else f' (n={nt})':8s} {miss:5.2f}   {ms:8.2f}")
                 first = False
         print()
@@ -666,6 +678,17 @@ def main():
                   f"intensity {ls[:, 1].mean():.2f} [{ls[:, 1].min():.2f}, "
                   f"{ls[:, 1].max():.2f}] dB, outputscale {os_.mean():.3f} "
                   f"[{os_.min():.3f}, {os_.max():.3f}], mean {mn.mean():.3f}")
+            if args.model == "psychometric":
+                # Under this model the fields above are the threshold GP's
+                # (intensity lengthscale unused); the log-slope GP is the _g set.
+                lg = np.array([h["lengthscale_g"][0] for h in hs])
+                og = np.array([h["outputscale_g"] for h in hs])
+                mg = np.array([h["mean_g"] for h in hs])
+                print(f"psy.gp {m}: log-slope GP lengthscale_g freq {lg.mean():.3f} "
+                      f"[{lg.min():.3f}, {lg.max():.3f}] log2 kHz, outputscale_g "
+                      f"{og.mean():.3f} [{og.min():.3f}, {og.max():.3f}], mean_g "
+                      f"{mg.mean():.3f} [{mg.min():.3f}, {mg.max():.3f}] "
+                      f"(slope exp(mean_g) = {np.exp(mg.mean()):.3f} per dB)")
     if "aepsych" in libs:
         bad = [k for k in results if k[0] == "aepsych" and results[k][1]
                and not results[k][1].get("init_match", True)]

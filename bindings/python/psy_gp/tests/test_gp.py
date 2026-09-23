@@ -443,3 +443,53 @@ def test_refine_steps():
     # The refined proposals leave the 9-point grid (0.125 apart).
     assert off_grid > 0
     assert any(abs(h["x"][0] * 8 - round(h["x"][0] * 8)) > 1e-9 for h in g.history())
+
+
+def test_psychometric_model():
+    # The header rejects what the model cannot carry, at open.
+    base = dict(lo=[0.0, 0.0], hi=[1.0, 1.0], intensity_dim=1, target_p=0.75,
+                stop_trials=60, model="psychometric")
+    for bad in (dict(kernel="semip"), dict(lik="categorical", n_outcomes=3),
+                dict(lik="gaussian")):
+        with pytest.raises(pg.Error):
+            pg.GP(**dict(base, **bad))
+    # The look-ahead acquisitions are accepted since psy_gp.h 0.4.0.
+    for ok in ("eavc", "localmi"):
+        la = pg.GP(**dict(base, acq=ok, grid=[5, 9], n_init=4, stop_trials=8))
+        uu = random.Random(3)
+        while not la.done:
+            _, x = la.next()
+            p = phi(8.0 * (x[1] - 0.5))
+            la.update(x, pg.simulate_outcome([1 - p, p], uu.random()))
+        assert la.n_trials == 8
+    assert pg.MODEL_PSYCHOMETRIC != pg.MODEL_GP
+
+    u = random.Random(21)
+    g = pg.GP(grid=[9, 17], n_init=8, fit=True, fit_every=20, acq="lse",
+              **dict(base, model=pg.MODEL_PSYCHOMETRIC, stop_trials=100))
+    while not g.done:
+        _, x = g.next()
+        p = phi(8.0 * (x[1] - (0.3 + 0.3 * x[0])))
+        g.update(x, pg.simulate_outcome([1 - p, p], u.random()))
+    h = g.hyper()
+    assert {"lengthscale_g", "outputscale_g", "mean_g"} <= set(h)
+    assert len(h["lengthscale_g"]) == 2 and h["outputscale_g"] > 0.0
+
+    z75 = 0.67448975019608171
+    errs = []
+    for ctx in (0.2, 0.5, 0.8):
+        thr, lo, hi = g.threshold([ctx])
+        # m and log-slope g at this context: k = 0 and k = 1; intensity ignored
+        mm, sm = g.predict_f([ctx, 0.5], k=0)
+        mg, sg = g.predict_f([ctx, 0.5], k=1)
+        # E[m + f_t exp(-g)] for (m, g) jointly Gaussian needs no covariance
+        closed = mm + z75 * math.exp(-mg + sg * sg / 2.0)
+        assert abs(thr - closed) < 1e-9 * max(1.0, abs(closed))
+        assert lo <= thr <= hi
+        if 0.0 < lo and hi < 1.0:          # unclamped: E -+ 1.96 sd
+            assert abs((thr - lo) - (hi - thr)) < 1e-9
+        errs.append(abs(thr - (0.3 + 0.3 * ctx + z75 / 8.0)))
+    # One stream: a mean over three contexts at 100 trials, with the 1-D
+    # test's tolerance, rather than a per-context bound one seed can break.
+    assert sum(errs) / len(errs) < 0.08
+    assert not g.threshold_multi_cross

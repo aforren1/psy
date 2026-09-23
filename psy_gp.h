@@ -1,4 +1,4 @@
-/* psy_gp.h - v0.2.1 - public domain single-header Gaussian-process adaptive library
+/* psy_gp.h - v0.4.0 - public domain single-header Gaussian-process adaptive library
  *
  *   Nonparametric and semiparametric Bayesian adaptive psychophysics: a
  *   Gaussian-process model over a multidimensional stimulus space with
@@ -22,6 +22,26 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.4.0 - three changes to PSYGP_MODEL_PSYCHOMETRIC. Its hyperparameter
+ *          gradient is analytic (one conjugate-gradient adjoint solve through
+ *          the true Hessian, preconditioned by the Gauss-Newton posterior),
+ *          which cuts the cost of a fit about five times. It supports EAVC and
+ *          LOCALMI, through a rank-one look-ahead in the collapsed system. And
+ *          the log-slope GP's output-scale prior is centered at 0.3 rather than
+ *          1, which removes a 7 to 12 dB tail on the audiometric sensory
+ *          phenotype. The last one changes what the model computes by default;
+ *          nothing changes under PSYGP_MODEL_GP. No public struct changed.
+ *   v0.3.0 - desc.model and PSYGP_MODEL_PSYCHOMETRIC: Keeley et al. 2023's
+ *          semiparametric model in its own form, a threshold GP and a
+ *          log-slope GP over the context feeding a probit or logit in the
+ *          intensity, for the observer whose psychometric rise is narrow
+ *          against the box (see MODEL, and STATUS for what it measured).
+ *          psygp_hyper gains lengthscale_g, outputscale_g and mean_g, and
+ *          psygp_desc gains model; both at the end of their structs, so every
+ *          earlier field keeps its offset, but both structs are larger and a
+ *          binding that mirrors them must add the fields. The default model
+ *          is PSYGP_MODEL_GP, and with it nothing computes differently from
+ *          v0.2.1; PSYGP_KERNEL_SEMIP is unchanged.
  *   v0.2.1 - version macros (PSYGP_VERSION_MAJOR / MINOR / PATCH / STRING)
  *          and psygp_version(), so a program can log which header it was
  *          built from and a binding can read its version from the header;
@@ -65,7 +85,7 @@
  *          gradient under CATEGORICAL is central differences, not analytic.
  *   v0.0 - specification. Declarations and the manual, no implementation.
  *
- *   STATUS: v0.2.1. Implemented and checked by tests/adapt/psy_gp_test.c,
+ *   STATUS: v0.4.0. Implemented and checked by tests/adapt/psy_gp_test.c,
  *   which builds and passes as C11, C99 and C++17 under gcc with -Wall
  *   -Wextra -Wpedantic -Wshadow -Werror, with and without PSYGP_ASYNC, as
  *   MSVC's default C dialect with /W4 /WX both ways, and is clean under
@@ -164,6 +184,68 @@
  *   up as a log marginal far closer to zero than the responses allow;
  *   HYPERPARAMETERS says how that looks and what else to do about it.
  *
+ *   PSYGP_MODEL_PSYCHOMETRIC is checked by the same test, under both links:
+ *   the 2N-latent mode satisfies z - mean = K grad log p(y | z) to 4e-8 of
+ *   the latent (the Newton tolerance is 1e-8); the predictive mean and
+ *   covariance of (m, g) agree with a dense (K2^-1 + W2)^-1 over all 2N
+ *   latents to 2e-10 and 2e-9; the Laplace log marginal likelihood agrees
+ *   with a dense evaluation through log|K2| + log|K2^-1 + W2| to 1e-8; the
+ *   quadrature is checked as MODEL says; the closed-form threshold agrees with
+ *   a 40-node quadrature of the crossing to 3e-12; the analytic
+ *   hyperparameter gradient agrees with central differences to 2e-8 to 2e-6
+ *   over all six hyperparameters under probit and logit, with guess 0.5 and
+ *   lapse 0.02, and over all eight with four ordinal outcomes (the mode
+ *   converged to 1e-13 for that check, so the differences resolve it); the
+ *   look-ahead's cross-covariance between two contexts agrees with the dense
+ *   2N posterior to 3e-10, and its rank-one update with a dense update of the
+ *   two contexts' joint 4 x 4 covariance to 2e-9; LOCALMI's candidate score
+ *   equals its point score to the last bit; ordinal and two-interval sessions
+ *   run clean; and on a 2-D observer with a curved threshold and a 7 dB rise
+ *   the model's EAVC and LOCALMI find the threshold to 0.7 and 1.0 dB in 80
+ *   trials.
+ *   On examples/gp_audiometric.c, 20 replications, trial 150: field MAE(p) /
+ *   band MAE(p) / threshold error in dB, the worst replication's threshold
+ *   error, and ms per trial with fits every 20 trials:
+ *
+ *                      metabolic, beta 2              metabolic, beta 0.5
+ *     RBF LSE       .077 .213 1.98 +- .32 3.9  3   .083 .298 2.49 +- .32 4.9  3
+ *     RBF EAVC      .058 .204 1.98 +- .16 2.9  7   .056 .285 2.28 +- .15 2.7  7
+ *     semip2-lse    .013 .160 1.41 +- .12 2.0  9   .013 .302 1.54 +- .05 1.8  9
+ *     semip2-balv   .011 .153 1.28 +- .16 2.2 10   .011 .316 1.41 +- .08 1.9  8
+ *     semip2-bald   .008 .129 1.08 +- .09 1.7 11   .011 .316 1.42 +- .09 2.0 10
+ *     semip2-eavc   .011 .140 1.18 +- .11 2.0 24   .011 .264 1.25 +- .23 3.1 29
+ *     semip2-lmi    .011 .152 1.25 +- .07 1.6 11   .012 .321 1.44 +- .07 1.8 10
+ *     staircase     .017 .267 2.60 +- .22 3.5      .014 .322 2.06 +- .17 3.0
+ *
+ *                      sensory, beta 2                sensory, beta 0.5
+ *     RBF LSE       .092 .249 1.77 +- .19 3.1  3   .092 .276 2.82 +- .21 3.2  3
+ *     RBF EAVC      .069 .216 2.14 +- .16 2.9  7   .078 .200 2.33 +- .20 3.2  7
+ *     semip2-lse    .016 .193 1.89 +- .20 2.8 11   .033 .230 2.89 +- .33 3.6  9
+ *     semip2-balv   .009 .156 1.16 +- .22 2.1  8   .030 .287 3.23 +- .82 5.9  7
+ *     semip2-bald   .007 .126 0.93 +- .14 1.6 11   .026 .295 3.18 +- .80 5.5 10
+ *     semip2-eavc   .009 .149 1.18 +- .22 2.6 25   .022 .204 1.98 +- .50 4.3 26
+ *     semip2-lmi    .013 .168 1.44 +- .20 2.2 12   .021 .240 2.05 +- .31 3.3 11
+ *     staircase     .018 .277 2.49 +- .31 3.5      .014 .539 1.90 +- .09 2.4
+ *
+ *   On three of the four cells every semip2 method beats the RBF GP and the
+ *   staircase (which is given the psychometric width) on threshold: BALD
+ *   0.93 to 1.42 dB, EAVC 1.18 to 1.25, against 2.06 to 2.60 for the
+ *   staircase and 1.77 to 2.49 for the RBF GP. The worst replication is 3.1
+ *   dB or less there, and 5.9 dB over all four cells, where v0.3.0's was
+ *   11.6. Sensory at beta 0.5, a 27 dB climb in two octaves with a 2.6 dB
+ *   rise, is the hard cell: there EAVC (1.98 dB) and LOCALMI (2.05) match
+ *   the staircase (1.90) and beat both RBF methods, and the per-point
+ *   acquisitions do not (2.9 to 3.2). The field error is 3 to 10 times
+ *   smaller than the RBF GP's everywhere and already 0.04 to 0.12 at trial
+ *   25, against 0.22 to 0.28. The band error is under the RBF GP's at
+ *   beta 2 (0.13 to 0.19 against 0.20 to 0.25); at beta 0.5 the band is about
+ *   one grid point per column and measures the threshold's location, not the
+ *   model's shape, and the staircase given the true width scores 0.32 and
+ *   0.54 there. The cost is 8 to 11 ms a trial for the per-point
+ *   acquisitions and about 25 for EAVC, against 3 and 7 for the RBF GP.
+ *   BALD is the best of the per-point acquisitions on this model and EAVC
+ *   the most robust overall.
+ *
  *   The async layer of v0.2 is checked by the same test, in a PSYGP_ASYNC
  *   block: a 60-trial session driven through psygp_async_submit() reproduces
  *   the synchronous session bit for bit (memcmp of the history and of the
@@ -193,7 +275,12 @@
  *
  *   The float build of PSYGP_REAL passes the same test with the tolerances
  *   PRECISION lists, measured rather than assumed, with PSYGP_LIK_GAUSSIAN
- *   rejected at open and its checks skipped.
+ *   rejected at open and its checks skipped. That includes the psychometric
+ *   model, whose float mode PRECISION describes, and whose analytic gradient
+ *   the float test can check against differences only to 7e-2, since a float
+ *   objective is too rough for differences to resolve more; on the 7 dB
+ *   observer the float build's threshold error is 0.98 dB against the double
+ *   build's 1.12, band error 0.143 against 0.141, same streams.
  *
  *   NOT verified: nothing is compared against AEPsych yet, so the
  *   agreement claim of docs/psy_adapt.md is still a plan, and the Laplace
@@ -328,6 +415,108 @@
  *     rather than 8 and 10 for a hundred-trial run), or fixing hyper.mean so
  *     the fit cannot go there.
  *
+ *   THE PSYCHOMETRIC MODEL (desc.model = PSYGP_MODEL_PSYCHOMETRIC)
+ *     Keeley et al. 2023's semiparametric model in its own form, rather than
+ *     as the kernel PSYGP_KERNEL_SEMIP approximates it with. Two latent GPs
+ *     over the context c (every dimension but intensity_dim): m(c), the
+ *     threshold, in intensity units, and g(c), the log of the slope. At a
+ *     stimulus (c, x) the latent is
+ *
+ *       f(c, x) = exp(g(c)) (x - m(c)),     p = link(f)
+ *
+ *     with the floor and ceiling above, or the ordinal cutpoints on f. Every
+ *     slice along the intensity is a psychometric function, increasing by
+ *     construction, whose location and steepness vary smoothly with the
+ *     context. That is the shape a stationary kernel over the whole box
+ *     cannot hold: the RBF latent needs one lengthscale for all of the
+ *     intensity axis, so a rise of 7 dB in a 140 dB box comes out tens of dB
+ *     wide, and on the audiometric observer the field error inside the
+ *     transition band (true p between 0.05 and 0.95) is 0.22 for the RBF GP
+ *     and for AEPsych alike. The numbers this model gets are under STATUS.
+ *     Priors: m has an RBF-ARD kernel over c with mean hyper.mean (default
+ *     the middle of the intensity axis) and output scale hyper.outputscale
+ *     (default (span / 4)^2, span the intensity axis's length, i.e. a prior
+ *     sd of a quarter of the axis); g has an RBF-ARD kernel with
+ *     hyper.lengthscale_g, output scale hyper.outputscale_g (default 0.3) and
+ *     mean hyper.mean_g (default log(4 / span): a rise whose probit sd is a
+ *     quarter of the axis). With n_dims = 1 there is no context and each GP
+ *     is one Gaussian variable, which makes the model a Bayesian parametric
+ *     psychometric function.
+ *     Inference is Laplace over the 2N latents (m_i, g_i), one pair per
+ *     trial, with the prior block-diagonal in (K_m, K_g). The exact Hessian
+ *     of log p(y | m, g) is indefinite at every trial with a nonzero residual
+ *     (its second-derivative-of-f term has determinant -b^2 l'^2), so the
+ *     step uses the Gauss-Newton part J' (-l'') J, J = (-b, f) the gradient
+ *     of f, with -l'' clamped at zero as under a floor. That W is positive
+ *     semidefinite and rank one per trial, W = U U' with U 2N x N, so every
+ *     2N x 2N system collapses to N x N through B = I + U' K U: one Cholesky
+ *     per step, the same size as the GP model's. The mode is exact (the
+ *     iteration's fixed point is the stationary point of the log posterior)
+ *     and W is the curvature the Gaussian takes, which is also what makes the
+ *     step converge linearly rather than quadratically: about 10 steps from a
+ *     warm start where the GP model takes 2 to 4, to a step of 1e-8 relative.
+ *     Exact Newton steps near the mode were tried and measured, solved by
+ *     conjugate gradients with the Gauss-Newton posterior as preconditioner:
+ *     they halve the steps and the factorizations, but the dropped term is
+ *     large enough that the preconditioned solve takes about 10 iterations,
+ *     which at N of 50 to 150 costs what the saved factorizations did, and
+ *     the whole session came out 1.7 times slower. Gauss-Newton stays.
+ *     Prediction at a context is a bivariate Gaussian over (m, g). The
+ *     target quantity at an intensity is its expectation over that: m given
+ *     g is Gaussian and f is linear in m, so the m integral is the one-latent
+ *     machinery (closed form for the probit Bernoulli case) and only g takes
+ *     quadrature, PSYGP_QUAD_N = 20 Gauss-Hermite nodes. The test measures
+ *     that rule against 60 nodes and against a brute-force rule in both
+ *     coordinates: E[q] under the probit agrees to 3e-8 and 2e-8; Var[q],
+ *     and under the logit E[q] as well, to about 1e-4, which is the accuracy
+ *     of the one-latent 20-node rule in f when the latent sd is several
+ *     units and so is the GP model's too.
+ *     The threshold at a context is the crossing m + f_t exp(-g), f_t the
+ *     latent level of the target, and with (m, g) bivariate Gaussian its
+ *     mean and variance are closed form (see ESTIMATES): no scan, no
+ *     bisection, and never more than one crossing.
+ *     Acquisitions: all six. LSE, BALV and BALD are per point, each computed
+ *     by the same quadrature. LSE is the straddle on the probability scale,
+ *     beta sd[q] - |E[q] - target_p|, since this latent is not Gaussian and
+ *     has no one sd to straddle with. The look-ahead acquisitions work on the
+ *     level-set indicator [p > target] = [m + f_t exp(-g) < x], whose
+ *     probability is one Gaussian CDF per node of the g quadrature. With W
+ *     frozen at the candidate's predictive mean, one more trial there is a
+ *     Gauss-Newton site w J J' on that context's (m, g), so it updates every
+ *     context's (m, g) posterior by RANK ONE, through
+ *     v = Cov((m, g), f*) = Sigma_ij J, and the cross-covariance Sigma_ij
+ *     comes from the same L^-1 U' k columns the prediction computes. LOCALMI
+ *     is the self-update of the candidate's own context; EAVC is the expected
+ *     absolute change in sum_i P(level_i) over the candidates. EAVC keeps
+ *     2 M x N of those columns, and a candidate sharing a context with the
+ *     one before it shares its update, so on a grid with the intensity
+ *     fastest the M^2 pairs cost one context's dot products per column plus
+ *     M^2 x outcomes x about 14 Gaussian CDFs (the outer nodes whose weight
+ *     is above 1e-12); about 20 ms a trial on the audiometric grid, M = 231.
+ *     Under refinement EAVC's point objective is the straddle, as under the
+ *     GP model, and LOCALMI is its own.
+ *     The hyperparameter gradient is analytic. The explicit terms are the GP
+ *     model's with U' dK U inside the trace; the implicit term, through the
+ *     mode, needs the TRUE negative Hessian A = K^-1 + W_true, and one adjoint
+ *     solve A lambda = d(-1/2 log|B|)/dz serves every hyperparameter. A is
+ *     symmetric and positive definite at a maximum, so the solve is
+ *     conjugate gradients preconditioned by the Gauss-Newton posterior
+ *     K - K U B^-1 U' K, which needs only the factor already in hand, and
+ *     K^-1 of each iterate falls out of the same arithmetic, so no
+ *     factorization of K and none of a 2N matrix; about 10 iterations of
+ *     O(N^2). A breakdown (A not positive definite, so no strict maximum)
+ *     falls back to central differences for that one evaluation. Checked
+ *     against differences to 1e-6 or better (STATUS). Measured on the
+ *     audiometric benchmark with fits every 20 trials, a whole session costs
+ *     6 to 9 ms a trial against 3 to 4 ms without fits, so the fits cost 2.7
+ *     to 5.7 ms a trial (the difference gradient cost 16 to 20), against 1.2
+ *     for the RBF GP: the gap left is the linearly converging mode search,
+ *     which every fit evaluation repeats.
+ *     desc.refit_every is ignored (every update is an exact refit).
+ *     Rejected at open: CATEGORICAL and GAUSSIAN (no psychometric function
+ *     of the intensity to write) and PSYGP_KERNEL_SEMIP (the model has its
+ *     own GPs).
+ *
  *   The header keeps a Gaussian
  *   approximation to the posterior of f given the trials so far, and the
  *   acquisition function picks the next stimulus from a candidate set to
@@ -406,9 +595,13 @@
  *                         kernel's is not, and a run with too few trials at
  *                         one context can put a negative slope there. The
  *                         HYPERPARAMETERS and ESTIMATES sections say how
- *                         to see it. A positive-slope variant is in the
- *                         plan. Under CATEGORICAL each latent gets its own
- *                         a and b.
+ *                         to see it. PSYGP_MODEL_PSYCHOMETRIC (MODEL) is
+ *                         the positive-slope form, with the threshold as a
+ *                         GP of its own, so no intercept has to carry the
+ *                         threshold's distance from the box middle. This
+ *                         kernel is kept as it was, for reproducibility.
+ *                         Under CATEGORICAL each latent gets its own a and
+ *                         b.
  *     Monotonicity along the intensity dimension is not enforced by either
  *     kernel (AEPsych's monotonic projection is not here). The threshold
  *     search treats the posterior mean as monotonic and reports where it
@@ -417,7 +610,12 @@
  *   HYPERPARAMETERS (desc.hyper, desc.fit)
  *     lengthscale[d], outputscale and mean for RBF; a second lengthscale
  *     set and outputscale for the slope GP under SEMIP; cutpoint[k] under
- *     ORDINAL; noise_sd under GAUSSIAN. A NONZERO field is fixed at that
+ *     ORDINAL; noise_sd under GAUSSIAN. Under PSYGP_MODEL_PSYCHOMETRIC,
+ *     lengthscale, outputscale and mean are the threshold GP m's (the output
+ *     scale in squared intensity units, the mean in intensity units) and
+ *     lengthscale_g, outputscale_g and mean_g the log-slope GP g's; MODEL has
+ *     their defaults, and lengthscale[intensity_dim] is unused.
+ *     A NONZERO field is fixed at that
  *     value. A zero field takes a default and is the set psygp_fit() fits:
  *     lengthscale (hi - lo) / 4, outputscale 1, mean 0, cutpoints 0, 1, 2,
  *     ... (c_1 is pinned to 0 while they are fitted, so the mean stays
@@ -456,6 +654,55 @@
  *     log-normal on every lengthscale, centered on the default (hi - lo) / 4
  *     with an sd of 1 in logarithms, and log-normal on the output scales,
  *     centered at 1 with an sd of 0.7. Nothing on the mean or the cutpoints.
+ *     Under PSYGP_MODEL_PSYCHOMETRIC the threshold GP's output-scale prior is
+ *     centered on its default, (span / 4)^2, and the mean log-slope mean_g has
+ *     a normal prior of its own, centered on its default log(4 / span) with an
+ *     sd of 1. That one is not optional in practice: separable early
+ *     responses favor an infinitely steep psychometric function exactly as
+ *     they favor an infinite output scale, and a step is worse than useless
+ *     to this model, because every trial then sits in the flat tail of the
+ *     link, adds no curvature, and leaves the Laplace posterior of the
+ *     threshold where it was, so a level-set acquisition asks the same
+ *     question forever. Without it, on a 2-D observer with a 7 dB rise over
+ *     a 100 dB axis, mean_g ran to its ceiling at trial 5 and the log
+ *     marginal likelihood to 0.00; with an sd of 1.5 two LSE runs in five
+ *     still ran away (threshold error 3.3 dB on average); with 1.0 or 0.5 none
+ *     did (0.9 and 1.1 dB under LSE, 1.5 and 0.8 under BALV, five streams
+ *     each), and 1.0 leaves the data more room to move the slope. mean_g is
+ *     bounded to [log(0.25 / span), log(256 / span)] and mean to the
+ *     intensity axis.
+ *     The log-slope GP's output-scale prior is centered at 0.3, not 1 (sd 0.7
+ *     in the logarithm, as for the others, default 0.3, lower bound 0.01).
+ *     In psychophysics a slope varies across a context by tens of percent,
+ *     not by factors of four, and a slope GP free to vary that much has a way
+ *     out that the threshold GP does not: where the threshold climbs fast,
+ *     it can flatten the rise instead of following the climb, and the 75%
+ *     point then lands tens of dB off. That was the 7 to 12 dB tail on the
+ *     audiometric sensory phenotype. Measured with examples/gp_audiometric.c,
+ *     20 replications, trial 150, threshold error in dB (worst replication)
+ *     and band MAE(p), for the center at 1, 0.5 and 0.3:
+ *
+ *                          1                  0.5                0.3
+ *     sensory 2   lse   3.10 (7.7) .244   1.87 (3.8) .198   1.83 (2.8) .189
+ *                 balv  2.05 (11.6) .174  2.81 (26.4) .186  1.11 (2.6) .152
+ *     sensory .5  lse   3.39 (3.6) .323   3.11 (3.9) .230   2.76 (3.4) .289
+ *                 balv  2.03 (2.7) .260   2.15 (3.0) .250   3.26 (5.6) .292
+ *     metabolic 2 lse   1.40 (2.1) .159   1.55 (2.9) .172   1.42 (2.0) .160
+ *                 balv  1.58 (3.1) .180   1.29 (1.9) .148   1.31 (2.1) .154
+ *     metabolic .5 lse  1.88 (3.1) .300   1.51 (1.8) .292   1.55 (1.8) .302
+ *                 balv  1.39 (1.7) .316   1.36 (1.7) .326   1.42 (2.0) .318
+ *
+ *     The threshold GP's lengthscale ended over 3 octaves in 0 to 5 runs of 20
+ *     on sensory at every center and in 17 to 20 of 20 on metabolic.
+ *     So 0.3 removes the tail (worst replication 5.6 dB, from 11.6) and costs
+ *     metabolic nothing outside its interval; it is also better on the 2-D
+ *     observer of the test (LSE 0.98 to 0.72 dB, BALV 1.07 to 0.75, 20
+ *     streams) and within noise on the 1-D observers. The cost is sensory at
+ *     beta 0.5 under BALV, 2.03 to 3.26 dB. 0.5 is worse than either: its
+ *     one bad replication is 26 dB. The lengthscale count shows that a long
+ *     threshold lengthscale is NOT the mechanism, contrary to a diagnosis
+ *     from one dumped replication: it is the rule on metabolic, whose
+ *     threshold really is smooth, and rare on sensory at every center.
  *     They are what stops the fit from interpolating its own trials. Type-II
  *     maximum likelihood on a run whose responses nearly separate keeps
  *     improving as the output scale grows and the lengthscale shrinks, so it
@@ -527,7 +774,8 @@
  *     data want an output scale of 6 to 7 by trial 150 and the box will not
  *     let them. Late accuracy is the tie-breaker, and it splits between the
  *     two observers, so it does not justify a change: the default stays
- *     centered at 1, where the rest of the manual's numbers were measured. A session that cares more about its early
+ *     centered at 1, where the rest of the manual's numbers were measured.
+ *     A session that cares more about its early
  *     estimate can have the box's behavior by fixing desc.hyper.outputscale
  *     at 4. Bounds of [1, 4] on the fitted scale do not do it: the log-normal
  *     keeps the fit on the lower edge early (1.3 at trial 25, measured) and
@@ -782,7 +1030,11 @@
  *
  *   ESTIMATES
  *     psygp_predict_f(g, x, k, &mu, &sd)  latent k's mean and sd at x
- *                                         (k = 0 except CATEGORICAL)
+ *                                         (k = 0 except CATEGORICAL). Under
+ *                                         PSYGP_MODEL_PSYCHOMETRIC, k = 0 is
+ *                                         the threshold m and k = 1 the log
+ *                                         slope g at x's context, and the
+ *                                         intensity of x is ignored.
  *     psygp_predict_p(g, x)               the target quantity at x:
  *                                         E[P(y = 1)], E[P(y >= k*)] or
  *                                         E[P(y = k*)]; E[y] under
@@ -832,6 +1084,18 @@
  *       before it bisects, at the candidate spacing (the grid count along
  *       that dimension, or M^(1/n_dims) clamped to 9..65 points), which is
  *       what lets it see a second crossing rather than bisect it away.
+ *       Under PSYGP_MODEL_PSYCHOMETRIC none of that: the threshold is the
+ *       posterior mean of the crossing m + f_t exp(-g), f_t the latent level
+ *       of the target (link^-1 of the target with the floor and ceiling taken
+ *       off), which with (m, g) bivariate Gaussian is closed form,
+ *         E = mm + f_t exp(-mg + vg / 2),
+ *         Var = vm + f_t^2 (exp(-2 mg + 2 vg) - exp(-2 mg + vg))
+ *               - 2 f_t cmg exp(-mg + vg / 2),
+ *       and lo and hi are E -+ 1.96 sqrt(Var), clamped to the box. It is not
+ *       where psygp_predict_p() crosses the target, which averages p over
+ *       the posterior first; the two differ by the posterior's skew and agree
+ *       as it narrows. PSYGP_ERR_NOCROSS when E falls outside the box, and
+ *       psygp_threshold_multi_cross() is always false.
  *     psygp_get_hyper(g, out) and psygp_log_marginal(g) for the fit.
  *
  *   STOPPING (desc.stop_trials, desc.stop_threshold_sd)
@@ -885,7 +1149,11 @@
  *   more N*N*8 under CATEGORICAL for the coupling factor, the M x M
  *   look-ahead covariance and its M x N staging block under EAVC,
  *   a handful of N*8 vectors, M*n_dims*8 for a generated candidate set,
- *   and the history. Measured: Bernoulli at N = 512, M = 512 is 6.44 MB
+ *   and the history. PSYGP_MODEL_PSYCHOMETRIC adds a second N*N*8 prior
+ *   matrix (the slope GP's), 18 N*8 vectors and M*40 bytes, and under EAVC
+ *   2*M*N*8 for the look-ahead's columns and M*8, where the GP model's EAVC
+ *   takes M*M*8 and M*N*8.
+ *   Measured: Bernoulli at N = 512, M = 512 is 6.44 MB
  *   with LSE and 10.44 MB with EAVC; N = 200, M = 512 with LSE is 1.11 MB;
  *   a 3-class categorical at N = M = 512 with LSE is 12.54 MB. The handle
  *   itself is 42 KB at the default ceilings, nearly all of it the 512-trial
@@ -1018,6 +1286,11 @@
  *   and 9e-6, the analytic hyperparameter gradient against central
  *   differences 9e-5 and 2.9e-2 relative (and the difference step has to grow
  *   from 1e-5 to 3e-3, because a float objective is only good to about 1e-7).
+ *   The same holds for the fits whose gradient IS central differences
+ *   (CATEGORICAL): their step is 1e-4 of the hyperparameter in double and
+ *   3e-3 in float. In float the psychometric model's mode is good to about
+ *   4e-4 of the latent, which is what its analytic gradient is then good to
+ *   as well.
  *   psygp_refit() restores the exact posterior to 6e-15 in double and 6e-8 in
  *   float.
  *   What it does not cost: the answers an experiment reads. Over 20 response
@@ -1193,9 +1466,9 @@
 /* The version of this header, for a log line or a compile-time check. The
  * string is the three numbers, and the test asserts that it stays so. */
 #define PSYGP_VERSION_MAJOR  0
-#define PSYGP_VERSION_MINOR  2
-#define PSYGP_VERSION_PATCH  1
-#define PSYGP_VERSION_STRING "0.2.1"
+#define PSYGP_VERSION_MINOR  4
+#define PSYGP_VERSION_PATCH  0
+#define PSYGP_VERSION_STRING "0.4.0"
 
 /* The one optional dependency, and it comes FIRST: psy_rt.h sets a
  * feature-test macro for the Linux clock calls and can only do that before the
@@ -1282,6 +1555,15 @@ typedef enum psygp_link {
     PSYGP_LINK_LOGIT       /* p = 1 / (1 + exp(-f))                         */
 } psygp_link;
 
+/* What the latent is. PSYGP_MODEL_GP is one GP over the whole box, shaped by
+ * desc.kernel. PSYGP_MODEL_PSYCHOMETRIC is a psychometric function whose
+ * threshold m(c) and log-slope g(c) are two GPs over the context c (every
+ * dimension but intensity_dim): f = exp(g(c)) (x - m(c)). See MODEL. */
+typedef enum psygp_model {
+    PSYGP_MODEL_GP = 0,          /* one GP over the box (default)            */
+    PSYGP_MODEL_PSYCHOMETRIC     /* threshold and slope GPs over the context */
+} psygp_model;
+
 typedef enum psygp_acq {
     PSYGP_ACQ_LSE = 0,     /* level-set straddle (default)                  */
     PSYGP_ACQ_EAVC,        /* look-ahead expected absolute volume change    */
@@ -1315,6 +1597,10 @@ typedef struct psygp_hyper {
     double outputscale_b;
     double cutpoint[PSYGP_MAX_OUTCOMES - 1];
     double noise_sd;
+    double lengthscale_g[PSYGP_MAX_DIMS]; /* PSYGP_MODEL_PSYCHOMETRIC only: */
+    double outputscale_g;          /* the log-slope GP g(c). The threshold  */
+    double mean_g;                 /* GP m(c) uses lengthscale, outputscale,
+                                    * mean                                  */
 } psygp_hyper;
 
 /* Run description. Zero-initialize it and set only what you need.
@@ -1380,6 +1666,7 @@ typedef struct psygp_desc {
                                    * the grid winner; 0 = off. See
                                    * CANDIDATES. Last in the struct so the
                                    * fields before it keep their offsets.   */
+    psygp_model  model;           /* GP (0) by default; see MODEL           */
 } psygp_desc;
 
 /* --- handle ------------------------------------------------------------ */
@@ -1407,7 +1694,12 @@ typedef struct psygp_gp {
     bool        mem_owned;
     double*     X;             /* N_max x n_dims                           */
     double*     y;             /* N_max                                    */
-    psygp_real* Kmat;          /* N_max x N_max kernel matrix              */
+    psygp_real* Kmat;          /* N_max x N_max kernel matrix; the
+                                * threshold GP's under PSYCHOMETRIC       */
+    psygp_real* Kg;            /* the log-slope GP's, PSYCHOMETRIC only    */
+    double      ps_tol;        /* its Newton tolerance, PSYGP__PS_TOL; a
+                                * field so a gradient check can converge one
+                                * handle's mode further than a session needs */
     psygp_real* L;             /* K x N_max x N_max Laplace factors, or the
                                 * growing kernel Cholesky under GAUSSIAN   */
     double*     f;             /* K x N_max latent mode                    */
@@ -2196,6 +2488,30 @@ static void psygp__tri_sqr(psygp_real* A, int n, int ld, double* tmp) {
 
 /* --- memory layout ------------------------------------------------------ */
 
+/* The N-vectors of PSYGP_MODEL_PSYCHOMETRIC, rows of scratch.ps. The latent is
+ * z = (m_1..m_N, g_1..g_N); A is K^-1 (z - mean), H is z - mean, U is the
+ * square root of the Gauss-Newton Hessian (one column per trial, nonzero in
+ * that trial's m and g rows only, so two numbers), G is d log p / dz. */
+#define PSYGP__PS_AM  0
+#define PSYGP__PS_AG  1
+#define PSYGP__PS_HM  2
+#define PSYGP__PS_HG  3
+#define PSYGP__PS_UM  4
+#define PSYGP__PS_UG  5
+#define PSYGP__PS_GM  6
+#define PSYGP__PS_GG  7
+#define PSYGP__PS_BM  8    /* Newton workspace from here on */
+#define PSYGP__PS_BG  9
+#define PSYGP__PS_NM  10
+#define PSYGP__PS_NG  11
+#define PSYGP__PS_QM  12
+#define PSYGP__PS_QG  13
+#define PSYGP__PS_KM  14   /* prediction workspace */
+#define PSYGP__PS_KG  15
+#define PSYGP__PS_V1  16
+#define PSYGP__PS_V2  17
+#define PSYGP__PS_VEC 18
+
 /* Scratch areas, carved out of the one allocation. The blocks above `blk` keep
  * their contents between calls; the ones below are temporaries. */
 typedef struct psygp__scr {
@@ -2226,6 +2542,10 @@ typedef struct psygp__scr {
     double* t6;
     double* t7;
     double* pv;       /* 4 x PSYGP_MAX_OUTCOMES: outcome probabilities        */
+    double* ps;       /* PSYGP__PS_VEC x Nmax, PSYCHOMETRIC only; see there    */
+    double* ps_c;     /* 5 x M: (m, g) posteriors at the candidates, the same */
+    psygp_real* ps_v; /* 2M x Nmax: L^-1 U' k(X, c) for m and g, EAVC only    */
+    double* ps_p0;    /* M: P(level) now, EAVC's baseline                     */
 } psygp__scr;
 
 /* One walk of the arena for both jobs: psygp_memory_size() calls it with a
@@ -2236,8 +2556,10 @@ static size_t psygp__layout(const psygp_desc* d, int Nmax, int M, int K,
                             unsigned char* base, psygp_gp* g, psygp__scr* s) {
     size_t off = 0;
     int nd = d->n_dims;
-    bool look = (d->acq == PSYGP_ACQ_EAVC);
     bool cat  = (d->lik == PSYGP_LIK_CATEGORICAL);
+    bool ps   = (d->model == PSYGP_MODEL_PSYCHOMETRIC);
+    bool look = (d->acq == PSYGP_ACQ_EAVC) && !ps;
+    bool pslook = (d->acq == PSYGP_ACQ_EAVC) && ps;
 
 #define PSYGP__TAKE(pp, count) do {                                  \
         double** pp_ = (pp);                                         \
@@ -2263,6 +2585,7 @@ static size_t psygp__layout(const psygp_desc* d, int Nmax, int M, int K,
     PSYGP__TAKE(g ? &g->cand : NULL,    d->candidates ? 0 : (size_t)M * nd);
     PSYGP__TAKE(g ? &g->cand_mu : NULL, (size_t)K * M);
     PSYGP__TAKER(g ? &g->cand_cov : NULL, look ? (size_t)M * M : 0);
+    PSYGP__TAKER(g ? &g->Kg : NULL,     ps ? (size_t)Nmax * Nmax : 0);
     if (g) g->scratch = (double*)(base ? base + off : NULL);
     PSYGP__TAKE(s ? &s->alpha : NULL,   (size_t)K * Nmax);
     PSYGP__TAKE(s ? &s->sW : NULL,      (size_t)K * Nmax);
@@ -2289,6 +2612,10 @@ static size_t psygp__layout(const psygp_desc* d, int Nmax, int M, int K,
     PSYGP__TAKE(s ? &s->t6 : NULL,      (size_t)Nmax);
     PSYGP__TAKE(s ? &s->t7 : NULL,      (size_t)Nmax);
     PSYGP__TAKE(s ? &s->pv : NULL,      (size_t)4 * PSYGP_MAX_OUTCOMES);
+    PSYGP__TAKE(s ? &s->ps : NULL,      ps ? (size_t)PSYGP__PS_VEC * Nmax : 0);
+    PSYGP__TAKE(s ? &s->ps_c : NULL,    ps ? (size_t)5 * M : 0);
+    PSYGP__TAKER(s ? &s->ps_v : NULL,   pslook ? (size_t)2 * M * Nmax : 0);
+    PSYGP__TAKE(s ? &s->ps_p0 : NULL,   pslook ? (size_t)M : 0);
 #undef PSYGP__TAKE
 #undef PSYGP__TAKER
     return off;
@@ -2357,6 +2684,24 @@ static bool psygp__validate(const psygp_desc* d, char* err, size_t cap,
     if (d->acq < PSYGP_ACQ_LSE || d->acq > PSYGP_ACQ_RANDOM) {
         psygp__err(err, cap, "acq = %d is not a psygp_acq", (int)d->acq);
         return false;
+    }
+    if (d->model != PSYGP_MODEL_GP && d->model != PSYGP_MODEL_PSYCHOMETRIC) {
+        psygp__err(err, cap, "model = %d is not a psygp_model", (int)d->model);
+        return false;
+    }
+    if (d->model == PSYGP_MODEL_PSYCHOMETRIC) {
+        if (d->lik != PSYGP_LIK_BERNOULLI && d->lik != PSYGP_LIK_ORDINAL) {
+            psygp__err(err, cap,
+                       "PSYGP_MODEL_PSYCHOMETRIC needs BERNOULLI or ORDINAL: its "
+                       "latent is a psychometric function of the intensity");
+            return false;
+        }
+        if (d->kernel != PSYGP_KERNEL_RBF) {
+            psygp__err(err, cap,
+                       "PSYGP_MODEL_PSYCHOMETRIC has its own two RBF GPs; leave "
+                       "kernel at PSYGP_KERNEL_RBF");
+            return false;
+        }
     }
     nout = d->n_outcomes;
     if (d->lik == PSYGP_LIK_ORDINAL) {
@@ -2429,12 +2774,14 @@ static bool psygp__validate(const psygp_desc* d, char* err, size_t cap,
         }
     }
     for (int i = 0; i < nd; i++) {
-        if (d->hyper.lengthscale[i] < 0.0 || d->hyper.lengthscale_b[i] < 0.0) {
+        if (d->hyper.lengthscale[i] < 0.0 || d->hyper.lengthscale_b[i] < 0.0 ||
+            d->hyper.lengthscale_g[i] < 0.0) {
             psygp__err(err, cap, "hyper.lengthscale[%d] is negative", i);
             return false;
         }
     }
     if (d->hyper.outputscale < 0.0 || d->hyper.outputscale_b < 0.0 ||
+        d->hyper.outputscale_g < 0.0 ||
         d->hyper.noise_sd < 0.0 || d->jitter < 0.0) {
         psygp__err(err, cap, "an output scale, the noise sd or the jitter is negative");
         return false;
@@ -2567,11 +2914,57 @@ static double psygp__kernel(const psygp_gp* g, const double* xa, const double* x
     return ka + xx * kb;
 }
 
+static bool psygp__is_ps(const psygp_gp* g) {
+    return g->desc.model == PSYGP_MODEL_PSYCHOMETRIC;
+}
+
+/* The two context kernels of PSYGP_MODEL_PSYCHOMETRIC, RBF-ARD over every
+ * dimension but the intensity: which = 0 for the threshold GP m, 1 for the
+ * log-slope GP g. With one dimension there is no context, and each GP is a
+ * single Gaussian variable with the output scale as its variance. */
+static double psygp__kctx(const psygp_gp* g, int which, const double* xa,
+                          const double* xb) {
+    const psygp_hyper* h = &g->hyper;
+    const double* ls = which ? h->lengthscale_g : h->lengthscale;
+    int nd = g->desc.n_dims, id = g->desc.intensity_dim;
+    double q = 0.0;
+    for (int i = 0; i < nd; i++) {
+        double dd;
+        if (i == id) continue;
+        dd = (xa[i] - xb[i]) / ls[i];
+        q += dd * dd;
+    }
+    return (which ? h->outputscale_g : h->outputscale) * exp(-0.5 * q);
+}
+
+/* Two stimuli share a context when every coordinate but the intensity agrees,
+ * and then they share the posterior of (m, g) exactly. */
+static bool psygp__same_ctx(const psygp_gp* g, const double* xa, const double* xb) {
+    int nd = g->desc.n_dims, id = g->desc.intensity_dim;
+    for (int i = 0; i < nd; i++) if (i != id && xa[i] != xb[i]) return false;
+    return true;
+}
+
+/* The intensity axis's span, and the defaults the psychometric model derives
+ * from it: a threshold prior sd of a quarter of the axis, centered in the
+ * middle, and a slope whose rise takes about a quarter of the axis. */
+static double psygp__ispan(const psygp_desc* d) {
+    return d->hi[d->intensity_dim] - d->lo[d->intensity_dim];
+}
+#ifndef PSYGP__PS_OS_G
+#define PSYGP__PS_OS_G 0.3
+#endif
+static double psygp__ps_os_m(const psygp_desc* d) {
+    double q = 0.25 * psygp__ispan(d);
+    return q * q;
+}
+
 /* --- hyperparameter vector ---------------------------------------------- */
 
 enum {
     PSYGP__P_LS = 0, PSYGP__P_OS, PSYGP__P_MEAN,
-    PSYGP__P_LSB, PSYGP__P_OSB, PSYGP__P_CUT, PSYGP__P_NOISE
+    PSYGP__P_LSB, PSYGP__P_OSB, PSYGP__P_CUT, PSYGP__P_NOISE,
+    PSYGP__P_LSG, PSYGP__P_OSG, PSYGP__P_MEANG
 };
 
 typedef struct psygp__param {
@@ -2587,11 +2980,67 @@ static double psygp__pick(double v, double dflt) { return v != 0.0 ? v : dflt; }
  * caller set to something nonzero is fixed there; a zero field is fitted (and
  * carries a default until it is). That is why desc.hyper, not the values in
  * force, decides. */
+static int psygp__params_ps(const psygp_gp* g, psygp__param* p) {
+    const psygp_desc* d = &g->desc;
+    const psygp_hyper* h0 = &d->hyper;
+    int nd = d->n_dims, id = d->intensity_dim, np = 0;
+    double os_m = psygp__ps_os_m(d), span = psygp__ispan(d);
+    for (int which = 0; which < 2; which++) {
+        const double* ls0 = which ? h0->lengthscale_g : h0->lengthscale;
+        const double* lsmin = which ? d->hyper_min.lengthscale_g : d->hyper_min.lengthscale;
+        const double* lsmax = which ? d->hyper_max.lengthscale_g : d->hyper_max.lengthscale;
+        for (int i = 0; i < nd; i++) {
+            double range = d->hi[i] - d->lo[i];
+            if (i == id || ls0[i] != 0.0) continue;
+            p[np].kind = which ? PSYGP__P_LSG : PSYGP__P_LS;
+            p[np].dim = i; p[np].logsp = true;
+            p[np].lo = log(psygp__pick(lsmin[i], 0.05 * range));
+            p[np].hi = log(psygp__pick(lsmax[i], 2.0 * range));
+            np++;
+        }
+    }
+    if (h0->outputscale == 0.0) {
+        p[np].kind = PSYGP__P_OS; p[np].dim = 0; p[np].logsp = true;
+        p[np].lo = log(psygp__pick(d->hyper_min.outputscale, 0.1 * os_m));
+        p[np].hi = log(psygp__pick(d->hyper_max.outputscale, 10.0 * os_m));
+        np++;
+    }
+    if (h0->mean == 0.0) {
+        p[np].kind = PSYGP__P_MEAN; p[np].dim = 0; p[np].logsp = false;
+        p[np].lo = psygp__pick(d->hyper_min.mean, d->lo[id]);
+        p[np].hi = psygp__pick(d->hyper_max.mean, d->hi[id]);
+        np++;
+    }
+    if (h0->outputscale_g == 0.0) {
+        p[np].kind = PSYGP__P_OSG; p[np].dim = 0; p[np].logsp = true;
+        p[np].lo = log(psygp__pick(d->hyper_min.outputscale_g, 0.01));
+        p[np].hi = log(psygp__pick(d->hyper_max.outputscale_g, 10.0));
+        np++;
+    }
+    if (h0->mean_g == 0.0) {
+        /* A rise from 16 times the axis down to a sixty-fourth of it. */
+        p[np].kind = PSYGP__P_MEANG; p[np].dim = 0; p[np].logsp = false;
+        p[np].lo = psygp__pick(d->hyper_min.mean_g, log(0.25 / span));
+        p[np].hi = psygp__pick(d->hyper_max.mean_g, log(256.0 / span));
+        np++;
+    }
+    if (d->lik == PSYGP_LIK_ORDINAL && h0->cutpoint[0] == 0.0) {
+        for (int m = 1; m < d->n_outcomes - 1; m++) {
+            p[np].kind = PSYGP__P_CUT; p[np].dim = m; p[np].logsp = true;
+            p[np].lo = log(psygp__pick(d->hyper_min.cutpoint[m], 0.01));
+            p[np].hi = log(psygp__pick(d->hyper_max.cutpoint[m], 10.0));
+            np++;
+        }
+    }
+    return np;
+}
+
 static int psygp__params(const psygp_gp* g, psygp__param* p) {
     const psygp_desc* d = &g->desc;
     const psygp_hyper* h0 = &d->hyper;
     int nd = d->n_dims, id = d->intensity_dim, np = 0;
     bool semip = (d->kernel == PSYGP_KERNEL_SEMIP);
+    if (psygp__is_ps(g)) return psygp__params_ps(g, p);
     for (int i = 0; i < nd; i++) {
         double range = d->hi[i] - d->lo[i];
         if (semip && i == id) continue;   /* no lengthscale along x */
@@ -2658,6 +3107,9 @@ static double psygp__param_value(const psygp_gp* g, const psygp__param* p) {
         case PSYGP__P_LSB:  return h->lengthscale_b[p->dim];
         case PSYGP__P_OSB:  return h->outputscale_b;
         case PSYGP__P_CUT:  return h->cutpoint[p->dim] - h->cutpoint[p->dim - 1];
+        case PSYGP__P_LSG:  return h->lengthscale_g[p->dim];
+        case PSYGP__P_OSG:  return h->outputscale_g;
+        case PSYGP__P_MEANG: return h->mean_g;
         default:            return h->noise_sd;
     }
 }
@@ -2684,6 +3136,9 @@ static void psygp__theta_set(psygp_gp* g, const psygp__param* p, int np,
             case PSYGP__P_OSB:  h->outputscale_b = v; break;
             case PSYGP__P_CUT:  h->cutpoint[p[i].dim] = h->cutpoint[p[i].dim - 1] + v;
                                 break;
+            case PSYGP__P_LSG:  h->lengthscale_g[p[i].dim] = v; break;
+            case PSYGP__P_OSG:  h->outputscale_g = v; break;
+            case PSYGP__P_MEANG: h->mean_g = v; break;
             default:            h->noise_sd = v; break;
         }
     }
@@ -2917,6 +3372,20 @@ static double psygp__jitter(const psygp_gp* g) {
 static void psygp__kmat_row(psygp_gp* g, int n) {
     int nd = g->desc.n_dims, ld = g->N_max;
     const double* xn = g->X + (size_t)n * nd;
+    if (psygp__is_ps(g)) {
+        for (int i = 0; i < n; i++) {
+            const double* xi = g->X + (size_t)i * nd;
+            psygp_real vm = (psygp_real)psygp__kctx(g, 0, xi, xn);
+            psygp_real vg = (psygp_real)psygp__kctx(g, 1, xi, xn);
+            g->Kmat[(size_t)n * ld + i] = vm; g->Kmat[(size_t)i * ld + n] = vm;
+            g->Kg[(size_t)n * ld + i] = vg;   g->Kg[(size_t)i * ld + n] = vg;
+        }
+        g->Kmat[(size_t)n * ld + n] = (psygp_real)(psygp__kctx(g, 0, xn, xn) +
+                                                   psygp__jitter(g));
+        g->Kg[(size_t)n * ld + n] = (psygp_real)(psygp__kctx(g, 1, xn, xn) +
+                                                 psygp__jitter(g));
+        return;
+    }
     for (int i = 0; i < n; i++) {
         double v = psygp__kernel(g, g->X + (size_t)i * nd, xn);
         g->Kmat[(size_t)n * ld + i] = (psygp_real)v;
@@ -3346,10 +3815,176 @@ static int psygp__laplace_grow(psygp_gp* g) {
     return PSYGP_OK;
 }
 
+/* --- Laplace, the psychometric model ------------------------------------ */
+
+static double* psygp__psv(const psygp__scr* s, int ld, int k) {
+    return s->ps + (size_t)k * ld;
+}
+
+/* The site values of every trial at the current h = z - mean: the latent
+ * f = b (x - m) with b = exp(g), the log-likelihood and its gradient in (m, g),
+ * and the Gauss-Newton square root U. Returns the log-likelihood.
+ *
+ * The exact Hessian of log p(y | m, g) is J' l'' J + l' d2f, with J = (-b, f)
+ * the gradient of f and d2f = [0, -b; -b, f] its Hessian. The second term has
+ * determinant -b^2 l'^2, so it is indefinite at every trial with a nonzero
+ * residual, and the exact Hessian with it. The Laplace step keeps the first
+ * term only, with l'' clamped to <= 0 as the one-latent model does under a
+ * floor: W = sum_i w_i J_i J_i' is then positive semidefinite and rank one per
+ * trial, so W = U U' with U N columns wide, and every 2N x 2N system below
+ * collapses to N x N through B = I + U' K U. The mode is the exact mode all the
+ * same, since the iteration's fixed point is where the gradient of the
+ * log posterior vanishes; W decides only the step and the Gaussian's
+ * curvature. */
+static double psygp__ps_sites(psygp_gp* g, const psygp__scr* s, const double* hm,
+                              const double* hg, bool fill) {
+    int n = g->N, ld = g->N_max, nd = g->desc.n_dims, id = g->desc.intensity_dim;
+    double mum = g->hyper.mean, mug = g->hyper.mean_g, ll = 0.0;
+    double *um = psygp__psv(s, ld, PSYGP__PS_UM), *ug = psygp__psv(s, ld, PSYGP__PS_UG);
+    double *gm = psygp__psv(s, ld, PSYGP__PS_GM), *gg = psygp__psv(s, ld, PSYGP__PS_GG);
+    for (int i = 0; i < n; i++) {
+        double xi = g->X[(size_t)i * nd + id];
+        double b = exp(psygp__clamp(mug + hg[i], -50.0, 50.0));
+        double fv = b * (xi - (mum + hm[i]));
+        double lp, d1, d2, d3, w, sw;
+        psygp__ll(g, fv, g->y[i], &lp, &d1, &d2, &d3);
+        ll += lp;
+        if (!fill) continue;
+        w = -d2;
+        if (!(w > 0.0)) w = 0.0;
+        if (w > 1e8) w = 1e8;
+        sw = sqrt(w);
+        g->f[i] = fv;
+        g->W[i] = w;
+        g->grad[i] = d1;
+        gm[i] = -d1 * b;
+        gg[i] = d1 * fv;
+        um[i] = -sw * b;
+        ug[i] = sw * fv;
+    }
+    return ll;
+}
+
+/* Newton (Gauss-Newton, see above) to the mode of the 2N latents in R&W
+ * Algorithm 3.1's form: a is the pair of K^-1 (z - mean) blocks, the step is
+ * a_new = b - U B^-1 U' K b with b = W h + grad, and the same backtracking line
+ * search on Psi = -1/2 a'h + log p(y|z) guards it. Leaves L = chol(B), U, a and
+ * the Laplace log marginal likelihood in place. */
+/* The Gauss-Newton step converges linearly, not quadratically, so the last
+ * three digits of the one-latent model's 1e-11 cost about seven iterations of
+ * seventeen. Measured on a 2-D observer over three 150-trial sessions: 1e-8
+ * changes no threshold by more than 0.04 dB and no MAE(p) by more than 5e-4,
+ * and takes 40% less time. */
+#ifndef PSYGP__PS_TOL
+#define PSYGP__PS_TOL (sizeof(psygp_real) == sizeof(double) ? 1e-8 : 1e-5)
+#endif
+
+static int psygp__laplace_ps(psygp_gp* g, int mode) {
+    psygp__scr s;
+    int n = g->N, ld = g->N_max;
+    double *am, *ag, *hm, *hg, *um, *ug, *gm, *gg, *bm, *bg, *nm, *ng, *qm, *qg, *t;
+    double psi = 0.0, logdet = 0.0;
+    psygp__scr_of(g, &s);
+    am = psygp__psv(&s, ld, PSYGP__PS_AM); ag = psygp__psv(&s, ld, PSYGP__PS_AG);
+    hm = psygp__psv(&s, ld, PSYGP__PS_HM); hg = psygp__psv(&s, ld, PSYGP__PS_HG);
+    um = psygp__psv(&s, ld, PSYGP__PS_UM); ug = psygp__psv(&s, ld, PSYGP__PS_UG);
+    gm = psygp__psv(&s, ld, PSYGP__PS_GM); gg = psygp__psv(&s, ld, PSYGP__PS_GG);
+    bm = psygp__psv(&s, ld, PSYGP__PS_BM); bg = psygp__psv(&s, ld, PSYGP__PS_BG);
+    nm = psygp__psv(&s, ld, PSYGP__PS_NM); ng = psygp__psv(&s, ld, PSYGP__PS_NG);
+    qm = psygp__psv(&s, ld, PSYGP__PS_QM); qg = psygp__psv(&s, ld, PSYGP__PS_QG);
+    t = s.t1;
+
+    if (mode == PSYGP__START_COLD) {
+        for (int i = 0; i < n; i++) am[i] = ag[i] = 0.0;
+    } else if (mode == PSYGP__START_ROW) {
+        am[n - 1] = ag[n - 1] = 0.0;
+    }
+    psygp__gemv(g->Kmat, n, ld, am, hm);
+    psygp__gemv(g->Kg, n, ld, ag, hg);
+
+    for (int it = 0; ; it++) {
+        double ll, step = 1.0;
+        bool moved = false;
+        ll = psygp__ps_sites(g, &s, hm, hg, true);
+        /* B = I + U' K U, lower triangle only. */
+        for (int i = 0; i < n; i++) {
+            const psygp_real* kr = g->Kmat + (size_t)i * ld;
+            const psygp_real* gr = g->Kg + (size_t)i * ld;
+            psygp_real* br = g->L + (size_t)i * ld;
+            for (int j = 0; j <= i; j++)
+                br[j] = (psygp_real)(um[i] * kr[j] * um[j] + ug[i] * gr[j] * ug[j]);
+            br[i] += 1.0;
+        }
+        if (!psygp__chol(g->L, n, ld)) return PSYGP_ERR_NUMERIC;
+        logdet = 0.0;
+        for (int i = 0; i < n; i++) logdet += log(g->L[(size_t)i * ld + i]);
+        psi = -0.5 * (psygp__dot(am, hm, n) + psygp__dot(ag, hg, n)) + ll;
+        if (it >= PSYGP__NEWTON_MAX) break;   /* L, U and psi match the last h */
+
+        for (int i = 0; i < n; i++) {
+            double r = um[i] * hm[i] + ug[i] * hg[i];
+            bm[i] = um[i] * r + gm[i];
+            bg[i] = ug[i] * r + gg[i];
+        }
+        psygp__gemv(g->Kmat, n, ld, bm, nm);
+        psygp__gemv(g->Kg, n, ld, bg, ng);
+        for (int i = 0; i < n; i++) t[i] = um[i] * nm[i] + ug[i] * ng[i];
+        psygp__tri_fwd(g->L, n, ld, t);
+        psygp__tri_bwd(g->L, n, ld, t);
+        for (int i = 0; i < n; i++) {
+            nm[i] = bm[i] - um[i] * t[i];
+            ng[i] = bg[i] - ug[i] * t[i];
+        }
+        psygp__gemv(g->Kmat, n, ld, nm, qm);
+        psygp__gemv(g->Kg, n, ld, ng, qg);
+        {
+            double dmax = 0.0, hmax = 0.0;
+            for (int i = 0; i < n; i++) {
+                double d1 = fabs(qm[i] - hm[i]), d2 = fabs(qg[i] - hg[i]);
+                if (d1 > dmax) dmax = d1;
+                if (d2 > dmax) dmax = d2;
+                if (fabs(hm[i]) > hmax) hmax = fabs(hm[i]);
+                if (fabs(hg[i]) > hmax) hmax = fabs(hg[i]);
+            }
+            if (dmax <= g->ps_tol * (1.0 + hmax)) break;
+        }
+        for (int ls = 0; ls < 20; ls++) {
+            double ah2 = 0.0, psi2;
+            for (int i = 0; i < n; i++) {
+                double atm = am[i] + step * (nm[i] - am[i]);
+                double atg = ag[i] + step * (ng[i] - ag[i]);
+                bm[i] = hm[i] + step * (qm[i] - hm[i]);
+                bg[i] = hg[i] + step * (qg[i] - hg[i]);
+                ah2 += atm * bm[i] + atg * bg[i];
+            }
+            psi2 = -0.5 * ah2 + psygp__ps_sites(g, &s, bm, bg, false);
+            if (psi2 > psi - 1e-13 * (1.0 + fabs(psi))) {
+                for (int i = 0; i < n; i++) {
+                    am[i] += step * (nm[i] - am[i]);
+                    ag[i] += step * (ng[i] - ag[i]);
+                    hm[i] = bm[i];
+                    hg[i] = bg[i];
+                }
+                moved = true;
+                break;
+            }
+            step *= 0.5;
+        }
+        if (!moved) {
+            /* No uphill step: the sites and L are still the ones at h. */
+            break;
+        }
+    }
+    g->log_marginal = psi - logdet;
+    g->N_fit = n;
+    g->fit_valid = true;
+    return PSYGP_OK;
+}
+
 /* Whether this configuration may take the cheap update at all. */
 static bool psygp__can_grow(const psygp_gp* g) {
     return g->desc.refit_every > 1 && g->K == 1 &&
-           g->desc.lik != PSYGP_LIK_GAUSSIAN;
+           g->desc.lik != PSYGP_LIK_GAUSSIAN && !psygp__is_ps(g);
 }
 
 /* One entry point for all four: refit the posterior at the current data and
@@ -3364,6 +3999,7 @@ static int psygp__infer(psygp_gp* g, int mode, int grow) {
     }
     if (g->desc.lik == PSYGP_LIK_GAUSSIAN)
         return psygp__gauss_fit(g, mode == PSYGP__START_ROW ? grow : 0);
+    if (psygp__is_ps(g)) return psygp__laplace_ps(g, mode);
     if (g->K > 1) return psygp__laplace_cat(g, mode);
     return psygp__laplace(g, mode);
 }
@@ -3543,6 +4179,14 @@ static void psygp__cand_cov_build(psygp_gp* g, int kv) {
 
 #define PSYGP__PRIOR_LS_SD 1.0
 #define PSYGP__PRIOR_OS_SD 0.7
+/* The psychometric model's mean log-slope gets a normal prior as well, centered
+ * on its default: separable responses favor an infinitely steep function just as
+ * they favor an infinite output scale, and a step is worse than useless here,
+ * because every observation then sits in the flat tail of the link, carries no
+ * curvature, and leaves the Laplace posterior of the threshold where it was. */
+#ifndef PSYGP__PRIOR_MG_SD
+#define PSYGP__PRIOR_MG_SD 1.0
+#endif
 
 static double psygp__log_prior(const psygp_gp* g, const psygp__param* p, int np,
                                const double* th, double* grad) {
@@ -3551,13 +4195,21 @@ static double psygp__log_prior(const psygp_gp* g, const psygp__param* p, int np,
     for (int i = 0; i < np; i++) {
         double sd, center, v;
         switch (p[i].kind) {
-            case PSYGP__P_LS: case PSYGP__P_LSB:
+            case PSYGP__P_LS: case PSYGP__P_LSB: case PSYGP__P_LSG:
                 sd = PSYGP__PRIOR_LS_SD;
                 center = log(0.25 * (g->desc.hi[p[i].dim] - g->desc.lo[p[i].dim]));
                 break;
-            case PSYGP__P_OS: case PSYGP__P_OSB:
+            case PSYGP__P_OS: case PSYGP__P_OSB: case PSYGP__P_OSG:
                 sd = PSYGP__PRIOR_OS_SD;
-                center = 0.0;            /* log 1 */
+                /* log 1, or the threshold GP's default variance, which is in
+                 * squared intensity units */
+                center = p[i].kind == PSYGP__P_OS && psygp__is_ps(g)
+                         ? log(psygp__ps_os_m(&g->desc))
+                         : p[i].kind == PSYGP__P_OSG ? log(PSYGP__PS_OS_G) : 0.0;
+                break;
+            case PSYGP__P_MEANG:
+                sd = PSYGP__PRIOR_MG_SD;
+                center = log(4.0 / psygp__ispan(&g->desc));
                 break;
             default:
                 continue;                /* none on the mean or the cutpoints */
@@ -3567,6 +4219,238 @@ static double psygp__log_prior(const psygp_gp* g, const psygp__param* p, int np,
         if (grad) grad[i] -= v / sd;
     }
     return lp;
+}
+
+/* The adjoint solve stops at this residual, relative to the right-hand side:
+ * the gradient it feeds is checked to 1e-4 against differences, and the
+ * conjugate-gradient error in it is of the order of this squared. */
+#define PSYGP__PCG_TOL 1e-10
+
+static int psygp__fit_grad_fd(psygp_gp* g, const psygp__param* p, int np,
+                              const double* th, double* val, double* grad);
+
+/* --- the psychometric model's hyperparameter gradient ------------------- */
+
+/* The Laplace objective is log q = Psi(z) - 1/2 log|B|, B = I + U' K U with U
+ * the Gauss-Newton square root at the mode z. Its total derivative in a
+ * hyperparameter is the explicit part at fixed z plus the implicit part through
+ * the mode, and only log|B| contributes to the second, because Psi is
+ * stationary there:
+ *
+ *   dF/dtheta = dF/dtheta|_z + gz' dz/dtheta,   gz = -1/2 d log|B| / dz,
+ *   dz/dtheta = A^-1 dG/dtheta,  A = K^-1 + W_true,  G = grad log p - K^-1 (z - m)
+ *
+ * with W_true the TRUE negative Hessian of the log-likelihood in z, which the
+ * mode is defined by, not the Gauss-Newton one the step uses. One adjoint
+ * solve, lambda = A^-1 gz, serves every hyperparameter. A is symmetric, and
+ * positive definite at a maximum of the log posterior, so the solve is
+ * preconditioned conjugate gradients with the Gauss-Newton posterior
+ * M = (K^-1 + W_gn)^-1 = K - K U B^-1 U' K as the preconditioner. Everything it
+ * needs is already factored: M r is two kernel products, two triangular solves
+ * and two more kernel products; A z = M^-1 z + E z = r + E z for z = M r, with
+ * E = W_true - W_gn block-diagonal 2 x 2; and K^-1 z = r - U B^-1 U' K r falls
+ * out of the same arithmetic, which is what lets the kernel terms, which need
+ * K^-1 lambda, avoid K^-1. The solve is O(N^2) an iteration where a dense 2N
+ * factorization would be 5 N^3. Returns false if the iteration breaks down (A
+ * not positive definite, so z is not a strict maximum and there is no gradient
+ * to speak of), and the caller falls back to differences. */
+static bool psygp__fit_grad_ps(psygp_gp* g, const psygp__param* p, int np,
+                               const double* th, double* grad) {
+    psygp__scr s;
+    int n = g->N, ld = g->N_max, nd = g->desc.n_dims;
+    double *am, *ag, *hg, *um, *ug, *w;
+    double *bb, *E1, *E2, *E3, *sp, *cm, *cg, *gzm, *gzg;
+    double *xm, *xg, *nm, *ng, *rm, *rg, *zm, *zg, *pm, *pg, *qm, *qg;
+    double *km, *kg, *kim, *kig, *kzm, *kzg, *tt, *um2, *ug2;
+    double mug = g->hyper.mean_g, rz, rr0, gs[PSYGP__NTHETA];
+    bool ord = g->desc.lik == PSYGP_LIK_ORDINAL;
+    psygp__scr_of(g, &s);
+    am = psygp__psv(&s, ld, PSYGP__PS_AM); ag = psygp__psv(&s, ld, PSYGP__PS_AG);
+    hg = psygp__psv(&s, ld, PSYGP__PS_HG);
+    um = psygp__psv(&s, ld, PSYGP__PS_UM); ug = psygp__psv(&s, ld, PSYGP__PS_UG);
+    w = s.blk;
+#define PSYGP__R(k) (w + (size_t)(k) * ld)
+    bb = PSYGP__R(0);  E1 = PSYGP__R(1);  E2 = PSYGP__R(2);  E3 = PSYGP__R(3);
+    sp = PSYGP__R(4);  cm = PSYGP__R(5);  cg = PSYGP__R(6);
+    gzm = PSYGP__R(7); gzg = PSYGP__R(8);
+    xm = PSYGP__R(9);  xg = PSYGP__R(10); nm = PSYGP__R(11); ng = PSYGP__R(12);
+    rm = PSYGP__R(13); rg = PSYGP__R(14); zm = PSYGP__R(15); zg = PSYGP__R(16);
+    pm = PSYGP__R(17); pg = PSYGP__R(18); qm = PSYGP__R(19); qg = PSYGP__R(20);
+    km = PSYGP__R(21); kg = PSYGP__R(22); kim = PSYGP__R(23); kig = PSYGP__R(24);
+    kzm = PSYGP__R(25); kzg = PSYGP__R(26); tt = PSYGP__R(27);
+    um2 = PSYGP__R(28); ug2 = PSYGP__R(29);
+#undef PSYGP__R
+
+    /* B^-1, dense: the trace terms and the log-determinant's z-gradient read
+     * every element. */
+    for (int i = 0; i < n; i++)
+        memcpy(s.Rm + (size_t)i * ld, g->L + (size_t)i * ld,
+               (size_t)(i + 1) * sizeof(psygp_real));
+    psygp__tri_inv(s.Rm, n, ld);
+    psygp__tri_sqr(s.Rm, n, ld, s.t1);
+
+    /* Per trial: the slope, the part of the true Hessian the Gauss-Newton W
+     * left out, and ds/df with s = sqrt(w), which is how U moves with z. A site
+     * the step clamped (w forced to 0 or capped) has a U that does not move. */
+    for (int i = 0; i < n; i++) {
+        double lp, l1, l2, l3, b, fv = g->f[i], wc = g->W[i], wt, dw, sv;
+        psygp__ll(g, fv, g->y[i], &lp, &l1, &l2, &l3);
+        b = exp(psygp__clamp(mug + hg[i], -50.0, 50.0));
+        wt = -l2;
+        dw = wt - wc;
+        bb[i] = b;
+        E1[i] = dw * b * b;
+        E2[i] = -dw * b * fv + l1 * b;
+        E3[i] = dw * fv * fv - l1 * fv;
+        sv = sqrt(wc);
+        sp[i] = (wc > 0.0 && wc == wt) ? -l3 / (2.0 * sv) : 0.0;
+    }
+    /* cm_i = (K_m diag(um) B^-1)_ii and cg_i likewise: d log|B| =
+     * 2 sum_i (cm_i dum_i + cg_i dug_i). */
+    for (int i = 0; i < n; i++) {
+        const psygp_real* kr = g->Kmat + (size_t)i * ld;
+        const psygp_real* gr = g->Kg + (size_t)i * ld;
+        double a1 = 0.0, a2 = 0.0;
+        for (int j = 0; j < n; j++) {
+            double bij = s.Rm[(size_t)j * ld + i];
+            a1 += kr[j] * um[j] * bij;
+            a2 += gr[j] * ug[j] * bij;
+        }
+        cm[i] = a1;
+        cg[i] = a2;
+    }
+    for (int i = 0; i < n; i++) {
+        double b = bb[i], fv = g->f[i], sv = sqrt(g->W[i]), q = sp[i] * fv + sv;
+        double dum_m = sp[i] * b * b, dum_g = -b * q;
+        double dug_m = -b * q, dug_g = fv * q;
+        gzm[i] = -(cm[i] * dum_m + cg[i] * dug_m);
+        gzg[i] = -(cm[i] * dum_g + cg[i] * dug_g);
+    }
+
+    /* PCG on A lambda = gz, tracking K^-1 of every iterate. */
+    for (int i = 0; i < n; i++) {
+        xm[i] = xg[i] = nm[i] = ng[i] = 0.0;
+        rm[i] = gzm[i]; rg[i] = gzg[i];
+    }
+#define PSYGP__APPLY_M() do {                                              \
+        psygp__gemv(g->Kmat, n, ld, rm, km);                               \
+        psygp__gemv(g->Kg, n, ld, rg, kg);                                 \
+        for (int i = 0; i < n; i++) tt[i] = um[i] * km[i] + ug[i] * kg[i]; \
+        psygp__tri_fwd(g->L, n, ld, tt);                                   \
+        psygp__tri_bwd(g->L, n, ld, tt);                                   \
+        for (int i = 0; i < n; i++) { um2[i] = um[i] * tt[i]; ug2[i] = ug[i] * tt[i]; } \
+        psygp__gemv(g->Kmat, n, ld, um2, zm);                              \
+        psygp__gemv(g->Kg, n, ld, ug2, zg);                                \
+        for (int i = 0; i < n; i++) {                                      \
+            zm[i] = km[i] - zm[i]; zg[i] = kg[i] - zg[i];                  \
+            kzm[i] = rm[i] - um2[i]; kzg[i] = rg[i] - ug2[i];              \
+        }                                                                  \
+    } while (0)
+    PSYGP__APPLY_M();
+    rz = psygp__dot(rm, zm, n) + psygp__dot(rg, zg, n);
+    rr0 = psygp__dot(rm, rm, n) + psygp__dot(rg, rg, n);
+    for (int i = 0; i < n; i++) {
+        pm[i] = zm[i]; pg[i] = zg[i];
+        kim[i] = kzm[i]; kig[i] = kzg[i];
+        qm[i] = rm[i] + E1[i] * zm[i] + E2[i] * zg[i];
+        qg[i] = rg[i] + E2[i] * zm[i] + E3[i] * zg[i];
+    }
+    if (rr0 > 0.0) {
+        int it;
+        for (it = 0; it < 4 * n + 20; it++) {
+            double pq = psygp__dot(pm, qm, n) + psygp__dot(pg, qg, n), al, rr, rzn, be;
+            if (!(pq > 0.0)) return false;
+            al = rz / pq;
+            for (int i = 0; i < n; i++) {
+                xm[i] += al * pm[i]; xg[i] += al * pg[i];
+                nm[i] += al * kim[i]; ng[i] += al * kig[i];
+                rm[i] -= al * qm[i]; rg[i] -= al * qg[i];
+            }
+            rr = psygp__dot(rm, rm, n) + psygp__dot(rg, rg, n);
+            if (rr <= PSYGP__PCG_TOL * PSYGP__PCG_TOL * rr0) break;
+            PSYGP__APPLY_M();
+            rzn = psygp__dot(rm, zm, n) + psygp__dot(rg, zg, n);
+            be = rzn / rz;
+            rz = rzn;
+            for (int i = 0; i < n; i++) {
+                pm[i] = zm[i] + be * pm[i];
+                pg[i] = zg[i] + be * pg[i];
+                kim[i] = kzm[i] + be * kim[i];
+                kig[i] = kzg[i] + be * kig[i];
+                qm[i] = rm[i] + E1[i] * zm[i] + E2[i] * zg[i] + be * qm[i];
+                qg[i] = rg[i] + E2[i] * zm[i] + E3[i] * zg[i] + be * qg[i];
+            }
+        }
+        if (it >= 4 * n + 20) return false;
+    }
+#undef PSYGP__APPLY_M
+
+    /* Kernel terms, one visit per pair and block: 1/2 a' dK a - 1/2
+     * tr(B^-1 U' dK U) + nu' dK a with nu = K^-1 lambda. */
+    for (int k = 0; k < np; k++) gs[k] = 0.0;
+    for (int blk = 0; blk < 2; blk++) {
+        const double* a = blk ? ag : am;
+        const double* u = blk ? ug : um;
+        const double* nu = blk ? ng : nm;
+        const double* ls = blk ? g->hyper.lengthscale_g : g->hyper.lengthscale;
+        int kls = blk ? PSYGP__P_LSG : PSYGP__P_LS;
+        int kos = blk ? PSYGP__P_OSG : PSYGP__P_OS;
+        for (int i = 0; i < n; i++) {
+            const double* xi = g->X + (size_t)i * nd;
+            for (int j = 0; j <= i; j++) {
+                const double* xj = g->X + (size_t)j * nd;
+                double k0 = psygp__kctx(g, blk, xi, xj);
+                double c = (i == j ? 1.0 : 2.0) *
+                           (0.5 * a[i] * a[j] - 0.5 * s.Rm[(size_t)i * ld + j] * u[i] * u[j])
+                           + nu[i] * a[j] + (i == j ? 0.0 : nu[j] * a[i]);
+                for (int q = 0; q < np; q++) {
+                    if (p[q].kind == kos) gs[q] += c * k0;
+                    else if (p[q].kind == kls) {
+                        double dd = (xi[p[q].dim] - xj[p[q].dim]) / ls[p[q].dim];
+                        gs[q] += c * k0 * dd * dd;
+                    }
+                }
+            }
+        }
+    }
+    for (int q = 0; q < np; q++) {
+        if (p[q].kind == PSYGP__P_MEAN)
+            for (int i = 0; i < n; i++) gs[q] += am[i] + nm[i];
+        else if (p[q].kind == PSYGP__P_MEANG)
+            for (int i = 0; i < n; i++) gs[q] += ag[i] + ng[i];
+    }
+    /* Cutpoints: the likelihood's own derivative, U's through w, and the
+     * implicit term through the gradient of dlog p/dc in z. The fitted
+     * coordinate is the log gap below, as in the GP model. */
+    if (ord) {
+        double gc[PSYGP_MAX_OUTCOMES];
+        int nout = g->desc.n_outcomes;
+        for (int m = 1; m < nout - 1; m++) {
+            double ex = 0.0;
+            for (int i = 0; i < n; i++) {
+                double e0, e1, e2, fv = g->f[i], b = bb[i], wc = g->W[i], dsdc = 0.0;
+                double lp, l1, l2, l3;
+                psygp__ll_cut(g, fv, g->y[i], m, &e0, &e1, &e2);
+                psygp__ll(g, fv, g->y[i], &lp, &l1, &l2, &l3);
+                if (wc > 0.0 && wc == -l2) dsdc = -e2 / (2.0 * sqrt(wc));
+                ex += e0 - (cm[i] * (-b * dsdc) + cg[i] * (fv * dsdc));
+                ex += xm[i] * (-b * e1) + xg[i] * (fv * e1);
+            }
+            gc[m] = ex;
+        }
+        for (int q = 0; q < np; q++) {
+            double gap, sum = 0.0;
+            if (p[q].kind != PSYGP__P_CUT) continue;
+            gap = g->hyper.cutpoint[p[q].dim] - g->hyper.cutpoint[p[q].dim - 1];
+            for (int m = p[q].dim; m < nout - 1; m++) sum += gc[m];
+            gs[q] = gap * sum;
+        }
+    }
+    /* The log parameters' chain rule: a lengthscale or output scale is fitted
+     * as its logarithm, and dK/dlog(theta) is what the loop above used. */
+    for (int q = 0; q < np; q++) grad[q] = gs[q];
+    psygp__log_prior(g, p, np, th, grad);
+    return true;
 }
 
 static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
@@ -3585,6 +4469,10 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
     if (rc != PSYGP_OK) { g->fit_valid = false; return rc; }
     *val = g->log_marginal + psygp__log_prior(g, p, np, th, NULL);
     if (!grad) return PSYGP_OK;
+    if (psygp__is_ps(g)) {
+        if (psygp__fit_grad_ps(g, p, np, th, grad)) return PSYGP_OK;
+        return psygp__fit_grad_fd(g, p, np, th, val, grad);
+    }
     if (g->K > 1) return PSYGP_ERR_ARG;   /* softmax: psygp__fit_grad_fd */
     n = g->N;
     q = s.t1; s2 = s.t2; bv = s.t3; s3 = s.t4; tv = s.t5; tmp = s.t6; piv = s.t7;
@@ -3778,6 +4666,11 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
  * The implicit term of eq. 5.23 needs third derivatives of a coupled block
  * Hessian; until that is written and checked, a numerical gradient of a
  * verified objective is the honest option. It costs 2 P + 1 Laplace refits. */
+/* The difference step, relative: 1e-4 in double; in float the objective is
+ * only good to about 1e-6 of itself, so a step that small differences noise,
+ * and 3e-3 is what the float build's analytic-gradient check needed too. */
+#define PSYGP__FD_STEP (sizeof(psygp_real) == sizeof(double) ? 1e-4 : 3e-3)
+
 static int psygp__fit_grad_fd(psygp_gp* g, const psygp__param* p, int np,
                               const double* th, double* val, double* grad) {
     psygp__scr s;
@@ -3789,7 +4682,7 @@ static int psygp__fit_grad_fd(psygp_gp* g, const psygp__param* p, int np,
     if (rc != PSYGP_OK) return rc;
     memcpy(tw, th, (size_t)np * sizeof(double));
     for (int i = 0; i < np; i++) {
-        double step = 1e-4 * (1.0 + fabs(th[i])), vp, vm;
+        double step = PSYGP__FD_STEP * (1.0 + fabs(th[i])), vp, vm;
         double hi = th[i] + step, lo = th[i] - step;
         if (hi > p[i].hi) hi = p[i].hi;
         if (lo < p[i].lo) lo = p[i].lo;
@@ -4062,6 +4955,388 @@ static void psygp__site(const psygp_gp* g, double mu, double yv, double other,
     }
 }
 
+/* --- the psychometric model's predictive ------------------------------- */
+
+/* The bivariate Gaussian posterior of (m, g) at one context. */
+typedef struct psygp__mg {
+    double mm, mg, vm, vg, cmg;
+} psygp__mg;
+
+/* K** - K*' U B^-1 U' K*, where K* has the threshold GP's kernel column in the
+ * m rows and the slope GP's in the g rows: two triangular solves per context,
+ * and every stimulus at that context shares the answer. */
+static void psygp__ps_post(const psygp_gp* g, const psygp__scr* s,
+                           const double* x, psygp__mg* o) {
+    int n = g->N_fit, ld = g->N_max, nd = g->desc.n_dims;
+    const double *am = psygp__psv(s, ld, PSYGP__PS_AM), *ag = psygp__psv(s, ld, PSYGP__PS_AG);
+    const double *um = psygp__psv(s, ld, PSYGP__PS_UM), *ug = psygp__psv(s, ld, PSYGP__PS_UG);
+    double *km = psygp__psv(s, ld, PSYGP__PS_KM), *kg = psygp__psv(s, ld, PSYGP__PS_KG);
+    double *v1 = psygp__psv(s, ld, PSYGP__PS_V1), *v2 = psygp__psv(s, ld, PSYGP__PS_V2);
+    double lim;
+    o->mm = g->hyper.mean;
+    o->mg = g->hyper.mean_g;
+    o->vm = psygp__kctx(g, 0, x, x);
+    o->vg = psygp__kctx(g, 1, x, x);
+    o->cmg = 0.0;
+    if (n == 0) return;
+    for (int i = 0; i < n; i++) {
+        const double* xi = g->X + (size_t)i * nd;
+        km[i] = psygp__kctx(g, 0, xi, x);
+        kg[i] = psygp__kctx(g, 1, xi, x);
+        v1[i] = um[i] * km[i];
+        v2[i] = ug[i] * kg[i];
+    }
+    o->mm += psygp__dot(am, km, n);
+    o->mg += psygp__dot(ag, kg, n);
+    psygp__tri_fwd(g->L, n, ld, v1);
+    psygp__tri_fwd(g->L, n, ld, v2);
+    o->vm -= psygp__dot(v1, v1, n);
+    o->vg -= psygp__dot(v2, v2, n);
+    o->cmg = -psygp__dot(v1, v2, n);
+    if (o->vm < 0.0) o->vm = 0.0;
+    if (o->vg < 0.0) o->vg = 0.0;
+    lim = sqrt(o->vm * o->vg);
+    o->cmg = psygp__clamp(o->cmg, -lim, lim);
+}
+
+/* One node of the quadrature over g: the slope there and the Gaussian that f
+ * is given that g, since f = b (x - m) is linear in m and m given g is
+ * Gaussian. */
+static void psygp__ps_node(const psygp__mg* o, double xint, double gk,
+                           double* muf, double* sdf) {
+    double b = exp(psygp__clamp(gk, -50.0, 50.0));
+    double mc = o->mm, vc = o->vm;
+    if (o->vg > 0.0) {
+        mc += o->cmg / o->vg * (gk - o->mg);
+        vc -= o->cmg * o->cmg / o->vg;
+    }
+    if (vc < 0.0) vc = 0.0;
+    *muf = b * (xint - mc);
+    *sdf = b * sqrt(vc);
+}
+
+/* The quadrature over g: PSYGP_QUAD_N Gauss-Hermite nodes, or one when g is
+ * known exactly. Fills the nodes and their weights, returns the count. */
+static int psygp__ps_nodes(const psygp__scr* s, const psygp__mg* o, double* gk,
+                           double* wk) {
+    if (!(o->vg > 0.0)) { gk[0] = o->mg; wk[0] = 1.0; return 1; }
+    for (int k = 0; k < PSYGP_QUAD_N; k++) {
+        gk[k] = o->mg + PSYGP__SQRT2 * sqrt(o->vg) * s->gh_x[k];
+        wk[k] = s->gh_w[k] / PSYGP__SQRTPI;
+    }
+    return PSYGP_QUAD_N;
+}
+
+/* E[q] and Var[q] of the target quantity at intensity xint. The m integral is
+ * the one-latent machinery (closed form for probit Bernoulli, Gauss-Hermite
+ * otherwise) and only g takes quadrature, so this is a 20-node rule where a
+ * product rule would need 20 x 20. */
+static void psygp__ps_moments(const psygp_gp* g, const psygp__scr* s, double xint,
+                              const psygp__mg* o, double* eq, double* vq) {
+    double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], e1 = 0.0, e2 = 0.0;
+    int nk = psygp__ps_nodes(s, o, gk, wk);
+    for (int k = 0; k < nk; k++) {
+        double muf, sdf, q1;
+        psygp__ps_node(o, xint, gk[k], &muf, &sdf);
+        q1 = psygp__q_smooth(g, s, muf, sdf, 0.0);
+        e1 += wk[k] * q1;
+        if (vq) e2 += wk[k] * (psygp__q_var(g, s, muf, sdf, 0.0) + q1 * q1);
+    }
+    *eq = e1;
+    if (vq) { double v = e2 - e1 * e1; *vq = v > 0.0 ? v : 0.0; }
+}
+
+/* The predictive outcome probabilities and the expected outcome entropy,
+ * E[p(y | m, g)] and E[H(p(y | m, g))]: BALD is the entropy of the first
+ * minus the second. Returns the outcome count. */
+static int psygp__ps_mix(const psygp_gp* g, const psygp__scr* s, double xint,
+                         const psygp__mg* o, double* pm, double* eh) {
+    double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], pf[PSYGP_MAX_OUTCOMES];
+    int nout = g->desc.lik == PSYGP_LIK_BERNOULLI ? 2 : g->desc.n_outcomes;
+    int nk = psygp__ps_nodes(s, o, gk, wk);
+    for (int j = 0; j < nout; j++) pm[j] = 0.0;
+    *eh = 0.0;
+    for (int k = 0; k < nk; k++) {
+        double muf, sdf;
+        psygp__ps_node(o, xint, gk[k], &muf, &sdf);
+        if (!(sdf > 0.0)) {
+            psygp__probs_of_f(g, muf, pf);
+            for (int j = 0; j < nout; j++) pm[j] += wk[k] * pf[j];
+            *eh += wk[k] * psygp__entropy(pf, nout);
+            continue;
+        }
+        for (int i = 0; i < PSYGP_QUAD_N; i++) {
+            double w = wk[k] * s->gh_w[i] / PSYGP__SQRTPI;
+            psygp__probs_of_f(g, muf + PSYGP__SQRT2 * sdf * s->gh_x[i], pf);
+            for (int j = 0; j < nout; j++) pm[j] += w * pf[j];
+            *eh += w * psygp__entropy(pf, nout);
+        }
+    }
+    return nout;
+}
+
+/* The latent level the target quantity is met at, for a caller's target. */
+static double psygp__f_level(const psygp_gp* g, double target) {
+    const psygp_desc* d = &g->desc;
+    int link = (int)d->link;
+    double pp = (target - d->guess) / psygp__span(g);
+    if (d->lik == PSYGP_LIK_ORDINAL) {
+        int k = d->target_outcome == 0 ? 1 : d->target_outcome;
+        return g->hyper.cutpoint[k - 1] - psygp__link_inv(link, 1.0 - pp);
+    }
+    return psygp__link_inv(link, pp);
+}
+
+/* P(level) at an intensity x: the probability that the target is met there,
+ * P(m + f_t exp(-g) < x), one Gaussian CDF per node of the quadrature over g
+ * because m given g is Gaussian. The look-ahead acquisitions' level-set
+ * indicator. Split in two because everything but x depends on the context's
+ * posterior alone: prepare once per context (the exponentials, the
+ * conditional means, and only the nodes whose weight matters), then evaluate
+ * per intensity, which on a grid is a whole column for one preparation. */
+typedef struct psygp__lvl {
+    int    nk;
+    double w[PSYGP_QUAD_N], a[PSYGP_QUAD_N];
+    double isc;        /* 1 / sd of m given g; 0 when m given g is exact */
+} psygp__lvl;
+
+static void psygp__lvl_prep(const psygp__scr* s, double ft, const psygp__mg* o,
+                            psygp__lvl* L) {
+    double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], sc2 = o->vm;
+    int nk = psygp__ps_nodes(s, o, gk, wk);
+    if (o->vg > 0.0) sc2 -= o->cmg * o->cmg / o->vg;
+    L->isc = sc2 > 0.0 ? 1.0 / sqrt(sc2) : 0.0;
+    L->nk = 0;
+    for (int k = 0; k < nk; k++) {
+        /* The outer Gauss-Hermite weights fall to 1e-22; below 1e-12 a node
+         * cannot move a probability. */
+        if (wk[k] < 1e-12) continue;
+        L->w[L->nk] = wk[k];
+        L->a[L->nk] = ft * exp(-psygp__clamp(gk[k], -50.0, 50.0)) +
+                      o->mm + (o->vg > 0.0 ? o->cmg / o->vg * (gk[k] - o->mg) : 0.0);
+        L->nk++;
+    }
+}
+
+static double psygp__lvl_eval(const psygp__lvl* L, double x, bool fast) {
+    double acc = 0.0;
+    for (int k = 0; k < L->nk; k++) {
+        double z = (x - L->a[k]) * L->isc, pk;
+        if (L->isc == 0.0) pk = x - L->a[k] > 0.0 ? 1.0 : 0.0;
+        else if (z > 8.5) pk = 1.0;            /* saturated: skip the exponential */
+        else if (z < -8.5) pk = 0.0;
+        else pk = fast ? psygp__Phi_fast(z) : psygp__Phi(z);
+        acc += L->w[k] * pk;
+    }
+    return acc;
+}
+
+static double psygp__ps_level(const psygp__scr* s, double xint, double ft,
+                              const psygp__mg* o, bool fast) {
+    psygp__lvl L;
+    psygp__lvl_prep(s, ft, o, &L);
+    return psygp__lvl_eval(&L, xint, fast);
+}
+
+/* One more trial at intensity xint of a context whose posterior is o, with
+ * outcome y: the Gauss-Newton site at the predictive mean, which is the
+ * look-ahead's frozen W. J is df/d(m, g) there, c = J' Sigma J. */
+static void psygp__ps_site(const psygp_gp* g, const psygp__mg* o, double xint,
+                           double yv, double* J, double* d1, double* w, double* c) {
+    double b = exp(psygp__clamp(o->mg, -50.0, 50.0)), fv = b * (xint - o->mm);
+    double lp, l1, l2, l3;
+    psygp__ll(g, fv, yv, &lp, &l1, &l2, &l3);
+    J[0] = -b;
+    J[1] = fv;
+    *d1 = l1;
+    *w = -l2 > 0.0 ? (-l2 < 1e8 ? -l2 : 1e8) : 0.0;
+    *c = o->vm * J[0] * J[0] + 2.0 * o->cmg * J[0] * J[1] + o->vg * J[1] * J[1];
+}
+
+/* A context's (m, g) posterior after that trial, given v = Cov((m, g), f*) =
+ * Sigma_ij J: the rank-one update the Gauss-Newton W makes it, one Newton step
+ * from the predictive mean with W frozen, as in the GP model's look-ahead. */
+static void psygp__ps_lookahead(const psygp__mg* oi, const double* v, double d1,
+                                double w, double c, psygp__mg* out) {
+    double den = 1.0 + w * c, lim;
+    out->mm = oi->mm + v[0] * d1 / den;
+    out->mg = oi->mg + v[1] * d1 / den;
+    out->vm = oi->vm - v[0] * v[0] * w / den;
+    out->vg = oi->vg - v[1] * v[1] * w / den;
+    out->cmg = oi->cmg - v[0] * v[1] * w / den;
+    if (out->vm < 0.0) out->vm = 0.0;
+    if (out->vg < 0.0) out->vg = 0.0;
+    lim = sqrt(out->vm * out->vg);
+    out->cmg = psygp__clamp(out->cmg, -lim, lim);
+}
+
+static double psygp__h2(double p) {
+    double pp[2];
+    pp[0] = 1.0 - p; pp[1] = p;
+    return psygp__entropy(pp, 2);
+}
+
+/* LocalMI at x: the information one trial there carries about whether x
+ * itself is above the level, H(pi) - E_y H(pi | y), with the self-update of
+ * x's own context. Per point, so it is its own refinement objective. */
+static double psygp__ps_localmi(const psygp_gp* g, const psygp__scr* s,
+                                const double* x, const psygp__mg* o) {
+    double xint = x[g->desc.intensity_dim], ft = psygp__f_level(g, g->desc.target_p);
+    double pm[PSYGP_MAX_OUTCOMES], eh = 0.0, ehy = 0.0, pi0;
+    int nout = psygp__ps_mix(g, s, xint, o, pm, &eh);
+    pi0 = psygp__ps_level(s, xint, ft, o, false);
+    for (int y = 0; y < nout; y++) {
+        double J[2], d1, w, c, v[2];
+        psygp__mg o2;
+        if (!(pm[y] > 0.0)) continue;
+        psygp__ps_site(g, o, xint, (double)y, J, &d1, &w, &c);
+        v[0] = o->vm * J[0] + o->cmg * J[1];
+        v[1] = o->cmg * J[0] + o->vg * J[1];
+        psygp__ps_lookahead(o, v, d1, w, c, &o2);
+        ehy += pm[y] * psygp__h2(psygp__ps_level(s, xint, ft, &o2, false));
+    }
+    return psygp__h2(pi0) - ehy;
+}
+
+/* The acquisition score at x under the psychometric model. LSE is the straddle
+ * on the probability scale, beta sd[q] - |E[q] - target_p|, because the latent
+ * of this model is not Gaussian and has no single sd to straddle with. */
+static double psygp__ps_score(const psygp_gp* g, const psygp__scr* s,
+                              const double* x, const psygp__mg* o) {
+    double xint = x[g->desc.intensity_dim], eq, vq;
+    switch (g->desc.acq) {
+        case PSYGP_ACQ_LSE:
+        case PSYGP_ACQ_EAVC: {
+            /* EAVC's own score is a sum over the other candidates (see
+             * psygp__ps_eavc); at one point, for refinement, it is the
+             * straddle, as under the GP model. */
+            double beta = g->desc.acq_beta > 0.0 ? g->desc.acq_beta : 1.96;
+            psygp__ps_moments(g, s, xint, o, &eq, &vq);
+            return beta * sqrt(vq) - fabs(eq - g->desc.target_p);
+        }
+        case PSYGP_ACQ_LOCALMI:
+            return psygp__ps_localmi(g, s, x, o);
+        case PSYGP_ACQ_BALV:
+            psygp__ps_moments(g, s, xint, o, &eq, &vq);
+            return vq;
+        case PSYGP_ACQ_BALD: {
+            double pm[PSYGP_MAX_OUTCOMES], eh;
+            int nout = psygp__ps_mix(g, s, xint, o, pm, &eh);
+            return psygp__entropy(pm, nout) - eh;
+        }
+        default:
+            return 0.0;
+    }
+}
+
+/* EAVC under the psychometric model: the expected absolute change in the
+ * expected number of candidates above the level, sum_i P(level_i), after one
+ * more trial at candidate j. With W frozen at j's predictive mean the trial
+ * updates every context's (m, g) posterior by rank one, through
+ * v_i = Sigma_ij J with Sigma_ij = K_ij - V_i' V_j, V the L^-1 U' k columns
+ * the prediction already computed (kept in ps_v). A candidate i sharing a
+ * context with the one before it shares v, so on a grid with the intensity
+ * fastest the M x M pairs cost one context's worth of dot products per
+ * column. What is left is M^2 x outcomes x PSYGP_QUAD_N Gaussian CDFs. */
+static void psygp__ps_eavc(psygp_gp* g, psygp__scr* s) {
+    int M = g->M, n = g->N_fit, ld = g->N_max, id = g->desc.intensity_dim;
+    int nout = g->desc.lik == PSYGP_LIK_BERNOULLI ? 2 : g->desc.n_outcomes;
+    double ft = psygp__f_level(g, g->desc.target_p);
+    double* wj = psygp__psv(s, ld, PSYGP__PS_KM);
+    psygp__lvl lv[PSYGP_MAX_OUTCOMES];
+    {
+        const double* prev = NULL;
+        for (int i = 0; i < M; i++) {
+            const double* ci = psygp__cand(g, i);
+            if (!prev || !psygp__same_ctx(g, prev, ci)) {
+                psygp__mg oi;
+                memcpy(&oi, s->ps_c + (size_t)5 * i, sizeof(oi));
+                psygp__lvl_prep(s, ft, &oi, &lv[0]);
+            }
+            prev = ci;
+            s->ps_p0[i] = psygp__lvl_eval(&lv[0], ci[id], true);
+        }
+    }
+    for (int j = 0; j < M; j++) {
+        psygp__mg oj;
+        const double* cj = psygp__cand(g, j);
+        const psygp_real* v1j = s->ps_v + (size_t)(2 * j) * ld;
+        const psygp_real* v2j = s->ps_v + (size_t)(2 * j + 1) * ld;
+        double pm[PSYGP_MAX_OUTCOMES], eh, J[2], c = 0.0, d1[PSYGP_MAX_OUTCOMES];
+        double wy[PSYGP_MAX_OUTCOMES], dv[PSYGP_MAX_OUTCOMES], sc = 0.0;
+        const double* prev = NULL;
+        memcpy(&oj, s->ps_c + (size_t)5 * j, sizeof(oj));
+        psygp__ps_mix(g, s, cj[id], &oj, pm, &eh);
+        for (int y = 0; y < nout; y++) {
+            psygp__ps_site(g, &oj, cj[id], (double)y, J, &d1[y], &wy[y], &c);
+            dv[y] = 0.0;
+        }
+        for (int k = 0; k < n; k++) wj[k] = (double)v1j[k] * J[0] + (double)v2j[k] * J[1];
+        for (int i = 0; i < M; i++) {
+            const double* ci = psygp__cand(g, i);
+            if (!prev || !psygp__same_ctx(g, prev, ci)) {
+                /* A new context: its v = Sigma_ij J, and each outcome's updated
+                 * posterior prepared for the whole column. */
+                const psygp_real* v1i = s->ps_v + (size_t)(2 * i) * ld;
+                const psygp_real* v2i = s->ps_v + (size_t)(2 * i + 1) * ld;
+                double vi[2];
+                psygp__mg oi;
+                memcpy(&oi, s->ps_c + (size_t)5 * i, sizeof(oi));
+                vi[0] = psygp__kctx(g, 0, ci, cj) * J[0] - psygp__dotr(v1i, wj, n);
+                vi[1] = psygp__kctx(g, 1, ci, cj) * J[1] - psygp__dotr(v2i, wj, n);
+                for (int y = 0; y < nout; y++) {
+                    psygp__mg o2;
+                    psygp__ps_lookahead(&oi, vi, d1[y], wy[y], c, &o2);
+                    psygp__lvl_prep(s, ft, &o2, &lv[y]);
+                }
+            }
+            prev = ci;
+            for (int y = 0; y < nout; y++) {
+                if (!(pm[y] > 0.0)) continue;
+                dv[y] += psygp__lvl_eval(&lv[y], ci[id], true) - s->ps_p0[i];
+            }
+        }
+        for (int y = 0; y < nout; y++) sc += pm[y] * fabs(dv[y]);
+        s->score[j] = sc;
+    }
+}
+
+/* Score every candidate, one posterior per context: a product grid with the
+ * intensity fastest shares each context across a whole column. */
+static void psygp__ps_fill(psygp_gp* g) {
+    psygp__scr s;
+    psygp__mg o;
+    const double* prev = NULL;
+    int M = g->M;
+    psygp__scr_of(g, &s);
+    memset(&o, 0, sizeof(o));
+    for (int j = 0; j < M; j++) {
+        const double* cj = psygp__cand(g, j);
+        if (!prev || !psygp__same_ctx(g, prev, cj)) psygp__ps_post(g, &s, cj, &o);
+        prev = cj;
+        s.ps_c[(size_t)5 * j + 0] = o.mm;
+        s.ps_c[(size_t)5 * j + 1] = o.mg;
+        s.ps_c[(size_t)5 * j + 2] = o.vm;
+        s.ps_c[(size_t)5 * j + 3] = o.vg;
+        s.ps_c[(size_t)5 * j + 4] = o.cmg;
+        if (g->desc.acq == PSYGP_ACQ_EAVC) {
+            /* ps_post leaves this context's L^-1 U' k columns in the V1 and V2
+             * rows, and they stay there while the context repeats. */
+            const double* v1 = psygp__psv(&s, g->N_max, PSYGP__PS_V1);
+            const double* v2 = psygp__psv(&s, g->N_max, PSYGP__PS_V2);
+            psygp_real* d1 = s.ps_v + (size_t)(2 * j) * g->N_max;
+            psygp_real* d2 = s.ps_v + (size_t)(2 * j + 1) * g->N_max;
+            for (int k = 0; k < g->N_fit; k++) { d1[k] = (psygp_real)v1[k]; d2[k] = (psygp_real)v2[k]; }
+            continue;
+        }
+        s.score[j] = g->desc.acq == PSYGP_ACQ_RANDOM ? 0.0
+                                                     : psygp__ps_score(g, &s, cj, &o);
+    }
+    if (g->desc.acq == PSYGP_ACQ_EAVC) psygp__ps_eavc(g, &s);
+    g->cand_valid = true;
+}
+
+
 /* --- acquisition -------------------------------------------------------- */
 
 /* The score of one latent at one point, for the acquisitions whose score needs
@@ -4116,6 +5391,11 @@ static double psygp__point_score(const psygp_gp* g, const psygp__scr* s,
     double fstar = psygp__f_star(g);
     psygp_acq acq = g->desc.acq == PSYGP_ACQ_EAVC ? PSYGP_ACQ_LSE : g->desc.acq;
     int K = g->K;
+    if (psygp__is_ps(g)) {
+        psygp__mg o;
+        psygp__ps_post(g, s, x, &o);
+        return psygp__ps_score(g, s, x, &o);
+    }
     for (int c = 0; c < K; c++) {
         double v;
         psygp__predict_k(g, s, x, c, &mus[c], &v, s->t1, s->t2);
@@ -4302,6 +5582,7 @@ static void psygp__acq_fill(psygp_gp* g) {
     psygp__scr s;
     int M = g->M, K = g->K;
     bool look = (g->desc.acq == PSYGP_ACQ_EAVC);
+    if (psygp__is_ps(g)) { psygp__ps_fill(g); return; }
     psygp__scr_of(g, &s);
     for (int j = 0; j < M; j++) s.score[j] = 0.0;
     if (g->desc.acq == PSYGP_ACQ_RANDOM) { psygp__cand_fill(g, -1); return; }
@@ -4508,6 +5789,16 @@ static void psygp__hyper_defaults(psygp_gp* g) {
     if (h->outputscale == 0.0) h->outputscale = 1.0;
     if (h->outputscale_b == 0.0) h->outputscale_b = 1.0;
     if (h->noise_sd == 0.0) h->noise_sd = 0.1;
+    if (d->model == PSYGP_MODEL_PSYCHOMETRIC) {
+        int id = d->intensity_dim;
+        for (int i = 0; i < d->n_dims; i++)
+            if (h->lengthscale_g[i] == 0.0)
+                h->lengthscale_g[i] = 0.25 * (d->hi[i] - d->lo[i]);
+        if (d->hyper.outputscale == 0.0) h->outputscale = psygp__ps_os_m(d);
+        if (h->mean == 0.0) h->mean = 0.5 * (d->lo[id] + d->hi[id]);
+        if (h->outputscale_g == 0.0) h->outputscale_g = PSYGP__PS_OS_G;
+        if (h->mean_g == 0.0) h->mean_g = log(4.0 / psygp__ispan(d));
+    }
     if (d->lik == PSYGP_LIK_ORDINAL && h->cutpoint[0] == 0.0)
         for (int m = 0; m < d->n_outcomes - 1; m++) h->cutpoint[m] = (double)m;
 }
@@ -4563,6 +5854,7 @@ PSYGP_API bool psygp_open(psygp_gp* g, const psygp_desc* desc) {
     g->proposed = -1;
     g->last_index = -1;
     g->repeats = 0;
+    g->ps_tol = PSYGP__PS_TOL;
     g->N_fit = 0;
     g->fit_valid = true;
     g->cand_valid = false;
@@ -4799,10 +6091,18 @@ PSYGP_API int psygp_predict_f(const psygp_gp* g, const double* x, int k,
     psygp__scr s;
     double m, v;
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
-    if (!x || k < 0 || k >= g->K || !psygp__in_box(g, x)) return PSYGP_ERR_ARG;
+    if (!x || k < 0 || k >= (psygp__is_ps(g) ? 2 : g->K) || !psygp__in_box(g, x))
+        return PSYGP_ERR_ARG;
     if (!g->fit_valid) return PSYGP_ERR_NUMERIC;
     psygp__scr_of(g, &s);
-    psygp__predict_k(g, &s, x, k, &m, &v, s.t1, s.t2);
+    if (psygp__is_ps(g)) {
+        psygp__mg o;
+        psygp__ps_post(g, &s, x, &o);
+        m = k == 0 ? o.mm : o.mg;
+        v = k == 0 ? o.vm : o.vg;
+    } else {
+        psygp__predict_k(g, &s, x, k, &m, &v, s.t1, s.t2);
+    }
     if (mu) *mu = m;
     if (sd) *sd = sqrt(v);
     return PSYGP_OK;
@@ -4814,6 +6114,13 @@ PSYGP_API double psygp_predict_p(const psygp_gp* g, const double* x) {
     if (!g || !g->open || !x || !psygp__in_box(g, x) || !g->fit_valid)
         return (double)NAN;
     psygp__scr_of(g, &s);
+    if (psygp__is_ps(g)) {
+        psygp__mg o;
+        double eq;
+        psygp__ps_post(g, &s, x, &o);
+        psygp__ps_moments(g, &s, x[g->desc.intensity_dim], &o, &eq, NULL);
+        return eq;
+    }
     psygp__target_latent(g, &s, x, &mu, &sd, &other, s.t1, s.t2);
     return psygp__q_smooth(g, &s, mu, sd, other);
 }
@@ -4823,12 +6130,26 @@ PSYGP_API int psygp_predict_f_many(const psygp_gp* g, const double* xs, int n,
     psygp__scr s;
     int nd;
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
-    if (!xs || n < 0 || k < 0 || k >= g->K) return PSYGP_ERR_ARG;
+    if (!xs || n < 0 || k < 0 || k >= (psygp__is_ps(g) ? 2 : g->K))
+        return PSYGP_ERR_ARG;
     if (!g->fit_valid) return PSYGP_ERR_NUMERIC;
     nd = g->desc.n_dims;
     for (int i = 0; i < n; i++)
         if (!psygp__in_box(g, xs + (size_t)i * nd)) return PSYGP_ERR_ARG;
     psygp__scr_of(g, &s);
+    if (psygp__is_ps(g)) {
+        psygp__mg o;
+        const double* prev = NULL;
+        memset(&o, 0, sizeof(o));
+        for (int i = 0; i < n; i++) {
+            const double* xi = xs + (size_t)i * nd;
+            if (!prev || !psygp__same_ctx(g, prev, xi)) psygp__ps_post(g, &s, xi, &o);
+            prev = xi;
+            if (mu) mu[i] = k == 0 ? o.mm : o.mg;
+            if (sd) sd[i] = sqrt(k == 0 ? o.vm : o.vg);
+        }
+        return PSYGP_OK;
+    }
     /* A chunk at a time, so an output the caller did not ask for goes to the
      * stack and nothing borrows the candidate cache. */
     for (int b0 = 0; b0 < n; b0 += PSYGP__BLK) {
@@ -4849,6 +6170,21 @@ PSYGP_API int psygp_predict_p_many(const psygp_gp* g, const double* xs, int n,
     if (!xs || !p || n < 0) return PSYGP_ERR_ARG;
     if (!g->fit_valid) return PSYGP_ERR_NUMERIC;
     nd = g->desc.n_dims;
+    if (psygp__is_ps(g)) {
+        psygp__mg o;
+        const double* prev = NULL;
+        for (int i = 0; i < n; i++)
+            if (!psygp__in_box(g, xs + (size_t)i * nd)) return PSYGP_ERR_ARG;
+        psygp__scr_of(g, &s);
+        memset(&o, 0, sizeof(o));
+        for (int i = 0; i < n; i++) {
+            const double* xi = xs + (size_t)i * nd;
+            if (!prev || !psygp__same_ctx(g, prev, xi)) psygp__ps_post(g, &s, xi, &o);
+            prev = xi;
+            psygp__ps_moments(g, &s, xi[g->desc.intensity_dim], &o, &p[i], NULL);
+        }
+        return PSYGP_OK;
+    }
     if (g->K > 1) {
         /* K coupled latents: one point at a time, since the target quantity of
          * a class needs the other classes at the same point. */
@@ -4876,6 +6212,13 @@ PSYGP_API double psygp_predict_p_var(const psygp_gp* g, const double* x) {
     if (!g || !g->open || !x || !psygp__in_box(g, x) || !g->fit_valid)
         return (double)NAN;
     psygp__scr_of(g, &s);
+    if (psygp__is_ps(g)) {
+        psygp__mg o;
+        double eq, vq;
+        psygp__ps_post(g, &s, x, &o);
+        psygp__ps_moments(g, &s, x[g->desc.intensity_dim], &o, &eq, &vq);
+        return vq;
+    }
     psygp__target_latent(g, &s, x, &mu, &sd, &other, s.t1, s.t2);
     return psygp__q_var(g, &s, mu, sd, other);
 }
@@ -4887,6 +6230,13 @@ PSYGP_API int psygp_predict_outcomes(const psygp_gp* g, const double* x, double*
     if (g->desc.lik == PSYGP_LIK_GAUSSIAN) return PSYGP_ERR_ARG;
     if (!g->fit_valid) return PSYGP_ERR_NUMERIC;
     psygp__scr_of(g, &s);
+    if (psygp__is_ps(g)) {
+        psygp__mg o;
+        double eh;
+        psygp__ps_post(g, &s, x, &o);
+        psygp__ps_mix(g, &s, x[g->desc.intensity_dim], &o, p, &eh);
+        return PSYGP_OK;
+    }
     if (g->K > 1) {
         /* One-latent quadrature per class, then normalized: the exact softmax
          * expectation is a K-dimensional integral. */
@@ -4957,6 +6307,30 @@ PSYGP_API int psygp_threshold(const psygp_gp* g, const double* ctx, double targe
         if (!(pt[i] >= g->desc.lo[i] && pt[i] <= g->desc.hi[i])) return PSYGP_ERR_ARG;
     }
     psygp__scr_of(g, &s);
+    if (psygp__is_ps(g)) {
+        /* The crossing of a psychometric function is m + f_t / b, and with
+         * (m, g) bivariate Gaussian its mean and variance are closed form:
+         * E[exp(-g)] = exp(-mg + vg / 2), Var[exp(-g)] = exp(-2 mg + 2 vg) -
+         * exp(-2 mg + vg), Cov(m, exp(-g)) = -cmg E[exp(-g)]. No scan, and so
+         * never more than one crossing. */
+        psygp__mg o;
+        double ft = psygp__f_level(g, target), e1, var, sd, lo0, hi0;
+        psygp__ps_post(g, &s, pt, &o);
+        e1 = exp(-o.mg + 0.5 * o.vg);
+        v = o.mm + ft * e1;
+        var = o.vm + ft * ft * (exp(-2.0 * o.mg + 2.0 * o.vg) -
+                                exp(-2.0 * o.mg + o.vg))
+              - 2.0 * ft * o.cmg * e1;
+        sd = var > 0.0 ? sqrt(var) : 0.0;
+        mg->multi_cross = false;
+        lo0 = g->desc.lo[id];
+        hi0 = g->desc.hi[id];
+        if (!(v >= lo0 && v <= hi0)) return PSYGP_ERR_NOCROSS;
+        if (x) *x = v;
+        if (lo) *lo = v - 1.96 * sd > lo0 ? v - 1.96 * sd : lo0;
+        if (hi) *hi = v + 1.96 * sd < hi0 ? v + 1.96 * sd : hi0;
+        return PSYGP_OK;
+    }
     if (!psygp__cross(g, &s, pt, target, 0.0, &v, &cross, s.t1, s.t2)) {
         mg->multi_cross = false;
         return PSYGP_ERR_NOCROSS;
