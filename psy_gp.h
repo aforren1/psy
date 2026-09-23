@@ -479,6 +479,59 @@
  *     and of BALD from 0.043 to 0.037 over eight streams.
  *     desc.no_hyper_prior turns them off and fits type-II maximum likelihood,
  *     which is what the numbers above call the "before".
+ *
+ *     WHERE THE OUTPUT-SCALE PRIOR IS CENTERED, and why it stays at 1. A
+ *     same-data comparison with AEPsych showed its model ahead early (field
+ *     MAE(p) 0.144 against 0.233 at trial 25) and level late, and AEPsych puts
+ *     a smoothed box on [1, 4] on the output scale. Three priors were run on
+ *     the same seeds: the log-normal centered at 1 (this header's), the same
+ *     centered at 3, and a smoothed box on [1, 4] (flat inside, Gaussian tails
+ *     of sd 0.05 in the logarithm). First examples/gp_audiometric.c, metabolic
+ *     phenotype, beta = 2, 20 replications; each cell is field MAE(p) /
+ *     threshold error in dB / mean fitted output scale:
+ *
+ *       trial              25              50             100             150
+ *       LSE  center 1  .256 6.8 1.3  .163 3.7 2.1  .120 2.2 3.1  .077 2.0 6.4
+ *            center 3  .165 8.6 3.8  .122 3.4 5.7  .078 2.3 9.8  .070 2.4 10.
+ *            box 1-4   .177 5.7 4.0  .144 3.1 4.0  .111 1.9 4.0  .088 1.7 4.0
+ *       EAVC center 1  .222 7.4 1.6  .138 4.9 2.5  .081 2.6 4.4  .058 2.0 7.0
+ *            center 3  .170 7.7 4.5  .109 4.1 6.5  .075 2.9 9.2  .065 2.6 10.
+ *            box 1-4   .175 9.5 4.0  .121 4.3 4.0  .084 2.7 4.0  .069 2.0 4.0
+ *
+ *     then the 1-D observer of the STATUS block, 20 streams of 150 trials,
+ *     field MAE(p) / threshold error / output scale:
+ *
+ *       trial                  25                  150
+ *       LSE  center 1   .120 .035 1.4    .058 .014 1.9
+ *            center 3   .086 .040 3.7    .055 .016 4.2
+ *            box 1-4    .087 .035 3.8    .043 .014 4.0
+ *       EAVC center 1   .117 .033 1.4    .069 .010 1.9
+ *            center 3   .088 .028 3.6    .050 .013 4.1
+ *            box 1-4    .086 .023 3.7    .049 .013 4.0
+ *
+ *     Early, the lead is real: at trial 25 either alternative cuts the field
+ *     error by about a third on both observers. Late, the three split.
+ *     Centered at 3, the prior lets the output scale run to its upper bound
+ *     of 10 (39 of 40 audiometric runs end on it, against 1 of 40 centered at
+ *     1) and the late threshold is the worst of the three: that is the
+ *     runaway the prior exists to stop. The box is not really a prior on
+ *     these data: every fit on both observers ends at 4.00 to 4.06, its upper
+ *     edge, so it acts as an output scale fixed at 4. Fixing it at 4 outright
+ *     (desc.hyper.outputscale = 4) reproduces the box's field errors to within
+ *     0.01 at every trial count on the audiometric observer, but not its late
+ *     LSE threshold (2.00 against the box's 1.66 dB, both intervals about
+ *     +- 0.3), which says that one number is seed noise. What the box
+ *     reliably does is trade a better early field (and a better late field on
+ *     the steep 1-D observer) for a worse late field on the audiometric one
+ *     (0.088 against 0.077 for LSE, 0.069 against 0.058 for EAVC), where the
+ *     data want an output scale of 6 to 7 by trial 150 and the box will not
+ *     let them. Late accuracy is the tie-breaker, and it splits between the
+ *     two observers, so it does not justify a change: the default stays
+ *     centered at 1, where the rest of the manual's numbers were measured. A session that cares more about its early
+ *     estimate can have the box's behavior by fixing desc.hyper.outputscale
+ *     at 4. Bounds of [1, 4] on the fitted scale do not do it: the log-normal
+ *     keeps the fit on the lower edge early (1.3 at trial 25, measured) and
+ *     only the ceiling is ever reached.
  *     The fit therefore maximizes a posterior, not a likelihood.
  *     psygp_log_marginal() still reports the likelihood alone, and the
  *     symptom of a fit that ran away anyway is a log marginal much closer

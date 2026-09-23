@@ -18,8 +18,9 @@ stream:
   only in where the adaptive trials go and in what the model makes of them.
 - psy.gp: RBF kernel, probit Bernoulli, candidates on an 11 x 21 grid
   (M = 231, the C benchmark's), hyperparameters fitted every 20 trials.
-- AEPsych: GPClassificationModel with its defaults (variational GP, scaled RBF
-  with its priors, 100 inducing points), refit from scratch every trial (the
+- AEPsych: GPClassificationModel with its defaults (variational GP, an RBF
+  kernel with a lognormal lengthscale prior and its output scale fixed at 1
+  unless --aepsych-scale, 100 inducing points), refit from scratch every trial (the
   Strategy default), OptimizeAcqfGenerator with its defaults, on the unit
   square, which is what AEPsych's own config path does with its normalizing
   parameter transform. The acquisitions are MCLevelSetEstimation (LSE), EAVC
@@ -43,6 +44,14 @@ aepsych installed):
     python tests/compare/compare_gp_aepsych.py                 # 10 reps, both
     python tests/compare/compare_gp_aepsych.py --reps 3 --libs psy
     python tests/compare/compare_gp_aepsych.py --csv curves.csv --workers 8
+    python tests/compare/compare_gp_aepsych.py --same-data sobol,psy-lse
+
+--same-data takes the acquisition out of the comparison: each replication is
+one fixed trial sequence (150 Sobol points, or the trials psy.gp LSE with
+refine_steps = 2 chose), both models are fitted from scratch to its first 25,
+50, 100 and 150 trials, and the table compares them with the truth and with
+each other, with MAE(p) split into the transition band (true p in 0.05..0.95)
+and outside it, and the fitted hyperparameters of both.
 
 Not a CI test: AEPsych pulls PyTorch. The output table is what goes into
 psy_gp.h's STATUS block.
@@ -243,7 +252,7 @@ def run_aepsych(method, rep, args):
     opt_strat = Strategy(generator=OptimizeAcqfGenerator(lb=lb, ub=ub, acqf=acqf,
                                                          acqf_kwargs=kw),
                          lb=lb, ub=ub, outcome_types=["binary"],
-                         model=GPClassificationModel(dim=2),
+                         model=make_aepsych_model(args),
                          min_asks=args.trials - N_INIT,
                          min_total_outcome_occurrences=0, name="opt")
     strat = SequentialStrategy([init_strat, opt_strat])
@@ -272,6 +281,231 @@ def run_aepsych(method, rep, args):
             mp, _ = strat.model.predict(grid, probability_space=True)
             rows.append((n,) + field.score(mp.detach().numpy()) + (1000.0 * spent / n,))
     return rows, {"init_match": init_match}
+
+
+# --- same-data mode -------------------------------------------------------------
+#
+# The adaptive comparison lets each library choose its own trials after the
+# shared init, so a difference in the table mixes the model with the
+# acquisition. This mode takes the acquisition out: one fixed (x, y) sequence
+# per replication, and both models fitted from scratch to exactly its first n
+# trials at each mark.
+
+SAME_SOURCES = ("sobol", "psy-lse")
+
+
+def same_sequence(source, rep, args):
+    """The replication's fixed trials in box units, and their responses."""
+    field = Field(args.pheno, args.beta)
+    u = stream(args.seed, rep, args.trials)
+    if source == "sobol":
+        try:
+            import torch
+            from aepsych.generators import SobolGenerator
+            gen = SobolGenerator(lb=torch.zeros(2, dtype=torch.float64),
+                                 ub=torch.ones(2, dtype=torch.float64), seed=rep)
+            unit = gen.gen(args.trials).numpy().astype(float)
+        except ImportError:
+            from scipy.stats import qmc
+            unit = qmc.Sobol(2, scramble=True, seed=rep).random(args.trials)
+        xs = to_box(unit)
+        ys = [respond(float(field.p(x[0], x[1])), u[t]) for t, x in enumerate(xs)]
+        return np.asarray(xs), np.asarray(ys, dtype=float)
+    # psy-lse: the trials psy.gp LSE with refine_steps = 2 chose in the
+    # adaptive protocol, replayed as they were answered.
+    import psy.gp as pg
+    init, _ = sobol_init(rep)
+    g = pg.GP(lo=list(LO), hi=list(HI), intensity_dim=1, acq="lse",
+              target_p=TARGET_P, grid=list(args.grid), n_init=N_INIT, fit=True,
+              fit_every=args.fit_every, stop_trials=args.trials,
+              max_trials=args.trials, refine_steps=2)
+    for t in range(args.trials):
+        x = list(to_box(init[t])) if t < N_INIT else g.next()[1]
+        y = respond(float(field.p(x[0], x[1])), u[t])
+        try:
+            g.update(x, y)
+        except pg.Numeric:
+            pass
+    h = g.history()
+    return np.array([r["x"] for r in h]), np.array([r["y"] for r in h])
+
+
+def fit_psy(xs, ys, args):
+    """psy.gp fitted once from its defaults to these trials, as AEPsych is."""
+    import psy.gp as pg
+    n = len(ys)
+    g = pg.GP(lo=list(LO), hi=list(HI), intensity_dim=1, target_p=TARGET_P,
+              grid=list(args.grid), n_init=N_INIT, fit=True, fit_every=0,
+              stop_trials=n, max_trials=n)
+    for x, y in zip(xs, ys):
+        try:
+            g.update(list(x), int(y))
+        except pg.Numeric:
+            pass
+    g.fit()
+    field = Field(args.pheno, args.beta)
+    p = np.frombuffer(g.predict_p_many(field.xs)).copy()
+    h = g.hyper()
+    return p, {"ls_freq": h["lengthscale"][0], "ls_int": h["lengthscale"][1],
+               "outputscale": h["outputscale"], "mean": h["mean"]}
+
+
+def describe_aepsych(m, ck, base, n):
+    amp = "fitted" if hasattr(ck, "outputscale") else "fixed at 1"
+    inner = "" if base is ck else "(" + type(base).__name__ + ")"
+    return (type(m).__name__ + ": " + type(m.mean_module).__name__ + ", "
+            + type(ck).__name__ + inner + " (output scale " + amp + "), "
+            + type(m.likelihood).__name__ + ", "
+            + type(m.variational_strategy).__name__ + ", inducing_size "
+            + str(getattr(m, "inducing_size", "?")) + " (greedy variance "
+            "reduction picks at most that many; the count used is in the table)")
+
+
+def make_aepsych_model(args):
+    """GPClassificationModel at its defaults, or with a fitted output scale.
+
+    AEPsych 0.8.0's default_mean_covar_factory takes fixed_kernel_amplitude
+    only from a Config, so --aepsych-scale builds that Config: the kernel is
+    then ScaleKernel(RBF) with the factory's own SmoothedBoxPrior(1, 4) on the
+    output scale, and everything else is unchanged."""
+    from aepsych.models import GPClassificationModel
+    if not getattr(args, "aepsych_scale", False):
+        return GPClassificationModel(dim=2)
+    from aepsych.config import Config
+    from aepsych.factory.default import default_mean_covar_factory
+    cfg = Config(config_dict={"default_mean_covar_factory": {
+        "lb": "[0, 0]", "ub": "[1, 1]", "fixed_kernel_amplitude": "False"}})
+    mean, covar = default_mean_covar_factory(cfg)
+    return GPClassificationModel(dim=2, mean_module=mean, covar_module=covar)
+
+
+def fit_aepsych(xs, ys, rep, args):
+    import logging
+    import warnings
+    import torch
+    warnings.filterwarnings("ignore")
+    torch.set_num_threads(1)
+    torch.manual_seed(rep)
+    from aepsych.models import GPClassificationModel
+    logging.getLogger().setLevel(logging.WARNING)
+    field = Field(args.pheno, args.beta)
+    m = make_aepsych_model(args)
+    xu = torch.tensor((xs - LO) / (HI - LO), dtype=torch.float64)
+    m.fit(xu, torch.tensor(ys, dtype=torch.float64))
+    grid = torch.tensor((field.xs - LO) / (HI - LO), dtype=torch.float64)
+    p, _ = m.predict(grid, probability_space=True)
+    ck = m.covar_module
+    base = getattr(ck, "base_kernel", ck)
+    ls = base.lengthscale.detach().numpy().reshape(-1) * (HI - LO)  # box units
+    info = {"ls_freq": float(ls[0]), "ls_int": float(ls[1]),
+            "outputscale": float(ck.outputscale) if hasattr(ck, "outputscale") else 1.0,
+            "mean": float(m.mean_module.constant) if hasattr(m.mean_module, "constant") else 0.0,
+            "inducing": int(m.variational_strategy.inducing_points.shape[0]),
+            "defaults": describe_aepsych(m, ck, base, len(ys))}
+    return p.detach().numpy().astype(float), info
+
+
+def compare_fields(field, pa, pb):
+    """Per-model scores against the truth, and the two models against each other."""
+    band = (field.truth_p >= 0.05) & (field.truth_p <= 0.95)
+    out = {}
+    curves = {}
+    for tag, p in (("psy", pa), ("aep", pb)):
+        p = np.asarray(p).reshape(NGRID, NGRID)
+        err = np.abs(p - field.truth_p)
+        out[tag + "_p"] = float(err.mean())
+        out[tag + "_p_band"] = float(err[band].mean())
+        out[tag + "_p_out"] = float(err[~band].mean())
+        out[tag + "_thr"] = field.score(p)[1]
+        curves[tag] = [column_threshold(p[i], field.xi) for i in range(NGRID)]
+    out["p_diff"] = float(np.mean(np.abs(np.asarray(pa) - np.asarray(pb))))
+    d = [abs(a - b) for a, b in zip(curves["psy"], curves["aep"])
+         if a is not None and b is not None]
+    out["thr_diff"] = float(np.mean(d)) if d else float("nan")
+    return out
+
+
+def same_job(source, rep, args):
+    t0 = time.perf_counter()
+    try:
+        field = Field(args.pheno, args.beta)
+        xs, ys = same_sequence(source, rep, args)
+        rows = []
+        for n in MARKS:
+            if n > len(ys):
+                continue
+            pa, ha = fit_psy(xs[:n], ys[:n], args)
+            pb, hb = fit_aepsych(xs[:n], ys[:n], rep, args)
+            rows.append((n, compare_fields(field, pa, pb), ha, hb))
+        return source, rep, rows, None, time.perf_counter() - t0
+    except Exception:
+        import traceback
+        return source, rep, [], traceback.format_exc(), time.perf_counter() - t0
+
+
+def same_data_main(args):
+    sources = [s for s in args.same_data.split(",") if s]
+    for src in sources:
+        if src not in SAME_SOURCES:
+            sys.exit("unknown --same-data source %s; choose from %s" % (src, SAME_SOURCES))
+    print("same-data mode: sources %s, %d replications, fits at %s; psy.gp fitted "
+          "once from its defaults (fit(), grid %dx%d), AEPsych "
+          "GPClassificationModel(dim=2) on the unit square, output scale %s"
+          % (sources, args.reps, [m for m in MARKS if m <= args.trials],
+             args.grid[0], args.grid[1],
+             "FITTED (--aepsych-scale)" if args.aepsych_scale else "fixed at 1 (default)"))
+    sys.stdout.flush()
+    results = {}
+    t_start = time.perf_counter()
+    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        futs = [ex.submit(same_job, src, r, args) for src in sources for r in range(args.reps)]
+        for f in as_completed(futs):
+            src, r, rows, err, secs = f.result()
+            results[(src, r)] = rows
+            status = ("FAILED: " + err) if err else ("%6.1f s" % secs)
+            print("  %-8s rep %2d  %s" % (src, r, status), flush=True)
+    wall = time.perf_counter() - t_start
+
+    def cell(vals, fmt="%.4f+-%.4f"):
+        m, c, _ = mean_ci(vals)
+        return fmt % (m, c)
+
+    for src in sources:
+        print("\n== same data: %s, %s, beta = %g, %d replications; mean +- 1.96 sd / sqrt(n) =="
+              % (src, args.pheno, args.beta, args.reps))
+        by_n = {}
+        for r in range(args.reps):
+            for row in results.get((src, r), []):
+                by_n.setdefault(row[0], []).append(row)
+        print("   n  MAE(p) psy      MAE(p) aep      |p psy-aep|     "
+              "band psy        band aep        outside psy     outside aep")
+        for n in sorted(by_n):
+            c = [row[1] for row in by_n[n]]
+            print("%4d  " % n + "  ".join(cell([x[k] for x in c]) for k in
+                  ("psy_p", "aep_p", "p_diff", "psy_p_band", "aep_p_band",
+                   "psy_p_out", "aep_p_out")))
+        print("   n  thr psy (dB)   thr aep (dB)   |thr psy-aep| (dB)")
+        for n in sorted(by_n):
+            c = [row[1] for row in by_n[n]]
+            print("%4d  " % n + "   ".join(cell([x[k] for x in c], "%5.2f+-%4.2f") for k in
+                  ("psy_thr", "aep_thr", "thr_diff")))
+        print("   n  ls freq (log2 kHz) psy/aep   ls intensity (dB) psy/aep   "
+              "outputscale psy/aep   mean psy/aep   aep inducing points")
+        for n in sorted(by_n):
+            rs = by_n[n]
+            f = lambda i, k: float(np.mean([row[i][k] for row in rs]))
+            print("%4d  %6.2f / %6.2f              %6.1f / %6.1f              "
+                  "%5.2f / %5.2f          %5.2f / %5.2f    %5.1f"
+                  % (n, f(2, "ls_freq"), f(3, "ls_freq"), f(2, "ls_int"), f(3, "ls_int"),
+                     f(2, "outputscale"), f(3, "outputscale"), f(2, "mean"), f(3, "mean"),
+                     f(3, "inducing")))
+    defaults = sorted({row[3]["defaults"] for rows in results.values() for row in rows})
+    print("\nAEPsych model at defaults, as fitted:")
+    for d in defaults:
+        print("  " + d)
+    fails = [k for k, v in results.items() if not v]
+    print("total wall time %.0f s; failed jobs %s" % (wall, fails if fails else "none"))
+    return 1 if fails else 0
 
 
 def job(lib, method, rep, args):
@@ -312,6 +546,14 @@ def main():
     ap.add_argument("--seed", type=int, default=20210419)
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) // 2))
     ap.add_argument("--csv", default=None, help="per-trial curves")
+    ap.add_argument("--aepsych-scale", action="store_true", dest="aepsych_scale",
+                    help="AEPsych model with a ScaleKernel and a fitted output scale "
+                         "(fixed_kernel_amplitude = False) instead of its default "
+                         "fixed amplitude of 1")
+    ap.add_argument("--same-data", default=None, dest="same_data",
+                    help="fit both models to one fixed trial sequence instead of "
+                         "running the adaptive protocol: a comma list of "
+                         + ", ".join(SAME_SOURCES))
     args = ap.parse_args()
     if args.csv:
         args.csv = os.path.abspath(args.csv)
@@ -337,6 +579,8 @@ def main():
         except Exception as e:
             print(f"AEPsych did not import ({e!r}); running psy.gp only", file=sys.stderr)
             libs = [l for l in libs if l != "aepsych"]
+    if args.same_data:
+        return same_data_main(args)
     _, init_src = sobol_init(0)
 
     print("compare_gp_aepsych: Owen et al. 2021 audiometric benchmark")

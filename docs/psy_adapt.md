@@ -609,7 +609,38 @@ None of these is a measurement. `examples/quest_bench.c` and
   against AEPsych's 1.29 +- 0.17, at 13 ms per trial, while fitting the
   hyperparameters every trial instead of every 20 changes nothing and
   costs ten times more. So the candidate count is a cost knob with an
-  accuracy price for the myopic acquisition. The header's answer is
+  accuracy price for the myopic acquisition.
+  A same-data run (both models fit from scratch to identical trial
+  sequences, Sobol and adaptive, 10 replications) isolates the model from
+  the acquisition: in the transition band (true p in 0.05 to 0.95) the two
+  agree and are equally too shallow, since a stationary RBF with a 30 to
+  40 dB lengthscale cannot represent a 7 dB rise; outside it AEPsych's
+  error is 1.25 to 2 times ours (0.163 against 0.082 at 150 adaptive
+  trials), the models' p fields differ by 0.03 to 0.08, and their
+  threshold curves by 1.2 to 2.8 dB with ours nearer the truth. The
+  lengthscales and means the two fit are close; the one systematic
+  difference is the output scale, which AEPsych's default model fixes at
+  1 (no ScaleKernel) while ours fits 4.5 to 6.3, and a latent with prior
+  sd 1 on a 140 dB box cannot reach p = 0 or 1 far from the threshold.
+  Rerun with AEPsych's amplitude fitted (a ScaleKernel under its box
+  prior on [1, 4]), the two models agree on identical adaptive data:
+  fields differ by 0.016, threshold curves by 0.14 dB, both at 1.43 dB
+  error. So Laplace with a candidate set and variational with an
+  optimizer give the same estimate; what differed was a kernel default.
+  The one place AEPsych's freed model is better is early (0.14 against
+  0.23 field error at 25 trials), because our output-scale prior is
+  centered at 1 and climbs slowly. Remeasured on both observers with the
+  center at 3 and with AEPsych's box on [1, 4]: either alternative cuts
+  the early field error by a third, but a center of 3 lets the scale run
+  to its ceiling in 39 of 40 runs and gives the worst late threshold, and
+  the box is a fixed scale of 4 in all but name (every fit ends on its
+  edge), which wins late on the steep 1-D observer and loses late on the
+  audiogram where the data want 6 to 7. The default stays centered at 1;
+  the manual tells a session that cares about its early estimate to fix
+  the output scale at 4. Both
+  models are equally shallow in the transition band, a limit of the
+  stationary RBF shared by both.
+  The header's answer to the grid cost is
   `refine_steps`, a coordinate-wise golden-section refinement of the
   acquisition between the grid winner's neighbors: two rounds take LSE
   from 2.06 to 1.44 +- 0.16 dB and EAVC from 2.09 to 1.44 +- 0.28 on the
