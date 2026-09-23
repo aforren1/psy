@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psy-quest"
+version = "0.4.1"  # must equal psy_quest.h's PSYQ_VERSION_STRING; tests/test_quest.py checks it
+description = "QUEST+ Bayesian adaptive psychophysics on a grid, with a background inference thread"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT-0"
+
+# The C extension is declared in setup.py (Extension) as psy.quest; this file
+# just pins the build backend so `pip install .` works. `psy` is a PEP 420
+# implicit namespace package: no __init__.py is shipped, so the other psy-*
+# distributions install next to this one without either owning the namespace.
+
+[tool.cibuildwheel]
+# abi3 (Limited API): setup.py forces a cp38-abi3 wheel tag, so one build per
+# platform serves every supported CPython. cibuildwheel >= 4 has no cp38 build
+# interpreter, so build on cp39; the wheel is still cp38-abi3.
+build = "cp39-*"
+skip = "*-musllinux_*"
+# Smoke test: a Psi grid opens, selects, and the Async thread starts and stops.
+test-command = "python -c \"import psy.quest as pq; q = pq.Quest([(-3.0, 0.0, 31)], [(-3.0, 0.0, 61), (0.5, 6.0, 12), 0.5, 0.02], stop_trials=5); a = pq.Async(q); a.start(); print('ok', a.poll()[1].proposed); a.stop()\""
+
+[tool.cibuildwheel.macos]
+archs = ["universal2"]

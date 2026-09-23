@@ -1,9 +1,9 @@
-/* psy_rt.h - v0.2 - public domain single-header real-time timing library
+/* psy_rt.h - v0.3.1 - public domain single-header real-time timing library
  *
- *   The clock, the waits, the scheduling ladder and the one-shot deadline
- *   worker that a psychophysics rig needs, factored out of the transport
- *   headers so experiment code and future transports share one clock base
- *   and one set of timing claims.
+ *   The clock, the waits, the scheduling ladder, the one-shot deadline
+ *   worker and the background-compute pump that a psychophysics rig needs,
+ *   factored out of the transport headers so experiment code and future
+ *   transports share one clock base and one set of timing claims.
  *
  *   Written in the single-header style of the stb / sokol libraries. It is
  *   the base the other psy headers stand on: psy_parallel.h and psy_serial.h
@@ -15,6 +15,33 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.3.1 - psyrt_pump_wait() is safe against a concurrent psyrt_pump_stop()
+ *          or psyrt_pump_start() at ANY point, not only once it has parked.
+ *          v0.3 checked for a live pump and then took its mutex, and a stop
+ *          landing between the two destroyed the mutex under it; a binding
+ *          had to slice its waits and defer its stop to cover that. A wait now
+ *          registers in an atomic counter before it looks, a stop closes the
+ *          door, releases every registered waiter and destroys nothing until
+ *          the counter reads zero, and a restart never plain-writes the
+ *          fields a racing wait reads. A wait racing a DRAINING stop now also
+ *          waits for the drain, so a seq already in the queue returns 0
+ *          instead of PSYRT_ERR_STOPPED. See STOP under PUMP.
+ *          PSYRT_VERSION_MAJOR / _MINOR / _PATCH / _STRING and
+ *          psyrt_version(), so a binding reads its version from the header.
+ *   v0.3 - psyrt_pump, a background-compute worker: one thread, a fixed-size
+ *          message ring, a callback per message in submit order, an idle
+ *          callback for spare work, a "done through seq" the frame loop polls
+ *          or waits on, and a lock the caller shares with the callbacks. It is
+ *          the opposite end of psyrt_worker: that one runs a short job AT a
+ *          deadline at the top of the scheduling ladder, this one runs a long
+ *          job BETWEEN deadlines at or below normal priority. See PUMP.
+ *          Two new return codes, PSYRT_ERR_FULL and PSYRT_ERR_TIMEOUT, and a
+ *          new bottom rung PSYRT_POLICY_BELOW_NORMAL, appended to
+ *          psyrt_policy so every existing value keeps its number. Only the
+ *          pump ever returns it; psyrt_thread_elevate() never lowers.
+ *          psyrt_strerror() names both new codes, and the PSYRT_ERR_STOPPED
+ *          text now says "worker or pump" because both use it.
+ *          The worker is unchanged.
  *   v0.2 - psyrt_worker_desc.on_start, a hook that runs ON THE WORKER THREAD
  *          after elevation and before psyrt_worker_start() publishes
  *          readiness, and fails the start when it returns false. The
@@ -39,13 +66,32 @@
  *          now builds this header without /std:c11.
  *   v0.1 - first release.
  *
- *   STATUS: v0.2. The Windows path is built and measured on Windows 11 by
+ *   STATUS: v0.3.1. The Windows path is built and measured on Windows 11 by
  *   examples/rt_jitter.c, and also builds in MSVC's default (pre-C11) C mode,
  *   which is what the Python and MEX bindings compile with. The Linux path is
  *   built as C11, as C++17 and with PSYRT_NO_THREADS (warnings as errors) and
  *   run under a WSL2 kernel, including a ThreadSanitizer run of the worker's
  *   submit, replace, cancel, flush, seq and on_start paths. The macOS path
  *   has not been compiled or run at all; CI compiles it.
+ *   The pump is built and run on Windows 11 (MSVC /W4 /WX) and on the same
+ *   WSL2 kernel as C11, C99 and C++17, clean under ThreadSanitizer and under
+ *   AddressSanitizer with UndefinedBehaviorSanitizer, by
+ *   tests/adapt/psy_rt_test.c (order, seq, done_seq, wait, ERR_FULL,
+ *   on_idle, drain, drop, the publish lock over a few thousand messages, the
+ *   inline and the caller-supplied ring, on_start refusal, a stop releasing a
+ *   blocked wait, a zeroed handle, a double stop, a submit after stop) and by
+ *   examples/rt_pump.c. The v0.3.1 wait-versus-stop guarantee is checked by a
+ *   hammer in the same test (two threads in a loop of 0.3 ms waits while the
+ *   main thread stops and restarts the pump 300 times, idle, draining and
+ *   dropping), clean under ThreadSanitizer on Linux and run on Windows; a
+ *   copy of the header whose stop skips the waiter drain is caught by the
+ *   same TSan run, so the clean result is not an instrumentation accident. Both platforms returned PSYRT_POLICY_BELOW_NORMAL, and
+ *   on Linux the nice value moved on the pump thread only (+5) with the calling
+ *   thread's left alone, which is what the per-thread claim in PUMP rests on.
+ *   The macOS pump, like the rest of the macOS path, has not been compiled or
+ *   run here at all, so its relative condition wait and its
+ *   THREAD_PRECEDENCE_POLICY rung are written, not tested; CI compiles them and
+ *   a rig should print what psyrt_pump_policy() reports before believing it.
  *   What NO machine here could exercise is the top of the ladder: neither
  *   test host grants CAP_SYS_NICE, so PSYRT_POLICY_DEADLINE,
  *   PSYRT_POLICY_FIFO and PSYRT_POLICY_TIME_CONSTRAINT have never been
@@ -200,6 +246,11 @@
  *                                   and removes 50 us of deliberate lateness
  *                                   from every wait.
  *
+ *   One rung sits BELOW that floor and is not part of this ladder:
+ *   PSYRT_POLICY_BELOW_NORMAL, which only psyrt_pump asks for and only when
+ *   psyrt_pump_desc.below_normal is set. psyrt_thread_elevate() never lowers a
+ *   thread, and nothing here ever moves a thread down the ladder it climbed.
+ *
  *   The reservation (psyrt_sched_deadline: runtime, deadline, period in ns)
  *   means the same thing here as in psyp_desc.sched and psys_desc.sched:
  *   runtime is the CPU budget guaranteed and capped per period, the relative
@@ -333,6 +384,133 @@
  *   onset, a frame boundary, a response window, a new transport you write.
  *
  *   ---------------------------------------------------------------------
+ *   PUMP
+ *   ---------------------------------------------------------------------
+ *   psyrt_pump is the other half of the worker's job, and the opposite shape.
+ *   The worker runs a SHORT callback AT a deadline, as high up the scheduling
+ *   ladder as it can get. The pump runs a LONG callback BETWEEN deadlines, at
+ *   normal priority or below it, and never climbs.
+ *
+ *   What it is for: an adaptive method whose inference does not fit a frame.
+ *   A QUEST+ selection over a large grid, a Gaussian-process refit, a
+ *   hyperparameter fit; see docs/psy_adapt.md, "Inference on a thread". The
+ *   trial loop submits the response and returns to drawing; the pump runs
+ *   update and next; the loop asks "is the next stimulus ready?" when the
+ *   inter-trial interval ends. That turns a frame budget from a hard
+ *   constraint into a contract the code can check, and it makes background
+ *   fitting free: on_idle runs one fit step whenever nothing is queued.
+ *
+ *       psyrt_pump_desc d;
+ *       memset(&d, 0, sizeof d);
+ *       d.msg_size = sizeof(trial_result);
+ *       d.capacity = 8;
+ *       d.on_msg   = infer;            // runs on the pump thread
+ *       d.on_idle  = fit_one_step;     // optional; true = call me again
+ *       d.ctx      = &model;
+ *       if (!psyrt_pump_start(&pump, &d)) die(psyrt_pump_error(&pump));
+ *
+ *       int seq = psyrt_pump_submit(&pump, &result);   // < 0 is an error
+ *       ...                                           // draw some frames
+ *       if (psyrt_pump_done_seq(&pump) >= (uint32_t)seq) {
+ *           psyrt_pump_lock(&pump);                   // read the publication
+ *           next_level = model.published_level;
+ *           psyrt_pump_unlock(&pump);
+ *       }
+ *
+ *   THE RING. msg_size bytes times capacity messages, either a buffer the
+ *   caller owns or, when desc.ring is NULL, an inline buffer inside the
+ *   handle (PSYRT_PUMP_INLINE_BYTES, 4096 by default). Nothing allocates,
+ *   ever. psyrt_pump_submit() COPIES the message into the ring and returns its
+ *   sequence number; when the ring is full it returns PSYRT_ERR_FULL and
+ *   copies nothing, so the caller still owns the message it tried to send and
+ *   may retry it on the next frame. That is the honest failure: a pump that
+ *   silently grew a queue would trade a visible error for an invisible
+ *   unbounded latency. A message being handled still occupies its slot until
+ *   on_msg returns, because on_msg reads it in place; so a full ring means
+ *   capacity messages accepted and at most one of them in flight.
+ *
+ *   Submit is safe from several threads at once: it takes the ring's mutex.
+ *   The ring has exactly ONE consumer, the pump thread, and on_msg is called
+ *   for each message in submit order, one at a time, never concurrently with
+ *   itself and never with either lock held. The order across two threads that
+ *   submit at the same instant is the order the mutex granted them, which is
+ *   the only order there is to have.
+ *
+ *   DONE_SEQ AND WAIT. psyrt_pump_done_seq() is the highest seq whose on_msg
+ *   has RETURNED. It is one atomic load, no lock, cheap enough for a frame
+ *   loop to poll every frame. It is published after the callback returns, so
+ *   `done_seq >= seq` means the work for that message is finished and whatever
+ *   it published is readable. psyrt_pump_wait() is the blocking form with a
+ *   relative timeout, for the end of an inter-trial interval: it returns 0
+ *   when the pump has passed the seq and PSYRT_ERR_TIMEOUT when the timeout
+ *   ran out first. Poll in a frame loop; wait in an interval you are willing
+ *   to lengthen.
+ *
+ *   THE LOCK. psyrt_pump_lock() / psyrt_pump_unlock() guard a struct the
+ *   callbacks write and the caller reads: the proposal, a posterior summary,
+ *   a progress counter. It is a SEPARATE mutex from the ring's, and that is
+ *   the whole point. on_msg runs without it held and is expected to take it
+ *   only around its publish, at the end, for the few instructions a struct
+ *   copy costs. So a caller may hold it for as long as it likes without
+ *   stalling the pump's inference, the ring, a submit, or a done_seq poll; the
+ *   only thing that waits is a publish. Nothing else in the pump takes it, and
+ *   the pump never reads what you put under it.
+ *
+ *   IDLE. on_idle runs on the pump thread, with no lock held, whenever the
+ *   ring is empty. Return true and it is called again (after a re-check of the
+ *   ring, so a submit is never starved by a busy idle callback); return false,
+ *   or leave on_idle NULL, and the thread blocks on a condition variable until
+ *   the next submit or the stop. It must return promptly, a few milliseconds:
+ *   a stop cannot join the thread until it does, and a message cannot be
+ *   dispatched until it does. One gradient step, not a whole fit.
+ *
+ *   PRIORITY. The pump runs at normal priority, or below it when
+ *   desc.below_normal is set: THREAD_PRIORITY_BELOW_NORMAL on Windows, nice +5
+ *   on the pump thread alone on Linux (setpriority(PRIO_PROCESS, tid), with
+ *   the kernel task id from the gettid syscall, because Linux nice is
+ *   per-task and PRIO_PROCESS with a thread id is how you reach one thread),
+ *   and a Mach THREAD_PRECEDENCE_POLICY importance of -16 on macOS. Failing to
+ *   lower is not an error; psyrt_pump_policy() then reports
+ *   PSYRT_POLICY_NORMAL instead of PSYRT_POLICY_BELOW_NORMAL, and those two
+ *   are the only values it ever returns while the pump runs.
+ *
+ *   The pump NEVER elevates. It does not call psyrt_thread_elevate() and has
+ *   no desc.sched. A thread that may hold a CPU for 30 ms must not be able to
+ *   preempt the frame loop or a deadline worker, and a SCHED_FIFO thread that
+ *   runs a Cholesky is a machine you cannot get the mouse back on. Inference
+ *   is work that must FINISH; a trailing edge is work that must finish ON
+ *   TIME. Only the second one belongs on the ladder. desc.pin_cpu is there for
+ *   the other half of the same idea: pin the pump to a core the frame loop
+ *   does not use and its cache footprint stops being the frame loop's problem.
+ *
+ *   STOP. psyrt_pump_stop() refuses new submits first (they get
+ *   PSYRT_ERR_STOPPED), then DRAINS: every message already in the ring is
+ *   still delivered to on_msg, in order, before the thread is joined. A
+ *   submitted response must not be lost because the session ended. Set
+ *   desc.drop_on_stop and it discards the queue instead, keeping only the
+ *   message already in flight, which cannot be un-run; those dropped messages
+ *   never reach done_seq, so a psyrt_pump_wait() on one of them returns
+ *   PSYRT_ERR_STOPPED. Drain when the messages are data; drop when they are
+ *   requests for a result nobody will read.
+ *
+ *   Both stop forms join the thread, so on_msg and on_idle are guaranteed not
+ *   to be running when psyrt_pump_stop() returns. That is what makes it safe
+ *   to free or reuse the context and the ring afterwards. Stop is safe on a
+ *   zeroed handle and on one already stopped.
+ *
+ *   psyrt_pump_wait() is SAFE AGAINST A CONCURRENT STOP AT ANY POINT, and
+ *   against a restart. A thread may sit in a loop of short waits while
+ *   another stops and starts the pump as often as it likes; no wait touches a
+ *   destroyed mutex, none hangs past its timeout, and each returns 0 (the seq
+ *   was reached), PSYRT_ERR_TIMEOUT or PSYRT_ERR_STOPPED. The mechanism: a
+ *   wait registers itself in an atomic counter before it looks at anything
+ *   else, and backs out if the pump's mutexes are already gone; a stop marks
+ *   them gone, lets every registered waiter out, and destroys nothing until
+ *   the counter is zero. So a binding needs no wait slicing and no deferral
+ *   of its own. The other calls keep the ordinary rule: do not race a submit,
+ *   a lock or a start with a stop.
+ *
+ *   ---------------------------------------------------------------------
  *   BUILDING
  *   ---------------------------------------------------------------------
  *   POSIX builds link -pthread: the worker needs it, and so does the
@@ -342,10 +520,19 @@
  *   extra. Windows needs no import library: winmm is loaded at runtime and
  *   only by psyrt_timer_resolution_begin().
  *
- *   Define PSYRT_NO_THREADS to drop the worker. That removes psyrt_worker
- *   and every psyrt_worker_* declaration, so code that uses them must guard
- *   the same way. The clock, the waits and the whole scheduling section stay:
- *   elevating the calling thread is not a threading feature.
+ *   Define PSYRT_NO_THREADS to drop the worker and the pump. That removes
+ *   psyrt_worker, psyrt_pump and every psyrt_worker_* / psyrt_pump_*
+ *   declaration, and the PSYRT_ERR_* codes and psyrt_strerror() with them, so
+ *   code that uses them must guard the same way. The clock, the waits and the
+ *   whole scheduling section stay: elevating the calling thread is not a
+ *   threading feature.
+ *
+ *   Define PSYRT_PUMP_INLINE_BYTES to size the ring a pump gets when
+ *   psyrt_pump_desc.ring is NULL (4096 by default). It sits inside every
+ *   psyrt_pump handle whether or not it is used, so a program that always
+ *   supplies its own ring can set it to 1 and a program with 8 KB messages
+ *   raises it. It must be the same in every translation unit that sees a
+ *   psyrt_pump.
  *
  *   Define PSYRT_API to override the default `extern` linkage.
  *
@@ -357,6 +544,13 @@
  */
 #ifndef PSY_RT_H_INCLUDED
 #define PSY_RT_H_INCLUDED
+
+/* The version of this header, for a binding's __version__ and for a log line.
+ * The string always matches the three numbers. */
+#define PSYRT_VERSION_MAJOR  0
+#define PSYRT_VERSION_MINOR  3
+#define PSYRT_VERSION_PATCH  1
+#define PSYRT_VERSION_STRING "0.3.1"
 
 /* Feature-test macro for clock_nanosleep() and mlockall() in the Linux
  * implementation. Defined here, before the first system header, so it takes
@@ -402,6 +596,11 @@ extern "C" {
 #ifndef PSYRT_API
 #define PSYRT_API extern
 #endif
+
+/* PSYRT_VERSION_STRING of the implementation that was compiled, which is not
+ * always the header a caller included: a binding that links a prebuilt object
+ * can compare the two. Static storage; never NULL. */
+PSYRT_API const char* psyrt_version(void);
 
 /* --- clock -------------------------------------------------------------- */
 
@@ -532,7 +731,13 @@ typedef enum psyrt_policy {
     PSYRT_POLICY_TIME_CONSTRAINT,/* macOS THREAD_TIME_CONSTRAINT_POLICY      */
     PSYRT_POLICY_FIFO,           /* SCHED_FIFO, priority 80 or system max    */
     PSYRT_POLICY_TIME_CRITICAL,  /* Windows THREAD_PRIORITY_TIME_CRITICAL    */
-    PSYRT_POLICY_NORMAL          /* no real-time policy was granted          */
+    PSYRT_POLICY_NORMAL,         /* no real-time policy was granted          */
+    PSYRT_POLICY_BELOW_NORMAL    /* deliberately below normal: only a
+                                  * psyrt_pump with desc.below_normal asks for
+                                  * this, and nothing else in this header ever
+                                  * moves a thread DOWN. Appended rather than
+                                  * placed in ladder order so every value
+                                  * above keeps the number it had in v0.2.  */
 } psyrt_policy;
 
 /* Short static name of a policy ("DEADLINE", "FIFO", ...), for log lines. */
@@ -650,8 +855,11 @@ PSYRT_API int psyrt_describe(const psyrt_report* r, char* buf, size_t cap);
  * them. PSYRT_OK is what "no error, nothing to report" means; do not compare
  * against it, compare against 0. */
 #define PSYRT_OK           0
-#define PSYRT_ERR_ARG    (-1)  /* null handle, null callback                */
-#define PSYRT_ERR_STOPPED (-2) /* the worker is not running                 */
+#define PSYRT_ERR_ARG    (-1)  /* null handle, null callback, null message  */
+#define PSYRT_ERR_STOPPED (-2) /* the worker or pump is not running         */
+#define PSYRT_ERR_FULL    (-3) /* psyrt_pump_submit: the ring is full and
+                                * the message was NOT taken                 */
+#define PSYRT_ERR_TIMEOUT (-4) /* psyrt_pump_wait: the timeout expired      */
 
 /* Static description of a PSYRT_ERR_* code ("ok" for values >= 0). */
 PSYRT_API const char* psyrt_strerror(int code);
@@ -798,6 +1006,227 @@ PSYRT_API const char* psyrt_worker_error(const psyrt_worker* w);
 
 /* True while the worker thread is running. */
 PSYRT_API bool psyrt_worker_is_running(const psyrt_worker* w);
+
+/* --- pump --------------------------------------------------------------- */
+
+/* Size of the ring a pump gets when psyrt_pump_desc.ring is NULL. It lives
+ * inside every psyrt_pump handle, used or not, so override it (before the
+ * include, in every translation unit that sees the handle) when your messages
+ * or your capacity do not fit, or when you always supply your own ring and
+ * want the 4 KB back. See BUILDING. */
+#ifndef PSYRT_PUMP_INLINE_BYTES
+#define PSYRT_PUMP_INLINE_BYTES 4096
+#endif
+
+/* One message, on the pump thread, in submit order, with NEITHER of the pump's
+ * locks held. `msg` points AT THE RING SLOT and is valid only until this
+ * returns; copy what you need to keep. `seq` is what psyrt_pump_submit()
+ * returned for it, and psyrt_pump_done_seq() reports it once this function has
+ * returned. Take psyrt_pump_lock() around the publish at the end, not around
+ * the work; see PUMP. */
+typedef void (*psyrt_msg_fn)(void* ctx, const void* msg, uint32_t seq);
+
+/* Spare-time work, on the pump thread, with neither lock held, called whenever
+ * the ring is empty. Return true to be called again, false to let the thread
+ * block until the next submit or the stop. MUST RETURN PROMPTLY, in a few
+ * milliseconds: a queued message and psyrt_pump_stop() both wait behind it.
+ * One step of a resumable fit is the intended shape. */
+typedef bool (*psyrt_idle_fn)(void* ctx);
+
+/* Pump description. Zero-initialize it and set only what you need; msg_size,
+ * capacity and on_msg have no useful default and are required. */
+typedef struct psyrt_pump_desc {
+    size_t        msg_size;   /* bytes per message, > 0. Every submit copies
+                               * exactly this many.                          */
+    uint32_t      capacity;   /* messages the ring holds, > 0. A message being
+                               * handled still holds its slot.               */
+    void*         ring;       /* at least msg_size * capacity bytes, owned by
+                               * the caller and alive until the pump stops;
+                               * NULL uses the handle's inline buffer, which
+                               * must be big enough (PSYRT_PUMP_INLINE_BYTES).
+                               * The size of a buffer you supply cannot be
+                               * checked here; get it right.                 */
+    psyrt_msg_fn  on_msg;     /* required                                    */
+    psyrt_idle_fn on_idle;    /* NULL = the thread just blocks when idle      */
+    void*         ctx;        /* passed to on_msg and on_idle                */
+    psyrt_start_fn on_start;  /* per-thread setup, on the pump thread, after
+                               * the priority and the pin and before
+                               * psyrt_pump_start() returns; NULL = none.
+                               * False fails the start. Same contract as
+                               * psyrt_worker_desc.on_start.                 */
+    void*    start_ctx;       /* passed to on_start                          */
+    bool     below_normal;    /* run the thread BELOW normal priority. Default
+                               * is normal. The pump never goes above it; see
+                               * PUMP.                                       */
+    int      pin_cpu;         /* logical CPU to pin the thread to. 0 and
+                               * negative mean no pinning, so a zeroed desc
+                               * does not pin: the repository's "a zero field
+                               * means default" rule wins over the usual -1
+                               * sentinel, and CPU 0 is not where background
+                               * work belongs anyway (it takes the timer tick
+                               * and most interrupts). To pin there, call
+                               * psyrt_thread_pin(0) from on_start, which runs
+                               * on the pump thread.                          */
+    bool     drop_on_stop;    /* stop discards the queue instead of draining
+                               * it. Default drains; see PUMP.               */
+} psyrt_pump_desc;
+
+/* Pump handle. The caller allocates it and treats every field as opaque; it
+ * owns no heap. The layout is ordered by what a frame loop touches: the done
+ * seq first, because polling it every frame is the hot path and it is read
+ * without any lock, then the ring's bookkeeping and the callbacks, then the OS
+ * objects, and the error buffer and the inline ring last, where the cold bytes
+ * cannot push the hot ones out of a line. Must be zeroed or stopped before
+ * psyrt_pump_start(); a fresh handle has no valid running flag, so start()
+ * cannot detect a pump already running in it. */
+typedef struct psyrt_pump {
+    /* --- the door: fields another thread may touch at ANY moment, including
+     * while psyrt_pump_stop() tears the pump down and psyrt_pump_start()
+     * builds it again. Every access is atomic and psyrt_pump_start() never
+     * memsets them, so a psyrt_pump_wait() racing a stop or a restart touches
+     * nothing a plain store is writing. `done` is also the frame loop's poll,
+     * which is why the door is first. --- */
+    int      done;          /* highest seq whose on_msg returned            */
+    int      running;       /* submits are accepted                         */
+    int      locks_live;    /* the mutexes exist and a new waiter may take
+                             * them. Outlives `running`: the callbacks still
+                             * publish during a drain, after a stop has
+                             * already refused new submits                  */
+    int      waiters;       /* psyrt_pump_wait()s registered on this pump. A
+                             * stop destroys nothing until it reads 0       */
+    /* --- hot: the ring --- */
+    unsigned char* ring;    /* desc.ring, or inline_ring below              */
+    size_t   msg_size;
+    uint32_t capacity;
+    uint32_t head;          /* slot to hand to on_msg next                  */
+    uint32_t tail;          /* slot the next submit fills                   */
+    uint32_t count;         /* slots occupied, including one in flight      */
+    uint32_t head_seq;      /* seq of the message at head                   */
+    uint32_t seq;           /* last seq handed out by a submit              */
+    int      busy;          /* on_msg is running, so head's slot is in use
+                             * and is not "pending" any more                */
+    int      quit;
+    int      exited;        /* the pump thread has left its loop: a waiter
+                             * whose seq is not done by now never will be  */
+    int      ready;
+    psyrt_msg_fn  on_msg;
+    psyrt_idle_fn on_idle;
+    void*    ctx;
+    /* OS objects (the ring mutex and its condition variable, the wait
+     * condition variable, the caller's publish mutex, the thread), inline so
+     * the pump owns no heap. The implementation asserts at compile time that
+     * they fit and are aligned. */
+    union { void* p[40]; uint64_t u[40]; double d[40]; } os;
+    /* --- cold: setup, teardown, diagnostics --- */
+    psyrt_start_fn on_start;
+    void*    start_ctx;
+    int      start_failed;  /* the hook refused; written before the ready
+                             * handshake, read by start() after it          */
+    int      drop_on_stop;
+    int      pin_cpu;
+    bool     below_normal;
+    psyrt_policy policy;
+    char     error[256];
+    /* Last, and the largest thing here: the ring a desc without one uses. */
+    unsigned char inline_ring[PSYRT_PUMP_INLINE_BYTES];
+} psyrt_pump;
+
+/* Start `p`'s thread per `desc`. Returns true once the thread is up, has set
+ * its priority and affinity, has run desc.on_start and has published
+ * p->policy, so all of that is final before the first submit. On failure
+ * returns false and leaves a message in psyrt_pump_error(): a NULL desc, a
+ * missing on_msg, a zero msg_size or capacity, a ring the handle's inline
+ * buffer is too small for, a refused on_start, or an OS object that could not
+ * be created. This is the only pump call that writes that message. It must
+ * not run while another thread submits, locks or stops the same handle; a
+ * psyrt_pump_wait() on another thread is allowed (see that function). */
+PSYRT_API bool psyrt_pump_start(psyrt_pump* p, const psyrt_pump_desc* desc);
+
+/* Refuse further submits, deliver what is already queued (or discard it, with
+ * desc.drop_on_stop), and join the thread. on_msg and on_idle are not running
+ * when this returns, so the ring and the ctx can be reused or freed. Safe on a
+ * zeroed or already-stopped handle. Must not race a start, a submit, a
+ * psyrt_pump_lock() or another stop on the same handle. It MAY race
+ * psyrt_pump_wait() from any thread at any point: see that function. */
+PSYRT_API void psyrt_pump_stop(psyrt_pump* p);
+
+/* Copy `msg` (desc.msg_size bytes) into the ring and return its sequence
+ * number, always POSITIVE and increasing, which on_msg also receives and
+ * psyrt_pump_done_seq() reports once on_msg has returned.
+ *
+ * Negative on failure: PSYRT_ERR_ARG for a null handle or message,
+ * PSYRT_ERR_STOPPED when the pump is not running, PSYRT_ERR_FULL when the ring
+ * has no free slot. ON PSYRT_ERR_FULL NOTHING WAS COPIED and the caller still
+ * owns its message: retry it next frame, or drop it deliberately. Test
+ * `rc < 0`, not `rc != PSYRT_OK`.
+ *
+ * Callable from any thread and from several at once (it takes the ring's
+ * mutex); the resulting order is the order the mutex granted. Allocates
+ * nothing. The seq space is 1..INT32_MAX and wraps to 1 after that, so a seq
+ * kept across the wrap is meaningless; at a thousand messages a second that is
+ * twenty-five days of submitting. */
+PSYRT_API int psyrt_pump_submit(psyrt_pump* p, const void* msg);
+
+/* Messages queued and not yet handed to on_msg (the one in flight is not
+ * counted), or 0 when the pump is not running. Takes the ring's mutex, so it
+ * is for a log line or an assertion, not a frame loop: poll
+ * psyrt_pump_done_seq() there instead. */
+PSYRT_API int psyrt_pump_pending(const psyrt_pump* p);
+
+/* The highest seq whose on_msg has RETURNED, or 0 before the first one. One
+ * atomic load, no lock, no syscall: this is the call a frame loop makes.
+ * `psyrt_pump_done_seq(p) >= (uint32_t)seq` is the "is my result ready?" test,
+ * and it is true only after the callback returned, so whatever that callback
+ * published under psyrt_pump_lock() is there to be read. */
+PSYRT_API uint32_t psyrt_pump_done_seq(const psyrt_pump* p);
+
+/* Block until psyrt_pump_done_seq() reaches `seq`, or until `timeout_ns` of
+ * monotonic time has passed. Returns PSYRT_OK (0) when the pump has passed the
+ * seq, PSYRT_ERR_TIMEOUT when the timeout ran out first, PSYRT_ERR_ARG for a
+ * null handle, and PSYRT_ERR_STOPPED when the pump is not running and never
+ * reached that seq (a seq it DID reach still returns 0 after a stop).
+ *
+ * timeout_ns is relative and 0 means "poll, do not block"; there is no
+ * infinite form, so pass a timeout you are willing to wait and treat
+ * PSYRT_ERR_TIMEOUT as the answer. An enormous timeout standing in for
+ * "forever" is safe: the wait is taken a second at a time internally. This is
+ * the inter-trial-interval call; a frame loop polls psyrt_pump_done_seq()
+ * instead.
+ *
+ * Callable from any thread, several at once, and CONCURRENTLY WITH
+ * psyrt_pump_stop() AND psyrt_pump_start() AT ANY POINT: before the stop, in
+ * the middle of it, after it, or across a stop and a restart. It never touches
+ * an OS object the stop has destroyed or the start has not finished building,
+ * and the stop does not destroy anything until every wait that got in has left.
+ * A wait racing a stop returns 0 if the pump reached the seq (a draining stop
+ * still delivers the queue, so a seq already submitted usually is reached),
+ * PSYRT_ERR_STOPPED if it did not, and never hangs past its timeout. A wait
+ * racing a restart may see either pump; the seq numbers of the new one start
+ * again at 1, so a seq kept across a restart is the caller's to retire. */
+PSYRT_API int psyrt_pump_wait(psyrt_pump* p, uint32_t seq, uint64_t timeout_ns);
+
+/* Take and release the pump's PUBLISH mutex, which is not the ring's: it
+ * guards nothing inside the pump and exists only so the caller and the
+ * callbacks can share a struct of results. on_msg runs WITHOUT it held and
+ * should take it only around its publish, for the few instructions a struct
+ * copy costs, so holding it in the caller stalls nothing but that publish, not
+ * the inference, not a submit, not a done_seq poll. Recursive locking is not
+ * supported. A lock on a pump that is not running is a no-op, which keeps a
+ * caller's read-the-results path working after a stop. */
+PSYRT_API void psyrt_pump_lock(psyrt_pump* p);
+PSYRT_API void psyrt_pump_unlock(psyrt_pump* p);
+
+/* True while the pump thread is running. */
+PSYRT_API bool psyrt_pump_is_running(const psyrt_pump* p);
+
+/* Last psyrt_pump_start() message for this handle ("" if none). */
+PSYRT_API const char* psyrt_pump_error(const psyrt_pump* p);
+
+/* What the pump thread runs at: PSYRT_POLICY_NORMAL, or
+ * PSYRT_POLICY_BELOW_NORMAL when desc.below_normal was set AND the OS granted
+ * the drop. PSYRT_POLICY_NONE before a successful start and after a stop.
+ * Never anything higher: the pump does not climb the ladder. */
+PSYRT_API psyrt_policy psyrt_pump_policy(const psyrt_pump* p);
 
 #endif /* PSYRT_NO_THREADS */
 
@@ -1080,6 +1509,7 @@ psyrt_policy psyrt_thread_elevate(const psyrt_sched_deadline* rt) {
 #include <sched.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/resource.h>   /* setpriority(), for the pump's below-normal rung */
 #include <unistd.h>
 
 #if defined(PSYRT__LINUX)
@@ -1313,6 +1743,8 @@ psyrt_policy psyrt_thread_elevate(const psyrt_sched_deadline* rt) {
  *  PLATFORM-INDEPENDENT
  * ======================================================================= */
 
+const char* psyrt_version(void) { return PSYRT_VERSION_STRING; }
+
 uint64_t psyrt_now_us(void) {
     return psyrt_now_ns() / 1000ull;
 }
@@ -1356,6 +1788,7 @@ const char* psyrt_policy_name(psyrt_policy p) {
         case PSYRT_POLICY_FIFO:            return "FIFO";
         case PSYRT_POLICY_TIME_CRITICAL:   return "TIME_CRITICAL";
         case PSYRT_POLICY_NORMAL:          return "NORMAL";
+        case PSYRT_POLICY_BELOW_NORMAL:    return "BELOW_NORMAL";
         default:                           return "?";
     }
 }
@@ -1437,6 +1870,31 @@ static int psyrt__flag_load(const int* p) { return *(const volatile int*)p; }
 static void psyrt__flag_store(int* p, int v) { *(volatile int*)p = v; }
 #endif
 
+/* Sequentially consistent forms, for the one place that needs a store-load
+ * handshake between two threads (the pump's waiter registration against its
+ * stop, a Dekker pattern). Acquire/release is not enough there: each side
+ * stores one flag and then loads the other's, and only a total order
+ * guarantees that at least one of them sees the other. The Interlocked calls
+ * are full barriers on MSVC, and a compare-exchange of 0 with 0 is its
+ * sequentially consistent load. */
+#if defined(_MSC_VER)
+static int psyrt__sc_load(const int* p) {
+    return (int)InterlockedCompareExchange((volatile LONG*)(uintptr_t)p, 0, 0);
+}
+static void psyrt__sc_store(int* p, int v) {
+    (void)InterlockedExchange((volatile LONG*)p, (LONG)v);
+}
+static int psyrt__sc_add(int* p, int v) {
+    return (int)InterlockedExchangeAdd((volatile LONG*)p, (LONG)v) + v;
+}
+#elif defined(__GNUC__) || defined(__clang__)
+static int psyrt__sc_load(const int* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+static void psyrt__sc_store(int* p, int v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
+static int psyrt__sc_add(int* p, int v) { return __atomic_add_fetch(p, v, __ATOMIC_SEQ_CST); }
+#else
+#error "psy_rt: the pump needs atomic read-modify-write; define PSYRT_NO_THREADS"
+#endif
+
 /* The generation is also the job's public seq, which psyrt_worker_submit()
  * returns as an int, so it is kept inside 1..INT32_MAX: 0 means "no job" to
  * psyrt_worker_pending() and a negative return means an error. Wrapping keeps
@@ -1449,7 +1907,9 @@ static uint32_t psyrt__next_gen(uint32_t g) {
 const char* psyrt_strerror(int code) {
     switch (code) {
         case PSYRT_ERR_ARG:     return "bad argument";
-        case PSYRT_ERR_STOPPED: return "worker not running";
+        case PSYRT_ERR_STOPPED: return "worker or pump not running";
+        case PSYRT_ERR_FULL:    return "pump ring full, message not taken";
+        case PSYRT_ERR_TIMEOUT: return "timed out";
         default:                return code >= 0 ? "ok" : "unknown error";
     }
 }
@@ -1504,22 +1964,29 @@ static psyrt__wstate* psyrt__w(psyrt_worker* w) {
 static void psyrt__worker_lock(psyrt_worker* w);
 static void psyrt__worker_unlock(psyrt_worker* w);
 
-/* Run desc.on_start on the worker thread, which is the whole point of it:
- * ioperm(), iopl() and the rest of what an OS keeps per thread can only be
- * asked for from the thread that will use them. Called before the ready
- * handshake, so the message it leaves is published to psyrt_worker_start()
- * by the same lock that publishes w->ready. */
-static bool psyrt__worker_on_start(psyrt_worker* w) {
-    char msg[sizeof(w->error)];
-    if (!w->on_start) return true;
+/* Run a desc.on_start on the thread that will use what it sets up, which is
+ * the whole point of it: ioperm(), iopl() and the rest of what an OS keeps per
+ * thread can only be asked for from that thread. Called before the ready
+ * handshake, so the message it leaves is published to the start() call by the
+ * same lock that publishes the ready flag. Shared by the worker and the pump;
+ * `what` is the prefix for the message a silent refusal gets. */
+static bool psyrt__run_on_start(psyrt_start_fn fn, void* ctx, char* err,
+                                size_t err_cap, const char* what) {
+    char msg[256];
+    if (!fn) return true;
     msg[0] = '\0';
-    if (w->on_start(w->start_ctx, msg, sizeof(msg))) return true;
+    if (fn(ctx, msg, sizeof(msg))) return true;
     /* A hook that refuses without saying why still must not fail silently. */
     if (msg[0] == '\0')
-        snprintf(w->error, sizeof(w->error), "worker: desc.on_start refused");
+        snprintf(err, err_cap, "%s: desc.on_start refused", what);
     else
-        snprintf(w->error, sizeof(w->error), "%s", msg);
+        snprintf(err, err_cap, "%s", msg);
     return false;
+}
+
+static bool psyrt__worker_on_start(psyrt_worker* w) {
+    return psyrt__run_on_start(w->on_start, w->start_ctx, w->error,
+                               sizeof(w->error), "worker");
 }
 
 /* Take the pending job and run it with the lock RELEASED. Called with the
@@ -1945,6 +2412,642 @@ static void psyrt__worker_loop(psyrt_worker* w) {
      * happen (a trailing edge, a cleanup write) is better early than never. */
     if (w->has_job) psyrt__worker_run(w, true);
 }
+
+/* ======================================================================= *
+ *  COMPUTE PUMP
+ *
+ *  One thread, a fixed ring of messages, one callback per message in submit
+ *  order, and an idle callback for the gaps. The same shape as the worker
+ *  above and the same private primitives, upside down: the worker exists to
+ *  hit a deadline and climbs the scheduling ladder to do it, the pump exists
+ *  to finish a long computation without disturbing anything and deliberately
+ *  stays at or below normal priority. See PUMP in the manual.
+ * ======================================================================= */
+
+/* The pump's only scheduling call. Lowering is optional and a refusal is not
+ * an error: the pump runs at normal priority and psyrt_pump_policy() says so.
+ * There is no path in here that raises. */
+static psyrt_policy psyrt__pump_priority(bool below_normal) {
+    if (!below_normal) return PSYRT_POLICY_NORMAL;
+#if defined(PSYRT__WINDOWS)
+    if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL))
+        return PSYRT_POLICY_BELOW_NORMAL;
+#elif defined(PSYRT__LINUX)
+    /* Linux nice is per TASK, and a task is what the rest of the world calls a
+     * thread, so PRIO_PROCESS with the KERNEL THREAD ID reaches this thread
+     * alone. PRIO_PROCESS with getpid() would move every thread in the
+     * process, the frame loop included, which is the opposite of the point.
+     * The id comes from the gettid syscall because glibc had no wrapper for it
+     * until 2.30 and this header supports older ones. +5 is one step out of
+     * the way, not the bottom: a pump that never runs never finishes. */
+    if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 5) == 0)
+        return PSYRT_POLICY_BELOW_NORMAL;
+#elif defined(PSYRT__DARWIN)
+    /* Mach has no per-thread nice; precedence is the knob, and a negative
+     * importance is the whole of "get out of the way". */
+    thread_precedence_policy_data_t pp;
+    pp.importance = -16;
+    if (thread_policy_set(pthread_mach_thread_np(pthread_self()),
+                          THREAD_PRECEDENCE_POLICY, (thread_policy_t)&pp,
+                          THREAD_PRECEDENCE_POLICY_COUNT) == KERN_SUCCESS)
+        return PSYRT_POLICY_BELOW_NORMAL;
+#endif
+    return PSYRT_POLICY_NORMAL;
+}
+
+#if defined(PSYRT__POSIX)
+
+typedef struct psyrt__pstate {
+    pthread_t       thread;
+    pthread_mutex_t mtx;    /* the ring, and the ready handshake            */
+    pthread_cond_t  cv;     /* a submit, a stop, or the ready flag          */
+    pthread_cond_t  donecv; /* done_seq advanced, or the pump is going away */
+    pthread_mutex_t pub;    /* psyrt_pump_lock(): the CALLER's, not ours    */
+} psyrt__pstate;
+
+#else /* PSYRT__WINDOWS */
+
+/* No waitable timer and no auto-reset event here, unlike the worker's state:
+ * the pump waits for work, never for a deadline, so a condition variable is
+ * the whole of it. */
+typedef struct psyrt__pstate {
+    CRITICAL_SECTION   cs;
+    CONDITION_VARIABLE cv;
+    CONDITION_VARIABLE donecv;
+    CRITICAL_SECTION   pub;
+    HANDLE             thread;
+} psyrt__pstate;
+
+#endif
+
+PSYRT__ALIGN_PROBE(psyrt__pstate);
+PSYRT__STATIC_ASSERT(sizeof(psyrt__pstate) <= sizeof(((psyrt_pump*)0)->os),
+                     "psyrt_pump.os is too small for this platform's OS objects");
+PSYRT__STATIC_ASSERT(PSYRT__ALIGNOF(psyrt__pstate) <= 8,
+                     "psyrt_pump.os is not aligned enough for this platform");
+
+static psyrt__pstate* psyrt__p(psyrt_pump* p) {
+    return (psyrt__pstate*)(void*)&p->os;
+}
+
+static bool psyrt__pump_on_start(psyrt_pump* p) {
+    return psyrt__run_on_start(p->on_start, p->start_ctx, p->error,
+                               sizeof(p->error), "pump");
+}
+
+/* ---- the six primitives that differ by platform ----------------------- */
+#if defined(PSYRT__POSIX)
+
+static void psyrt__pump_lock_ring(psyrt_pump* p)   { pthread_mutex_lock(&psyrt__p(p)->mtx); }
+static void psyrt__pump_unlock_ring(psyrt_pump* p) { pthread_mutex_unlock(&psyrt__p(p)->mtx); }
+static void psyrt__pump_wake(psyrt_pump* p)        { pthread_cond_signal(&psyrt__p(p)->cv); }
+static void psyrt__pump_wait_work(psyrt_pump* p) {
+    psyrt__pstate* s = psyrt__p(p);
+    pthread_cond_wait(&s->cv, &s->mtx);
+}
+static void psyrt__pump_done_wake(psyrt_pump* p) {
+    pthread_cond_broadcast(&psyrt__p(p)->donecv);
+}
+/* Lock held on entry and on return; the caller re-evaluates from the top, so a
+ * spurious wake costs one clock read. */
+static void psyrt__pump_done_wait(psyrt_pump* p, uint64_t until_ns) {
+    psyrt__pstate* s = psyrt__p(p);
+#if defined(PSYRT__DARWIN)
+    /* Darwin has no pthread_condattr_setclock, so an absolute wait would run
+     * against CLOCK_REALTIME and step with the wall clock. */
+    uint64_t now = psyrt_now_ns();
+    struct timespec rel;
+    if (until_ns <= now) return;
+    psyrt__ns_to_ts(until_ns - now, &rel);
+    pthread_cond_timedwait_relative_np(&s->donecv, &s->mtx, &rel);
+#else
+    struct timespec ts;
+    psyrt__ns_to_ts(until_ns, &ts);
+    pthread_cond_timedwait(&s->donecv, &s->mtx, &ts);
+#endif
+}
+
+#else /* PSYRT__WINDOWS */
+
+static void psyrt__pump_lock_ring(psyrt_pump* p)   { EnterCriticalSection(&psyrt__p(p)->cs); }
+static void psyrt__pump_unlock_ring(psyrt_pump* p) { LeaveCriticalSection(&psyrt__p(p)->cs); }
+static void psyrt__pump_wake(psyrt_pump* p)        { WakeConditionVariable(&psyrt__p(p)->cv); }
+static void psyrt__pump_wait_work(psyrt_pump* p) {
+    psyrt__pstate* s = psyrt__p(p);
+    SleepConditionVariableCS(&s->cv, &s->cs, INFINITE);
+}
+static void psyrt__pump_done_wake(psyrt_pump* p) {
+    WakeAllConditionVariable(&psyrt__p(p)->donecv);
+}
+static void psyrt__pump_done_wait(psyrt_pump* p, uint64_t until_ns) {
+    psyrt__pstate* s = psyrt__p(p);
+    uint64_t now = psyrt_now_ns();
+    DWORD ms = 0;
+    if (until_ns > now) {
+        /* Rounded UP: a sub-millisecond remainder must still wait, or the
+         * caller's loop turns into a spin for the last tick of its timeout. */
+        uint64_t d = (until_ns - now + 999999ull) / 1000000ull;
+        ms = (d >= INFINITE) ? INFINITE - 1 : (DWORD)d;
+    }
+    (void)SleepConditionVariableCS(&s->donecv, &s->cs, ms);
+}
+
+#endif /* platform */
+
+void psyrt_pump_lock(psyrt_pump* p) {
+    /* A no-op before the first start and after the last stop, so a caller's
+     * read-the-results path needs no guard of its own. `locks_live` rather
+     * than `running` because the callbacks keep publishing through a drain,
+     * which happens after a stop has already cleared `running`. */
+    if (!p || !psyrt__flag_load(&p->locks_live)) return;
+#if defined(PSYRT__POSIX)
+    pthread_mutex_lock(&psyrt__p(p)->pub);
+#else
+    EnterCriticalSection(&psyrt__p(p)->pub);
+#endif
+}
+
+void psyrt_pump_unlock(psyrt_pump* p) {
+    if (!p || !psyrt__flag_load(&p->locks_live)) return;
+#if defined(PSYRT__POSIX)
+    pthread_mutex_unlock(&psyrt__p(p)->pub);
+#else
+    LeaveCriticalSection(&psyrt__p(p)->pub);
+#endif
+}
+
+bool psyrt_pump_is_running(const psyrt_pump* p) {
+    return p && psyrt__flag_load(&p->running) != 0;
+}
+
+const char* psyrt_pump_error(const psyrt_pump* p) {
+    return p ? p->error : "null pump handle";
+}
+
+psyrt_policy psyrt_pump_policy(const psyrt_pump* p) {
+    return p ? p->policy : PSYRT_POLICY_NONE;
+}
+
+uint32_t psyrt_pump_done_seq(const psyrt_pump* p) {
+    /* One atomic load. No lock, no syscall: this is what a frame loop calls. */
+    return p ? (uint32_t)psyrt__flag_load(&p->done) : 0u;
+}
+
+/* The loop is platform-independent; only the primitives above differ. Entered
+ * and left with the ring lock held. */
+static void psyrt__pump_loop(psyrt_pump* p) {
+    for (;;) {
+        /* A stop that DROPS outranks the queue; a stop that drains does not.
+         * That one condition is the whole of drop_on_stop. */
+        if (p->count > 0 && !(p->quit && p->drop_on_stop)) {
+            const void* slot = p->ring + (size_t)p->head * p->msg_size;
+            uint32_t seq = p->head_seq;
+            /* The slot stays occupied while on_msg reads it in place, so a
+             * producer cannot overwrite it; `busy` is what keeps it out of
+             * psyrt_pump_pending(), which counts what has NOT been handed
+             * over yet. */
+            p->busy = 1;
+            psyrt__pump_unlock_ring(p);
+            p->on_msg(p->ctx, slot, seq);
+            psyrt__pump_lock_ring(p);
+            p->busy = 0;
+            p->head = (p->head + 1u == p->capacity) ? 0u : p->head + 1u;
+            p->count--;
+            p->head_seq = psyrt__next_gen(seq);
+            /* Published only now, after the callback RETURNED: a caller that
+             * sees this seq must be able to read what the callback published
+             * before it returned. */
+            psyrt__flag_store(&p->done, (int)seq);
+            psyrt__pump_done_wake(p);
+            continue;
+        }
+        if (p->quit) return;
+        if (p->on_idle) {
+            bool again;
+            psyrt__pump_unlock_ring(p);
+            again = p->on_idle(p->ctx);
+            psyrt__pump_lock_ring(p);
+            /* Re-check the ring before idling again, so a submit that arrived
+             * while on_idle ran is never starved by a callback that always
+             * says yes. */
+            if (again) continue;
+        }
+        if (p->count > 0 || p->quit) continue;
+        psyrt__pump_wait_work(p);
+    }
+}
+
+int psyrt_pump_submit(psyrt_pump* p, const void* msg) {
+    uint32_t seq;
+    if (!p || !msg) return PSYRT_ERR_ARG;
+    if (!psyrt__flag_load(&p->running)) return PSYRT_ERR_STOPPED;
+    psyrt__pump_lock_ring(p);
+    if (p->count >= p->capacity) {
+        /* Nothing was copied, so the caller still owns the message. An
+         * unbounded queue would trade this visible error for an invisible
+         * latency; see PUMP. */
+        psyrt__pump_unlock_ring(p);
+        return PSYRT_ERR_FULL;
+    }
+    memcpy(p->ring + (size_t)p->tail * p->msg_size, msg, p->msg_size);
+    p->tail = (p->tail + 1u == p->capacity) ? 0u : p->tail + 1u;
+    p->seq = psyrt__next_gen(p->seq);
+    seq = p->seq;
+    /* count == 0 means nothing queued AND nothing in flight, so this message
+     * is the one the consumer will take next and its seq is the head's. */
+    if (p->count == 0) p->head_seq = seq;
+    p->count++;
+    psyrt__pump_wake(p);
+    psyrt__pump_unlock_ring(p);
+    return (int)seq;
+}
+
+int psyrt_pump_pending(const psyrt_pump* p) {
+    uint32_t n;
+    psyrt_pump* m;
+    if (!p || !psyrt__flag_load(&p->running)) return 0;
+    /* The lock is what makes (count, busy) consistent, and taking it is a
+     * mutation the const in the signature cannot express: the handle the
+     * CALLER sees is unchanged. */
+    m = (psyrt_pump*)(uintptr_t)p;
+    psyrt__pump_lock_ring(m);
+    n = m->count - (uint32_t)(m->busy ? 1 : 0);
+    psyrt__pump_unlock_ring(m);
+    return (int)n;
+}
+
+int psyrt_pump_wait(psyrt_pump* p, uint32_t seq, uint64_t timeout_ns) {
+    uint64_t now, until;
+    int rc = PSYRT_ERR_TIMEOUT;
+    if (!p) return PSYRT_ERR_ARG;
+    /* The lock-free answer first: a seq already passed is the common case and
+     * a stopped pump that reached it is still a yes. */
+    if ((uint32_t)psyrt__flag_load(&p->done) >= seq) return PSYRT_OK;
+    /* Register BEFORE looking at whether the mutexes exist, and look with a
+     * sequentially consistent load. psyrt__pump_close_door() does the mirror
+     * image (clear locks_live, then read waiters), so either this wait sees
+     * the door closed and never touches a mutex, or the stop sees this wait
+     * counted and destroys nothing until it leaves. Checking first and
+     * registering second is the race this replaces. */
+    (void)psyrt__sc_add(&p->waiters, 1);
+    if (!psyrt__sc_load(&p->locks_live)) {
+        rc = ((uint32_t)psyrt__flag_load(&p->done) >= seq) ? PSYRT_OK
+                                                          : PSYRT_ERR_STOPPED;
+        (void)psyrt__sc_add(&p->waiters, -1);
+        return rc;
+    }
+    now = psyrt_now_ns();
+    until = (timeout_ns > UINT64_MAX - now) ? UINT64_MAX : now + timeout_ns;
+    psyrt__pump_lock_ring(p);
+    for (;;) {
+        uint64_t slice;
+        if ((uint32_t)psyrt__flag_load(&p->done) >= seq) { rc = PSYRT_OK; break; }
+        /* `exited`, not `running`: a draining stop has already refused new
+         * submits but is still delivering the queue, and a seq in that queue
+         * is still going to be reached. */
+        if (p->exited) { rc = PSYRT_ERR_STOPPED; break; }
+        now = psyrt_now_ns();
+        if (now >= until) { rc = PSYRT_ERR_TIMEOUT; break; }
+        /* One second at a time, and the loop re-checks: a caller who passes an
+         * enormous timeout as a stand-in for "forever" must not land on an
+         * absolute timespec the OS rejects, which would turn this wait into a
+         * spin. One extra wake per second of waiting is the whole cost. */
+        slice = now + 1000000000ull;
+        if (slice > until) slice = until;
+        psyrt__pump_done_wait(p, slice);
+    }
+    psyrt__pump_unlock_ring(p);
+    /* Last, after the unlock: the moment this reaches zero the stop may
+     * destroy the mutex just released. */
+    (void)psyrt__sc_add(&p->waiters, -1);
+    return rc;
+}
+
+/* Validate the desc and lay the ring out. Split from the platform starts
+ * because it is the same work on both and it is all that can fail before an
+ * OS object exists. */
+static bool psyrt__pump_setup(psyrt_pump* p, const psyrt_pump_desc* d) {
+    if (!d->on_msg || d->msg_size == 0 || d->capacity == 0) {
+        snprintf(p->error, sizeof(p->error),
+                 "pump: desc.on_msg, desc.msg_size and desc.capacity are all "
+                 "required (got %s, %lu, %lu)",
+                 d->on_msg ? "on_msg" : "no on_msg",
+                 (unsigned long)d->msg_size, (unsigned long)d->capacity);
+        return false;
+    }
+    if (d->ring) {
+        /* The size of a buffer the caller owns cannot be checked from here;
+         * the declaration says so. */
+        p->ring = (unsigned char*)d->ring;
+    } else {
+        /* Divided rather than multiplied: msg_size * capacity can overflow,
+         * and this test is the only thing between a large desc and a write
+         * past the inline buffer. */
+        if (d->msg_size > sizeof(p->inline_ring) / d->capacity) {
+            snprintf(p->error, sizeof(p->error),
+                     "pump: desc asks for %lu x %lu bytes of ring and the "
+                     "inline buffer is %lu; pass desc.ring or raise "
+                     "PSYRT_PUMP_INLINE_BYTES",
+                     (unsigned long)d->capacity, (unsigned long)d->msg_size,
+                     (unsigned long)sizeof(p->inline_ring));
+            return false;
+        }
+        p->ring = p->inline_ring;
+    }
+    p->msg_size     = d->msg_size;
+    p->capacity     = d->capacity;
+    p->on_msg       = d->on_msg;
+    p->on_idle      = d->on_idle;
+    p->ctx          = d->ctx;
+    p->on_start     = d->on_start;
+    p->start_ctx    = d->start_ctx;
+    p->below_normal = d->below_normal;
+    p->pin_cpu      = d->pin_cpu;
+    p->drop_on_stop = d->drop_on_stop ? 1 : 0;
+    p->policy       = PSYRT_POLICY_NONE;
+    return true;
+}
+
+/* Tell every waiter the pump thread is gone, whether it ran or never did. A
+ * waiter checks `exited` under the ring mutex before it parks, so after this
+ * nothing can park, and anything already parked is woken. */
+static void psyrt__pump_mark_exited(psyrt_pump* p) {
+    psyrt__pump_lock_ring(p);
+    p->exited = 1;
+    psyrt__pump_done_wake(p);
+    psyrt__pump_unlock_ring(p);
+}
+
+/* Close the door on new waiters and let the registered ones out, so the
+ * caller may destroy the mutexes. Must follow psyrt__pump_mark_exited(), or a
+ * registered waiter could park with nothing left to wake it.
+ *
+ * The store to locks_live and the load of waiters are both sequentially
+ * consistent, mirroring the registration in psyrt_pump_wait(): of the two
+ * store-then-load pairs, at least one sees the other's store. A waiter that
+ * arrives later sees the door closed and backs out touching only the atomic
+ * fields at the head of the handle. */
+static void psyrt__pump_close_door(psyrt_pump* p) {
+    psyrt__sc_store(&p->locks_live, 0);
+    while (psyrt__sc_load(&p->waiters) > 0) {
+        /* A waiter between its registration and its first lock still finds
+         * the mutex alive, sees `exited` and leaves; this broadcast is for one
+         * that parked before the pump thread's own. Not a timing path. */
+        psyrt__pump_lock_ring(p);
+        psyrt__pump_done_wake(p);
+        psyrt__pump_unlock_ring(p);
+        (void)psyrt_sleep_until(psyrt_now_ns() + 100000ull, 0);
+    }
+}
+
+/* Clear everything but the atomic door at the head of the handle. A
+ * psyrt_pump_wait() racing a restart may be touching those fields right now,
+ * so a plain memset of them would be a data race even though the values would
+ * already be what start wants; `done` is reset with an atomic store instead.
+ * The rest is only ever touched under the mutexes or by the pump thread, and
+ * start runs when neither exists. */
+static void psyrt__pump_reset(psyrt_pump* p) {
+    size_t head = offsetof(psyrt_pump, ring);
+    memset((unsigned char*)p + head, 0, sizeof(*p) - head);
+    psyrt__sc_store(&p->done, 0);
+}
+
+#if defined(PSYRT__POSIX)
+
+static void* psyrt__pump_main(void* arg) {
+    psyrt_pump* p = (psyrt_pump*)arg;
+    psyrt_policy pol = psyrt__pump_priority(p->below_normal);
+    bool ok;
+    if (p->pin_cpu > 0) (void)psyrt_thread_pin(p->pin_cpu);
+    /* After the priority and the pin, so a hook sees the thread it will run
+     * on as it will be, and before the handshake, so a refusal fails the
+     * start instead of a message. */
+    ok = psyrt__pump_on_start(p);
+    psyrt__pump_lock_ring(p);
+    p->policy = ok ? pol : PSYRT_POLICY_NONE;
+    p->start_failed = ok ? 0 : 1;
+    p->ready = 1;
+    pthread_cond_broadcast(&psyrt__p(p)->cv);
+    if (ok) psyrt__pump_loop(p);
+    /* Still under the lock: a waiter checks this before it parks, so none can
+     * park after it and every one parked now is woken. */
+    p->exited = 1;
+    psyrt__pump_done_wake(p);
+    psyrt__pump_unlock_ring(p);
+    return NULL;
+}
+
+bool psyrt_pump_start(psyrt_pump* p, const psyrt_pump_desc* desc) {
+    psyrt_pump_desc d;
+    psyrt__pstate* s;
+    pthread_mutexattr_t ma;
+    pthread_condattr_t ca;
+    int rc_mtx, rc_pub, rc_cv, rc_done, rc_thread, refused;
+    if (!p) return false;
+    memset(&d, 0, sizeof(d));
+    if (desc) d = *desc;
+    if (psyrt__flag_load(&p->running)) return true;
+
+    psyrt__pump_reset(p);
+    if (!psyrt__pump_setup(p, &d)) return false;
+
+    s = psyrt__p(p);
+    /* Priority inheritance on BOTH mutexes, and the inversion runs the other
+     * way round from the worker's: the pump is the LOW-priority thread here,
+     * so without PI a frame loop that calls psyrt_pump_submit() or
+     * psyrt_pump_lock() would wait for a preempted pump to be scheduled again
+     * before it could have the lock back. */
+    pthread_mutexattr_init(&ma);
+    pthread_mutexattr_setprotocol(&ma, PTHREAD_PRIO_INHERIT);
+    rc_mtx = pthread_mutex_init(&s->mtx, &ma);
+    rc_pub = rc_mtx ? 0 : pthread_mutex_init(&s->pub, &ma);
+    pthread_mutexattr_destroy(&ma);
+    if (rc_mtx != 0 || rc_pub != 0) {
+        if (rc_mtx == 0) pthread_mutex_destroy(&s->mtx);
+        snprintf(p->error, sizeof(p->error), "pump: mutex init: %s",
+                 strerror(rc_mtx ? rc_mtx : rc_pub));
+        return false;
+    }
+    pthread_condattr_init(&ca);
+#if !defined(PSYRT__DARWIN)
+    /* Absolute timed waits run against the clock psyrt_pump_wait()'s timeout
+     * is measured in. */
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+#endif
+    rc_cv   = pthread_cond_init(&s->cv, &ca);
+    rc_done = rc_cv ? 0 : pthread_cond_init(&s->donecv, &ca);
+    pthread_condattr_destroy(&ca);
+    if (rc_cv != 0 || rc_done != 0) {
+        if (rc_cv == 0) pthread_cond_destroy(&s->cv);
+        pthread_mutex_destroy(&s->pub);
+        pthread_mutex_destroy(&s->mtx);
+        snprintf(p->error, sizeof(p->error), "pump: cond init: %s",
+                 strerror(rc_cv ? rc_cv : rc_done));
+        return false;
+    }
+    /* Before the thread exists, because on_idle may call psyrt_pump_lock() on
+     * its very first invocation, which can happen before this function
+     * returns. Sequentially consistent because it also opens the door to
+     * waiters; see psyrt__pump_close_door(). */
+    psyrt__sc_store(&p->locks_live, 1);
+    /* pthread_create returns the error; it does not set errno. */
+    rc_thread = pthread_create(&s->thread, NULL, psyrt__pump_main, p);
+    if (rc_thread != 0) {
+        /* No thread will ever set `exited`, so do it here: a wait that got in
+         * through the open door must not be left parked. */
+        psyrt__pump_mark_exited(p);
+        psyrt__pump_close_door(p);
+        pthread_cond_destroy(&s->donecv);
+        pthread_cond_destroy(&s->cv);
+        pthread_mutex_destroy(&s->pub);
+        pthread_mutex_destroy(&s->mtx);
+        snprintf(p->error, sizeof(p->error), "pump: thread create: %s",
+                 strerror(rc_thread));
+        return false;
+    }
+    pthread_mutex_lock(&s->mtx);
+    while (!p->ready) pthread_cond_wait(&s->cv, &s->mtx);
+    refused = p->start_failed;
+    pthread_mutex_unlock(&s->mtx);
+    if (refused) {
+        /* The thread is on its way out and never set `running`, so nothing can
+         * be in the lock; join it before the objects it used go away.
+         * p->error already holds the hook's message. */
+        pthread_join(s->thread, NULL);   /* the thread set `exited` */
+        psyrt__pump_close_door(p);
+        pthread_cond_destroy(&s->donecv);
+        pthread_cond_destroy(&s->cv);
+        pthread_mutex_destroy(&s->pub);
+        pthread_mutex_destroy(&s->mtx);
+        return false;
+    }
+    psyrt__flag_store(&p->running, 1);
+    return true;
+}
+
+void psyrt_pump_stop(psyrt_pump* p) {
+    psyrt__pstate* s;
+    if (!p || !psyrt__flag_load(&p->running)) return;
+    s = psyrt__p(p);
+    /* Clear `running` first: no submit is accepted from here on, and a submit
+     * racing this teardown must be refused rather than reach for a mutex that
+     * is about to be destroyed. The queue is still delivered; `running` is
+     * about the door, not about the work. */
+    psyrt__flag_store(&p->running, 0);
+    pthread_mutex_lock(&s->mtx);
+    p->quit = 1;
+    pthread_cond_signal(&s->cv);
+    pthread_mutex_unlock(&s->mtx);
+    /* The thread sets `exited` and wakes every waiter on its way out, after
+     * the drain, so a wait for a seq still in the queue gets its 0. */
+    pthread_join(s->thread, NULL);
+    /* After the join: no callback is running, so the publish mutex has no user
+     * left, and closing the door both makes psyrt_pump_lock() the documented
+     * no-op and waits out every psyrt_pump_wait() that got in. Only then is
+     * anything destroyed. */
+    psyrt__pump_close_door(p);
+    pthread_cond_destroy(&s->donecv);
+    pthread_cond_destroy(&s->cv);
+    pthread_mutex_destroy(&s->pub);
+    pthread_mutex_destroy(&s->mtx);
+    p->policy = PSYRT_POLICY_NONE;
+}
+
+#else /* PSYRT__WINDOWS */
+
+static DWORD WINAPI psyrt__pump_main(LPVOID arg) {
+    psyrt_pump* p = (psyrt_pump*)arg;
+    psyrt_policy pol = psyrt__pump_priority(p->below_normal);
+    bool ok;
+    if (p->pin_cpu > 0) (void)psyrt_thread_pin(p->pin_cpu);
+    /* See the POSIX twin: after the priority and the pin, before the
+     * handshake. */
+    ok = psyrt__pump_on_start(p);
+    psyrt__pump_lock_ring(p);
+    p->policy = ok ? pol : PSYRT_POLICY_NONE;
+    p->start_failed = ok ? 0 : 1;
+    p->ready = 1;
+    WakeAllConditionVariable(&psyrt__p(p)->cv);
+    if (ok) psyrt__pump_loop(p);
+    /* See the POSIX twin. */
+    p->exited = 1;
+    psyrt__pump_done_wake(p);
+    psyrt__pump_unlock_ring(p);
+    return 0;
+}
+
+bool psyrt_pump_start(psyrt_pump* p, const psyrt_pump_desc* desc) {
+    psyrt_pump_desc d;
+    psyrt__pstate* s;
+    int refused;
+    if (!p) return false;
+    memset(&d, 0, sizeof(d));
+    if (desc) d = *desc;
+    if (psyrt__flag_load(&p->running)) return true;
+
+    psyrt__pump_reset(p);
+    if (!psyrt__pump_setup(p, &d)) return false;
+
+    s = psyrt__p(p);
+    /* Critical sections and condition variables cannot fail to initialize and
+     * need no handle, so there is nothing to unwind before CreateThread. */
+    InitializeCriticalSection(&s->cs);
+    InitializeCriticalSection(&s->pub);
+    InitializeConditionVariable(&s->cv);
+    InitializeConditionVariable(&s->donecv);
+    /* Before the thread exists; see the POSIX twin. */
+    psyrt__sc_store(&p->locks_live, 1);
+    s->thread = CreateThread(NULL, 0, psyrt__pump_main, p, 0, NULL);
+    if (!s->thread) {
+        DWORD err = GetLastError();
+        psyrt__pump_mark_exited(p);
+        psyrt__pump_close_door(p);
+        snprintf(p->error, sizeof(p->error), "pump: thread create failed (err %lu)",
+                 (unsigned long)err);
+        DeleteCriticalSection(&s->pub);
+        DeleteCriticalSection(&s->cs);
+        return false;
+    }
+    EnterCriticalSection(&s->cs);
+    while (!p->ready) SleepConditionVariableCS(&s->cv, &s->cs, INFINITE);
+    refused = p->start_failed;
+    LeaveCriticalSection(&s->cs);
+    if (refused) {
+        /* See the POSIX twin: join before the objects go away. p->error
+         * already holds the hook's message. */
+        WaitForSingleObject(s->thread, INFINITE);   /* it set `exited` */
+        CloseHandle(s->thread);
+        psyrt__pump_close_door(p);
+        DeleteCriticalSection(&s->pub);
+        DeleteCriticalSection(&s->cs);
+        return false;
+    }
+    psyrt__flag_store(&p->running, 1);
+    return true;
+}
+
+void psyrt_pump_stop(psyrt_pump* p) {
+    psyrt__pstate* s;
+    if (!p || !psyrt__flag_load(&p->running)) return;
+    s = psyrt__p(p);
+    /* Clear `running` first; see the POSIX twin. */
+    psyrt__flag_store(&p->running, 0);
+    EnterCriticalSection(&s->cs);
+    p->quit = 1;
+    WakeAllConditionVariable(&s->cv);
+    LeaveCriticalSection(&s->cs);
+    /* See the POSIX twin: the thread marks `exited` after the drain, the join
+     * waits for that, and close_door waits out every registered wait before
+     * anything is deleted. */
+    WaitForSingleObject(s->thread, INFINITE);
+    CloseHandle(s->thread);
+    psyrt__pump_close_door(p);
+    DeleteCriticalSection(&s->pub);
+    DeleteCriticalSection(&s->cs);
+    p->policy = PSYRT_POLICY_NONE;
+}
+
+#endif /* platform */
 
 #endif /* PSYRT_NO_THREADS */
 

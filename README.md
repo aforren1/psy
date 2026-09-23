@@ -10,9 +10,12 @@ C++17 and carries its own documentation in its top comment.
 
 | Header | Purpose | Platforms | Status |
 |---|---|---|---|
-| [psy_rt.h](psy_rt.h) | The shared base: monotonic clock, deadline waits, thread elevation, and a one-shot deadline worker. The transport headers use it. | Windows, Linux, macOS | v0.2. Windows measured with [rt_jitter](examples/rt_jitter.c); Linux built and run under WSL2, worker clean under ThreadSanitizer; CI compiles the macOS backend as soon as this is pushed. No test host grants CAP_SYS_NICE, so the SCHED_DEADLINE, SCHED_FIFO and Mach time-constraint rungs are unexercised. |
+| [psy_rt.h](psy_rt.h) | The shared base: monotonic clock, deadline waits, thread elevation, a one-shot deadline worker, and a background pump for inference between trials. The transport headers and the async layers of the adaptive headers use it. | Windows, Linux, macOS | v0.3.1. Pump built and run on Windows and Linux, ThreadSanitizer clean including a wait-versus-stop hammer; the deadline worker as before: Windows measured with [rt_jitter](examples/rt_jitter.c); Linux built and run under WSL2, worker clean under ThreadSanitizer; CI compiles the macOS backend as soon as this is pushed. No test host grants CAP_SYS_NICE, so the SCHED_DEADLINE, SCHED_FIFO and Mach time-constraint rungs are unexercised. |
 | [psy_parallel.h](psy_parallel.h) | Parallel port (LPT) trigger output and line input, blocking and async pulses. | Windows, Linux | v0.3, on psy_rt.h. Linux tested; Windows backend compiled but not run on hardware. |
 | [psy_serial.h](psy_serial.h) | Serial port (RS-232, USB-serial, USB-CDC) byte I/O for trigger and response boxes, blocking and async pulses. | Windows, Linux, macOS | v0.4, on psy_rt.h. Linux tested against a virtual port pair; the Windows and macOS backends compile in CI but have never run on a device. [Design notes](docs/psy_serial.md). |
+| [psy_stair.h](psy_stair.h) | Adaptive staircases: transformed and weighted up/down, accelerated stochastic approximation. No heap, no threads. | any | v0.1.1. Hand-derived tracks and a simulated observer in [tests/adapt/](tests/adapt/); gcc and MSVC, sanitizer clean; replays PsychoPy's StairHandler trial for trial ([tests/compare/](tests/compare/)). [Design notes](docs/psy_adapt.md). |
+| [psy_quest.h](psy_quest.h) | QUEST+ on a grid, with QUEST, Psi and Psi-marginal as configurations; built-in psychometric functions, per-cell and batch callbacks for custom models (quick CSF); optional async layer on psy_rt.h. | any | v0.4.1. 13000+ checks against an independent reference; a Psi-marginal selection in about 1 ms; gcc and MSVC, sanitizer and ThreadSanitizer clean; identical selections to questplus on 180 of 180 trials ([tests/compare/](tests/compare/)). Not yet compared with mQUESTPlus. [Design notes](docs/psy_adapt.md). |
+| [psy_gp.h](psy_gp.h) | Gaussian-process adaptive estimation (the AEPsych subset): Laplace GP with binary, ordinal, categorical or continuous outcomes, RBF and semiparametric kernels, look-ahead level-set and global acquisitions on a candidate set, priors on the hyperparameters; optional async layer on psy_rt.h. | any | v0.2.1. Numerics checked against dense references; the Owen et al. 2021 audiometric benchmark reproduced by [gp_audiometric](examples/gp_audiometric.c) and run beside AEPsych on one response stream ([tests/compare/](tests/compare/)); gcc and MSVC, sanitizer clean. [Design notes](docs/psy_adapt.md). |
 
 ## Quick start
 
@@ -54,6 +57,7 @@ psy_rt.h                  the shared base: clock, waits, scheduling, deadline wo
 psy_<name>.h              one library per header, at the root; the header is the documentation
 examples/<name>_*.c       runnable demos, one or more per library
 tests/compile/            per-header compile checks (C11, C++17, no-threads)
+tests/adapt/              self-checking tests for the adaptive-method headers, run by ctest
 tests/loopback/           opt-in hardware tests (-DPSY_BUILD_LOOPBACK=ON), run by hand
 docs/                     design notes and specifications only; nothing a header already says
 bindings/python/<name>/   one pip package per library
@@ -63,7 +67,9 @@ CMakeLists.txt            builds examples and compile checks; registers librarie
 
 ## Conventions
 
-- **Dependencies.** `psy_rt.h` is the one header the others use. It holds the
+- **Dependencies.** `psy_rt.h` is the one header the others use. The
+  adaptive-method headers (`psy_stair.h`, `psy_quest.h`, `psy_gp.h`) are
+  pure computation and include nothing but the C standard library. It holds the
   clock, the deadline waits, the thread elevation and the deadline worker. A
   transport header includes it, so a user copies `psy_rt.h` and the transport
   header. There are no other dependencies between headers. Two mechanics
@@ -77,7 +83,9 @@ CMakeLists.txt            builds examples and compile checks; registers librarie
 - **Names.** `psy_<name>.h` uses a short, unique function prefix `psy<x>_`
   and macro prefix `PSY<X>_`, registered in the table above: `psyp_`/`PSYP_`
   for parallel, `psys_`/`PSYS_` for serial, `psyrt_`/`PSYRT_` for the
-  real-time timing primitives in `psy_rt.h`. One letter while it stays
+  real-time timing primitives in `psy_rt.h`, `psyst_`/`PSYST_` for
+  staircases, `psyq_`/`PSYQ_` for QUEST+, `psygp_`/`PSYGP_` for the
+  Gaussian-process methods. One letter while it stays
   unique; a later `psy_screen.h` picks something like `psyscr_`. The
   implementation macro is `PSY_<NAME>_IMPLEMENTATION`. Private symbols use a
   double underscore (`psyp__now_ns`).
@@ -135,7 +143,11 @@ what puts a header under test.
   3.8+). Each one compiles the transport header plus `psy_rt.h` into the
   extension. They share the `psy` namespace (PEP 420, no `__init__.py`), so
   `pip install psy-parallel psy-serial` gives `import psy.parallel` and
-  `import psy.serial`, and either installs alone. CI builds the wheels with
+  `import psy.serial`, and either installs alone. The adaptive headers have
+  the same: `psy-stair`, `psy-quest` and `psy-gp` give `psy.stair`,
+  `psy.quest` and `psy.gp`, with an `Async` class in the last two that
+  runs inference on a C thread the interpreter never sees. `tests/compare/`
+  runs them beside PsychoPy, questplus and AEPsych on one response stream. CI builds the wheels with
   cibuildwheel on Linux, Windows, and (serial only) macOS.
 - **MATLAB / Octave**: [bindings/mex/](bindings/mex/), one MEX function per
   library (`psy_parallel`, `psy_serial`) with ppdev-mex-style command

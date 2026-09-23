@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psy-stair"
+version = "0.1.1"  # must equal psy_stair.h's PSYST_VERSION_STRING; tests/test_stair.py checks it
+description = "Adaptive staircases (up/down, weighted, ASA) for psychophysics"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT-0"
+
+# The C extension is declared in setup.py (Extension) as psy.stair; this file
+# just pins the build backend so `pip install .` works. `psy` is a PEP 420
+# implicit namespace package: no __init__.py is shipped, so the other psy-*
+# distributions install next to this one without either owning the namespace.
+
+[tool.cibuildwheel]
+# abi3 (Limited API): setup.py forces a cp38-abi3 wheel tag, so one build per
+# platform serves every supported CPython. cibuildwheel >= 4 has no cp38 build
+# interpreter, so build on cp39; the wheel is still cp38-abi3.
+build = "cp39-*"
+skip = "*-musllinux_*"
+test-command = "python -c \"import psy.stair as st; s = st.Staircase(start=1.0, steps=0.1, stop_trials=2); s.update(s.next(), 1); print('ok', s.next())\""
+
+[tool.cibuildwheel.macos]
+archs = ["universal2"]

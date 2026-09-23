@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psy-gp"
+version = "0.2.1"  # tracks the psy_gp.h version; keep the two in step
+description = "Gaussian-process adaptive psychophysics (AEPsych-style) with no dependencies"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT-0"
+
+# The C extension is declared in setup.py (Extension) as psy.gp; this file
+# just pins the build backend so `pip install .` works. `psy` is a PEP 420
+# implicit namespace package: no __init__.py is shipped, so psy-serial,
+# psy-parallel and the adaptive-method bindings install next to this
+# distribution without any of them owning the namespace.
+
+[tool.cibuildwheel]
+# The extension is abi3 (Limited API): setup.py forces a cp38-abi3 wheel tag
+# (py_limited_api="cp38"), so it installs on CPython 3.8+ regardless of which
+# interpreter builds it. We build on cp39 because cibuildwheel >=4 no longer
+# ships a cp38 build interpreter (3.8 is EOL); the resulting wheel is still
+# cp38-abi3. One build per platform serves every supported CPython.
+build = "cp39-*"
+skip = "*-musllinux_*"
+# Smoke test: the module imports, a GP opens, and the async thread starts.
+test-command = "python -c \"import psy.gp as g; m = g.GP(lo=[0], hi=[1], target_p=0.75, stop_trials=5); a = g.Async(m); a.start(); a.stop(); print('psy.gp', g.__version__, m.next())\""
+
+[tool.cibuildwheel.macos]
+# One wheel for Intel and Apple silicon. Pure computation plus pthreads, so
+# nothing platform-specific stands in the way.
+archs = ["universal2"]

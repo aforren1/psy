@@ -1,0 +1,317 @@
+# psy.gp Python binding
+
+A CPython extension that wraps the
+[psy_gp.h](../../../psy_gp.h) single-header library: Gaussian-process adaptive
+psychophysics, the subset of AEPsych that fits in one C file. It also compiles
+the header's optional async layer (`PSYGP_ASYNC`), which runs the inference on
+a C thread from the shared [psy_rt.h](../../../psy_rt.h).
+
+The binding uses the plain CPython C API and has no dependencies: no NumPy, no
+PyTorch, no pybind. It targets the **Limited API / stable ABI**
+(`Py_LIMITED_API = 0x03080000`), so one `psy/gp.abi3.so` (`gp.pyd` on
+Windows) works on CPython 3.8 and later.
+
+The distribution is `psy-gp` and the module is `psy.gp`. `psy` is a
+[PEP 420](https://peps.python.org/pep-0420/) implicit namespace package (no
+`__init__.py`), so `psy-gp` installs next to `psy-serial`, `psy-parallel` and
+the other `psy-*` bindings, or alone.
+
+This page has three parts: how to install and use the binding, the API
+reference, and an explanation of the threading rules and of what to log.
+
+## How to install
+
+From this directory:
+
+```sh
+pip install .                       # build and install an abi3 wheel
+# or, in place for development:
+python setup.py build_ext --inplace
+```
+
+With uv, from the repository root:
+
+```sh
+uv pip install ./bindings/python/psy_gp
+```
+
+The in-place build puts the extension into `psy/`. That directory is otherwise
+empty and stays in git for this purpose.
+
+setup.py finds the headers at the repository root in a development tree. A
+build outside the tree, such as an sdist or a cibuildwheel run, sees only this
+directory. Copy `psy_gp.h` and `psy_rt.h` next to `setup.py` first:
+
+```sh
+cp ../../../psy_gp.h ../../../psy_rt.h .
+uv build --sdist                    # or: python -m build --sdist
+```
+
+The two copies are gitignored. When the repository root is present, its
+headers win, so a stale copy cannot shadow a newer header.
+
+On Linux and macOS the build links `-pthread` (for the async thread) and
+`libm`. Windows needs no extra libraries.
+
+## How to run an adaptive session
+
+```python
+import psy.gp as pg
+
+gp = pg.GP(
+    lo=[0.0, -3.0], hi=[1.5, 0.0],     # log10 spatial frequency, log10 contrast
+    intensity_dim=1,                   # thresholds are along contrast
+    acq=pg.ACQ_EAVC,                   # or "eavc"
+    target_p=0.75,
+    grid=[15, 25],                     # candidate grid, 375 points
+    n_init=10,                         # Halton trials first
+    fit=True, fit_every=10,            # fit the hyperparameters every 10 trials
+    stop_trials=150,
+)
+
+while not gp.done:
+    index, x = gp.next()               # x is a list of n_dims floats
+    seen = run_trial(x)                # your code: 1 = yes, 0 = no
+    gp.update(x, seen)                 # the stimulus you SHOWED, and the outcome
+
+thr, lo, hi = gp.threshold([0.7])      # contrast threshold at log10 SF 0.7
+```
+
+Give `update()` the stimulus that you showed, not the one that was proposed.
+If the display quantized it, the history records that. A proposal without a
+response is proposed again by the next `next()`.
+
+The other likelihoods:
+
+```python
+# a four-point confidence rating; the level set is "rated 2 or above"
+pg.GP(..., lik="ordinal", n_outcomes=4, target_outcome=2, target_p=0.5)
+# which of three intervals (softmax over three latent GPs)
+pg.GP(..., lik="categorical", n_outcomes=3, target_outcome=1, target_p=0.5)
+# a continuous setting; use update_real(x, y)
+pg.GP(..., lik="gaussian", acq="balv", target_value=0.5)
+```
+
+A candidate grid quantizes every proposal: on an 11 x 21 grid over 140 dB,
+that is 7 dB along intensity. `refine_steps=2` moves the grid winner off the
+grid by a short golden-section search between its neighbors, for about a
+fifth of the cost of the candidate sweep. On the audiometric benchmark of the
+header's manual it takes the LSE threshold error at 150 trials from 1.98 to
+1.50 dB.
+
+## How to plot the field
+
+`predict_p_many()` evaluates the model at many points in one blocked pass.
+It takes any buffer (a NumPy array, `array.array('d')`) or a sequence of
+points, and it returns a `memoryview` of doubles:
+
+```python
+import numpy as np
+xs = np.column_stack([cc.ravel(), ii.ravel()])     # n x n_dims
+p = np.frombuffer(gp.predict_p_many(xs)).reshape(cc.shape)
+mu, sd = (np.frombuffer(v) for v in gp.predict_f_many(xs))
+```
+
+The result is a copy, not a view into the handle. The Limited API before
+Python 3.11 has no buffer slot, so a zero-copy result waits for a later
+version. A float64 C-order or Fortran-order array goes in through one copy.
+Other dtypes go through `tolist()`, which is slower.
+
+## How to keep the frame loop free (Async)
+
+An EAVC selection on a few hundred candidates takes 5 to 30 ms, and a
+hyperparameter fit takes hundreds of ms. That does not fit between two frames
+at 60 Hz. `psy.gp.Async` runs `update`, `next` and `threshold` on a C thread,
+so a PsychoPy frame loop only polls:
+
+```python
+gp = pg.GP(**desc)
+with pg.Async(gp, context=[0.5], fit_in_idle=True, below_normal=True) as a:
+    seq, snap = a.poll()                  # seq 0: the first stimulus is ready
+    while not snap.done:
+        k = run_trial_frames(snap.x)      # your win.flip() loop
+        seq = a.submit(snap.x, k)         # returns at once
+        while True:                       # the inter-trial interval
+            win.flip()
+            got, snap = a.poll()          # an atomic load and a struct copy
+            if got >= seq:
+                break                     # snap.x is the next stimulus
+# stop() has run: every queued response is applied, and gp is yours again
+print(gp.threshold([0.5]), gp.hyper(), gp.log_marginal)
+```
+
+This is the way to run a 30 ms EAVC selection under a PsychoPy frame loop.
+The loop keeps drawing while the thread computes. When the proposal is late,
+the loop shows one more frame of the same screen; it does not block.
+
+`submit()` raises `psy.gp.Busy` when the queue (`ASYNC_QUEUE`, 8 responses)
+is full. Nothing was copied, so keep the response and try again on the next
+frame. `wait(seq, timeout_s)` is the blocking form for the end of an interval;
+it releases the GIL.
+
+See [example.py](example.py) for both loops on a simulated observer.
+
+## API reference
+
+### Module
+
+| | |
+|---|---|
+| `GP(**desc)` | open a run; the keywords are the `psygp_desc` fields below |
+| `Async(gp, context=None, target=0, fit_in_idle=False, below_normal=False, pin_cpu=0)` | the inference thread for `gp` |
+| `Hyper(**fields)` | a namespace of hyperparameter fields for `hyper=`, `hyper_min=`, `hyper_max=`; a dict works too |
+| `Snapshot` | the type of what `Async.poll()` and `Async.wait()` return |
+| `simulate_outcome(p, u) -> int` | the smallest k with cumulative `p` > `u` (`u` in [0, 1) from your generator) |
+| `memory_size(**desc) -> int` | bytes `GP(**desc)` allocates at open; raises `Error` with the validation message on a bad desc |
+| `__version__` | the version of the compiled `psy_gp.h` (`psygp_version()`), for example `"0.2.1"`; log it with your data |
+
+### GP keywords
+
+Every keyword is optional. An omitted, `None` or zero field takes the library
+default. `n_dims` comes from `len(lo)` unless you give it.
+
+| Keyword | Type | Meaning |
+|---|---|---|
+| `lo`, `hi` | sequence of floats | the box, one entry per dimension |
+| `intensity_dim` | int | the dimension that thresholds run along (default 0) |
+| `lik` | `LIK_*` or name | `"bernoulli"` (default), `"ordinal"`, `"categorical"`, `"gaussian"` |
+| `n_outcomes` | int | K, for ordinal and categorical |
+| `kernel` | `KERNEL_*` or name | `"rbf"` (default) or `"semip"` |
+| `link` | `LINK_*` or name | `"probit"` (default) or `"logit"` |
+| `guess`, `lapse` | float | floor and ceiling of p; fixed, never fitted |
+| `hyper`, `hyper_min`, `hyper_max` | dict or `Hyper` | fixed values and fit bounds; zero means default or fit |
+| `fit`, `fit_every` | bool, int | fit the free hyperparameters every `fit_every` trials after the init phase |
+| `no_hyper_prior` | bool | fit type-II maximum likelihood instead of the weak priors |
+| `refit_every` | int | rank-one updates between exact Newton refits |
+| `jitter` | float | kernel diagonal jitter (default 1e-6) |
+| `acq` | `ACQ_*` or name | `"lse"` (default), `"eavc"`, `"localmi"`, `"balv"`, `"bald"`, `"random"` |
+| `target_p`, `target_value`, `target_outcome` | float, float, int | the level set; the level-set acquisitions need one |
+| `acq_beta` | float | LSE straddle width (default 1.96) |
+| `n_init` | int | Halton trials before the acquisition runs |
+| `rng` | callable | returns a uniform in [0, 1); breaks ties and drives `"random"`, for example `numpy.random.default_rng(1).random` |
+| `candidates` | buffer or sequence of points | an explicit M x n_dims candidate set; the binding keeps a copy |
+| `n_candidates`, `grid` | int, sequence of ints | a Halton set of M points, or a product grid |
+| `stop_trials`, `stop_threshold_sd`, `stop_context` | int, float, sequence | stop rules; one is required |
+| `max_trials` | int | the hard ceiling and the size of the allocation (at most `MAX_TRIALS`, 512) |
+| `refine_steps` | int, 0 to 32 | rounds of golden-section refinement of the grid winner between its neighbors; 0 (default) keeps proposals on the grid. A refined proposal returns index -1. EAVC refines on the LSE straddle, because its score has no value off the grid |
+
+A caller-owned memory buffer (`desc.memory`) is not exposed.
+
+### GP methods
+
+| | |
+|---|---|
+| `next() -> (index, x)` | the next stimulus; `index` is a candidate index, or -1 for a Halton or `rng` point |
+| `next_subset(indices) -> (index, x)` | `next()` restricted to some candidates; skips the init phase |
+| `acq_score(i) -> float` | the acquisition score of candidate `i` (NaN in the init phase) |
+| `update(x, outcome)` | record an outcome in 0..K-1 at the stimulus shown, and refit |
+| `update_real(x, y)` | the same for a continuous `y` under `"gaussian"` |
+| `predict_f(x, k=0) -> (mu, sd)` | latent `k` at `x` (k > 0 only under categorical) |
+| `predict_p(x) -> float` | the target quantity at `x`: E[P(y=1)], E[P(y>=k*)], E[P(y=k*)] or E[y] |
+| `predict_p_var(x) -> float` | its posterior variance (the BALV score) |
+| `predict_outcomes(x) -> list` | all K outcome probabilities |
+| `predict_p_many(xs) -> memoryview` | `predict_p` at n points, format `'d'` |
+| `predict_f_many(xs, k=0) -> (memoryview, memoryview)` | `predict_f` at n points |
+| `threshold(ctx=None, target=0) -> (x, lo, hi)` | where `predict_p` crosses `target` along the intensity dimension at context `ctx` (the other `n_dims - 1` coordinates); raises `NoCross` |
+| `fit()` | fit the free hyperparameters (tens of refits) |
+| `fit_step() -> bool` | one step of that fit; `True` while another step helps |
+| `refit()` | the exact refit that `refit_every` skips |
+| `hyper() -> dict` | `lengthscale`, `outputscale`, `mean`, `lengthscale_b`, `outputscale_b`, `cutpoint`, `noise_sd` |
+| `candidate(i) -> list` | candidate `i` |
+| `history() -> list[dict]` | every trial as `{'x', 'y', 'proposed', 'init'}` |
+| `close()` | free the handle; `GP` is also a context manager |
+
+Read-only properties: `done`, `stop_reason` (`STOP_*`), `log_marginal`,
+`n_candidates`, `n_trials`, `threshold_multi_cross`, `n_dims`, `is_open`.
+`done` runs a threshold search when `stop_threshold_sd` is set, so read it
+once per trial.
+
+### Async
+
+| | |
+|---|---|
+| `start()` / `stop()` | take the GP over and start the thread; drain the queue, join, and give the GP back. `with Async(gp) as a:` does both |
+| `submit(x, outcome) -> seq` | queue one response and return at once |
+| `submit_real(x, y) -> seq` | the same under `"gaussian"` |
+| `poll() -> (seq, Snapshot)` | the newest snapshot; `seq >= submit's seq` means that response is applied |
+| `wait(seq, timeout_s=None) -> (seq, Snapshot)` | block until then, with the GIL released; raises `Timeout` |
+| `pending` | responses queued and not applied yet (takes the queue mutex; for logs) |
+| `policy` | `POLICY_NORMAL` or `POLICY_BELOW_NORMAL` (what the OS granted), `POLICY_NONE` when stopped |
+| `running`, `gp` | state, and the GP it drives |
+
+A `Snapshot` has `seq`, `x`, `proposed`, `update_rc`, `n_trials`, `done`,
+`stop`, `threshold`, `threshold_lo`, `threshold_hi`, `threshold_rc`,
+`multi_cross`, `hyper` (a dict), `log_marginal`, `numeric` and `fitting`.
+`threshold_rc` is 0, `ERR_NOCROSS` or another `ERR_*` code; `update_rc` is 0 or the code that
+`update` returned on the thread for that response.
+
+### Errors
+
+| Exception | Raised when |
+|---|---|
+| `Error` | base class; also a bad desc, a closed handle (`.code == ERR_CLOSED`) or a bad argument (`ERR_ARG`) |
+| `Numeric` | a Cholesky failed. The trial **is** recorded and the previous posterior stays in force; continue |
+| `NoCross` | `threshold()` found no crossing inside the box |
+| `Full` | `max_trials` are recorded |
+| `Busy` | the Async queue is full, or the GP is owned by a running Async, or another thread is inside a call on it |
+| `Timeout` | `Async.wait()` ran out of time |
+
+Every library error carries `.code`, the `ERR_*` value. Type errors in the
+arguments raise `TypeError` or `ValueError`.
+
+Constants mirror the header: `LIK_*`, `KERNEL_*`, `LINK_*`, `ACQ_*`,
+`STOP_*`, `OK`, `ERR_*`, `POLICY_*`, `MAX_DIMS`, `MAX_OUTCOMES`,
+`MAX_TRIALS`, `QUAD_N`, `ASYNC_QUEUE`.
+
+## Explanation
+
+### The GIL and the threads
+
+A GP handle is not thread-safe. These calls release the GIL while the C code
+runs: `next`, `next_subset`, `update`, `update_real`, `fit`, `fit_step`,
+`refit`, `predict_p_many` and `predict_f_many`. Other Python threads keep
+running during them. A flag on the object, read and written only while the
+GIL is held, makes a second call on the same GP from another thread raise
+`Busy` instead of corrupting the handle. The one-point predictions keep the
+GIL, because they take microseconds.
+
+When `rng` is set, `next()` and `next_subset()` keep the GIL: the library
+calls the generator from inside the selection, and the generator is Python
+code. If the generator raises, `next()` raises the same exception.
+
+The Async thread is a C thread that never touches the interpreter. It calls
+`psygp_update`, `psygp_next` and `psygp_threshold` and publishes a plain C
+struct under a lock. The Python side copies that struct into a `Snapshot`
+when you poll. For this reason, `Async` refuses a GP whose `rng` is a Python
+callable. While an `Async` runs, it owns the GP, and every call on the GP
+raises `Busy`, including the predictions: a prediction writes the handle's
+scratch space. Read the snapshot instead, or stop first.
+
+The same responses give the same posterior bit for bit through `Async` as
+through the plain loop, with `fit_in_idle` off. With `fit_in_idle` on, the
+hyperparameter fit runs in the gaps between responses, so its schedule
+depends on timing, and a replay needs the plain loop.
+
+### What to log with a threshold
+
+A threshold number alone does not tell you whether to trust it. Log these
+with it:
+
+- `lo` and `hi`. The band is the crossing of the mu +- 1.96 sd latent
+  curves: it is wide when the fit is loose. It is a credible band from a
+  Laplace posterior, which underestimates the variance early and at the edges
+  of the box.
+- `threshold_multi_cross`. When the posterior mean crosses the target more
+  than once along the intensity axis, the value is the lowest crossing.
+- `hyper()`. A lengthscale or an output scale at its bound is a warning. A
+  lengthscale at its upper bound on a dimension that does not matter is
+  normal.
+- `log_marginal`. A value much closer to 0 than the responses allow means the
+  fit interpolated its own trials. One hundred binary trials at a 75% level
+  cannot honestly do better than about -56 nats.
+- `history()`, which has the stimuli that you showed, and whether each one
+  was the proposal.
+- For an Async session, `policy`, and how many frames each proposal was late.
+
+The header's manual, [psy_gp.h](../../../psy_gp.h), explains the model, the
+kernels, the priors, the acquisitions and their costs.

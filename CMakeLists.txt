@@ -4,13 +4,16 @@ project(psy LANGUAGES C CXX)
 # Consumers: add_subdirectory(psy) then target_link_libraries(app PRIVATE psy::psy).
 # The target carries the include path plus what an IMPLEMENTATION translation
 # unit needs to link: pthreads on POSIX (async workers), setupapi on Windows
-# (serial-port enumeration). A header needs nothing else but psy_rt.h, which
-# the include path above already resolves.
+# (serial-port enumeration), libm on Linux (the adaptive-method headers; a
+# C driver does not get it for free there). A header needs nothing else but
+# psy_rt.h, which the include path above already resolves.
 find_package(Threads REQUIRED)
 add_library(psy INTERFACE)
 add_library(psy::psy ALIAS psy)
 target_include_directories(psy INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(psy INTERFACE Threads::Threads $<$<PLATFORM_ID:Windows>:setupapi>)
+target_link_libraries(psy INTERFACE Threads::Threads
+    $<$<PLATFORM_ID:Windows>:setupapi>
+    $<$<PLATFORM_ID:Linux>:m>)
 
 # Nothing below applies when psy is pulled in as a subproject.
 if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -32,7 +35,11 @@ option(PSY_BUILD_LOOPBACK "Build the loopback tests in tests/loopback/ (needs ha
 # which the include path above resolves from the repository root, so the
 # compiler's own header dependencies rebuild every target after a psy_rt.h
 # edit. rt comes first so its compile checks run before its dependents'.
-set(PSY_LIBS rt parallel serial)
+# A header with a tests/adapt/psy_<name>_test.c gets that self-checking
+# program registered with ctest too, and one with PSY_ASYNC_<name> ON gets
+# the compile check and that test built a second time with
+# PSY<X>_ASYNC defined, which is the opt-in layer that pulls in psy_rt.h.
+set(PSY_LIBS rt parallel serial stair quest gp)
 
 set(PSY_PREFIX_rt          PSYRT)
 set(PSY_PLATFORMS_rt       Windows Linux Darwin)
@@ -45,6 +52,22 @@ set(PSY_THREADS_parallel   ON)
 set(PSY_PREFIX_serial      PSYS)
 set(PSY_PLATFORMS_serial   Windows Linux Darwin)
 set(PSY_THREADS_serial     ON)
+
+# The adaptive-method headers are pure computation: every platform, no
+# worker thread, so no NO_THREADS variant.
+set(PSY_PREFIX_stair       PSYST)
+set(PSY_PLATFORMS_stair    Windows Linux Darwin)
+set(PSY_THREADS_stair      OFF)
+
+set(PSY_PREFIX_quest       PSYQ)
+set(PSY_PLATFORMS_quest    Windows Linux Darwin)
+set(PSY_THREADS_quest      OFF)
+set(PSY_ASYNC_quest        ON)
+
+set(PSY_PREFIX_gp          PSYGP)
+set(PSY_PLATFORMS_gp       Windows Linux Darwin)
+set(PSY_THREADS_gp         OFF)
+set(PSY_ASYNC_gp           ON)
 
 if(MSVC)
     set(PSY_WARNINGS /W4 /WX)
@@ -85,6 +108,22 @@ foreach(lib IN LISTS PSY_LIBS)
         foreach(variant IN LISTS variants)
             add_test(NAME compile_psy_${lib}_${variant} COMMAND compile_psy_${lib}_${variant})
         endforeach()
+    endif()
+
+    # --- verification tests: tests/adapt/psy_<lib>_test.c is self-checking
+    #     (exit 0 on pass) and needs no hardware, so ctest runs it, and the
+    #     sanitizer job in CI runs it instrumented.
+    if(PSY_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/adapt/psy_${lib}_test.c)
+        psy_add_program(test_psy_${lib} tests/adapt/psy_${lib}_test.c)
+        add_test(NAME test_psy_${lib} COMMAND test_psy_${lib})
+        if(PSY_ASYNC_${lib})
+            psy_add_program(compile_psy_${lib}_async tests/compile/psy_${lib}.c)
+            target_compile_definitions(compile_psy_${lib}_async PRIVATE ${PSY_PREFIX_${lib}}_ASYNC)
+            add_test(NAME compile_psy_${lib}_async COMMAND compile_psy_${lib}_async)
+            psy_add_program(test_psy_${lib}_async tests/adapt/psy_${lib}_test.c)
+            target_compile_definitions(test_psy_${lib}_async PRIVATE ${PSY_PREFIX_${lib}}_ASYNC)
+            add_test(NAME test_psy_${lib}_async COMMAND test_psy_${lib}_async)
+        endif()
     endif()
 
     # --- loopback tests: tests/loopback/psy_<lib>_loopback.c, run by hand with

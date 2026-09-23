@@ -67,6 +67,20 @@ jobs:
           # policy is one of its results, so it always exits 0. 40 short waits
           # per spin window keeps a loaded CI runner under a second.
           expect 0 "$bin/rt_jitter" 40 1000
+          # rt_pump runs a fake inference job beside a 16 ms frame loop; 40
+          # frames is under a second and needs nothing.
+          expect 0 "$bin/rt_pump" 40
+          # The adaptive-method examples simulate their observer, so they
+          # need nothing and exit 0. The benches print their own numbers.
+          expect 0 "$bin/stair_sim"
+          expect 0 "$bin/quest_sim"
+          expect 0 "$bin/quest_qcsf"
+          expect 0 "$bin/quest_bench"
+          expect 0 "$bin/quest_async" 20 1      # 20 trials, one frame each
+          expect 0 "$bin/gp_sim"
+          expect 0 "$bin/gp_bench"
+          expect 0 "$bin/gp_audiometric"   # no args: the small configuration
+          expect 0 "$bin/gp_async"
 
   # --------------------------------------------------------------------- #
   # Extra Linux toolchains and flag sets, one matrix entry each:           #
@@ -143,6 +157,14 @@ jobs:
           expect 2 build/serial_trigger             # no args: usage
           expect 1 build/serial_trigger /dev/nothing
           expect 0 build/rt_jitter 40 1000
+          expect 0 build/rt_pump 40
+          # The adaptive examples' numerics run instrumented through the
+          # tests/adapt/ programs under ctest above; the two cheap examples
+          # cover the example code itself. gp_sim and the benches are too
+          # slow under ASan in Debug to be worth a second run.
+          expect 0 build/stair_sim
+          expect 0 build/quest_sim
+          expect 0 build/quest_async 20 1
 
   # --------------------------------------------------------------------- #
   # MinGW: the headers carry explicit MinGW handling (no #pragma           #
@@ -187,7 +209,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        package: [psy_parallel, psy_serial]
+        package: [psy_parallel, psy_serial, psy_stair, psy_quest, psy_gp]
         exclude:
           - os: macos-latest      # psy_parallel.h #errors on macOS
             package: psy_parallel
@@ -196,8 +218,10 @@ jobs:
       - uses: actions/checkout@v7
 
       # cibuildwheel builds from the package directory alone, so every header
-      # the extension compiles must sit next to setup.py: the transport header
-      # and psy_rt.h, which the transport header includes.
+      # the extension compiles must sit next to setup.py: the package's header
+      # and psy_rt.h, which the transport headers include and the adaptive
+      # headers' async layers include. psy_stair gets a psy_rt.h it never
+      # reads; staging it unconditionally keeps this step one line.
       - name: Stage headers into the package (isolated build needs them locally)
         shell: bash
         run: cp ${{ matrix.package }}.h psy_rt.h bindings/python/${{ matrix.package }}/

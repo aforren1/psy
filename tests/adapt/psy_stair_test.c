@@ -1,0 +1,918 @@
+/* psy_stair_test.c - self-checking test for psy_stair.h. No framework: it
+ * returns 0 when every check passed and 1 after printing each failure.
+ *
+ * Build it with small capacities so the PSYST_ERR_FULL path costs a few
+ * hundred trials instead of a thousand:
+ *
+ *     gcc -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. \
+ *         -DPSYST_MAX_TRIALS=128 -DPSYST_MAX_REVERSALS=32 \
+ *         -o stair_test tests/adapt/psy_stair_test.c -lm
+ *
+ * The traces below are derived by hand from the manual, trial by trial, not
+ * captured from a run of this header. Where one is ambiguous in the v0.0
+ * specification the manual now says which reading the code takes, and the
+ * trace follows the manual.
+ */
+#ifndef PSYST_MAX_TRIALS
+#define PSYST_MAX_TRIALS 128
+#endif
+#ifndef PSYST_MAX_REVERSALS
+#define PSYST_MAX_REVERSALS 32
+#endif
+
+#define PSY_STAIR_IMPLEMENTATION
+#include "psy_stair.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+/* ---------------------------------------------------------------- harness */
+
+static int g_failures = 0;
+
+static void fail(int line, const char* what) {
+    fprintf(stderr, "psy_stair_test: FAIL at line %d: %s\n", line, what);
+    g_failures++;
+}
+
+static void fail_d(int line, const char* what, double got, double want) {
+    fprintf(stderr, "psy_stair_test: FAIL at line %d: %s (got %.17g, want %.17g)\n",
+            line, what, got, want);
+    g_failures++;
+}
+
+static void fail_i(int line, const char* what, long got, long want) {
+    fprintf(stderr, "psy_stair_test: FAIL at line %d: %s (got %ld, want %ld)\n",
+            line, what, got, want);
+    g_failures++;
+}
+
+#define CHECK(cond) do { if (!(cond)) fail(__LINE__, #cond); } while (0)
+#define CHECK_I(got, want) do { long g_ = (long)(got), w_ = (long)(want); \
+    if (g_ != w_) fail_i(__LINE__, #got, g_, w_); } while (0)
+#define CHECK_D(got, want, tol) do { double g_ = (got), w_ = (want); \
+    if (!close_to(g_, w_, (tol))) fail_d(__LINE__, #got, g_, w_); } while (0)
+#define CHECK_NAN(got) do { double g_ = (got); \
+    if (!is_nan(g_)) fail_d(__LINE__, #got " is NaN", g_, 0.0); } while (0)
+
+/* Written without a self-comparison so no compiler mistakes it for a typo. */
+static bool is_nan(double x) { return !(x >= 0.0) && !(x < 0.0); }
+
+/* A NaN the compiler cannot fold: psyst_weighted_scale() refuses anything
+ * outside (0, 1). */
+static double nan_value(void) { return psyst_weighted_scale(2.0); }
+
+static bool close_to(double a, double b, double tol) {
+    double d = a - b;
+    if (is_nan(a) || is_nan(b)) return false;
+    if (d < 0.0) d = -d;
+    return d <= tol;
+}
+
+#define TOL 1e-12
+
+/* Fill a desc with the fields nearly every case here shares. */
+static void base_desc(psyst_desc* d) {
+    memset(d, 0, sizeof(*d));
+    d->start = 10.0;
+    d->steps[0] = 1.0;
+    d->n_steps = 1;
+    d->stop_trials = 8;
+}
+
+/* Replay a fixed response sequence, showing exactly what was proposed. */
+static void replay(psyst_stair* s, const int* resp, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        double x = psyst_next(s);
+        int rc = psyst_update(s, x, resp[i]);
+        if (rc < 0) fail(__LINE__, psyst_strerror(rc));
+    }
+}
+
+static void check_proposals(const psyst_stair* s, const double* want, int n, double tol) {
+    const psyst_trial* h;
+    int got = 0, i;
+    h = psyst_history(s, &got);
+    CHECK_I(got, n);
+    if (!h || got != n) return;
+    for (i = 0; i < n; i++) {
+        if (!close_to(h[i].proposed, want[i], tol))
+            fail_d(__LINE__, "history proposed", h[i].proposed, want[i]);
+    }
+}
+
+static void check_reversals(const psyst_stair* s, const double* lev, const int* tr,
+                            int n, double tol) {
+    int i;
+    CHECK_I(psyst_n_reversals(s), n);
+    for (i = 0; i < n; i++) {
+        if (!close_to(psyst_reversal_level(s, i), lev[i], tol))
+            fail_d(__LINE__, "reversal level", psyst_reversal_level(s, i), lev[i]);
+        CHECK_I(psyst_reversal_trial(s, i), tr[i]);
+    }
+    CHECK_NAN(psyst_reversal_level(s, n));
+    CHECK_I(psyst_reversal_trial(s, n), -1);
+}
+
+static psyst_stair g_s;   /* one shared handle: psyst_open() resets it fully */
+
+/* ------------------------------------------------------- 1-up-1-down, LIN */
+
+static void test_updown_1_1(void) {
+    static const int resp[10] = { 1, 1, 0, 0, 1, 0, 1, 1, 1, 0 };
+    static const double want[10] = { 10, 9, 8, 9, 10, 9, 10, 9, 8, 7 };
+    static const double rlev[5] = { 8, 10, 9, 10, 7 };
+    static const int rtr[5] = { 2, 4, 5, 6, 9 };
+    psyst_desc d;
+    const psyst_trial* h;
+    int n = 0;
+
+    base_desc(&d);
+    d.stop_trials = 10;
+    CHECK(psyst_open(&g_s, &d));
+    CHECK(psyst_is_open(&g_s));
+    CHECK_I(strlen(psyst_error(&g_s)), 0);
+
+    replay(&g_s, resp, 10);
+    check_proposals(&g_s, want, 10, TOL);
+    check_reversals(&g_s, rlev, rtr, 5, TOL);
+    CHECK_I(psyst_n_trials(&g_s), 10);
+    CHECK(psyst_done(&g_s));
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_TRIALS);
+    CHECK_D(psyst_next(&g_s), 8.0, TOL);
+
+    /* Every trial steps under 1-up-1-down, and the marked ones turn. */
+    h = psyst_history(&g_s, &n);
+    CHECK_I(n, 10);
+    if (h) {
+        int i;
+        for (i = 0; i < 10; i++) CHECK(h[i].direction != 0);
+        CHECK_I(h[0].reversal, 0);
+        CHECK_I(h[2].reversal, 1);
+        CHECK_I(h[4].reversal, 1);
+        CHECK_I(h[9].reversal, 1);
+        CHECK_I(h[0].direction, -1);
+        CHECK_I(h[2].direction, 1);
+        CHECK_I(h[0].step_index, 0);
+    }
+
+    /* Estimators over the whole track: n_steps is 1 and the initial rule is
+     * off, so every reversal and every trial counts. */
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_REVERSALS), 5);
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_MEDIAN_REV), 5);
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_TRIALS), 10);
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_LAST), 1);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_REVERSALS), 44.0 / 5.0, TOL);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_MEDIAN_REV), 9.0, TOL);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_TRIALS), 89.0 / 10.0, TOL);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_LAST), 8.0, TOL);
+
+    /* Updates after the stop are still recorded and the reason does not move. */
+    CHECK(psyst_update(&g_s, psyst_next(&g_s), 1) >= 0);
+    CHECK_I(psyst_n_trials(&g_s), 11);
+    CHECK(psyst_done(&g_s));
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_TRIALS);
+}
+
+/* ------------------------------------------------------- 1-up-2-down, LIN */
+
+static void test_updown_1_2(void) {
+    static const int resp[14] = { 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1 };
+    static const double want[14] = { 20, 20, 18, 18, 20, 20, 18, 20,
+                                     22, 22, 20, 20, 18, 20 };
+    static const double rlev[5] = { 18, 20, 18, 22, 18 };
+    static const int rtr[5] = { 3, 5, 6, 9, 12 };
+    psyst_desc d;
+    int rc;
+
+    base_desc(&d);
+    d.start = 20.0;
+    d.n_down = 2;
+    d.steps[0] = 2.0;
+    d.stop_trials = 14;
+    CHECK(psyst_open(&g_s, &d));
+
+    /* The first trial only moves a counter: no step, no reversal, no stop. */
+    rc = psyst_update(&g_s, psyst_next(&g_s), resp[0]);
+    CHECK_I(rc, 0);
+    replay(&g_s, resp + 1, 13);
+
+    check_proposals(&g_s, want, 14, TOL);
+    check_reversals(&g_s, rlev, rtr, 5, TOL);
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_TRIALS);
+    CHECK_D(psyst_next(&g_s), 20.0, TOL);
+    CHECK_D(psyst_convergence_p(1, 2, 0.0), 0.70710678118654752, 1e-12);
+}
+
+/* ------------------------------------------------------- 1-up-3-down, LIN */
+
+static void test_updown_1_3(void) {
+    static const int resp[9] = { 1, 1, 1, 1, 0, 1, 1, 1, 0 };
+    static const double want[9] = { 40, 40, 40, 36, 36, 40, 40, 40, 36 };
+    static const double rlev[3] = { 36, 40, 36 };
+    static const int rtr[3] = { 4, 7, 8 };
+    psyst_desc d;
+    int rc;
+
+    base_desc(&d);
+    d.start = 40.0;
+    d.n_down = 3;
+    d.steps[0] = 4.0;
+    d.stop_trials = 0;
+    d.stop_reversals = 3;
+    CHECK(psyst_open(&g_s, &d));
+
+    replay(&g_s, resp, 8);
+    CHECK(!psyst_done(&g_s));
+    rc = psyst_update(&g_s, psyst_next(&g_s), resp[8]);
+    CHECK_I(rc, PSYST_EVENT_STEP | PSYST_EVENT_REVERSAL | PSYST_EVENT_DONE);
+
+    check_proposals(&g_s, want, 9, TOL);
+    check_reversals(&g_s, rlev, rtr, 3, TOL);
+    CHECK(psyst_done(&g_s));
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_REVERSALS);
+    CHECK_D(psyst_next(&g_s), 40.0, TOL);
+    CHECK_D(psyst_convergence_p(1, 3, 0.0), 0.79370052598409974, 1e-12);
+}
+
+/* ------------------------------------------------------- 2-up-1-down, LIN */
+
+static void test_updown_2_1(void) {
+    static const int resp[6] = { 1, 0, 0, 1, 0, 1 };
+    static const double want[6] = { 10, 9, 9, 10, 9, 9 };
+    static const double rlev[2] = { 9, 10 };
+    static const int rtr[2] = { 2, 3 };
+    psyst_desc d;
+
+    base_desc(&d);
+    d.n_up = 2;
+    d.stop_trials = 6;
+    CHECK(psyst_open(&g_s, &d));
+    replay(&g_s, resp, 6);
+    check_proposals(&g_s, want, 6, TOL);
+    check_reversals(&g_s, rlev, rtr, 2, TOL);
+    CHECK_D(psyst_next(&g_s), 8.0, TOL);
+    CHECK_D(psyst_convergence_p(2, 1, 0.0), 0.29289321881345248, 1e-12);
+}
+
+/* -------------------------------------- step schedule and the initial rule */
+
+static void test_schedule_and_initial_rule(void) {
+    static const int resp[11] = { 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1 };
+    static const double want[11] = { 40, 32, 24, 28, 28, 28, 26, 28, 30, 30, 30 };
+    static const double rlev[4] = { 24, 28, 26, 30 };
+    static const int rtr[4] = { 2, 5, 6, 10 };
+    static const int widx[11] = { 0, 0, 1, 1, 1, 2, 2, 2, 2, 2, 2 };
+    psyst_desc d;
+    const psyst_trial* h;
+    int n = 0, i;
+
+    base_desc(&d);
+    d.start = 40.0;
+    d.n_down = 3;
+    d.initial_rule = true;
+    d.steps[0] = 8.0; d.steps[1] = 4.0; d.steps[2] = 2.0;
+    d.n_steps = 3;
+    d.stop_trials = 0;
+    d.stop_reversals = 4;
+    CHECK(psyst_open(&g_s, &d));
+
+    replay(&g_s, resp, 11);
+    check_proposals(&g_s, want, 11, TOL);
+    check_reversals(&g_s, rlev, rtr, 4, TOL);
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_REVERSALS);
+    CHECK_D(psyst_next(&g_s), 28.0, TOL);
+
+    /* The trial that causes a reversal already steps by the new size. */
+    h = psyst_history(&g_s, &n);
+    CHECK_I(n, 11);
+    if (h) for (i = 0; i < 11; i++) CHECK_I(h[i].step_index, widx[i]);
+
+    /* Default windows skip the schedule and, with the initial rule on, the
+     * first reversal: that leaves reversals 2 and 3 and trials 5 to 10. */
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_REVERSALS), 2);
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_TRIALS), 6);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_REVERSALS), 28.0, TOL);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_MEDIAN_REV), 28.0, TOL);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_TRIALS), 172.0 / 6.0, TOL);
+
+    /* An explicit window is a plain "last N", with neither exclusion. */
+    d.est_reversals = 3;
+    d.est_trials = 4;
+    CHECK(psyst_open(&g_s, &d));
+    replay(&g_s, resp, 11);
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_REVERSALS), 3);
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_TRIALS), 4);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_REVERSALS), 84.0 / 3.0, TOL);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_TRIALS), 118.0 / 4.0, TOL);
+
+    /* An odd median picks a middle level rather than averaging. */
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_MEDIAN_REV), 28.0, TOL);
+}
+
+/* ----------------------------------------------- an empty estimate window */
+
+static void test_empty_windows(void) {
+    psyst_desc d;
+    base_desc(&d);
+    d.n_steps = 2;
+    d.steps[1] = 0.5;
+    d.initial_rule = true;
+    CHECK(psyst_open(&g_s, &d));
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_REVERSALS), 0);
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_TRIALS), 0);
+    CHECK_NAN(psyst_estimate(&g_s, PSYST_EST_REVERSALS));
+    CHECK_NAN(psyst_estimate(&g_s, PSYST_EST_MEDIAN_REV));
+    CHECK_NAN(psyst_estimate(&g_s, PSYST_EST_TRIALS));
+    /* PSYST_EST_LAST always has a value on an open handle. */
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_LAST), 10.0, TOL);
+}
+
+/* ------------------------------------------------------ LIN, LOG, DB steps */
+
+static void test_step_types(void) {
+    static const int resp[4] = { 1, 1, 0, 0 };
+    double want[4];
+    psyst_desc d;
+
+    /* LOG: a step adds to log10(level). */
+    base_desc(&d);
+    d.start = 0.5;
+    d.step_type = PSYST_STEP_LOG;
+    d.steps[0] = 0.3;
+    d.stop_trials = 4;
+    CHECK(psyst_open(&g_s, &d));
+    want[0] = 0.5;
+    want[1] = 0.5 * pow(10.0, -0.3);
+    want[2] = 0.5 * pow(10.0, -0.6);
+    want[3] = 0.5 * pow(10.0, -0.3);
+    replay(&g_s, resp, 4);
+    check_proposals(&g_s, want, 4, 1e-12);
+    CHECK_D(psyst_next(&g_s), 0.5, 1e-12);
+    CHECK_I(psyst_n_reversals(&g_s), 1);
+    CHECK_D(psyst_reversal_level(&g_s, 0), 0.5 * pow(10.0, -0.6), 1e-12);
+    /* The mean is a geometric one: log10 levels are -0.30103, -0.60103,
+     * -0.90103 and -0.60103, which average to -0.60103. */
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_TRIALS), 0.5 * pow(10.0, -0.3), 1e-12);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_REVERSALS), 0.5 * pow(10.0, -0.6), 1e-12);
+
+    /* A shown level of 0 has no logarithm, so update() refuses it. */
+    CHECK_I(psyst_update(&g_s, 0.0, 1), PSYST_ERR_ARG);
+    CHECK_I(psyst_update(&g_s, -1.0, 1), PSYST_ERR_ARG);
+
+    /* DB: a step adds to 20 log10(level), so 6 dB is about a factor of 2. */
+    base_desc(&d);
+    d.start = 1.0;
+    d.step_type = PSYST_STEP_DB;
+    d.steps[0] = 6.0;
+    d.stop_trials = 3;
+    CHECK(psyst_open(&g_s, &d));
+    want[0] = 1.0;
+    want[1] = pow(10.0, -6.0 / 20.0);
+    want[2] = pow(10.0, -12.0 / 20.0);
+    replay(&g_s, resp, 3);
+    check_proposals(&g_s, want, 3, 1e-12);
+    CHECK_D(psyst_next(&g_s), pow(10.0, -6.0 / 20.0), 1e-12);
+    CHECK_I(psyst_n_reversals(&g_s), 1);
+    CHECK_D(psyst_reversal_level(&g_s, 0), pow(10.0, -12.0 / 20.0), 1e-12);
+    /* The dB levels are 0, -6 and -12, which average to -6 dB. */
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_TRIALS),
+            pow(10.0, (0.0 - 6.0 - 12.0) / 3.0 / 20.0), 1e-12);
+}
+
+/* ---------------------------------- harder_is_up and the shown-vs-proposed */
+
+static void test_harder_is_up_and_shown(void) {
+    static const int resp[3] = { 1, 1, 0 };
+    static const double want[3] = { 10, 11, 12 };
+    psyst_desc d;
+    const psyst_trial* h;
+    int n = 0;
+
+    base_desc(&d);
+    d.harder_is_up = true;
+    d.stop_trials = 3;
+    CHECK(psyst_open(&g_s, &d));
+    replay(&g_s, resp, 3);
+    check_proposals(&g_s, want, 3, TOL);
+    CHECK_I(psyst_n_reversals(&g_s), 1);
+    CHECK_D(psyst_reversal_level(&g_s, 0), 12.0, TOL);
+    CHECK_D(psyst_next(&g_s), 11.0, TOL);
+    h = psyst_history(&g_s, &n);
+    if (h) { CHECK_I(h[0].direction, 1); CHECK_I(h[2].direction, -1); }
+
+    /* A caller that quantizes the level: the rule steps from its own
+     * proposal, the history keeps both, and the two estimators differ. */
+    base_desc(&d);
+    d.stop_trials = 2;
+    CHECK(psyst_open(&g_s, &d));
+    CHECK(psyst_update(&g_s, 10.4, 1) >= 0);
+    CHECK_D(psyst_next(&g_s), 9.0, TOL);
+    CHECK(psyst_update(&g_s, 9.4, 0) >= 0);
+    CHECK_D(psyst_next(&g_s), 10.0, TOL);
+    h = psyst_history(&g_s, &n);
+    CHECK_I(n, 2);
+    if (h) {
+        CHECK_D(h[0].proposed, 10.0, TOL);
+        CHECK_D(h[0].shown, 10.4, TOL);
+        CHECK_D(h[1].proposed, 9.0, TOL);
+        CHECK_D(h[1].shown, 9.4, TOL);
+    }
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_REVERSALS), 9.0, TOL);
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_TRIALS), (10.4 + 9.4) / 2.0, TOL);
+}
+
+/* ----------------------------------------------- limits and STOP_LIMIT */
+
+static void test_limits(void) {
+    static const int wrong[3] = { 0, 0, 0 };
+    static const int mixed[3] = { 0, 0, 1 };
+    psyst_desc d;
+    const psyst_trial* h;
+    int n = 0, rc;
+
+    /* Every response incorrect drives the level into max and holds it. */
+    base_desc(&d);
+    d.start = 5.0;
+    d.min = 1.0;
+    d.max = 5.0;
+    d.stop_trials = 50;
+    d.stop_at_limit = 3;
+    CHECK(psyst_open(&g_s, &d));
+    rc = psyst_update(&g_s, psyst_next(&g_s), wrong[0]);
+    CHECK_I(rc, PSYST_EVENT_STEP);                 /* clamped, still a step */
+    CHECK_D(psyst_next(&g_s), 5.0, TOL);
+    CHECK(psyst_update(&g_s, psyst_next(&g_s), wrong[1]) >= 0);
+    CHECK(!psyst_done(&g_s));
+    rc = psyst_update(&g_s, psyst_next(&g_s), wrong[2]);
+    CHECK_I(rc, PSYST_EVENT_STEP | PSYST_EVENT_DONE);
+    CHECK(psyst_done(&g_s));
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_LIMIT);
+    CHECK_I(psyst_n_trials(&g_s), 3);
+
+    /* A clamped step still sets the direction, so the turn away registers. */
+    CHECK(psyst_open(&g_s, &d));
+    replay(&g_s, mixed, 3);
+    CHECK_I(psyst_n_reversals(&g_s), 1);
+    CHECK_D(psyst_reversal_level(&g_s, 0), 5.0, TOL);
+    CHECK_D(psyst_next(&g_s), 4.0, TOL);
+
+    /* desc.start outside the limits is clamped, not rejected. */
+    base_desc(&d);
+    d.start = 99.0;
+    d.min = 1.0;
+    d.max = 5.0;
+    CHECK(psyst_open(&g_s, &d));
+    CHECK_D(psyst_next(&g_s), 5.0, TOL);
+
+    /* One zero bound leaves the limits off unless use_limits says otherwise. */
+    base_desc(&d);
+    d.start = 2.0;
+    d.min = 0.0;
+    d.max = 5.0;
+    d.stop_trials = 4;
+    CHECK(psyst_open(&g_s, &d));
+    replay(&g_s, wrong, 3);
+    CHECK_D(psyst_next(&g_s), 5.0, TOL);           /* 2 + 3 steps, no clamp */
+
+    base_desc(&d);
+    d.start = 2.0;
+    d.min = 0.0;
+    d.max = 4.0;
+    d.use_limits = true;
+    d.stop_trials = 4;
+    CHECK(psyst_open(&g_s, &d));
+    replay(&g_s, wrong, 3);
+    CHECK_D(psyst_next(&g_s), 4.0, TOL);
+    h = psyst_history(&g_s, &n);
+    CHECK_I(n, 3);
+    if (h) CHECK_D(h[2].proposed, 4.0, TOL);
+}
+
+/* ------------------------------------------ PSYST_STOP_FULL, PSYST_ERR_FULL */
+
+static void test_full(void) {
+    psyst_desc d;
+    int i, rc = 0;
+
+    /* No reversal ever happens, so only the hard ceiling can stop it. */
+    base_desc(&d);
+    d.start = 1000.0;
+    d.n_down = 3;
+    d.stop_trials = 0;
+    d.stop_reversals = PSYST_MAX_REVERSALS;
+    CHECK(psyst_open(&g_s, &d));
+    for (i = 0; i < PSYST_MAX_TRIALS; i++) {
+        rc = psyst_update(&g_s, psyst_next(&g_s), 1);
+        if (rc < 0) { fail(__LINE__, psyst_strerror(rc)); break; }
+    }
+    CHECK_I(psyst_n_reversals(&g_s), 0);
+    CHECK_I(psyst_n_trials(&g_s), PSYST_MAX_TRIALS);
+    CHECK(psyst_done(&g_s));
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_FULL);
+    CHECK(rc >= 0 && (rc & PSYST_EVENT_DONE) != 0);
+    CHECK_I(psyst_update(&g_s, psyst_next(&g_s), 1), PSYST_ERR_FULL);
+    CHECK_I(psyst_n_trials(&g_s), PSYST_MAX_TRIALS);
+
+    /* Reversals past PSYST_MAX_REVERSALS are counted but not recorded. */
+    base_desc(&d);
+    d.stop_trials = PSYST_MAX_TRIALS;
+    d.stop_reversals = 0;
+    CHECK(psyst_open(&g_s, &d));
+    for (i = 0; i < PSYST_MAX_TRIALS; i++)
+        CHECK(psyst_update(&g_s, psyst_next(&g_s), i % 2) >= 0);
+    CHECK(psyst_n_reversals(&g_s) > PSYST_MAX_REVERSALS);
+    CHECK_NAN(psyst_reversal_level(&g_s, PSYST_MAX_REVERSALS));
+    CHECK_I(psyst_reversal_trial(&g_s, PSYST_MAX_REVERSALS), -1);
+    CHECK_I(psyst_estimate_count(&g_s, PSYST_EST_REVERSALS), PSYST_MAX_REVERSALS);
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_TRIALS);
+}
+
+/* ---------------------------------------------- the weighted up/down rule */
+
+static void test_weighted(void) {
+    static const int resp[4] = { 1, 0, 1, 1 };
+    static const double want[4] = { 10, 9, 12, 11 };
+    static const double rlev[2] = { 9, 12 };
+    static const int rtr[2] = { 1, 2 };
+    psyst_desc d;
+
+    CHECK_D(psyst_weighted_scale(0.75), 1.0 / 3.0, 1e-15);
+    CHECK_D(psyst_weighted_scale(0.5), 1.0, 1e-15);
+    CHECK_NAN(psyst_weighted_scale(0.0));
+    CHECK_NAN(psyst_weighted_scale(1.0));
+    CHECK_NAN(psyst_weighted_scale(-0.25));
+    CHECK_NAN(psyst_weighted_scale(2.0));
+
+    CHECK_D(psyst_convergence_p(1, 1, psyst_weighted_scale(0.75)), 0.75, 1e-15);
+    CHECK_D(psyst_convergence_p(1, 1, 0.0), 0.5, 1e-15);
+    CHECK_D(psyst_convergence_p(0, 0, 0.0), 0.5, 1e-15);   /* 0 means 1 */
+    CHECK_D(psyst_convergence_p(1, 4, 0.0), 0.84089641525371454, 1e-12);
+    CHECK_D(psyst_convergence_p(2, 1, 0.0), 1.0 - sqrt(0.5), 1e-12);
+    CHECK_NAN(psyst_convergence_p(2, 2, 0.0));
+    CHECK_NAN(psyst_convergence_p(1, 1, -1.0));
+
+    base_desc(&d);
+    d.steps[0] = 3.0;
+    d.step_down_scale = psyst_weighted_scale(0.75);   /* down step is 1.0 */
+    d.stop_trials = 4;
+    CHECK(psyst_open(&g_s, &d));
+    replay(&g_s, resp, 4);
+    check_proposals(&g_s, want, 4, 1e-12);
+    check_reversals(&g_s, rlev, rtr, 2, 1e-12);
+    CHECK_D(psyst_next(&g_s), 10.0, 1e-12);
+
+    /* harder_is_up moves the small step upward: the scale follows difficulty,
+     * not the sign of the level change. */
+    base_desc(&d);
+    d.steps[0] = 3.0;
+    d.step_down_scale = psyst_weighted_scale(0.75);
+    d.harder_is_up = true;
+    d.stop_trials = 2;
+    CHECK(psyst_open(&g_s, &d));
+    CHECK(psyst_update(&g_s, 10.0, 1) >= 0);
+    CHECK_D(psyst_next(&g_s), 11.0, 1e-12);
+    CHECK(psyst_update(&g_s, 11.0, 0) >= 0);
+    CHECK_D(psyst_next(&g_s), 8.0, 1e-12);
+    CHECK_D(psyst_reversal_level(&g_s, 0), 11.0, 1e-12);
+}
+
+/* --------------------------------------------------------------------- ASA */
+
+static void test_asa(void) {
+    static const int resp[6] = { 1, 1, 0, 1, 0, 0 };
+    double want[6];
+    static const int rtr[3] = { 2, 3, 4 };
+    double rlev[3];
+    psyst_desc d;
+
+    want[0] = 10.0;
+    want[1] = 9.75;                     /* c/m = 1/1, (1 - 0.75) = 0.25 down */
+    want[2] = 9.5;
+    want[3] = 9.5 + 0.375;              /* reversal: m = 2, 0.75/2 up        */
+    want[4] = 9.875 - 1.0 / 12.0;       /* reversal: m = 3, 0.25/3 down      */
+    want[5] = want[4] + 0.1875;         /* reversal: m = 4, 0.75/4 up        */
+    rlev[0] = want[2];
+    rlev[1] = want[3];
+    rlev[2] = want[4];
+
+    base_desc(&d);
+    d.rule = PSYST_RULE_ASA;
+    d.target_p = 0.75;
+    d.steps[0] = 1.0;
+    d.stop_trials = 6;
+    CHECK(psyst_open(&g_s, &d));
+    replay(&g_s, resp, 6);
+    check_proposals(&g_s, want, 6, 1e-12);
+    check_reversals(&g_s, rlev, rtr, 3, 1e-12);
+    /* ASA reports the next proposal. */
+    CHECK_D(psyst_estimate(&g_s, PSYST_EST_LAST), want[5] + 0.1875, 1e-12);
+    CHECK_I(psyst_stop_reason(&g_s), PSYST_STOP_TRIALS);
+
+    /* harder_is_up flips the sign of every ASA move. */
+    base_desc(&d);
+    d.rule = PSYST_RULE_ASA;
+    d.target_p = 0.75;
+    d.steps[0] = 1.0;
+    d.harder_is_up = true;
+    d.stop_trials = 2;
+    CHECK(psyst_open(&g_s, &d));
+    CHECK(psyst_update(&g_s, 10.0, 1) >= 0);
+    CHECK_D(psyst_next(&g_s), 10.25, 1e-12);
+    CHECK(psyst_update(&g_s, 10.25, 0) >= 0);
+    CHECK_D(psyst_next(&g_s), 10.25 - 0.75, 1e-12);
+
+    /* A LOG ASA moves log10(level). */
+    base_desc(&d);
+    d.rule = PSYST_RULE_ASA;
+    d.target_p = 0.5;
+    d.step_type = PSYST_STEP_LOG;
+    d.start = 1.0;
+    d.steps[0] = 0.2;
+    d.stop_trials = 2;
+    CHECK(psyst_open(&g_s, &d));
+    CHECK(psyst_update(&g_s, 1.0, 1) >= 0);
+    CHECK_D(psyst_next(&g_s), pow(10.0, -0.1), 1e-12);
+}
+
+/* --------------------------------------------- closed handles and bad args */
+
+static void test_closed_and_bad_args(void) {
+    static psyst_stair z;
+    psyst_desc d;
+    const psyst_trial* h;
+    int n = 123;
+
+    memset(&z, 0, sizeof(z));
+    CHECK(!psyst_is_open(&z));
+    CHECK_NAN(psyst_next(&z));
+    CHECK_I(psyst_update(&z, 1.0, 1), PSYST_ERR_CLOSED);
+    CHECK(!psyst_done(&z));
+    CHECK_I(psyst_stop_reason(&z), PSYST_STOP_NONE);
+    CHECK_NAN(psyst_estimate(&z, PSYST_EST_REVERSALS));
+    CHECK_NAN(psyst_estimate(&z, PSYST_EST_TRIALS));
+    CHECK_NAN(psyst_estimate(&z, PSYST_EST_MEDIAN_REV));
+    CHECK_NAN(psyst_estimate(&z, PSYST_EST_LAST));
+    CHECK_I(psyst_estimate_count(&z, PSYST_EST_REVERSALS), 0);
+    CHECK_I(psyst_estimate_count(&z, PSYST_EST_LAST), 0);
+    CHECK_I(psyst_n_trials(&z), 0);
+    CHECK_I(psyst_n_reversals(&z), 0);
+    h = psyst_history(&z, &n);
+    CHECK(h == NULL);
+    CHECK_I(n, 0);
+    CHECK_NAN(psyst_reversal_level(&z, 0));
+    CHECK_I(psyst_reversal_trial(&z, 0), -1);
+
+    /* A null handle answers the same way. */
+    CHECK_NAN(psyst_next(NULL));
+    CHECK_I(psyst_update(NULL, 1.0, 1), PSYST_ERR_ARG);
+    CHECK(!psyst_done(NULL));
+    CHECK(!psyst_is_open(NULL));
+    CHECK_I(psyst_stop_reason(NULL), PSYST_STOP_NONE);
+    CHECK_NAN(psyst_estimate(NULL, PSYST_EST_LAST));
+    CHECK_I(psyst_estimate_count(NULL, PSYST_EST_LAST), 0);
+    CHECK_I(psyst_n_trials(NULL), 0);
+    CHECK_I(psyst_n_reversals(NULL), 0);
+    CHECK(psyst_history(NULL, NULL) == NULL);
+    CHECK_NAN(psyst_reversal_level(NULL, 0));
+    CHECK_I(psyst_reversal_trial(NULL, 0), -1);
+    CHECK(strlen(psyst_error(NULL)) > 0);
+    CHECK(!psyst_open(NULL, NULL));
+
+    /* Bad arguments to update() on a good handle. */
+    base_desc(&d);
+    CHECK(psyst_open(&g_s, &d));
+    CHECK_I(psyst_update(&g_s, 10.0, 2), PSYST_ERR_ARG);
+    CHECK_I(psyst_update(&g_s, 10.0, -1), PSYST_ERR_ARG);
+    CHECK_I(psyst_update(&g_s, HUGE_VAL, 1), PSYST_ERR_ARG);
+    CHECK_I(psyst_update(&g_s, -HUGE_VAL, 0), PSYST_ERR_ARG);
+    CHECK_I(psyst_update(&g_s, nan_value(), 1), PSYST_ERR_ARG);
+    CHECK_I(psyst_n_trials(&g_s), 0);
+    /* A LIN staircase may legitimately be shown zero or a negative level. */
+    CHECK(psyst_update(&g_s, 0.0, 1) >= 0);
+    CHECK(psyst_update(&g_s, -3.0, 0) >= 0);
+    CHECK_I(psyst_n_trials(&g_s), 2);
+
+    CHECK_I(strcmp(psyst_strerror(PSYST_OK), "ok"), 0);
+    CHECK(strlen(psyst_strerror(PSYST_ERR_ARG)) > 0);
+    CHECK(strlen(psyst_strerror(PSYST_ERR_CLOSED)) > 0);
+    CHECK(strlen(psyst_strerror(PSYST_ERR_FULL)) > 0);
+    CHECK(strlen(psyst_strerror(-99)) > 0);
+
+    CHECK_I(psyst_simulate_response(0.5, 0.4), 1);
+    CHECK_I(psyst_simulate_response(0.5, 0.5), 0);
+    CHECK_I(psyst_simulate_response(0.5, 0.6), 0);
+    CHECK_I(psyst_simulate_response(0.0, 0.0), 0);
+    CHECK_I(psyst_simulate_response(1.0, 0.999999), 1);
+}
+
+/* ------------------------------------------------- every rejected desc */
+
+static void reject(int line, const psyst_desc* d, const char* what) {
+    if (psyst_open(&g_s, d)) {
+        fail(line, what);
+        return;
+    }
+    if (psyst_is_open(&g_s)) fail(line, "handle open after a refused desc");
+    if (strlen(psyst_error(&g_s)) == 0) fail(line, "no message after a refused desc");
+}
+
+#define REJECT(d) reject(__LINE__, (d), "psyst_open accepted a bad desc")
+
+static void test_bad_descs(void) {
+    psyst_desc d;
+
+    reject(__LINE__, NULL, "psyst_open accepted a null desc");
+
+    base_desc(&d); d.rule = (psyst_rule)7;                      REJECT(&d);
+    base_desc(&d); d.step_type = (psyst_step_type)9;            REJECT(&d);
+    base_desc(&d); d.start = HUGE_VAL;                          REJECT(&d);
+    base_desc(&d); d.start = nan_value();                       REJECT(&d);
+    base_desc(&d); d.n_steps = 0;                               REJECT(&d);
+    base_desc(&d); d.n_steps = PSYST_MAX_STEPS + 1;             REJECT(&d);
+    base_desc(&d); d.steps[0] = 0.0;                            REJECT(&d);
+    base_desc(&d); d.steps[0] = -1.0;                           REJECT(&d);
+    base_desc(&d); d.n_steps = 2; d.steps[1] = HUGE_VAL;        REJECT(&d);
+    base_desc(&d); d.n_up = -1;                                 REJECT(&d);
+    base_desc(&d); d.n_down = -1;                               REJECT(&d);
+    base_desc(&d); d.step_down_scale = -1.0;                    REJECT(&d);
+    base_desc(&d); d.step_down_scale = HUGE_VAL;                REJECT(&d);
+    base_desc(&d); d.stop_reversals = -1;                       REJECT(&d);
+    base_desc(&d); d.stop_at_limit = -1;                        REJECT(&d);
+    base_desc(&d); d.est_reversals = -1;                        REJECT(&d);
+    base_desc(&d); d.est_trials = -1;                           REJECT(&d);
+    base_desc(&d); d.stop_trials = -1;                          REJECT(&d);
+    base_desc(&d); d.stop_trials = 0;                           REJECT(&d);
+    base_desc(&d); d.stop_trials = 0;
+                   d.stop_reversals = PSYST_MAX_REVERSALS + 1;  REJECT(&d);
+    base_desc(&d); d.stop_trials = PSYST_MAX_TRIALS + 1;        REJECT(&d);
+    base_desc(&d); d.min = 5.0; d.max = 1.0;                    REJECT(&d);
+    base_desc(&d); d.use_limits = true; d.min = HUGE_VAL;       REJECT(&d);
+    base_desc(&d); d.use_limits = true; d.max = HUGE_VAL;       REJECT(&d);
+
+    base_desc(&d); d.step_type = PSYST_STEP_LOG; d.start = 0.0; REJECT(&d);
+    base_desc(&d); d.step_type = PSYST_STEP_LOG; d.start = -1.0; REJECT(&d);
+    base_desc(&d); d.step_type = PSYST_STEP_DB; d.start = 0.0;  REJECT(&d);
+    base_desc(&d); d.step_type = PSYST_STEP_LOG; d.start = 1.0;
+                   d.use_limits = true; d.max = 2.0;            REJECT(&d);
+    base_desc(&d); d.step_type = PSYST_STEP_DB; d.start = 1.0;
+                   d.min = -2.0; d.max = 2.0;                   REJECT(&d);
+
+    base_desc(&d); d.rule = PSYST_RULE_ASA;                     REJECT(&d);
+    base_desc(&d); d.rule = PSYST_RULE_ASA; d.target_p = 0.0;   REJECT(&d);
+    base_desc(&d); d.rule = PSYST_RULE_ASA; d.target_p = 1.0;   REJECT(&d);
+    base_desc(&d); d.rule = PSYST_RULE_ASA; d.target_p = -0.5;  REJECT(&d);
+    base_desc(&d); d.rule = PSYST_RULE_ASA; d.target_p = 0.75;
+                   d.n_steps = 2; d.steps[1] = 0.5;             REJECT(&d);
+    base_desc(&d); d.rule = PSYST_RULE_ASA; d.target_p = 0.75;
+                   d.step_down_scale = 0.5;                     REJECT(&d);
+
+    /* And the same base desc, unmodified, is accepted. */
+    base_desc(&d);
+    CHECK(psyst_open(&g_s, &d));
+    CHECK(psyst_is_open(&g_s));
+}
+
+/* ----------------------------------------- a simulated Weibull observer */
+
+/* splitmix64, so the whole run is reproducible from one seed and nothing
+ * here depends on the platform's rand(). */
+static uint64_t g_rng = 0x853C49E6748FEA9BULL;
+
+static double next_uniform(void) {
+    uint64_t z;
+    g_rng += 0x9E3779B97F4A7C15ULL;
+    z = g_rng;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    return (double)(z >> 11) * (1.0 / 9007199254740992.0);
+}
+
+/* 2AFC Weibull: guessing at 0.5, threshold scale 1, slope 3. */
+#define WB_ALPHA 1.0
+#define WB_BETA  3.0
+#define WB_GAMMA 0.5
+
+static double weibull_p(double x) {
+    if (x <= 0.0) return WB_GAMMA;
+    return WB_GAMMA + (1.0 - WB_GAMMA) * (1.0 - exp(-pow(x / WB_ALPHA, WB_BETA)));
+}
+
+/* The level where the observer is correct a proportion p of the time. */
+static double weibull_level(double p) {
+    double q = (p - WB_GAMMA) / (1.0 - WB_GAMMA);
+    return WB_ALPHA * pow(-log(1.0 - q), 1.0 / WB_BETA);
+}
+
+/* Run `reps` staircases of PSYST_MAX_TRIALS trials, each starting 25% above
+ * the level the rule should converge on, and pool everything after `burn`
+ * trials. Two things must come out right: the proportion correct over the
+ * pooled trials, and the proportion correct AT the pooled geometric mean
+ * level. Both are compared with psyst_convergence_p. */
+static void sim_case(const char* name, int n_up, int n_down, double scale,
+                     int reps, int burn, double tol) {
+    static psyst_stair s;
+    psyst_desc d;
+    double p_star = psyst_convergence_p(n_up, n_down, scale);
+    double x_star = weibull_level(p_star);
+    double sum_log = 0.0;
+    long n_correct = 0, n_pooled = 0;
+    int r, i;
+
+    memset(&d, 0, sizeof(d));
+    d.start = x_star * 1.25;
+    d.n_up = n_up;
+    d.n_down = n_down;
+    d.step_down_scale = scale;
+    d.step_type = PSYST_STEP_LOG;
+    d.steps[0] = 0.02;          /* a fine step, so the track sits tight      */
+    d.n_steps = 1;
+    d.stop_trials = PSYST_MAX_TRIALS;
+    d.min = x_star * 0.01;
+    d.max = x_star * 100.0;
+
+    for (r = 0; r < reps; r++) {
+        if (!psyst_open(&s, &d)) { fail(__LINE__, psyst_error(&s)); return; }
+        for (i = 0; i < PSYST_MAX_TRIALS; i++) {
+            double x = psyst_next(&s);
+            int resp = psyst_simulate_response(weibull_p(x), next_uniform());
+            if (psyst_update(&s, x, resp) < 0) { fail(__LINE__, "update"); return; }
+            if (i >= burn) {
+                sum_log += log10(x);
+                n_correct += resp;
+                n_pooled++;
+            }
+        }
+        if (psyst_stop_reason(&s) != PSYST_STOP_TRIALS) {
+            fail(__LINE__, "simulated staircase did not stop on trials");
+            return;
+        }
+    }
+
+    {
+        double p_emp = (double)n_correct / (double)n_pooled;
+        double x_bar = pow(10.0, sum_log / (double)n_pooled);
+        double p_at_level = weibull_p(x_bar);
+        printf("  %-22s p* = %.4f  empirical = %.4f  p(mean level) = %.4f"
+               "  (%ld trials)\n", name, p_star, p_emp, p_at_level, n_pooled);
+        if (!close_to(p_emp, p_star, tol))
+            fail_d(__LINE__, "empirical proportion correct", p_emp, p_star);
+        if (!close_to(p_at_level, p_star, tol))
+            fail_d(__LINE__, "proportion correct at the converged level",
+                   p_at_level, p_star);
+    }
+}
+
+static void test_simulation(void) {
+    printf("psy_stair_test: simulated Weibull observer\n");
+    sim_case("1-up-2-down", 1, 2, 0.0, 3000, 60, 0.01);
+    sim_case("1-up-3-down", 1, 3, 0.0, 3000, 60, 0.01);
+    sim_case("weighted 1-up-1-down", 1, 1, psyst_weighted_scale(0.75),
+             3000, 60, 0.01);
+}
+
+/* -------------------------------------------------------------------- main */
+
+/* The version macros agree with each other and with the implementation. */
+static void test_version(void) {
+    char want[32];
+    snprintf(want, sizeof(want), "%d.%d.%d",
+             PSYST_VERSION_MAJOR, PSYST_VERSION_MINOR, PSYST_VERSION_PATCH);
+    CHECK(strcmp(PSYST_VERSION_STRING, want) == 0);
+    CHECK(strcmp(psyst_version(), PSYST_VERSION_STRING) == 0);
+    /* Pinned, and compared at run time: a constant condition is MSVC's C4127,
+     * and the string from the implementation is the thing worth pinning. */
+    CHECK(strcmp(psyst_version(), "0.1.1") == 0);
+}
+
+int main(void) {
+    test_version();
+    test_updown_1_1();
+    test_updown_1_2();
+    test_updown_1_3();
+    test_updown_2_1();
+    test_schedule_and_initial_rule();
+    test_empty_windows();
+    test_step_types();
+    test_harder_is_up_and_shown();
+    test_limits();
+    test_full();
+    test_weighted();
+    test_asa();
+    test_closed_and_bad_args();
+    test_bad_descs();
+    test_simulation();
+
+    if (g_failures != 0) {
+        fprintf(stderr, "psy_stair_test: %d check(s) failed\n", g_failures);
+        return 1;
+    }
+    printf("psy_stair_test: all checks passed (PSYST_MAX_TRIALS=%d, "
+           "PSYST_MAX_REVERSALS=%d, sizeof(psyst_stair)=%lu)\n",
+           PSYST_MAX_TRIALS, PSYST_MAX_REVERSALS,
+           (unsigned long)sizeof(psyst_stair));
+    return 0;
+}

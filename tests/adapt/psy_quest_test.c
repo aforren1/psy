@@ -1,0 +1,2206 @@
+/* psy_quest_test.c - self-checking tests for psy_quest.h.
+ *
+ * No framework: every check prints a line to stderr and bumps a counter, and
+ * main() returns 1 if the counter is not zero. Build and run:
+ *
+ *   cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. \
+ *      -o quest_test tests/adapt/psy_quest_test.c -lm && ./quest_test
+ *
+ * The reference sections below are written from the definitions (Watson 2017
+ * eq. 8-11 and Bayes' rule), in double precision, without looking at how the
+ * header arranges the arithmetic. They are the point of this file: the header
+ * rearranges the entropy sum to avoid a division and stores the likelihood
+ * table as float, and those two liberties are what has to be shown harmless.
+ */
+#define PSY_QUEST_IMPLEMENTATION
+#include "psy_quest.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int g_fail = 0;
+static int g_checks = 0;
+
+#define CHECK(cond, ...)                                                      \
+    do {                                                                      \
+        g_checks++;                                                           \
+        if (!(cond)) {                                                        \
+            fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__);              \
+            fprintf(stderr, __VA_ARGS__);                                     \
+            fputc('\n', stderr);                                              \
+            g_fail++;                                                         \
+        }                                                                     \
+    } while (0)
+
+#define CLOSE(a, b, tol, ...)                                                 \
+    do {                                                                      \
+        double aa_ = (a), bb_ = (b);                                          \
+        g_checks++;                                                           \
+        if (!(fabs(aa_ - bb_) <= (tol))) {                                    \
+            fprintf(stderr, "FAIL %s:%d: %.17g vs %.17g (tol %g): ",          \
+                    __FILE__, __LINE__, aa_, bb_, (double)(tol));             \
+            fprintf(stderr, __VA_ARGS__);                                     \
+            fputc('\n', stderr);                                              \
+            g_fail++;                                                         \
+        }                                                                     \
+    } while (0)
+
+/* ======================================================================= *
+ *  A deterministic generator, so a whole run replays from a seed.
+ * ======================================================================= */
+
+static uint64_t g_sm_state = 0;
+
+static void sm_seed(uint64_t s) { g_sm_state = s; }
+
+static double sm_u(void) {
+    uint64_t z = (g_sm_state += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z = z ^ (z >> 31);
+    return (double)(z >> 11) * (1.0 / 9007199254740992.0);
+}
+
+/* A generator that hands out a fixed list, so a tie or a subset draw has a
+ * known answer. */
+typedef struct {
+    const double* v;
+    int n, i;
+} seq_rng;
+
+static double seq_rng_fn(void* ctx) {
+    seq_rng* r = (seq_rng*)ctx;
+    double u = r->v[r->i % r->n];
+    r->i++;
+    return u;
+}
+
+/* ======================================================================= *
+ *  REFERENCE MODEL: 5 stimuli x (4 x 3 x 1 x 1) parameters, K = 2
+ * ======================================================================= */
+
+#define RS 5
+#define RA 4
+#define RB 3
+#define RP (RA * RB)
+
+static double ref_x[RS];
+static double ref_alpha[RA];
+static double ref_beta[RB];
+static const double REF_GAMMA = 0.5;
+static const double REF_LAMBDA = 0.03;
+
+static void ref_build_axes(void) {
+    int i;
+    for (i = 0; i < RS; i++) ref_x[i] = -2.5 + 2.0 * (double)i / (double)(RS - 1);
+    for (i = 0; i < RA; i++) ref_alpha[i] = -2.0 + 1.5 * (double)i / (double)(RA - 1);
+    for (i = 0; i < RB; i++) ref_beta[i] = 1.0 + 3.0 * (double)i / (double)(RB - 1);
+}
+
+/* p(correct) for the log-Weibull, written straight from the manual. */
+static double ref_p1(double x, double alpha, double beta) {
+    double f = 1.0 - exp(-pow(10.0, beta * (x - alpha)));
+    return REF_GAMMA + (1.0 - REF_GAMMA - REF_LAMBDA) * f;
+}
+
+/* Parameter grid index t = ia * RB + ib, last axis fastest; the two fixed
+ * axes have one point each and so do not enter the index. */
+static double ref_lik(int s, int t, int k) {
+    double p1 = ref_p1(ref_x[s], ref_alpha[t / RB], ref_beta[t % RB]);
+    return (k == 1) ? p1 : 1.0 - p1;
+}
+
+static void ref_prior(double* post) {
+    int t;
+    for (t = 0; t < RP; t++) post[t] = 1.0 / (double)RP;
+}
+
+static void ref_update(double* post, int s, int k) {
+    double w[RP], sum = 0.0;
+    int t;
+    for (t = 0; t < RP; t++) { w[t] = post[t] * ref_lik(s, t, k); sum += w[t]; }
+    for (t = 0; t < RP; t++) post[t] = w[t] / sum;
+}
+
+/* Expected posterior entropy in bits, by the definition: for every outcome,
+ * normalize the updated posterior and take its entropy, then average under
+ * the outcome's marginal probability. */
+static double ref_expected_entropy(const double* post, int s) {
+    double e = 0.0;
+    int k, t;
+    for (k = 0; k < 2; k++) {
+        double w[RP], pk = 0.0, h = 0.0;
+        for (t = 0; t < RP; t++) { w[t] = post[t] * ref_lik(s, t, k); pk += w[t]; }
+        if (pk <= 0.0) continue;
+        for (t = 0; t < RP; t++) {
+            double qq = w[t] / pk;
+            if (qq > 0.0) h -= qq * log(qq) / log(2.0);
+        }
+        e += pk * h;
+    }
+    return e;
+}
+
+static int ref_argmin_entropy(const double* post) {
+    double best = ref_expected_entropy(post, 0);
+    int s, arg = 0;
+    for (s = 1; s < RS; s++) {
+        double v = ref_expected_entropy(post, s);
+        if (v < best) { best = v; arg = s; }
+    }
+    return arg;
+}
+
+static void ref_desc(psyq_desc* d, bool no_table) {
+    memset(d, 0, sizeof(*d));
+    d->pf = PSYQ_PF_GUMBEL;
+    d->stim[0] = psyq_values(ref_x, RS);
+    d->n_stim = 1;
+    d->param[0] = psyq_values(ref_alpha, RA);
+    d->param[1] = psyq_values(ref_beta, RB);
+    d->param[2] = psyq_fixed(REF_GAMMA);
+    d->param[3] = psyq_fixed(REF_LAMBDA);
+    d->n_param = 4;
+    d->stop_trials = 1000;
+    d->no_table = no_table;
+}
+
+/* The fixed outcome sequence the reference and the header both replay. */
+static const int ref_seq_s[] = { 2, 0, 4, 1, 3, 2, 4 };
+static const int ref_seq_k[] = { 1, 0, 1, 1, 0, 1, 0 };
+#define REF_SEQ_N ((int)(sizeof(ref_seq_s) / sizeof(ref_seq_s[0])))
+
+static psyq_quest g_q;
+static psyq_quest g_q2;
+
+static void test_reference(bool no_table) {
+    psyq_desc d;
+    double post[RP];
+    double tol = no_table ? 1e-12 : 1e-6;
+    int i, t, s;
+
+    ref_desc(&d, no_table);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_n_stim(&g_q) == RS, "S = %d", psyq_n_stim(&g_q));
+    CHECK(psyq_n_param(&g_q) == RP, "P = %d", psyq_n_param(&g_q));
+    CHECK(psyq_n_outcomes(&g_q) == 2, "K = %d", psyq_n_outcomes(&g_q));
+    ref_prior(post);
+
+    for (i = 0; i <= REF_SEQ_N; i++) {
+        const double* hp = psyq_posterior(&g_q);
+        double gap_best = 0.0, gap_second = 0.0;
+        int arg;
+        for (t = 0; t < RP; t++)
+            CLOSE(hp[t], post[t], tol, "posterior cell %d after %d trials (no_table=%d)",
+                  t, i, (int)no_table);
+        for (s = 0; s < RS; s++)
+            CLOSE(psyq_expected_entropy(&g_q, s), ref_expected_entropy(post, s), tol,
+                  "expected entropy of stimulus %d after %d trials (no_table=%d)",
+                  s, i, (int)no_table);
+        /* The argmin can only be compared when the reference itself is not in
+         * a near-tie; check that the test is asking a fair question. */
+        arg = ref_argmin_entropy(post);
+        gap_best = ref_expected_entropy(post, arg);
+        gap_second = HUGE_VAL;
+        for (s = 0; s < RS; s++)
+            if (s != arg && ref_expected_entropy(post, s) < gap_second)
+                gap_second = ref_expected_entropy(post, s);
+        CHECK(gap_second - gap_best > 1e-5, "trial %d: the reference argmin is a near-tie (%g)",
+              i, gap_second - gap_best);
+        CHECK(psyq_next(&g_q) == arg, "trial %d: selected %d, reference %d (no_table=%d)",
+              i, psyq_next(&g_q), arg, (int)no_table);
+        CHECK(psyq_next(&g_q) == arg, "psyq_next is not stable without an update");
+        /* Entropy of the joint posterior, in bits. */
+        {
+            double h = 0.0;
+            for (t = 0; t < RP; t++) if (post[t] > 0.0) h -= post[t] * log(post[t]) / log(2.0);
+            CLOSE(psyq_entropy(&g_q), h, tol, "psyq_entropy after %d trials", i);
+        }
+        if (i == REF_SEQ_N) break;
+        CHECK(psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]) == PSYQ_OK, "update %d", i);
+        ref_update(post, ref_seq_s[i], ref_seq_k[i]);
+    }
+
+    /* The history records both what was proposed and what was shown. */
+    {
+        int n = -1;
+        const psyq_trial* h = psyq_history(&g_q, &n);
+        CHECK(n == REF_SEQ_N, "history holds %d trials", n);
+        CHECK(psyq_n_trials(&g_q) == REF_SEQ_N, "n_trials = %d", psyq_n_trials(&g_q));
+        for (i = 0; i < n; i++) {
+            CHECK(h[i].stim_index == ref_seq_s[i], "history %d stim_index", i);
+            CHECK(h[i].outcome == (uint8_t)ref_seq_k[i], "history %d outcome", i);
+            CHECK(h[i].proposed_index >= 0 && h[i].proposed_index < RS,
+                  "history %d proposed_index = %d", i, h[i].proposed_index);
+            CLOSE(h[i].stim[0], ref_x[ref_seq_s[i]], 0.0, "history %d stim value", i);
+        }
+    }
+    psyq_close(&g_q);
+}
+
+/* The two storage paths must agree to float precision, and the estimators
+ * must agree with what the caller can compute from psyq_posterior(). */
+static void test_no_table_matches(void) {
+    psyq_desc a, b;
+    int i;
+    ref_desc(&a, false);
+    ref_desc(&b, true);
+    CHECK(psyq_open(&g_q, &a), "open table: %s", psyq_error(&g_q));
+    CHECK(psyq_open(&g_q2, &b), "open no_table: %s", psyq_error(&g_q2));
+    for (i = 0; i < REF_SEQ_N; i++) {
+        CHECK(psyq_next(&g_q) == psyq_next(&g_q2), "trial %d: table %d, no_table %d",
+              i, psyq_next(&g_q), psyq_next(&g_q2));
+        psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]);
+        psyq_update(&g_q2, ref_seq_s[i], ref_seq_k[i]);
+    }
+    for (i = 0; i < RP; i++)
+        CLOSE(psyq_posterior(&g_q)[i], psyq_posterior(&g_q2)[i], 1e-6,
+              "table vs no_table posterior cell %d", i);
+    CHECK(g_q.table != NULL, "the table path has no table");
+    CHECK(g_q2.table == NULL, "no_table kept a table");
+    psyq_close(&g_q);
+    psyq_close(&g_q2);
+}
+
+/* An off-grid update at a value that happens to be a grid point must give the
+ * same posterior as the indexed update. */
+static void test_update_values(void) {
+    psyq_desc d;
+    double sv[1];
+    int i;
+    ref_desc(&d, false);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_open(&g_q2, &d), "open: %s", psyq_error(&g_q2));
+    for (i = 0; i < REF_SEQ_N; i++) {
+        sv[0] = psyq_stim_value(&g_q, ref_seq_s[i], 0);
+        CHECK(psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]) == PSYQ_OK, "update %d", i);
+        CHECK(psyq_update_values(&g_q2, sv, ref_seq_k[i]) == PSYQ_OK, "update_values %d", i);
+    }
+    for (i = 0; i < RP; i++)
+        CLOSE(psyq_posterior(&g_q)[i], psyq_posterior(&g_q2)[i], 1e-6,
+              "on-grid update_values disagrees at cell %d", i);
+    {
+        int n = -1;
+        const psyq_trial* h = psyq_history(&g_q2, &n);
+        CHECK(h[0].stim_index == -1, "update_values recorded a grid index");
+        CLOSE(h[0].stim[0], ref_x[ref_seq_s[0]], 0.0, "update_values stimulus value");
+    }
+    /* Halfway between two grid points: a different, still exact, update. */
+    sv[0] = 0.5 * (ref_x[0] + ref_x[1]);
+    CHECK(psyq_update_values(&g_q2, sv, 1) == PSYQ_OK, "off-grid update");
+    sv[0] = (double)NAN;
+    CHECK(psyq_update_values(&g_q2, sv, 1) == PSYQ_ERR_ARG, "NaN stimulus was accepted");
+    psyq_close(&g_q);
+    psyq_close(&g_q2);
+}
+
+/* ======================================================================= *
+ *  MEMORY
+ * ======================================================================= */
+
+static void test_memory(void) {
+    psyq_desc d;
+    size_t need;
+    unsigned char* buf;
+    size_t i;
+    const size_t guard = 32;
+
+    ref_desc(&d, false);
+    need = psyq_memory_size(&d);
+    CHECK(need > 0, "memory_size returned 0");
+    buf = (unsigned char*)malloc(need + guard);
+    CHECK(buf != NULL, "malloc failed");
+    if (!buf) return;
+    memset(buf, 0xA5, need + guard);
+
+    d.memory = buf;
+    d.memory_size = need - 1;
+    CHECK(!psyq_open(&g_q, &d), "open succeeded with one byte too few");
+    CHECK(strstr(psyq_error(&g_q), "too small") != NULL,
+          "message does not name the problem: %s", psyq_error(&g_q));
+    CHECK(strstr(psyq_error(&g_q), psyq_strerror(PSYQ_ERR_MEMORY)) != NULL,
+          "message does not name PSYQ_ERR_MEMORY: %s", psyq_error(&g_q));
+
+    d.memory_size = need;
+    CHECK(psyq_open(&g_q, &d), "open failed at exactly memory_size: %s", psyq_error(&g_q));
+    CHECK(g_q.mem == buf, "open did not use the caller's buffer");
+    CHECK(g_q.mem_size == need, "open claimed %llu bytes, memory_size said %llu",
+          (unsigned long long)g_q.mem_size, (unsigned long long)need);
+    /* Drive a few trials so every block in the arena is touched, then check
+     * that nothing past memory_size was. */
+    psyq_next(&g_q);
+    psyq_update(&g_q, 2, 1);
+    psyq_next(&g_q);
+    for (i = 0; i < guard; i++)
+        CHECK(buf[need + i] == 0xA5, "open wrote %llu bytes past memory_size",
+              (unsigned long long)(i + 1));
+    CHECK(!g_q.mem_owned, "the handle thinks it owns the caller's buffer");
+    psyq_close(&g_q);
+    free(buf);
+
+    /* An unaligned buffer is still usable: memory_size carries the slack. */
+    buf = (unsigned char*)malloc(need + 8);
+    CHECK(buf != NULL, "malloc failed");
+    if (!buf) return;
+    d.memory = buf + 1;
+    d.memory_size = need;
+    CHECK(psyq_open(&g_q, &d), "open failed on an unaligned buffer: %s", psyq_error(&g_q));
+    psyq_next(&g_q);
+    psyq_close(&g_q);
+    free(buf);
+
+    /* And with no buffer at all, open owns one malloc. */
+    d.memory = NULL;
+    d.memory_size = 0;
+    CHECK(psyq_open(&g_q, &d), "open without a buffer: %s", psyq_error(&g_q));
+    CHECK(g_q.mem_owned, "open did not take its own memory");
+    psyq_close(&g_q);
+    CHECK(g_q.mem == NULL, "close did not release the memory");
+    psyq_close(&g_q);   /* close twice must be safe */
+}
+
+/* ======================================================================= *
+ *  PSYCHOMETRIC FUNCTIONS
+ * ======================================================================= */
+
+/* Phi written as an erf, which is not how the header writes it. */
+static double ref_phi(double z) { return 0.5 * (1.0 + erf(z / sqrt(2.0))); }
+
+static void test_pfs(void) {
+    static const psyq_pf pfs[] = { PSYQ_PF_GUMBEL, PSYQ_PF_WEIBULL, PSYQ_PF_LOGISTIC,
+                                   PSYQ_PF_NORMAL, PSYQ_PF_HYPSEC };
+    static const double xs[] = { 0.25, 0.9, 1.0, 1.6, 3.0 };
+    double par[4];
+    int ip, ix;
+    for (ip = 0; ip < 5; ip++) {
+        psyq_desc d;
+        memset(&d, 0, sizeof(d));
+        d.pf = pfs[ip];
+        d.stim[0] = psyq_values(xs, 5);
+        d.n_stim = 1;
+        d.param[0] = psyq_fixed(1.0);
+        d.param[1] = psyq_fixed(2.0);
+        d.param[2] = psyq_fixed(0.25);
+        d.param[3] = psyq_fixed(0.04);
+        d.n_param = 4;
+        d.stop_trials = 10;
+        CHECK(psyq_open(&g_q, &d), "pf %d open: %s", ip, psyq_error(&g_q));
+        par[0] = 1.0; par[1] = 2.0; par[2] = 0.25; par[3] = 0.04;
+        for (ix = 0; ix < 5; ix++) {
+            double p[2], f = 0.0, want, x = xs[ix], z = par[1] * (x - par[0]);
+            CHECK(psyq_p(&g_q, ix, par, p) == PSYQ_OK, "psyq_p");
+            switch (pfs[ip]) {
+            case PSYQ_PF_GUMBEL:   f = 1.0 - exp(-pow(10.0, z)); break;
+            case PSYQ_PF_WEIBULL:  f = 1.0 - exp(-pow(x / par[0], par[1])); break;
+            case PSYQ_PF_LOGISTIC: f = 1.0 / (1.0 + exp(-z)); break;
+            case PSYQ_PF_NORMAL:   f = ref_phi(z); break;
+            case PSYQ_PF_HYPSEC:   f = (2.0 / 3.14159265358979323846) *
+                                       atan(exp(1.57079632679489661923 * z)); break;
+            default: break;
+            }
+            want = par[2] + (1.0 - par[2] - par[3]) * f;
+            CLOSE(p[1], want, 1e-12, "pf %d at x = %g", ip, x);
+            CLOSE(p[0] + p[1], 1.0, 1e-15, "pf %d outcomes do not sum to 1", ip);
+        }
+        /* A few anchors that do not depend on the formula being read back. */
+        if (pfs[ip] == PSYQ_PF_NORMAL || pfs[ip] == PSYQ_PF_LOGISTIC ||
+            pfs[ip] == PSYQ_PF_HYPSEC) {
+            double p[2], st[1];
+            st[0] = par[0];
+            CHECK(psyq_p_values(&g_q, st, par, p) == PSYQ_OK, "psyq_p_values");
+            CLOSE(p[1], par[2] + 0.5 * (1.0 - par[2] - par[3]), 1e-12,
+                  "pf %d is not at half height at x = alpha", ip);
+        }
+        if (pfs[ip] == PSYQ_PF_WEIBULL) {
+            double p[2], st[1];
+            st[0] = par[0];
+            CHECK(psyq_p_values(&g_q, st, par, p) == PSYQ_OK, "psyq_p_values");
+            CLOSE(p[1], par[2] + (1.0 - par[2] - par[3]) * (1.0 - exp(-1.0)), 1e-12,
+                  "the Weibull is not at 1 - 1/e at x = alpha");
+        }
+        psyq_close(&g_q);
+    }
+}
+
+/* ======================================================================= *
+ *  NUISANCE MARGINALIZATION
+ * ======================================================================= */
+
+/* p(correct) with the lapse of this cell, for the nuisance reference. */
+static double ref_p1_lam(double x, double alpha, double beta, double lam) {
+    double f = 1.0 - exp(-pow(10.0, beta * (x - alpha)));
+    return REF_GAMMA + (1.0 - REF_GAMMA - lam) * f;
+}
+
+/* A grid with a free threshold, a free slope and a nuisance lapse axis. The
+ * selection entropy must be the entropy of the posterior marginalized over
+ * the lapse, not of the joint. */
+static void test_nuisance(void) {
+    static const double lapse[3] = { 0.01, 0.03, 0.06 };
+    psyq_desc d;
+    int s, i, t, k;
+    const int NB = RB, NL = 3;
+    const int NP = RA * RB * 3;
+    double marg_h;
+
+    memset(&d, 0, sizeof(d));
+    d.pf = PSYQ_PF_GUMBEL;
+    d.stim[0] = psyq_values(ref_x, RS);
+    d.n_stim = 1;
+    d.param[0] = psyq_values(ref_alpha, RA);
+    d.param[1] = psyq_values(ref_beta, RB);
+    d.param[2] = psyq_fixed(REF_GAMMA);
+    d.param[3] = psyq_values(lapse, NL);
+    d.param[3].nuisance = true;
+    d.n_param = 4;
+    d.stop_trials = 1000;
+    d.no_table = true;   /* double throughout, so the tolerance can be tight */
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_n_param(&g_q) == NP, "P = %d, want %d", psyq_n_param(&g_q), NP);
+
+    for (i = 0; i < 4; i++) {
+        const double* post = psyq_posterior(&g_q);
+        /* Marginal over the nuisance axis: the lapse is the last axis, so it
+         * is the fastest index and the marginal sums blocks of NL. */
+        double marg[RA * RB], h = 0.0;
+        int m;
+        for (m = 0; m < RA * RB; m++) {
+            double sum = 0.0;
+            for (k = 0; k < NL; k++) sum += post[m * NL + k];
+            marg[m] = sum;
+        }
+        for (m = 0; m < RA * RB; m++) if (marg[m] > 0.0) h -= marg[m] * log(marg[m]) / log(2.0);
+        CLOSE(psyq_entropy(&g_q), h, 1e-12, "marginal entropy after %d trials", i);
+
+        for (s = 0; s < RS; s++) {
+            /* Expected entropy of the MARGINAL posterior, by the definition. */
+            double e = 0.0;
+            for (k = 0; k < 2; k++) {
+                double w[RA * RB * 3], pk = 0.0, hk = 0.0, mk[RA * RB];
+                int mm, b;
+                for (t = 0; t < NP; t++) {
+                    double pp = ref_p1_lam(ref_x[s], ref_alpha[t / (NB * NL)],
+                                           ref_beta[(t / NL) % NB], lapse[t % NL]);
+                    double lik = (k == 1) ? pp : 1.0 - pp;
+                    w[t] = post[t] * lik;
+                    pk += w[t];
+                }
+                for (mm = 0; mm < RA * RB; mm++) {
+                    double sum = 0.0;
+                    for (b = 0; b < NL; b++) sum += w[mm * NL + b];
+                    mk[mm] = sum;
+                }
+                if (pk <= 0.0) continue;
+                for (mm = 0; mm < RA * RB; mm++) {
+                    double qq = mk[mm] / pk;
+                    if (qq > 0.0) hk -= qq * log(qq) / log(2.0);
+                }
+                e += pk * hk;
+            }
+            CLOSE(psyq_expected_entropy(&g_q, s), e, 1e-12,
+                  "marginalized expected entropy, stimulus %d, trial %d", s, i);
+        }
+        CHECK(psyq_update(&g_q, (i * 2) % RS, i % 2) == PSYQ_OK, "update %d", i);
+    }
+    marg_h = psyq_entropy(&g_q);
+
+    /* The same grid and the same trials without the flag: the entropy of the
+     * joint is above the entropy of the marginal, and the selection scores
+     * differ, so the flag is doing something. */
+    d.param[3].nuisance = false;
+    CHECK(psyq_open(&g_q2, &d), "open: %s", psyq_error(&g_q2));
+    for (i = 0; i < 4; i++) psyq_update(&g_q2, (i * 2) % RS, i % 2);
+    CHECK(psyq_entropy(&g_q2) > marg_h + 1e-9,
+          "the joint entropy (%g) is not above the marginal one (%g)",
+          psyq_entropy(&g_q2), marg_h);
+    for (s = 0; s < RS; s++)
+        CHECK(psyq_expected_entropy(&g_q2, s) > psyq_expected_entropy(&g_q, s) + 1e-12,
+              "stimulus %d: joint score %g, marginalized score %g", s,
+              psyq_expected_entropy(&g_q2, s), psyq_expected_entropy(&g_q, s));
+    psyq_close(&g_q);
+    psyq_close(&g_q2);
+}
+
+/* ======================================================================= *
+ *  PLACEMENT RULES
+ * ======================================================================= */
+
+static int nearest_stim(double target) {
+    int s, best = 0;
+    double bd = fabs(ref_x[0] - target);
+    for (s = 1; s < RS; s++) {
+        double dd = fabs(ref_x[s] - target);
+        if (dd < bd - 1e-9) { bd = dd; best = s; }
+    }
+    return best;
+}
+
+static void test_placement(void) {
+    static const psyq_select rules[] = { PSYQ_SELECT_QUANTILE, PSYQ_SELECT_MEAN,
+                                         PSYQ_SELECT_MODE };
+    int ir, i;
+    for (ir = 0; ir < 3; ir++) {
+        psyq_desc d;
+        ref_desc(&d, false);
+        d.select = rules[ir];
+        d.select_param = 0;
+        d.select_quantile = (rules[ir] == PSYQ_SELECT_QUANTILE) ? 0.5 : 0.0;
+        CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+        for (i = 0; i < REF_SEQ_N; i++) {
+            double marg[RA], target = 0.0, c = 0.0;
+            int a;
+            CHECK(psyq_marginal(&g_q, 0, marg) == RA, "psyq_marginal");
+            switch (rules[ir]) {
+            case PSYQ_SELECT_MEAN:
+                for (a = 0; a < RA; a++) target += marg[a] * ref_alpha[a];
+                break;
+            case PSYQ_SELECT_MODE: {
+                int best = 0;
+                for (a = 1; a < RA; a++) if (marg[a] > marg[best]) best = a;
+                target = ref_alpha[best];
+                break;
+            }
+            default:
+                for (a = 0; a < RA; a++) {
+                    c += marg[a];
+                    if (c >= 0.5) { target = ref_alpha[a]; break; }
+                }
+                break;
+            }
+            CHECK(psyq_next(&g_q) == nearest_stim(target),
+                  "rule %d trial %d: selected %d, want %d (target %g)",
+                  ir, i, psyq_next(&g_q), nearest_stim(target), target);
+            psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]);
+        }
+        /* The quantile rule and the median estimator must agree on the same
+         * marginal. */
+        if (rules[ir] == PSYQ_SELECT_QUANTILE) {
+            double est[4];
+            CHECK(psyq_estimate(&g_q, PSYQ_EST_MEDIAN, est) == PSYQ_OK, "estimate");
+            CLOSE(est[0], psyq_quantile(&g_q, 0, 0.5), 0.0, "median vs quantile");
+        }
+        psyq_close(&g_q);
+    }
+}
+
+/* ======================================================================= *
+ *  TIES AND RANDOM SUBSETS
+ * ======================================================================= */
+
+/* A model that ignores the stimulus, so every stimulus has exactly the same
+ * expected entropy and the tiebreak rule is the only thing choosing. */
+static void flat_pf(void* ctx, const double* stim, const double* params, double* p) {
+    (void)ctx; (void)stim;
+    p[1] = params[0];
+    p[0] = 1.0 - params[0];
+}
+
+static void flat_desc(psyq_desc* d) {
+    static const double pv[3] = { 0.3, 0.5, 0.7 };
+    memset(d, 0, sizeof(*d));
+    d->pf = PSYQ_PF_CUSTOM;
+    d->pf_fn = flat_pf;
+    d->n_outcomes = 2;
+    d->stim[0] = psyq_values(ref_x, RS);
+    d->n_stim = 1;
+    d->param[0] = psyq_values(pv, 3);
+    d->n_param = 1;
+    d->stop_trials = 1000;
+}
+
+static void test_ties(void) {
+    psyq_desc d;
+    int i;
+
+    /* LOWEST */
+    flat_desc(&d);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    for (i = 0; i < 3; i++) {
+        CHECK(psyq_next(&g_q) == 0, "TIE_LOWEST picked %d", psyq_next(&g_q));
+        psyq_update(&g_q, 2, 1);
+    }
+    psyq_close(&g_q);
+
+    /* NEAREST: after a trial at index 3 the tie resolves to 3 itself. */
+    flat_desc(&d);
+    d.tiebreak = PSYQ_TIE_NEAREST;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_next(&g_q) == 0, "TIE_NEAREST before any trial picked %d", psyq_next(&g_q));
+    psyq_update(&g_q, 3, 1);
+    CHECK(psyq_next(&g_q) == 3, "TIE_NEAREST after a trial at 3 picked %d", psyq_next(&g_q));
+    psyq_update(&g_q, 1, 0);
+    CHECK(psyq_next(&g_q) == 1, "TIE_NEAREST after a trial at 1 picked %d", psyq_next(&g_q));
+    psyq_close(&g_q);
+
+    /* ALTERNATE */
+    flat_desc(&d);
+    d.tiebreak = PSYQ_TIE_ALTERNATE;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    for (i = 0; i < 4; i++) {
+        int want = (i % 2 == 0) ? 0 : RS - 1;
+        CHECK(psyq_next(&g_q) == want, "TIE_ALTERNATE trial %d picked %d, want %d",
+              i, psyq_next(&g_q), want);
+        psyq_update(&g_q, 2, i % 2);
+    }
+    psyq_close(&g_q);
+
+    /* RANDOM: the draw picks the j-th tied candidate, j = floor(u * count). */
+    {
+        static const double us[3] = { 0.0, 0.5, 0.99 };
+        static const int want[3] = { 0, 2, 4 };
+        seq_rng r;
+        r.v = us; r.n = 3; r.i = 0;
+        flat_desc(&d);
+        d.tiebreak = PSYQ_TIE_RANDOM;
+        d.rng = seq_rng_fn;
+        d.rng_ctx = &r;
+        CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+        for (i = 0; i < 3; i++) {
+            CHECK(psyq_next(&g_q) == want[i], "TIE_RANDOM draw %d picked %d, want %d",
+                  i, psyq_next(&g_q), want[i]);
+            psyq_update(&g_q, 2, i % 2);
+        }
+        CHECK(r.i == 3, "TIE_RANDOM drew %d variates for 3 ties", r.i);
+        psyq_close(&g_q);
+    }
+
+    /* A tolerance wide enough to swallow every difference makes every
+     * stimulus tied, even on a grid whose entropies differ. */
+    {
+        psyq_desc t;
+        ref_desc(&t, false);
+        t.tie_tolerance = 1e9;
+        t.tiebreak = PSYQ_TIE_ALTERNATE;
+        CHECK(psyq_open(&g_q, &t), "open: %s", psyq_error(&g_q));
+        CHECK(psyq_next(&g_q) == 0, "wide tolerance, first pick");
+        psyq_update(&g_q, 0, 1);
+        CHECK(psyq_next(&g_q) == RS - 1, "wide tolerance, second pick");
+        psyq_close(&g_q);
+    }
+}
+
+static void test_subset(void) {
+    psyq_desc d;
+    /* 0.0 -> 0, 0.25 -> 1, 0.85 -> 4 on a 5-point grid. */
+    static const double us[3] = { 0.0, 0.25, 0.85 };
+    seq_rng r;
+    int global, chosen, i;
+    double best;
+    int explicit_set[2];
+
+    ref_desc(&d, false);
+    CHECK(psyq_open(&g_q2, &d), "open: %s", psyq_error(&g_q2));
+    global = psyq_next(&g_q2);
+
+    r.v = us; r.n = 3; r.i = 0;
+    d.rng = seq_rng_fn;
+    d.rng_ctx = &r;
+    d.subset_size = 3;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    chosen = psyq_next(&g_q);
+    CHECK(chosen == 0 || chosen == 1 || chosen == 4, "subset selection picked %d", chosen);
+    best = HUGE_VAL;
+    for (i = 0; i < 3; i++) {
+        int s = (i == 0) ? 0 : (i == 1 ? 1 : 4);
+        double e = psyq_expected_entropy(&g_q, s);
+        if (e < best - 1e-12) { best = e; }
+    }
+    CLOSE(psyq_expected_entropy(&g_q, chosen), best, 1e-12,
+          "the subset selection is not the best of the subset");
+    CHECK(r.i == 3, "subset_size 3 drew %d variates", r.i);
+    psyq_close(&g_q);
+
+    /* psyq_next_subset does the same with the caller's list. */
+    explicit_set[0] = (global + 1) % RS;
+    explicit_set[1] = (global + 2) % RS;
+    {
+        int pick = psyq_next_subset(&g_q2, explicit_set, 2);
+        double e0 = psyq_expected_entropy(&g_q2, explicit_set[0]);
+        double e1 = psyq_expected_entropy(&g_q2, explicit_set[1]);
+        CHECK(pick == explicit_set[0] || pick == explicit_set[1],
+              "next_subset returned %d, outside the list", pick);
+        CLOSE(psyq_expected_entropy(&g_q2, pick), (e0 < e1) ? e0 : e1, 1e-12,
+              "next_subset did not take the better of the two");
+        CHECK(psyq_next_subset(&g_q2, explicit_set, 0) == PSYQ_ERR_ARG, "empty subset");
+        CHECK(psyq_next_subset(&g_q2, NULL, 2) == PSYQ_ERR_ARG, "null subset");
+        explicit_set[0] = RS;
+        CHECK(psyq_next_subset(&g_q2, explicit_set, 2) == PSYQ_ERR_ARG, "out-of-range subset");
+    }
+    psyq_close(&g_q2);
+}
+
+/* ======================================================================= *
+ *  STOPPING
+ * ======================================================================= */
+
+static void test_stopping(void) {
+    psyq_desc d;
+    int i;
+
+    /* Trials. */
+    ref_desc(&d, false);
+    d.stop_trials = 3;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    for (i = 0; i < 3; i++) {
+        CHECK(!psyq_done(&g_q), "done fired after %d of 3 trials", i);
+        psyq_update(&g_q, 2, i % 2);
+    }
+    CHECK(psyq_done(&g_q), "done did not fire at 3 trials");
+    CHECK(psyq_stop_reason(&g_q) == PSYQ_STOP_TRIALS, "stop reason %d",
+          (int)psyq_stop_reason(&g_q));
+    CHECK(psyq_update(&g_q, 2, 1) == PSYQ_OK, "a trial after done was refused");
+    psyq_close(&g_q);
+
+    /* Entropy, mid-run: the uniform prior over 12 cells is log2(12) bits. */
+    ref_desc(&d, false);
+    d.stop_trials = 0;
+    d.stop_entropy = 2.0;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CLOSE(psyq_entropy(&g_q), log(12.0) / log(2.0), 1e-12, "prior entropy");
+    CHECK(!psyq_done(&g_q), "the entropy criterion fired on the prior");
+    for (i = 0; i < 40 && !psyq_done(&g_q); i++) psyq_update(&g_q, psyq_next(&g_q), 1);
+    CHECK(psyq_done(&g_q), "the entropy criterion never fired");
+    CHECK(psyq_stop_reason(&g_q) == PSYQ_STOP_ENTROPY, "stop reason %d",
+          (int)psyq_stop_reason(&g_q));
+    CHECK(psyq_entropy(&g_q) <= 2.0, "stopped at %g bits", psyq_entropy(&g_q));
+    psyq_close(&g_q);
+
+    /* sd, mid-run. */
+    ref_desc(&d, false);
+    d.stop_trials = 0;
+    d.stop_sd = 0.35;
+    d.stop_sd_param = 0;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(!psyq_done(&g_q), "the sd criterion fired on the prior");
+    for (i = 0; i < 60 && !psyq_done(&g_q); i++) psyq_update(&g_q, psyq_next(&g_q), i % 3 ? 1 : 0);
+    CHECK(psyq_done(&g_q), "the sd criterion never fired");
+    CHECK(psyq_stop_reason(&g_q) == PSYQ_STOP_SD, "stop reason %d", (int)psyq_stop_reason(&g_q));
+    CHECK(psyq_sd(&g_q, 0) <= 0.35, "stopped at sd %g", psyq_sd(&g_q, 0));
+    psyq_close(&g_q);
+
+    /* sd, at open: a bound no posterior can exceed fires before any trial. */
+    ref_desc(&d, false);
+    d.stop_trials = 0;
+    d.stop_sd = 100.0;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_done(&g_q) && psyq_stop_reason(&g_q) == PSYQ_STOP_SD,
+          "a bound above the prior sd did not fire at open");
+    psyq_close(&g_q);
+
+    /* Full history. */
+    ref_desc(&d, false);
+    d.stop_trials = PSYQ_MAX_TRIALS * 4;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    for (i = 0; i < PSYQ_MAX_TRIALS; i++)
+        CHECK(psyq_update(&g_q, i % RS, i % 2) == PSYQ_OK, "update %d refused", i);
+    CHECK(psyq_stop_reason(&g_q) == PSYQ_STOP_FULL, "stop reason %d at a full history",
+          (int)psyq_stop_reason(&g_q));
+    CHECK(psyq_done(&g_q), "done did not fire at a full history");
+    CHECK(psyq_update(&g_q, 0, 1) == PSYQ_ERR_FULL, "a trial past the end was accepted");
+    CHECK(psyq_n_trials(&g_q) == PSYQ_MAX_TRIALS, "n_trials = %d", psyq_n_trials(&g_q));
+    psyq_close(&g_q);
+}
+
+/* ======================================================================= *
+ *  ESTIMATORS
+ * ======================================================================= */
+
+static void test_estimates(void) {
+    psyq_desc d;
+    const double* post;
+    double est[4], marg[RA], m0 = 0.0, m2 = 0.0, c = 0.0;
+    int i, best, want_median = 0;
+
+    ref_desc(&d, false);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    for (i = 0; i < REF_SEQ_N; i++) psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]);
+    post = psyq_posterior(&g_q);
+
+    CHECK(psyq_marginal(&g_q, 0, marg) == RA, "psyq_marginal returned the wrong count");
+    {
+        double sum = 0.0;
+        for (i = 0; i < RA; i++) {
+            double blk = 0.0;
+            int b;
+            for (b = 0; b < RB; b++) blk += post[i * RB + b];
+            CLOSE(marg[i], blk, 1e-15, "marginal cell %d", i);
+            sum += marg[i];
+        }
+        CLOSE(sum, 1.0, 1e-12, "the marginal is not normalized");
+    }
+    for (i = 0; i < RA; i++) { m0 += marg[i] * ref_alpha[i]; m2 += marg[i] * ref_alpha[i] * ref_alpha[i]; }
+    CHECK(psyq_estimate(&g_q, PSYQ_EST_MEAN, est) == PSYQ_OK, "estimate MEAN");
+    CLOSE(est[0], m0, 1e-12, "marginal mean of alpha");
+    CLOSE(est[2], REF_GAMMA, 1e-15, "a fixed parameter's mean is not its value");
+    CLOSE(psyq_sd(&g_q, 0), sqrt(m2 - m0 * m0), 1e-12, "marginal sd of alpha");
+    CLOSE(psyq_sd(&g_q, 2), 0.0, 1e-15, "a fixed parameter has a nonzero sd");
+
+    best = 0;
+    for (i = 1; i < RP; i++) if (post[i] > post[best]) best = i;
+    CHECK(psyq_estimate(&g_q, PSYQ_EST_MODE, est) == PSYQ_OK, "estimate MODE");
+    CLOSE(est[0], ref_alpha[best / RB], 0.0, "joint mode alpha");
+    CLOSE(est[1], ref_beta[best % RB], 0.0, "joint mode beta");
+
+    for (i = 0; i < RA; i++) { c += marg[i]; if (c >= 0.5) { want_median = i; break; } }
+    CHECK(psyq_estimate(&g_q, PSYQ_EST_MEDIAN, est) == PSYQ_OK, "estimate MEDIAN");
+    CLOSE(est[0], ref_alpha[want_median], 0.0, "marginal median of alpha");
+    CLOSE(psyq_quantile(&g_q, 0, 0.5), ref_alpha[want_median], 0.0, "quantile 0.5");
+    CHECK(psyq_quantile(&g_q, 0, 0.0) != psyq_quantile(&g_q, 0, 0.0) ,
+          "quantile 0 must be NaN");
+    CHECK(psyq_quantile(&g_q, 0, 1.0) != psyq_quantile(&g_q, 0, 1.0),
+          "quantile 1 must be NaN");
+    CHECK(psyq_quantile(&g_q, 9, 0.5) != psyq_quantile(&g_q, 9, 0.5),
+          "quantile on a bad axis must be NaN");
+    CHECK(psyq_estimate(&g_q, (psyq_estimator)99, est) == PSYQ_ERR_ARG, "bad estimator");
+    CHECK(psyq_quantile(&g_q, 0, 0.99) >= psyq_quantile(&g_q, 0, 0.01),
+          "the quantile function is not monotone");
+    psyq_close(&g_q);
+}
+
+/* ======================================================================= *
+ *  A CUSTOM MODEL WITH THREE OUTCOMES
+ * ======================================================================= */
+
+/* "Less / same / more": two criteria around a point of subjective equality.
+ * params = (pse, sigma, criterion). */
+static void three_pf(void* ctx, const double* stim, const double* params, double* p) {
+    double lo, hi;
+    (void)ctx;
+    lo = 0.5 * (1.0 + erf(((-params[2]) - (stim[0] - params[0])) / (params[1] * sqrt(2.0))));
+    hi = 0.5 * (1.0 + erf((( params[2]) - (stim[0] - params[0])) / (params[1] * sqrt(2.0))));
+    p[0] = lo;             /* "less"  */
+    p[1] = hi - lo;        /* "same"  */
+    p[2] = 1.0 - hi;       /* "more"  */
+}
+
+static void test_three_outcomes(void) {
+    static const double pse[4] = { -0.6, -0.2, 0.2, 0.6 };
+    static const double sig[3] = { 0.4, 0.8, 1.6 };
+    static const double crit[2] = { 0.3, 0.9 };
+    psyq_desc d;
+    double post[4 * 3 * 2];
+    double p[3], par[3], sv[1];
+    int i, t, k, counts[3];
+
+    memset(&d, 0, sizeof(d));
+    d.pf = PSYQ_PF_CUSTOM;
+    d.pf_fn = three_pf;
+    d.n_outcomes = 3;
+    d.stim[0] = psyq_linspace(-2.0, 2.0, 7);
+    d.n_stim = 1;
+    d.param[0] = psyq_values(pse, 4);
+    d.param[1] = psyq_values(sig, 3);
+    d.param[2] = psyq_values(crit, 2);
+    d.n_param = 3;
+    d.stop_trials = 20;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_n_outcomes(&g_q) == 3, "K = %d", psyq_n_outcomes(&g_q));
+    CHECK(psyq_n_param(&g_q) == 24, "P = %d", psyq_n_param(&g_q));
+
+    for (t = 0; t < 24; t++) post[t] = 1.0 / 24.0;
+    for (i = 0; i < 6; i++) {
+        int s = psyq_next(&g_q);
+        int outcome = i % 3;
+        double sum = 0.0;
+        for (t = 0; t < 24; t++) {
+            double pr[3];
+            sv[0] = psyq_stim_value(&g_q, s, 0);
+            par[0] = pse[t / 6]; par[1] = sig[(t / 2) % 3]; par[2] = crit[t % 2];
+            three_pf(NULL, sv, par, pr);
+            post[t] *= pr[outcome];
+            sum += post[t];
+        }
+        for (t = 0; t < 24; t++) post[t] /= sum;
+        CHECK(psyq_update(&g_q, s, outcome) == PSYQ_OK, "update %d", i);
+        for (t = 0; t < 24; t++)
+            CLOSE(psyq_posterior(&g_q)[t], post[t], 1e-6, "K=3 posterior cell %d, trial %d", t, i);
+    }
+    CHECK(psyq_update(&g_q, 0, 3) == PSYQ_ERR_ARG, "outcome K was accepted");
+
+    /* psyq_simulate must reach all three outcomes and follow the cumulative. */
+    par[0] = 0.0; par[1] = 0.8; par[2] = 0.5;
+    sv[0] = psyq_stim_value(&g_q, 3, 0);
+    three_pf(NULL, sv, par, p);
+    counts[0] = counts[1] = counts[2] = 0;
+    for (i = 0; i < 3000; i++) {
+        int k2 = psyq_simulate(&g_q, 3, par, (double)i / 3000.0);
+        CHECK(k2 >= 0 && k2 < 3, "simulate returned %d", k2);
+        if (k2 >= 0 && k2 < 3) counts[k2]++;
+    }
+    for (k = 0; k < 3; k++)
+        CLOSE((double)counts[k] / 3000.0, p[k], 2e-3, "simulate outcome %d frequency", k);
+    CHECK(psyq_simulate(&g_q, 3, par, 1.0) == PSYQ_ERR_ARG, "u = 1 was accepted");
+    CHECK(psyq_simulate(&g_q, 3, par, -0.1) == PSYQ_ERR_ARG, "u < 0 was accepted");
+    psyq_close(&g_q);
+}
+
+/* ======================================================================= *
+ *  DESCRIPTIONS open() MUST REJECT
+ * ======================================================================= */
+
+static void bad_pf(void* ctx, const double* stim, const double* params, double* p) {
+    (void)ctx; (void)stim; (void)params;
+    p[0] = 0.4;
+    p[1] = 0.4;   /* sums to 0.8 */
+}
+
+static void reject(psyq_desc* d, const char* what) {
+    bool ok = psyq_open(&g_q, d);
+    g_checks++;
+    if (ok) {
+        fprintf(stderr, "FAIL: open accepted an invalid desc (%s)\n", what);
+        g_fail++;
+        psyq_close(&g_q);
+        return;
+    }
+    g_checks++;
+    if (psyq_error(&g_q)[0] == '\0') {
+        fprintf(stderr, "FAIL: open rejected %s without a message\n", what);
+        g_fail++;
+    }
+    g_checks++;
+    if (psyq_memory_size(d) != 0) {
+        fprintf(stderr, "FAIL: memory_size is nonzero for an invalid desc (%s)\n", what);
+        g_fail++;
+    }
+}
+
+static void test_rejections(void) {
+    psyq_desc d;
+    static const double neg[3] = { 1.0, -1.0, 1.0 };
+    static const double zero[3] = { 0.0, 0.0, 0.0 };
+    static double joint_zero[RP];
+
+    CHECK(!psyq_open(&g_q, NULL), "open accepted a null desc");
+    CHECK(psyq_error(&g_q)[0] != '\0', "a null desc left no message");
+    CHECK(!psyq_open(NULL, &d) , "open accepted a null handle");
+    CHECK(psyq_memory_size(NULL) == 0, "memory_size of a null desc");
+
+    ref_desc(&d, false); d.n_stim = 0;                    reject(&d, "n_stim = 0");
+    ref_desc(&d, false); d.n_stim = PSYQ_MAX_STIM_DIMS + 1; reject(&d, "n_stim too large");
+    ref_desc(&d, false); d.n_param = 0;                   reject(&d, "n_param = 0");
+    ref_desc(&d, false); d.n_param = 3;                   reject(&d, "a built-in with n_param = 3");
+    ref_desc(&d, false); d.param[1].n = 0;                reject(&d, "an axis with n = 0");
+    ref_desc(&d, false); d.stim[0] = psyq_linspace(0.0, (double)NAN, 4);
+                                                          reject(&d, "a non-finite axis bound");
+    ref_desc(&d, false); d.param[0].prior = neg;          reject(&d, "a negative prior weight");
+    ref_desc(&d, false); d.param[1].prior = zero;         reject(&d, "a prior that sums to zero");
+    ref_desc(&d, false); d.joint_prior = joint_zero;      reject(&d, "a joint prior that sums to zero");
+    ref_desc(&d, false); d.stim[0].nuisance = true;       reject(&d, "a nuisance stimulus axis");
+    ref_desc(&d, false); d.stop_trials = 0;               reject(&d, "no stop criterion");
+    ref_desc(&d, false); d.tiebreak = PSYQ_TIE_RANDOM;    reject(&d, "TIE_RANDOM without rng");
+    ref_desc(&d, false); d.subset_size = 2;               reject(&d, "subset_size without rng");
+    ref_desc(&d, false); d.tie_tolerance = -1.0;          reject(&d, "a negative tie_tolerance");
+    ref_desc(&d, false); d.select = PSYQ_SELECT_MEAN; d.select_param = 9;
+                                                          reject(&d, "select_param out of range");
+    ref_desc(&d, false); d.select = PSYQ_SELECT_QUANTILE; d.select_quantile = 1.0;
+                                                          reject(&d, "select_quantile = 1");
+    ref_desc(&d, false); d.select = PSYQ_SELECT_QUANTILE; d.select_quantile = -0.2;
+                                                          reject(&d, "a negative select_quantile");
+    ref_desc(&d, false); d.select = (psyq_select)9;       reject(&d, "select out of range");
+    ref_desc(&d, false); d.tiebreak = (psyq_tiebreak)9;   reject(&d, "tiebreak out of range");
+    ref_desc(&d, false); d.pf = (psyq_pf)99;              reject(&d, "pf out of range");
+    ref_desc(&d, false); d.stop_trials = 0; d.stop_sd = 0.1; d.stop_sd_param = 7;
+                                                          reject(&d, "stop_sd_param out of range");
+    ref_desc(&d, false); d.stop_entropy = -1.0;           reject(&d, "a negative stop_entropy");
+    ref_desc(&d, false); d.memory = (void*)&d; d.memory_size = 0;
+                                                          reject(&d, "memory without memory_size");
+    ref_desc(&d, false); d.n_outcomes = 3;                reject(&d, "a built-in with 3 outcomes");
+
+    /* The Weibull needs a positive stimulus axis and a positive alpha. */
+    ref_desc(&d, false); d.pf = PSYQ_PF_WEIBULL;          reject(&d, "a Weibull on a negative axis");
+
+    /* Custom models. */
+    ref_desc(&d, false); d.pf = PSYQ_PF_CUSTOM; d.n_outcomes = 2;
+                                                          reject(&d, "PSYQ_PF_CUSTOM without pf_fn");
+    ref_desc(&d, false); d.pf = PSYQ_PF_CUSTOM; d.pf_fn = bad_pf; d.n_outcomes = 1;
+                                                          reject(&d, "n_outcomes = 1");
+    ref_desc(&d, false); d.pf = PSYQ_PF_CUSTOM; d.pf_fn = bad_pf;
+    d.n_outcomes = PSYQ_MAX_OUTCOMES + 1;                 reject(&d, "n_outcomes over the maximum");
+
+    /* A callback whose outcomes do not sum to 1, with and without a table. */
+    ref_desc(&d, false); d.pf = PSYQ_PF_CUSTOM; d.pf_fn = bad_pf; d.n_outcomes = 2;
+    {
+        bool ok = psyq_open(&g_q, &d);
+        CHECK(!ok, "open accepted a pf_fn whose outcomes sum to 0.8");
+        CHECK(strstr(psyq_error(&g_q), "sum") != NULL, "message: %s", psyq_error(&g_q));
+        if (ok) psyq_close(&g_q);
+        d.no_table = true;
+        ok = psyq_open(&g_q, &d);
+        CHECK(!ok, "open accepted a bad pf_fn under no_table");
+        if (ok) psyq_close(&g_q);
+    }
+
+    /* Calls on a closed handle. */
+    memset(&g_q2, 0, sizeof(g_q2));
+    CHECK(psyq_next(&g_q2) == PSYQ_ERR_CLOSED, "next on a closed handle");
+    CHECK(psyq_update(&g_q2, 0, 0) == PSYQ_ERR_CLOSED, "update on a closed handle");
+    CHECK(psyq_n_trials(&g_q2) == PSYQ_ERR_CLOSED, "n_trials on a closed handle");
+    CHECK(psyq_posterior(&g_q2) == NULL, "posterior of a closed handle");
+    CHECK(!psyq_done(&g_q2), "done on a closed handle");
+    CHECK(!psyq_is_open(&g_q2), "is_open on a closed handle");
+    CHECK(psyq_next(NULL) == PSYQ_ERR_ARG, "next(NULL)");
+    CHECK(psyq_update(NULL, 0, 0) == PSYQ_ERR_ARG, "update(NULL)");
+    CHECK(psyq_strerror(PSYQ_ERR_MEMORY)[0] != '\0', "strerror");
+    CHECK(strcmp(psyq_strerror(0), "ok") == 0, "strerror(0)");
+    CHECK(psyq_strerror(-99)[0] != '\0', "strerror of an unknown code");
+    psyq_close(&g_q2);
+}
+
+/* ======================================================================= *
+ *  GRID ARITHMETIC
+ * ======================================================================= */
+
+static void test_grids(void) {
+    psyq_desc d;
+    int sub[2], flat, i;
+    double sv[2];
+
+    memset(&d, 0, sizeof(d));
+    d.pf = PSYQ_PF_GUMBEL;
+    d.stim[0] = psyq_linspace(-2.0, 0.0, 3);
+    d.stim[1] = psyq_linspace(1.0, 4.0, 4);
+    d.n_stim = 2;
+    d.param[0] = psyq_values(ref_alpha, RA);
+    d.param[1] = psyq_values(ref_beta, RB);
+    d.param[2] = psyq_fixed(0.5);
+    d.param[3] = psyq_fixed(0.02);
+    d.n_param = 4;
+    d.stop_trials = 5;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_n_stim(&g_q) == 12, "S = %d", psyq_n_stim(&g_q));
+    sub[0] = 2; sub[1] = 1;
+    flat = psyq_stim_index(&g_q, sub);
+    CHECK(flat == 2 * 4 + 1, "stim_index = %d", flat);       /* last axis fastest */
+    CLOSE(psyq_stim_value(&g_q, flat, 0), 0.0, 1e-15, "axis 0 value");
+    CLOSE(psyq_stim_value(&g_q, flat, 1), 2.0, 1e-15, "axis 1 value");
+    CHECK(psyq_stim_values(&g_q, flat, sv) == 2, "stim_values count");
+    CLOSE(sv[0], 0.0, 1e-15, "stim_values[0]");
+    CLOSE(sv[1], 2.0, 1e-15, "stim_values[1]");
+    sv[0] = -0.9; sv[1] = 2.2;
+    CHECK(psyq_stim_nearest(&g_q, sv) == 1 * 4 + 1, "stim_nearest = %d",
+          psyq_stim_nearest(&g_q, sv));
+    for (i = 0; i < 12; i++) {
+        double v[2];
+        int s2[2];
+        psyq_stim_values(&g_q, i, v);
+        s2[0] = i / 4; s2[1] = i % 4;
+        CHECK(psyq_stim_index(&g_q, s2) == i, "round trip at %d", i);
+        CHECK(psyq_stim_nearest(&g_q, v) == i, "nearest of a grid point at %d", i);
+    }
+    sub[0] = 3;
+    CHECK(psyq_stim_index(&g_q, sub) == PSYQ_ERR_ARG, "an out-of-range subscript");
+    CHECK(psyq_stim_value(&g_q, 99, 0) != psyq_stim_value(&g_q, 99, 0), "value of a bad index");
+    CHECK(psyq_stim_value(&g_q, 0, 9) != psyq_stim_value(&g_q, 0, 9), "value on a bad axis");
+    {
+        int p4[4];
+        double pv[4];
+        p4[0] = 1; p4[1] = 2; p4[2] = 0; p4[3] = 0;
+        flat = psyq_param_index(&g_q, p4);
+        CHECK(flat == (1 * RB + 2), "param_index = %d", flat);
+        CHECK(psyq_param_values(&g_q, flat, pv) == 4, "param_values count");
+        CLOSE(pv[0], ref_alpha[1], 1e-15, "param_values[0]");
+        CLOSE(pv[1], ref_beta[2], 1e-15, "param_values[1]");
+        CLOSE(psyq_param_value(&g_q, flat, 3), 0.02, 1e-15, "param_value of a fixed axis");
+    }
+    /* A built-in ignores the extra stimulus axes, so the selection is free to
+     * use them; this is the configuration the manual warns about. */
+    CHECK(psyq_next(&g_q) >= 0, "next on a two-axis stimulus grid");
+    psyq_close(&g_q);
+
+    /* A prior built by psyq_prior_normal is a Gaussian on the axis. */
+    {
+        psyq_axis ax = psyq_values(ref_alpha, RA);
+        double w[RA], sum = 0.0;
+        psyq_desc pd;
+        CHECK(psyq_prior_normal(&ax, -1.0, 0.5, w), "prior_normal failed");
+        for (i = 0; i < RA; i++) {
+            double z = (ref_alpha[i] + 1.0) / 0.5;
+            CLOSE(w[i], exp(-0.5 * z * z), 1e-15, "prior weight %d", i);
+        }
+        CHECK(!psyq_prior_normal(&ax, 0.0, 0.0, w), "prior_normal accepted sd = 0");
+        CHECK(!psyq_prior_normal(NULL, 0.0, 1.0, w), "prior_normal accepted a null axis");
+        ref_desc(&pd, false);
+        pd.param[0].prior = w;
+        CHECK(psyq_open(&g_q, &pd), "open with a prior: %s", psyq_error(&g_q));
+        for (i = 0; i < RA; i++) sum += w[i];
+        {
+            double marg[RA];
+            psyq_marginal(&g_q, 0, marg);
+            for (i = 0; i < RA; i++)
+                CLOSE(marg[i], w[i] / sum, 1e-12, "the prior is not installed at cell %d", i);
+        }
+        psyq_close(&g_q);
+    }
+}
+
+/* ======================================================================= *
+ *  A SIMULATED PSI RUN
+ * ======================================================================= */
+
+#define SIM_REPS 20
+#define SIM_TRIALS 100
+
+static void test_simulated_run(void) {
+    psyq_desc d;
+    static double alpha_grid[41], beta_grid[15];
+    double truth[4];
+    double a_err = 0.0, a_bias = 0.0, b_err = 0.0, b_bias = 0.0, sd_sum = 0.0;
+    int i, rep;
+
+    for (i = 0; i < 41; i++) alpha_grid[i] = -3.0 + 3.0 * (double)i / 40.0;
+    for (i = 0; i < 15; i++) beta_grid[i] = 0.5 + 5.5 * (double)i / 14.0;
+
+    truth[0] = -1.72;   /* threshold, log10 contrast */
+    truth[1] = 3.1;     /* slope                     */
+    truth[2] = 0.5;     /* 2AFC guess rate           */
+    truth[3] = 0.02;    /* lapse rate                */
+
+    memset(&d, 0, sizeof(d));
+    d.pf = PSYQ_PF_GUMBEL;
+    d.stim[0] = psyq_linspace(-3.0, 0.0, 31);
+    d.n_stim = 1;
+    d.param[0] = psyq_values(alpha_grid, 41);
+    d.param[1] = psyq_values(beta_grid, 15);
+    d.param[2] = psyq_fixed(0.5);
+    d.param[3] = psyq_fixed(0.02);
+    d.n_param = 4;
+    d.stop_trials = SIM_TRIALS;
+
+    /* One PRNG stream across the replications, seeded once, so the whole
+     * block is a function of the seed below and nothing else. */
+    sm_seed(0x5EEDF00Dull);
+    for (rep = 0; rep < SIM_REPS; rep++) {
+        double est[4];
+        CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+        while (!psyq_done(&g_q)) {
+            int s = psyq_next(&g_q);
+            int k;
+            CHECK(s >= 0, "next returned %d", s);
+            if (s < 0) break;
+            k = psyq_simulate(&g_q, s, truth, sm_u());
+            CHECK(k == 0 || k == 1, "simulate returned %d", k);
+            CHECK(psyq_update(&g_q, s, k) == PSYQ_OK, "update");
+        }
+        CHECK(psyq_n_trials(&g_q) == SIM_TRIALS, "the run stopped at %d trials",
+              psyq_n_trials(&g_q));
+        CHECK(psyq_estimate(&g_q, PSYQ_EST_MEAN, est) == PSYQ_OK, "estimate");
+        /* Per run, only a loose sanity bound: one run in twenty is allowed to
+         * be unlucky, and the aggregate below is the real check. */
+        CHECK(fabs(est[0] - truth[0]) < 0.4, "run %d: threshold %.4f, truth %.4f",
+              rep, est[0], truth[0]);
+        CHECK(psyq_sd(&g_q, 0) < 0.25, "run %d: threshold sd %.4f after %d trials",
+              rep, psyq_sd(&g_q, 0), SIM_TRIALS);
+        a_err += fabs(est[0] - truth[0]);
+        a_bias += est[0] - truth[0];
+        b_err += fabs(est[1] - truth[1]);
+        b_bias += est[1] - truth[1];
+        sd_sum += psyq_sd(&g_q, 0);
+        psyq_close(&g_q);
+    }
+    a_err /= SIM_REPS; a_bias /= SIM_REPS; b_err /= SIM_REPS;
+    b_bias /= SIM_REPS; sd_sum /= SIM_REPS;
+    printf("  %d Psi runs of %d trials: threshold mean |error| %.4f, bias %+.4f, "
+           "posterior sd %.4f; slope mean |error| %.3f, bias %+.3f\n",
+           SIM_REPS, SIM_TRIALS, a_err, a_bias, sd_sum, b_err, b_bias);
+    /* Stated tolerances: the threshold recovers to within 0.12 log10 units on
+     * average, with a bias under a tenth of a log unit (the grid step is
+     * 0.075), and the slope to within 1.5 of 3.1. */
+    CHECK(a_err < 0.12, "mean absolute threshold error %.4f", a_err);
+    CHECK(fabs(a_bias) < 0.10, "threshold bias %+.4f", a_bias);
+    CHECK(b_err < 1.5, "mean absolute slope error %.3f", b_err);
+    CHECK(fabs(b_bias) < 1.2, "slope bias %+.3f", b_bias);
+    CHECK(sd_sum < 0.10, "mean posterior threshold sd %.4f", sd_sum);
+}
+
+/* ======================================================================= *
+ *  THE REMAINING CORNERS
+ * ======================================================================= */
+
+/* A model that can only ever produce outcome 1. Outcome 0 is then impossible
+ * under every parameter point, and no posterior can absorb it. */
+static void impossible_pf(void* ctx, const double* stim, const double* params, double* p) {
+    (void)ctx; (void)stim; (void)params;
+    p[0] = 0.0;
+    p[1] = 1.0;
+}
+
+static void test_extras(void) {
+    psyq_desc d;
+    static double jp[RP];
+    double marg[RA], sum = 0.0;
+    int i;
+
+    /* A joint prior that does not factor: put all the mass on two cells. */
+    ref_desc(&d, false);
+    for (i = 0; i < RP; i++) jp[i] = 0.0;
+    jp[1] = 2.0;
+    jp[RP - 1] = 1.0;
+    d.joint_prior = jp;
+    CHECK(psyq_open(&g_q, &d), "open with a joint prior: %s", psyq_error(&g_q));
+    for (i = 0; i < RP; i++) {
+        double want = (i == 1) ? (2.0 / 3.0) : ((i == RP - 1) ? (1.0 / 3.0) : 0.0);
+        CLOSE(psyq_posterior(&g_q)[i], want, 1e-15, "joint prior cell %d", i);
+    }
+    CLOSE(psyq_entropy(&g_q), -(2.0 / 3.0) * log(2.0 / 3.0) / log(2.0)
+                              - (1.0 / 3.0) * log(1.0 / 3.0) / log(2.0), 1e-12,
+          "entropy of a two-point prior");
+    /* A posterior with exact zeros must not produce a NaN anywhere. */
+    for (i = 0; i < RS; i++)
+        CHECK(psyq_expected_entropy(&g_q, i) == psyq_expected_entropy(&g_q, i),
+              "expected entropy of stimulus %d is NaN with a sparse prior", i);
+    CHECK(psyq_update(&g_q, 2, 1) == PSYQ_OK, "update with a sparse prior");
+    psyq_marginal(&g_q, 0, marg);
+    for (i = 0; i < RA; i++) sum += marg[i];
+    CLOSE(sum, 1.0, 1e-12, "a sparse posterior is not normalized");
+    psyq_close(&g_q);
+
+    /* An outcome no parameter point can produce changes nothing. */
+    ref_desc(&d, false);
+    d.pf = PSYQ_PF_CUSTOM;
+    d.pf_fn = impossible_pf;
+    d.n_outcomes = 2;
+    d.n_param = 1;
+    d.param[0] = psyq_values(ref_alpha, RA);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_update(&g_q, 0, 0) == PSYQ_ERR_ARG, "an impossible outcome was accepted");
+    CHECK(psyq_n_trials(&g_q) == 0, "an impossible outcome was recorded");
+    for (i = 0; i < RA; i++)
+        CLOSE(psyq_posterior(&g_q)[i], 1.0 / RA, 1e-15,
+              "an impossible outcome disturbed the posterior at %d", i);
+    CHECK(psyq_update(&g_q, 0, 1) == PSYQ_OK, "the possible outcome was refused");
+    {   /* Uninformative: every cell has the same likelihood, so nothing moves. */
+        double sv[1];
+        sv[0] = ref_x[0];
+        CHECK(psyq_update_values(&g_q, sv, 0) == PSYQ_ERR_ARG,
+              "an impossible off-grid outcome was accepted");
+    }
+    psyq_close(&g_q);
+
+    /* TIE_NEAREST inside a caller's subset resolves within the subset. */
+    {
+        int list[3];
+        flat_desc(&d);
+        d.tiebreak = PSYQ_TIE_NEAREST;
+        CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+        psyq_update(&g_q, 4, 1);
+        list[0] = 1; list[1] = 3; list[2] = 0;
+        CHECK(psyq_next_subset(&g_q, list, 3) == 3,
+              "TIE_NEAREST in a subset picked %d, want 3", psyq_next_subset(&g_q, list, 3));
+        /* The subset answer is the cached proposal. */
+        CHECK(psyq_next(&g_q) == 3, "psyq_next did not repeat the subset proposal");
+        psyq_close(&g_q);
+    }
+
+    /* psyq_p at parameter values between grid points. */
+    ref_desc(&d, false);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    {
+        double par[4], p[2], sv[1];
+        par[0] = -1.234; par[1] = 2.345; par[2] = REF_GAMMA; par[3] = REF_LAMBDA;
+        CHECK(psyq_p(&g_q, 3, par, p) == PSYQ_OK, "psyq_p off the parameter grid");
+        CLOSE(p[1], ref_p1(ref_x[3], par[0], par[1]), 1e-12, "psyq_p off-grid value");
+        sv[0] = -0.123;
+        CHECK(psyq_p_values(&g_q, sv, par, p) == PSYQ_OK, "psyq_p_values off both grids");
+        CLOSE(p[1], ref_p1(sv[0], par[0], par[1]), 1e-12, "psyq_p_values off-grid value");
+        par[0] = (double)NAN;
+        CHECK(psyq_p(&g_q, 3, par, p) == PSYQ_ERR_ARG, "a NaN parameter was accepted");
+        CHECK(psyq_p(&g_q, RS, par, p) == PSYQ_ERR_ARG, "a bad stimulus index was accepted");
+        CHECK(psyq_p(&g_q, 0, NULL, p) == PSYQ_ERR_ARG, "null params");
+    }
+    psyq_close(&g_q);
+}
+
+/* ======================================================================= *
+ *  THE DECOMPOSED SCORE AGAINST THE DEFINITION
+ *
+ *  The table path does not compute the expected entropy the way the manual
+ *  writes it. It uses
+ *      E[H] = H(theta) - H(y | s) + sum_theta post(theta) h(s, theta)
+ *  with h tabulated as an extra row at open. This checks the identity itself,
+ *  separately from the float storage: the direct formula is evaluated here in
+ *  double, from the very floats the header stored, so the only difference
+ *  left is the decomposition and the rounding of h to float.
+ * ======================================================================= */
+
+static void test_decomposition(void) {
+    psyq_desc d;
+    double post[RP];
+    double worst_table = 0.0, worst_lik = 0.0;
+    int i, s, t, k;
+
+    /* Table path: read the stored floats back and apply the definition. */
+    ref_desc(&d, false);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(g_q.rows == 3, "the table has %d rows, want K+1 = 3", g_q.rows);
+    ref_prior(post);
+    for (i = 0; i <= REF_SEQ_N; i++) {
+        for (s = 0; s < RS; s++) {
+            const float* base = g_q.table
+                                + (size_t)s * (size_t)g_q.rows * (size_t)RP;
+            double direct = 0.0, got, diff;
+            for (k = 0; k < 2; k++) {
+                double w[RP], pk = 0.0, h = 0.0;
+                for (t = 0; t < RP; t++) {
+                    /* Read the table exactly as the header stores it, so what
+                     * is left over is the decomposition and nothing else. */
+                    w[t] = psyq_posterior(&g_q)[t]
+                           * (double)base[(size_t)k * RP + (size_t)t];
+                    pk += w[t];
+                }
+                if (pk <= 0.0) continue;
+                for (t = 0; t < RP; t++) {
+                    double qq = w[t] / pk;
+                    if (qq > 0.0) h -= qq * log(qq) / log(2.0);
+                }
+                direct += pk * h;
+            }
+            got = psyq_expected_entropy(&g_q, s);
+            diff = fabs(got - direct);
+            if (diff > worst_table) worst_table = diff;
+            CLOSE(got, direct, 1e-6,
+                  "decomposed vs direct, stimulus %d after %d trials", s, i);
+        }
+        if (i == REF_SEQ_N) break;
+        psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]);
+        ref_update(post, ref_seq_s[i], ref_seq_k[i]);
+    }
+    psyq_close(&g_q);
+
+    /* No-table path: the header uses the direct formula there, so the same
+     * comparison the other way round, in double on both sides, isolates the
+     * algebra from the float table entirely. */
+    ref_desc(&d, true);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(g_q.rows == 2, "no_table kept an entropy row");
+    for (i = 0; i <= REF_SEQ_N; i++) {
+        double hpost = 0.0;
+        const double* hp = psyq_posterior(&g_q);
+        for (t = 0; t < RP; t++) if (hp[t] > 0.0) hpost -= hp[t] * log(hp[t]) / log(2.0);
+        for (s = 0; s < RS; s++) {
+            /* The decomposition, written out here. */
+            double hy = 0.0, hcond = 0.0, got, diff;
+            double pk[2];
+            for (k = 0; k < 2; k++) {
+                pk[k] = 0.0;
+                for (t = 0; t < RP; t++) pk[k] += hp[t] * ref_lik(s, t, k);
+            }
+            for (k = 0; k < 2; k++) if (pk[k] > 0.0) hy -= pk[k] * log(pk[k]) / log(2.0);
+            for (t = 0; t < RP; t++) {
+                double cell = 0.0;
+                for (k = 0; k < 2; k++) {
+                    double l = ref_lik(s, t, k);
+                    if (l > 0.0) cell -= l * log(l) / log(2.0);
+                }
+                hcond += hp[t] * cell;
+            }
+            got = psyq_expected_entropy(&g_q, s);
+            diff = fabs(got - (hpost - hy + hcond));
+            if (diff > worst_lik) worst_lik = diff;
+            CLOSE(got, hpost - hy + hcond, 1e-12,
+                  "direct vs decomposed (no_table), stimulus %d after %d trials", s, i);
+        }
+        if (i == REF_SEQ_N) break;
+        psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]);
+    }
+    psyq_close(&g_q);
+    printf("  decomposition: worst |decomposed - direct| = %.3g through the float table, "
+           "%.3g in double\n", worst_table, worst_lik);
+}
+
+/* ======================================================================= *
+ *  A NUISANCE AXIS THAT IS NOT WHERE THE POSTERIOR WANTS IT
+ *
+ *  The posterior is stored with the nuisance axes first, so a desc that
+ *  flags a middle axis makes the internal and the public orders differ and
+ *  every boundary has to translate. Grid: alpha (4) x beta (3, NUISANCE) x
+ *  gamma (1) x lambda (2), so the public flat index is
+ *  t = ia*6 + ib*2 + il.
+ * ======================================================================= */
+
+#define PNA 4
+#define PNB 3
+#define PNL 2
+#define PNP (PNA * PNB * PNL)
+
+static const double pn_lapse[PNL] = { 0.01, 0.05 };
+
+static double pn_lik(int s, int t, int k) {
+    double p1 = ref_p1_lam(ref_x[s], ref_alpha[t / 6], ref_beta[(t / 2) % PNB],
+                           pn_lapse[t % PNL]);
+    return (k == 1) ? p1 : 1.0 - p1;
+}
+
+static void test_permuted_nuisance(bool no_table) {
+    psyq_desc d;
+    double post[PNP];
+    double tol = no_table ? 1e-12 : 1e-6;
+    int i, t, s, k, m;
+
+    memset(&d, 0, sizeof(d));
+    d.pf = PSYQ_PF_GUMBEL;
+    d.stim[0] = psyq_values(ref_x, RS);
+    d.n_stim = 1;
+    d.param[0] = psyq_values(ref_alpha, RA);
+    d.param[1] = psyq_values(ref_beta, RB);
+    d.param[1].nuisance = true;          /* the middle axis, not the last */
+    d.param[2] = psyq_fixed(REF_GAMMA);
+    d.param[3] = psyq_values(pn_lapse, PNL);
+    d.n_param = 4;
+    d.stop_trials = 1000;
+    d.no_table = no_table;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(psyq_n_param(&g_q) == PNP, "P = %d, want %d", psyq_n_param(&g_q), PNP);
+    CHECK(g_q.permuted, "the internal order did not change for a middle nuisance axis");
+    CHECK(g_q.perm[0] == 1, "perm[0] = %d, want the nuisance axis", g_q.perm[0]);
+    CHECK(g_q.nuis_block == PNB, "nuis_block = %d", g_q.nuis_block);
+    CHECK(g_q.n_marg == PNA * PNL, "n_marg = %d", g_q.n_marg);
+
+    for (t = 0; t < PNP; t++) post[t] = 1.0 / (double)PNP;
+    for (i = 0; i <= REF_SEQ_N; i++) {
+        const double* hp = psyq_posterior(&g_q);
+        double marg[PNA * PNL], h = 0.0;
+        /* psyq_posterior() must come back in the CALLER's axis order. */
+        for (t = 0; t < PNP; t++)
+            CLOSE(hp[t], post[t], tol, "permuted posterior cell %d after %d trials", t, i);
+        /* Marginal over the nuisance axis, in public terms. */
+        for (m = 0; m < PNA * PNL; m++) {
+            double sum = 0.0;
+            int ia = m / PNL, il = m % PNL, ib;
+            for (ib = 0; ib < PNB; ib++) sum += post[ia * 6 + ib * 2 + il];
+            marg[m] = sum;
+        }
+        for (m = 0; m < PNA * PNL; m++)
+            if (marg[m] > 0.0) h -= marg[m] * log(marg[m]) / log(2.0);
+        CLOSE(psyq_entropy(&g_q), h, tol, "permuted marginal entropy after %d trials", i);
+
+        /* Single-axis marginals and the estimators, all in public terms. */
+        {
+            double ma[RA], mb[RB], ml[PNL], est[4], mean_a = 0.0, mean_b = 0.0;
+            int ia, ib, il, best = 0;
+            CHECK(psyq_marginal(&g_q, 0, ma) == RA, "marginal 0");
+            CHECK(psyq_marginal(&g_q, 1, mb) == RB, "marginal 1");
+            CHECK(psyq_marginal(&g_q, 3, ml) == PNL, "marginal 3");
+            for (ia = 0; ia < RA; ia++) {
+                double sum = 0.0;
+                for (ib = 0; ib < PNB; ib++)
+                    for (il = 0; il < PNL; il++) sum += post[ia * 6 + ib * 2 + il];
+                CLOSE(ma[ia], sum, tol, "permuted marginal of alpha at %d", ia);
+                mean_a += sum * ref_alpha[ia];
+            }
+            for (ib = 0; ib < PNB; ib++) {
+                double sum = 0.0;
+                for (ia = 0; ia < RA; ia++)
+                    for (il = 0; il < PNL; il++) sum += post[ia * 6 + ib * 2 + il];
+                CLOSE(mb[ib], sum, tol, "permuted marginal of beta at %d", ib);
+                mean_b += sum * ref_beta[ib];
+            }
+            for (il = 0; il < PNL; il++) {
+                double sum = 0.0;
+                for (ia = 0; ia < RA; ia++)
+                    for (ib = 0; ib < PNB; ib++) sum += post[ia * 6 + ib * 2 + il];
+                CLOSE(ml[il], sum, tol, "permuted marginal of lambda at %d", il);
+            }
+            CHECK(psyq_estimate(&g_q, PSYQ_EST_MEAN, est) == PSYQ_OK, "estimate");
+            CLOSE(est[0], mean_a, tol, "permuted mean of alpha");
+            CLOSE(est[1], mean_b, tol, "permuted mean of beta");
+            CLOSE(est[2], REF_GAMMA, 1e-15, "permuted mean of a fixed axis");
+            /* The mode is compared by mass, not by coordinates: this
+             * posterior has exact ties (two slopes that no trial so far can
+             * tell apart), and either cell is a mode. */
+            for (t = 1; t < PNP; t++) if (post[t] > post[best]) best = t;
+            CHECK(psyq_estimate(&g_q, PSYQ_EST_MODE, est) == PSYQ_OK, "estimate");
+            {
+                int ia2 = -1, ib2 = -1, il2 = -1, z;
+                for (z = 0; z < RA; z++)   if (est[0] == ref_alpha[z]) ia2 = z;
+                for (z = 0; z < PNB; z++)  if (est[1] == ref_beta[z])  ib2 = z;
+                for (z = 0; z < PNL; z++)  if (est[3] == pn_lapse[z])  il2 = z;
+                CHECK(ia2 >= 0 && ib2 >= 0 && il2 >= 0,
+                      "the mode is not a grid point (%g, %g, %g)", est[0], est[1], est[3]);
+                if (ia2 >= 0 && ib2 >= 0 && il2 >= 0)
+                    CLOSE(post[ia2 * 6 + ib2 * 2 + il2], post[best], tol,
+                          "the permuted mode is not at the maximum, trial %d", i);
+            }
+        }
+
+        /* The marginalized selection score, from the definition. */
+        for (s = 0; s < RS; s++) {
+            double e = 0.0;
+            for (k = 0; k < 2; k++) {
+                double w[PNP], pk = 0.0, hk = 0.0, mk[PNA * PNL];
+                int ia, ib, il;
+                for (t = 0; t < PNP; t++) { w[t] = post[t] * pn_lik(s, t, k); pk += w[t]; }
+                for (m = 0; m < PNA * PNL; m++) {
+                    double sum = 0.0;
+                    ia = m / PNL; il = m % PNL;
+                    for (ib = 0; ib < PNB; ib++) sum += w[ia * 6 + ib * 2 + il];
+                    mk[m] = sum;
+                }
+                if (pk <= 0.0) continue;
+                for (m = 0; m < PNA * PNL; m++) {
+                    double qq = mk[m] / pk;
+                    if (qq > 0.0) hk -= qq * log(qq) / log(2.0);
+                }
+                e += pk * hk;
+            }
+            CLOSE(psyq_expected_entropy(&g_q, s), e, tol,
+                  "permuted marginalized score, stimulus %d, trial %d", s, i);
+        }
+        if (i == REF_SEQ_N) break;
+        CHECK(psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]) == PSYQ_OK, "update %d", i);
+        {
+            double sum = 0.0;
+            for (t = 0; t < PNP; t++) {
+                post[t] *= pn_lik(ref_seq_s[i], t, ref_seq_k[i]);
+                sum += post[t];
+            }
+            for (t = 0; t < PNP; t++) post[t] /= sum;
+        }
+    }
+    psyq_close(&g_q);
+}
+
+/* ======================================================================= *
+ *  THE BATCH PSYCHOMETRIC FUNCTION
+ *
+ *  What is under test is the plumbing, not a model: the transpose from the
+ *  callback's cell-major output into the header's outcome-major rows, the
+ *  order of the parameter matrix the callback is handed, the validation, and
+ *  the arena. So every batch callback here is written as a loop over the
+ *  per-cell callback beside it, which is what a binding's vectorized callable
+ *  computes by other means. Identical doubles in, so the two paths must
+ *  produce tables that are equal BIT FOR BIT.
+ * ======================================================================= */
+
+/* A four-parameter logistic, one cell at a time. */
+static void pair_pf(void* ctx, const double* stim, const double* params, double* p) {
+    double z = params[1] * (stim[0] - params[0]);
+    (void)ctx;
+    p[1] = params[2] + (1.0 - params[2] - params[3]) / (1.0 + exp(-z));
+    p[0] = 1.0 - p[1];
+}
+
+static void pair_pf_batch(void* ctx, const double* stims, int S,
+                          const double* params, int P, float* out) {
+    int s, i, k;
+    for (s = 0; s < S; s++) {
+        for (i = 0; i < P; i++) {
+            double p[2];
+            pair_pf(ctx, stims + (size_t)s, params + (size_t)i * 4, p);
+            for (k = 0; k < 2; k++)
+                out[((size_t)s * (size_t)P + (size_t)i) * 2 + (size_t)k] = (float)p[k];
+        }
+    }
+}
+
+/* Three outcomes, to be sure the transpose is not a K = 2 accident. */
+static void three_pf_batch(void* ctx, const double* stims, int S,
+                           const double* params, int P, float* out) {
+    int s, i, k;
+    for (s = 0; s < S; s++) {
+        for (i = 0; i < P; i++) {
+            double p[3];
+            three_pf(ctx, stims + (size_t)s, params + (size_t)i * 3, p);
+            for (k = 0; k < 3; k++)
+                out[((size_t)s * (size_t)P + (size_t)i) * 3 + (size_t)k] = (float)p[k];
+        }
+    }
+}
+
+/* Outcomes that do not sum to 1, for the rejection path. */
+static void bad_pf_batch(void* ctx, const double* stims, int S,
+                         const double* params, int P, float* out) {
+    int s, i;
+    (void)ctx; (void)stims; (void)params;
+    for (s = 0; s < S; s++)
+        for (i = 0; i < P; i++) {
+            out[((size_t)s * (size_t)P + (size_t)i) * 2 + 0] = 0.4f;
+            out[((size_t)s * (size_t)P + (size_t)i) * 2 + 1] = 0.4f;
+        }
+}
+
+static void pair_desc(psyq_desc* d, bool batch, bool no_table, bool nuisance) {
+    memset(d, 0, sizeof(*d));
+    d->pf = PSYQ_PF_CUSTOM;
+    if (batch) d->pf_batch = pair_pf_batch;
+    else       d->pf_fn = pair_pf;
+    d->n_outcomes = 2;
+    d->stim[0] = psyq_values(ref_x, RS);
+    d->n_stim = 1;
+    d->param[0] = psyq_values(ref_alpha, RA);
+    d->param[1] = psyq_values(ref_beta, RB);
+    d->param[1].nuisance = nuisance;   /* the middle axis: forces a permutation */
+    d->param[2] = psyq_fixed(0.5);
+    d->param[3] = psyq_values(pn_lapse, PNL);
+    d->n_param = 4;
+    d->stop_trials = 1000;
+    d->no_table = no_table;
+}
+
+static void test_batch_pf(void) {
+    psyq_desc dc, db;
+    int i, pass;
+
+    /* Once with the caller's axis order intact, once with a nuisance axis in
+     * the middle so the header permutes the parameter grid under the
+     * callback. If the matrix rows and the output rows ever disagreed, the
+     * second pass would catch it. */
+    for (pass = 0; pass < 2; pass++) {
+        bool nuisance = (pass == 1);
+        size_t floats;
+        pair_desc(&dc, false, false, nuisance);
+        pair_desc(&db, true, false, nuisance);
+        CHECK(psyq_open(&g_q, &dc), "per-cell open: %s", psyq_error(&g_q));
+        CHECK(psyq_open(&g_q2, &db), "batch open: %s", psyq_error(&g_q2));
+        CHECK(psyq_memory_size(&db) > psyq_memory_size(&dc),
+              "the batch desc does not ask for more memory (%llu vs %llu)",
+              (unsigned long long)psyq_memory_size(&db),
+              (unsigned long long)psyq_memory_size(&dc));
+        CHECK(g_q2.param_matrix != NULL, "no parameter matrix for the batch path");
+        CHECK(g_q.param_matrix == NULL, "the per-cell path allocated a parameter matrix");
+        CHECK(g_q2.permuted == nuisance, "pass %d: permuted = %d", pass, (int)g_q2.permuted);
+
+        /* The tables must be equal bit for bit, including the entropy row. */
+        floats = (size_t)g_q.S * (size_t)g_q.rows * (size_t)g_q.P;
+        CHECK(g_q.rows == g_q2.rows, "rows differ: %d vs %d", g_q.rows, g_q2.rows);
+        CHECK(memcmp(g_q.table, g_q2.table, floats * sizeof(float)) == 0,
+              "pass %d: the batch table is not bit for bit the per-cell table", pass);
+
+        /* Drive both and require identical selections and identical posteriors. */
+        for (i = 0; i < REF_SEQ_N; i++) {
+            int a = psyq_next(&g_q), b = psyq_next(&g_q2);
+            CHECK(a == b, "pass %d trial %d: per-cell picked %d, batch picked %d", pass, i, a, b);
+            CLOSE(psyq_expected_entropy(&g_q, a), psyq_expected_entropy(&g_q2, b), 0.0,
+                  "pass %d trial %d: the scores differ", pass, i);
+            psyq_update(&g_q, a, ref_seq_k[i]);
+            psyq_update(&g_q2, b, ref_seq_k[i]);
+        }
+        CHECK(memcmp(psyq_posterior(&g_q), psyq_posterior(&g_q2),
+                     (size_t)g_q.P * sizeof(double)) == 0,
+              "pass %d: the posteriors differ", pass);
+        CLOSE(psyq_entropy(&g_q), psyq_entropy(&g_q2), 0.0, "pass %d: entropy", pass);
+
+        /* Off-grid: the batch path goes through the same callback with S = 1
+         * and every parameter point, but its likelihoods come back as floats,
+         * so this one agrees to float precision and not exactly. */
+        {
+            double sv[1];
+            double e1[4], e2[4];
+            sv[0] = 0.5 * (ref_x[1] + ref_x[2]);
+            CHECK(psyq_update_values(&g_q, sv, 1) == PSYQ_OK, "per-cell off-grid update");
+            CHECK(psyq_update_values(&g_q2, sv, 1) == PSYQ_OK, "batch off-grid update");
+            CHECK(psyq_estimate(&g_q, PSYQ_EST_MEAN, e1) == PSYQ_OK, "estimate");
+            CHECK(psyq_estimate(&g_q2, PSYQ_EST_MEAN, e2) == PSYQ_OK, "estimate");
+            for (i = 0; i < 4; i++)
+                CLOSE(e1[i], e2[i], 1e-6, "pass %d: estimate %d after an off-grid update", pass, i);
+        }
+
+        /* One cell through the public model calls, also float-rounded. */
+        {
+            double par[4], p1[2], p2[2], sv[1];
+            par[0] = -1.1; par[1] = 2.2; par[2] = 0.5; par[3] = 0.03;
+            sv[0] = -0.75;
+            CHECK(psyq_p_values(&g_q, sv, par, p1) == PSYQ_OK, "psyq_p_values per-cell");
+            CHECK(psyq_p_values(&g_q2, sv, par, p2) == PSYQ_OK, "psyq_p_values batch");
+            CLOSE(p1[1], p2[1], 1e-6, "pass %d: psyq_p_values", pass);
+            CLOSE(p2[0] + p2[1], 1.0, 1e-6, "pass %d: batch outcomes do not sum to 1", pass);
+            CHECK(psyq_simulate(&g_q2, 2, par, 0.5) >= 0, "simulate through the batch path");
+        }
+        psyq_close(&g_q);
+        psyq_close(&g_q2);
+    }
+
+    /* no_table with a batch callback: allowed, and the same answers. */
+    pair_desc(&dc, false, true, true);
+    pair_desc(&db, true, true, true);
+    CHECK(psyq_open(&g_q, &dc), "per-cell no_table open: %s", psyq_error(&g_q));
+    CHECK(psyq_open(&g_q2, &db), "batch no_table open: %s", psyq_error(&g_q2));
+    CHECK(g_q2.table == NULL, "no_table kept a table");
+    for (i = 0; i < REF_SEQ_N; i++) {
+        int a = psyq_next(&g_q), b = psyq_next(&g_q2);
+        CHECK(a == b, "no_table trial %d: per-cell %d, batch %d", i, a, b);
+        CLOSE(psyq_expected_entropy(&g_q, a), psyq_expected_entropy(&g_q2, b), 1e-6,
+              "no_table trial %d: the scores differ", i);
+        psyq_update(&g_q, a, ref_seq_k[i]);
+        psyq_update(&g_q2, b, ref_seq_k[i]);
+    }
+    for (i = 0; i < psyq_n_param(&g_q); i++)
+        CLOSE(psyq_posterior(&g_q)[i], psyq_posterior(&g_q2)[i], 1e-6,
+              "no_table batch posterior cell %d", i);
+    psyq_close(&g_q);
+    psyq_close(&g_q2);
+
+    /* Three outcomes through the batch path, against the per-cell twin. */
+    {
+        static const double pse[4] = { -0.6, -0.2, 0.2, 0.6 };
+        static const double sig[3] = { 0.4, 0.8, 1.6 };
+        static const double crit[2] = { 0.3, 0.9 };
+        size_t floats;
+        memset(&dc, 0, sizeof(dc));
+        dc.pf = PSYQ_PF_CUSTOM;
+        dc.n_outcomes = 3;
+        dc.stim[0] = psyq_linspace(-2.0, 2.0, 7);
+        dc.n_stim = 1;
+        dc.param[0] = psyq_values(pse, 4);
+        dc.param[1] = psyq_values(sig, 3);
+        dc.param[2] = psyq_values(crit, 2);
+        dc.n_param = 3;
+        dc.stop_trials = 20;
+        db = dc;
+        dc.pf_fn = three_pf;
+        db.pf_batch = three_pf_batch;
+        CHECK(psyq_open(&g_q, &dc), "K=3 per-cell open: %s", psyq_error(&g_q));
+        CHECK(psyq_open(&g_q2, &db), "K=3 batch open: %s", psyq_error(&g_q2));
+        floats = (size_t)g_q.S * (size_t)g_q.rows * (size_t)g_q.P;
+        CHECK(memcmp(g_q.table, g_q2.table, floats * sizeof(float)) == 0,
+              "the K=3 batch table is not bit for bit the per-cell table");
+        for (i = 0; i < 6; i++) {
+            int a = psyq_next(&g_q), b = psyq_next(&g_q2);
+            CHECK(a == b, "K=3 trial %d: per-cell %d, batch %d", i, a, b);
+            psyq_update(&g_q, a, i % 3);
+            psyq_update(&g_q2, b, i % 3);
+        }
+        CHECK(memcmp(psyq_posterior(&g_q), psyq_posterior(&g_q2),
+                     (size_t)g_q.P * sizeof(double)) == 0, "the K=3 posteriors differ");
+        psyq_close(&g_q);
+        psyq_close(&g_q2);
+    }
+
+    /* The arena, for a batch desc: exactly memory_size opens, one byte fewer
+     * does not, and nothing past it is touched. */
+    {
+        size_t need;
+        unsigned char* buf;
+        const size_t guard = 32;
+        size_t z;
+        pair_desc(&db, true, false, true);
+        need = psyq_memory_size(&db);
+        buf = (unsigned char*)malloc(need + guard);
+        CHECK(buf != NULL, "malloc");
+        if (buf) {
+            memset(buf, 0x5A, need + guard);
+            db.memory = buf;
+            db.memory_size = need - 1;
+            CHECK(!psyq_open(&g_q, &db), "batch open succeeded one byte short");
+            db.memory_size = need;
+            CHECK(psyq_open(&g_q, &db), "batch open at exactly memory_size: %s", psyq_error(&g_q));
+            psyq_next(&g_q);
+            psyq_update(&g_q, 2, 1);
+            psyq_next(&g_q);
+            for (z = 0; z < guard; z++)
+                CHECK(buf[need + z] == 0x5A, "batch open wrote past memory_size");
+            psyq_close(&g_q);
+            free(buf);
+        }
+    }
+
+    /* Rejections. */
+    pair_desc(&dc, false, false, false);
+    dc.pf_fn = NULL;
+    reject(&dc, "PSYQ_PF_CUSTOM with neither pf_fn nor pf_batch");
+    pair_desc(&dc, false, false, false);
+    dc.pf_batch = pair_pf_batch;
+    reject(&dc, "PSYQ_PF_CUSTOM with both pf_fn and pf_batch");
+    {
+        bool ok;
+        pair_desc(&dc, true, false, false);
+        dc.pf_batch = bad_pf_batch;
+        ok = psyq_open(&g_q, &dc);
+        CHECK(!ok, "open accepted a pf_batch whose outcomes sum to 0.8");
+        CHECK(strstr(psyq_error(&g_q), "pf_batch") != NULL,
+              "the message does not name pf_batch: %s", psyq_error(&g_q));
+        if (ok) psyq_close(&g_q);
+        dc.no_table = true;
+        ok = psyq_open(&g_q, &dc);
+        CHECK(!ok, "open accepted a bad pf_batch under no_table");
+        CHECK(strstr(psyq_error(&g_q), "pf_batch") != NULL,
+              "the no_table message does not name pf_batch: %s", psyq_error(&g_q));
+        if (ok) psyq_close(&g_q);
+    }
+    /* A built-in ignores both callbacks rather than tripping over them. */
+    {
+        psyq_desc d;
+        ref_desc(&d, false);
+        d.pf_batch = bad_pf_batch;
+        CHECK(psyq_open(&g_q, &d), "a built-in with a stray pf_batch: %s", psyq_error(&g_q));
+        CHECK(g_q.desc.pf_batch == NULL, "the stray pf_batch was kept");
+        CHECK(g_q.param_matrix == NULL, "the stray pf_batch took memory");
+        {
+            double par[4], p[2];
+            par[0] = -1.5; par[1] = 3.0; par[2] = REF_GAMMA; par[3] = REF_LAMBDA;
+            CHECK(psyq_p(&g_q, 2, par, p) == PSYQ_OK, "psyq_p");
+            CLOSE(p[1], ref_p1(ref_x[2], par[0], par[1]), 1e-12,
+                  "the stray pf_batch changed the built-in");
+        }
+        psyq_close(&g_q);
+    }
+}
+
+/* ======================================================================= *
+ *  THE ASYNC LAYER
+ *
+ *  Only under PSYQ_ASYNC, and the test is built both ways. The claim under
+ *  test is that the layer changes nothing about the inference: the same
+ *  responses in the same order, driven through the thread, must leave the same
+ *  posterior BIT FOR BIT as a synchronous run, because it is the same code on
+ *  the same handle. The rest is queue behavior.
+ * ======================================================================= */
+#ifdef PSYQ_ASYNC
+
+/* A grid big enough that one update plus one selection takes a while (about a
+ * millisecond here), so the queue-full and not-ready-yet cases can actually be
+ * reached from a submit loop. */
+static double as_alpha[61], as_beta[12], as_guess[5], as_lapse[5];
+static double as_stim[31];
+
+static void async_axes(void) {
+    int i;
+    for (i = 0; i < 31; i++) as_stim[i]  = -3.0 + 3.0 * (double)i / 30.0;
+    for (i = 0; i < 61; i++) as_alpha[i] = -3.0 + 3.0 * (double)i / 60.0;
+    for (i = 0; i < 12; i++) as_beta[i]  = 0.5 + 5.5 * (double)i / 11.0;
+    for (i = 0; i < 5; i++)  as_guess[i] = 0.45 + 0.10 * (double)i / 4.0;
+    for (i = 0; i < 5; i++)  as_lapse[i] = 0.06 * (double)i / 4.0;
+}
+
+static void async_desc_of(psyq_desc* d, bool big) {
+    memset(d, 0, sizeof(*d));
+    d->pf = PSYQ_PF_GUMBEL;
+    d->stim[0] = big ? psyq_values(as_stim, 31) : psyq_values(ref_x, RS);
+    d->n_stim = 1;
+    d->param[0] = big ? psyq_values(as_alpha, 61) : psyq_values(ref_alpha, RA);
+    d->param[1] = big ? psyq_values(as_beta, 12)  : psyq_values(ref_beta, RB);
+    if (big) {
+        d->param[2] = psyq_values(as_guess, 5);
+        d->param[3] = psyq_values(as_lapse, 5);
+        d->param[2].nuisance = true;
+        d->param[3].nuisance = true;
+    } else {
+        d->param[2] = psyq_fixed(REF_GAMMA);
+        d->param[3] = psyq_fixed(REF_LAMBDA);
+    }
+    d->n_param = 4;
+    d->stop_trials = 10000;
+}
+
+static psyq_async g_async;
+
+/* An async run against a synchronous replay of the same responses. */
+static void test_async_matches(void) {
+    psyq_desc d;
+    psyq_async_desc ad;
+    psyq_snapshot snap;
+    int outcomes[12], proposals[12];
+    int i, seq, rc;
+
+    async_desc_of(&d, false);
+    CHECK(psyq_open(&g_q, &d), "async: open: %s", psyq_error(&g_q));
+    memset(&g_async, 0, sizeof(g_async));
+    memset(&ad, 0, sizeof(ad));
+    ad.quest = &g_q;
+    ad.estimator = PSYQ_EST_MEAN;
+    CHECK(psyq_async_start(&g_async, &ad), "async start: %s", psyq_async_error(&g_async));
+    CHECK(psyq_async_is_running(&g_async), "async is not running after start");
+
+    /* The proposal made at start: poll returns 0 and the snapshot is valid. */
+    rc = psyq_async_poll(&g_async, &snap);
+    CHECK(rc == 0, "the initial poll returned %d, want 0", rc);
+    CHECK(snap.seq == 0, "initial snapshot seq = %u", snap.seq);
+    CHECK(snap.proposed >= 0 && snap.proposed < RS, "initial proposal %d", snap.proposed);
+    CHECK(snap.n_trials == 0, "initial n_trials = %d", snap.n_trials);
+    CLOSE(snap.stim[0], ref_x[snap.proposed], 0.0, "initial snapshot stimulus value");
+
+    /* One trial at a time, waiting for each: that makes the run
+     * deterministic, which is what lets the replay be compared bit for bit. */
+    for (i = 0; i < 12; i++) {
+        proposals[i] = snap.proposed;
+        outcomes[i] = (i * 5 + 1) % 3 ? 1 : 0;
+        seq = psyq_async_submit(&g_async, proposals[i], outcomes[i]);
+        CHECK(seq == i + 1, "submit %d returned %d", i, seq);
+        rc = psyq_async_wait(&g_async, (uint32_t)seq, 5000000000ull, &snap);
+        CHECK(rc >= seq, "wait for seq %d returned %d", seq, rc);
+        CHECK(snap.seq == (uint32_t)seq, "snapshot seq %u after waiting for %d",
+              snap.seq, seq);
+        CHECK(snap.n_trials == i + 1, "snapshot n_trials %d at trial %d", snap.n_trials, i);
+        CHECK(snap.update_rc == PSYQ_OK, "the thread's update returned %d", snap.update_rc);
+        CHECK(snap.proposed >= 0, "proposal %d at trial %d", snap.proposed, i);
+        CHECK(psyq_async_pending(&g_async) == 0, "pending after a wait");
+    }
+    psyq_async_stop(&g_async);
+    CHECK(!psyq_async_is_running(&g_async), "still running after stop");
+
+    /* The handle is the caller's again. */
+    CHECK(psyq_n_trials(&g_q) == 12, "n_trials after the async run = %d",
+          psyq_n_trials(&g_q));
+
+    /* The same responses, synchronously, on a second handle. */
+    CHECK(psyq_open(&g_q2, &d), "sync open: %s", psyq_error(&g_q2));
+    for (i = 0; i < 12; i++) {
+        int s = psyq_next(&g_q2);
+        CHECK(s == proposals[i], "trial %d: sync proposed %d, async proposed %d",
+              i, s, proposals[i]);
+        CHECK(psyq_update(&g_q2, s, outcomes[i]) == PSYQ_OK, "sync update %d", i);
+    }
+    CHECK(memcmp(psyq_posterior(&g_q), psyq_posterior(&g_q2),
+                 (size_t)psyq_n_param(&g_q) * sizeof(double)) == 0,
+          "the async posterior is not bit for bit the synchronous one");
+    CHECK(psyq_next(&g_q) == psyq_next(&g_q2), "the next proposals differ");
+    {
+        double ea[4], eb[4];
+        psyq_estimate(&g_q, PSYQ_EST_MEAN, ea);
+        psyq_estimate(&g_q2, PSYQ_EST_MEAN, eb);
+        for (i = 0; i < 4; i++)
+            CLOSE(ea[i], eb[i], 0.0, "estimate %d differs between async and sync", i);
+        /* And the snapshot the thread published last says the same thing. */
+        for (i = 0; i < 4; i++)
+            CLOSE(snap.estimate[i], ea[i], 0.0, "snapshot estimate %d", i);
+        CLOSE(snap.entropy, psyq_entropy(&g_q), 0.0, "snapshot entropy");
+        CLOSE(snap.sd, psyq_sd(&g_q, 0), 0.0, "snapshot sd");
+    }
+    psyq_close(&g_q);
+    psyq_close(&g_q2);
+}
+
+/* The queue: a full one is reported and loses nothing, a poll before the
+ * thread is finished still answers with the previous seq, and a stop drains. */
+static void test_async_queue(void) {
+    psyq_desc d;
+    psyq_async_desc ad;
+    psyq_snapshot snap;
+    int acc_stim[256], acc_out[256];
+    int i, n_acc = 0, busy = 0, last_seq = 0, rc, prev;
+
+    async_axes();
+    async_desc_of(&d, true);
+    CHECK(psyq_open(&g_q, &d), "async big open: %s", psyq_error(&g_q));
+    memset(&g_async, 0, sizeof(g_async));
+    memset(&ad, 0, sizeof(ad));
+    ad.quest = &g_q;
+    ad.below_normal = true;      /* exercise the priority path too */
+    CHECK(psyq_async_start(&g_async, &ad), "async start: %s", psyq_async_error(&g_async));
+    prev = psyq_async_poll(&g_async, &snap);
+    CHECK(prev == 0, "initial poll on the big grid returned %d", prev);
+
+    /* Submit as fast as the loop can. The thread needs about a millisecond per
+     * response, so the queue fills; every submit that is accepted is recorded
+     * so the replay below knows exactly what the thread was given. */
+    for (i = 0; i < 64 && busy < 3; i++) {
+        int s = (i * 7) % 31, o = (i % 4) ? 1 : 0;
+        rc = psyq_async_submit(&g_async, s, o);
+        if (rc == PSYQ_ERR_BUSY) {
+            busy++;
+            /* A full queue must not have consumed the response: the caller
+             * keeps it and retries, which is what the next iteration does with
+             * the same i, so nothing is lost. Give the thread a moment. */
+            rc = psyq_async_wait(&g_async, (uint32_t)(last_seq), 2000000000ull, &snap);
+            CHECK(rc >= 0, "wait after a full queue returned %d", rc);
+            i--;
+            continue;
+        }
+        CHECK(rc > 0, "submit %d returned %d", i, rc);
+        if (rc <= 0) break;
+        CHECK(rc == last_seq + 1, "submit returned %d after %d", rc, last_seq);
+        last_seq = rc;
+        acc_stim[n_acc] = s;
+        acc_out[n_acc] = o;
+        n_acc++;
+        /* A poll in the middle of the run: whatever it returns must be a seq
+         * the thread really has finished, never ahead of what was submitted,
+         * and never behind what a previous poll reported. */
+        rc = psyq_async_poll(&g_async, &snap);
+        CHECK(rc >= prev, "poll went backwards: %d after %d", rc, prev);
+        CHECK(rc <= last_seq, "poll returned %d, beyond the submitted %d", rc, last_seq);
+        CHECK(snap.seq == (uint32_t)rc, "poll's seq and snapshot disagree");
+        CHECK(snap.n_trials == rc, "snapshot n_trials %d at seq %d", snap.n_trials, rc);
+        prev = rc;
+    }
+    CHECK(busy > 0, "the queue never filled: %d submits accepted, %d rejected",
+          n_acc, busy);
+    CHECK(n_acc > PSYQ_ASYNC_QUEUE, "only %d submits were accepted", n_acc);
+
+    /* Stop drains: every accepted response must have been applied. */
+    psyq_async_stop(&g_async);
+    CHECK(psyq_n_trials(&g_q) == n_acc,
+          "stop did not drain: %d trials applied of %d accepted",
+          psyq_n_trials(&g_q), n_acc);
+
+    /* And the replay of exactly those responses matches, bit for bit. */
+    CHECK(psyq_open(&g_q2, &d), "replay open: %s", psyq_error(&g_q2));
+    for (i = 0; i < n_acc; i++)
+        CHECK(psyq_update(&g_q2, acc_stim[i], acc_out[i]) == PSYQ_OK, "replay update %d", i);
+    CHECK(memcmp(psyq_posterior(&g_q), psyq_posterior(&g_q2),
+                 (size_t)psyq_n_param(&g_q) * sizeof(double)) == 0,
+          "the drained async posterior is not the replay's");
+    psyq_close(&g_q);
+    psyq_close(&g_q2);
+}
+
+/* Off-grid submits, and the calls that should refuse. */
+static void test_async_edges(void) {
+    psyq_desc d;
+    psyq_async_desc ad;
+    psyq_snapshot snap;
+    double sv[1];
+    int i, seq, rc;
+
+    /* Every call on a zeroed handle. */
+    memset(&g_async, 0, sizeof(g_async));
+    CHECK(!psyq_async_is_running(&g_async), "a zeroed handle claims to run");
+    CHECK(psyq_async_submit(&g_async, 0, 0) == PSYQ_ERR_ARG, "submit on a zeroed handle");
+    CHECK(psyq_async_pending(&g_async) == PSYQ_ERR_CLOSED, "pending on a zeroed handle");
+    CHECK(psyq_async_poll(&g_async, NULL) == PSYQ_ERR_CLOSED, "poll on a zeroed handle");
+    CHECK(psyq_async_wait(&g_async, 1, 0, NULL) == PSYQ_ERR_CLOSED, "wait on a zeroed handle");
+    CHECK(psyq_async_error(&g_async)[0] == '\0', "a zeroed handle has a message");
+    psyq_async_stop(&g_async);   /* must be safe */
+
+    /* Descs start() refuses. */
+    CHECK(!psyq_async_start(&g_async, NULL), "start accepted a null desc");
+    CHECK(psyq_async_error(&g_async)[0] != '\0', "no message for a null desc");
+    memset(&ad, 0, sizeof(ad));
+    CHECK(!psyq_async_start(&g_async, &ad), "start accepted a desc without a quest");
+    memset(&g_q, 0, sizeof(g_q));
+    ad.quest = &g_q;
+    CHECK(!psyq_async_start(&g_async, &ad), "start accepted a closed quest");
+    CHECK(strstr(psyq_async_error(&g_async), "not open") != NULL,
+          "message: %s", psyq_async_error(&g_async));
+
+    async_desc_of(&d, false);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    ad.quest = &g_q;
+    ad.estimator = (psyq_estimator)99;
+    CHECK(!psyq_async_start(&g_async, &ad), "start accepted a bad estimator");
+    ad.estimator = PSYQ_EST_MODE;
+    CHECK(psyq_async_start(&g_async, &ad), "start: %s", psyq_async_error(&g_async));
+
+    /* Arguments the submit path rejects without troubling the thread. */
+    CHECK(psyq_async_submit(&g_async, RS, 0) == PSYQ_ERR_ARG, "a stimulus index past the grid");
+    CHECK(psyq_async_submit(&g_async, -1, 0) == PSYQ_ERR_ARG, "a negative stimulus index");
+    CHECK(psyq_async_submit(&g_async, 0, 2) == PSYQ_ERR_ARG, "an outcome >= K");
+    CHECK(psyq_async_submit_values(&g_async, NULL, 1) == PSYQ_ERR_ARG, "null values");
+    sv[0] = (double)NAN;
+    CHECK(psyq_async_submit_values(&g_async, sv, 1) == PSYQ_ERR_ARG, "a NaN value");
+
+    /* An off-grid trial through the thread, against the synchronous form. */
+    sv[0] = 0.5 * (ref_x[1] + ref_x[2]);
+    seq = psyq_async_submit_values(&g_async, sv, 1);
+    CHECK(seq > 0, "submit_values returned %d", seq);
+    rc = psyq_async_wait(&g_async, (uint32_t)seq, 5000000000ull, &snap);
+    CHECK(rc == seq, "wait returned %d for seq %d", rc, seq);
+    CHECK(snap.n_trials == 1, "n_trials after an off-grid submit = %d", snap.n_trials);
+    /* PSYQ_EST_MODE was asked for, so the snapshot carries grid points. */
+    CHECK(snap.estimate[0] == ref_alpha[0] || snap.estimate[0] == ref_alpha[1] ||
+          snap.estimate[0] == ref_alpha[2] || snap.estimate[0] == ref_alpha[3],
+          "the mode estimate %g is not a grid point", snap.estimate[0]);
+    CHECK(psyq_async_wait(&g_async, (uint32_t)seq + 5, 1000000ull, NULL) == PSYQ_ERR_TIMEOUT,
+          "a wait for a seq nobody submitted did not time out");
+    psyq_async_stop(&g_async);
+    CHECK(psyq_async_submit(&g_async, 0, 1) == PSYQ_ERR_CLOSED, "submit after stop");
+    CHECK(psyq_async_poll(&g_async, &snap) >= 0,
+          "poll after stop should still hand back the last snapshot");
+    {
+        int n = -1;
+        const psyq_trial* h = psyq_history(&g_q, &n);
+        CHECK(n == 1, "history after the async off-grid trial = %d", n);
+        CHECK(h[0].stim_index == -1, "the off-grid trial kept a grid index");
+        CLOSE(h[0].stim[0], sv[0], 0.0, "the off-grid stimulus value");
+    }
+    psyq_close(&g_q);
+    psyq_async_stop(&g_async);   /* twice must be safe */
+    for (i = 0; i < 2; i++) psyq_async_stop(&g_async);
+    CHECK(strcmp(psyq_strerror(PSYQ_ERR_BUSY), "queue is full") == 0, "strerror BUSY");
+    CHECK(strcmp(psyq_strerror(PSYQ_ERR_TIMEOUT), "timed out") == 0, "strerror TIMEOUT");
+}
+
+#endif /* PSYQ_ASYNC */
+
+/* The version macros agree with each other and with the implementation, and
+ * the axis sizes come back as the desc stated them, in the caller's order even
+ * where a nuisance axis made the header permute its posterior. */
+static void test_version_and_axis_n(void) {
+    char want[32];
+    psyq_desc d;
+    int i;
+    snprintf(want, sizeof(want), "%d.%d.%d",
+             PSYQ_VERSION_MAJOR, PSYQ_VERSION_MINOR, PSYQ_VERSION_PATCH);
+    CHECK(strcmp(PSYQ_VERSION_STRING, want) == 0,
+          "PSYQ_VERSION_STRING %s does not match the numbers %s", PSYQ_VERSION_STRING, want);
+    CHECK(strcmp(psyq_version(), PSYQ_VERSION_STRING) == 0,
+          "psyq_version() %s, macro %s", psyq_version(), PSYQ_VERSION_STRING);
+    /* Pinned, and compared at run time: a constant condition is MSVC's C4127,
+     * and the string from the implementation is the thing worth pinning. */
+    CHECK(strcmp(psyq_version(), "0.4.1") == 0, "version %s, want 0.4.1", psyq_version());
+
+    memset(&d, 0, sizeof(d));
+    d.pf = PSYQ_PF_GUMBEL;
+    d.stim[0] = psyq_linspace(-2.0, 0.0, 3);
+    d.stim[1] = psyq_linspace(1.0, 4.0, 4);
+    d.n_stim = 2;
+    d.param[0] = psyq_values(ref_alpha, RA);
+    d.param[1] = psyq_values(ref_beta, RB);
+    d.param[1].nuisance = true;           /* permutes the posterior internally */
+    d.param[2] = psyq_fixed(0.5);
+    d.param[3] = psyq_values(pn_lapse, PNL);
+    d.n_param = 4;
+    d.stop_trials = 5;
+    memset(&g_q, 0, sizeof(g_q));
+    CHECK(psyq_stim_axis_n(&g_q, 0) == PSYQ_ERR_CLOSED, "axis_n on a closed handle");
+    CHECK(psyq_param_axis_n(NULL, 0) == PSYQ_ERR_ARG, "axis_n on a null handle");
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    CHECK(g_q.permuted, "the test meant to exercise a permuted handle");
+    CHECK(psyq_stim_axis_n(&g_q, 0) == 3, "stim axis 0 = %d", psyq_stim_axis_n(&g_q, 0));
+    CHECK(psyq_stim_axis_n(&g_q, 1) == 4, "stim axis 1 = %d", psyq_stim_axis_n(&g_q, 1));
+    CHECK(psyq_param_axis_n(&g_q, 0) == RA, "param axis 0 = %d", psyq_param_axis_n(&g_q, 0));
+    CHECK(psyq_param_axis_n(&g_q, 1) == RB, "param axis 1 = %d", psyq_param_axis_n(&g_q, 1));
+    CHECK(psyq_param_axis_n(&g_q, 2) == 1, "param axis 2 = %d", psyq_param_axis_n(&g_q, 2));
+    CHECK(psyq_param_axis_n(&g_q, 3) == PNL, "param axis 3 = %d", psyq_param_axis_n(&g_q, 3));
+    CHECK(psyq_stim_axis_n(&g_q, 2) == PSYQ_ERR_ARG, "stim axis past n_stim");
+    CHECK(psyq_stim_axis_n(&g_q, -1) == PSYQ_ERR_ARG, "negative stim axis");
+    CHECK(psyq_param_axis_n(&g_q, 4) == PSYQ_ERR_ARG, "param axis past n_param");
+    {
+        int prod_s = 1, prod_p = 1;
+        for (i = 0; i < 2; i++) prod_s *= psyq_stim_axis_n(&g_q, i);
+        for (i = 0; i < 4; i++) prod_p *= psyq_param_axis_n(&g_q, i);
+        CHECK(prod_s == psyq_n_stim(&g_q), "the stimulus axes do not multiply to S");
+        CHECK(prod_p == psyq_n_param(&g_q), "the parameter axes do not multiply to P");
+    }
+    psyq_close(&g_q);
+}
+
+int main(void) {
+    ref_build_axes();
+    test_reference(false);
+    test_reference(true);
+    test_no_table_matches();
+    test_update_values();
+    test_memory();
+    test_pfs();
+    test_nuisance();
+    test_placement();
+    test_ties();
+    test_subset();
+    test_stopping();
+    test_estimates();
+    test_three_outcomes();
+    test_rejections();
+    test_grids();
+    test_extras();
+    test_decomposition();
+    test_permuted_nuisance(false);
+    test_permuted_nuisance(true);
+    test_batch_pf();
+    test_version_and_axis_n();
+#ifdef PSYQ_ASYNC
+    test_async_matches();
+    test_async_queue();
+    test_async_edges();
+#endif
+    test_simulated_run();
+
+    if (g_fail) {
+        fprintf(stderr, "psy_quest_test: %d of %d checks FAILED\n", g_fail, g_checks);
+        return 1;
+    }
+    printf("psy_quest_test: %d checks passed\n", g_checks);
+    return 0;
+}
