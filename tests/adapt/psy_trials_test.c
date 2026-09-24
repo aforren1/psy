@@ -69,10 +69,17 @@ typedef struct design {
 
 /* Level by this file's own arithmetic, last factor fastest. */
 static int lev_of(const design* g, int cond, int f) {
-    int s = 1, j;
+    int s = 1, j, nf;
     if (cond < 0) return -1;
-    if (f == PSYTR_CONDITION) return cond;
-    for (j = g->n_factors - 1; j > f; j--) s *= g->n_levels[j];
+    /* PSYTR_CONDITION (-1) means the row itself. The test is `f < 0`, and
+     * every index below is bounded by the array too, because gcc 13 at -O3
+     * carries a constant -1 from a caller past an `== -1` test and then
+     * reports n_levels[-1]. */
+    if (f < 0) return cond;
+    if (f >= PSYTR_MAX_FACTORS) return -1;
+    nf = g->n_factors < PSYTR_MAX_FACTORS ? g->n_factors : PSYTR_MAX_FACTORS;
+    for (j = nf - 1; j > f && j >= 0; j--) s *= g->n_levels[j];
+    if (g->n_levels[f] < 1 || s < 1) return -1;
     return (cond / s) % g->n_levels[f];
 }
 
@@ -108,7 +115,7 @@ static void find_violations(const design* g, const int* seq, const bool* cut, in
                 if (cnt > c->n && !mark[k]) mark[k] = ci + 1;
                 break;
             case PSYTR_RULE_MIN_GAP:
-                if (L < 0 || L != target) break;
+                if (L < 0 || L >= PSYTR_MAX_CONDITIONS || L != target) break;
                 if (last[L] >= 0 && k - last[L] - 1 < c->n && !mark[k]) mark[k] = ci + 1;
                 last[L] = k;
                 break;
@@ -480,7 +487,7 @@ static void design_from(const cdesign* cd, design* g) {
     int f;
     memset(g, 0, sizeof(*g));
     g->n_factors = cd->n_factors;
-    for (f = 0; f < cd->n_factors; f++) g->n_levels[f] = cd->n_levels[f];
+    for (f = 0; f < cd->n_factors && f < 3; f++) g->n_levels[f] = cd->n_levels[f];
     g->c = cd->c;
     g->n_c = cd->n_c;
 }
@@ -488,7 +495,7 @@ static void design_from(const cdesign* cd, design* g) {
 static void desc_from(const cdesign* cd, psytr_desc* d, uint64_t* state) {
     int f, i;
     zero_desc(d);
-    for (f = 0; f < cd->n_factors; f++) d->factors[f] = psytr_factor(NULL, cd->n_levels[f]);
+    for (f = 0; f < cd->n_factors && f < 3; f++) d->factors[f] = psytr_factor(NULL, cd->n_levels[f]);
     d->n_factors = cd->n_factors;
     d->n_conditions = cd->n_conditions;
     d->cond_reps = cd->cond_reps;

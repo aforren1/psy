@@ -4505,7 +4505,7 @@ static void psygp__ll(const psygp_gp* g, double fv, double yv,
             *d3 = s * (2.0 * r * r * r + 3.0 * z * r * r + (z * z - 1.0) * r);
         }
     } else {
-        double G[10];
+        double G[10] = { 0 };
         int j = (int)(yv + 0.5);
         psygp__ord_G(g, fv, j, G);
         *lp = G[9];
@@ -4521,7 +4521,7 @@ static void psygp__ll(const psygp_gp* g, double fv, double yv,
  * observed category contribute. */
 static void psygp__ll_cut(const psygp_gp* g, double fv, double yv, int m,
                           double* e0, double* e1, double* e2) {
-    double G[10];
+    double G[10] = { 0 };
     int j = (int)(yv + 0.5);
     *e0 = *e1 = *e2 = 0.0;
     if (m != j - 1 && m != j) return;
@@ -5578,7 +5578,7 @@ static void psygp__predict_many(const psygp_gp* g, const psygp__scr* s,
     const psygp_real* Lk = g->L + (size_t)k * ld * ld;
     for (int b0 = 0; b0 < n; b0 += PSYGP__BLK) {
         int b1 = b0 + PSYGP__BLK < n ? b0 + PSYGP__BLK : n;
-        double kxx[PSYGP__BLK];
+        double kxx[PSYGP__BLK] = { 0 };
         for (int j = b0; j < b1; j++) {
             const double* xj = xs + (size_t)j * nd;
             double* row = s->blk + (size_t)(j - b0) * ld;
@@ -5647,8 +5647,8 @@ static double psygp__mean0(const psygp_gp* g, const psygp__scr* s, const double*
 static double psygp__mono_mu(const psygp_gp* g, const psygp__scr* s, const double* x,
                              double mu, double* w) {
     const psygp_desc* d = &g->desc;
-    double vals[PSYGP_MAX_DIMS][PSYGP__LINE_MAX], y[PSYGP_MAX_DIMS];
-    int md[PSYGP_MAX_DIMS], cnt[PSYGP_MAX_DIMS], at[PSYGP_MAX_DIMS], nm = 0;
+    double vals[PSYGP_MAX_DIMS][PSYGP__LINE_MAX], y[PSYGP_MAX_DIMS] = { 0 };
+    int md[PSYGP_MAX_DIMS] = { 0 }, cnt[PSYGP_MAX_DIMS] = { 0 }, at[PSYGP_MAX_DIMS] = { 0 }, nm = 0;
     int nd = d->n_dims;
     double best = mu;
     for (int i = 0; i < nd; i++) {
@@ -5722,7 +5722,7 @@ static void psygp__cand_fill(psygp_gp* g, int kv) {
     psygp__scr_of(g, &s);
     for (int b0 = 0; b0 < M; b0 += PSYGP__BLK) {
         int b1 = b0 + PSYGP__BLK < M ? b0 + PSYGP__BLK : M;
-        double kxx[PSYGP__BLK];
+        double kxx[PSYGP__BLK] = { 0 };
         for (int j = b0; j < b1; j++) {
             const double* cj = psygp__cand(g, j);
             double* row = s.blk + (size_t)(j - b0) * ld;
@@ -5916,7 +5916,7 @@ static bool psygp__fit_grad_ps(psygp_gp* g, const psygp__param* p, int np,
     double *bb, *E1, *E2, *E3, *sp, *cm, *cg, *gzm, *gzg;
     double *xm, *xg, *nm, *ng, *rm, *rg, *zm, *zg, *pm, *pg, *qm, *qg;
     double *km, *kg, *kim, *kig, *kzm, *kzg, *tt, *um2, *ug2;
-    double mug = g->hyper.mean_g, rz, rr0, gs[PSYGP__NTHETA];
+    double mug = g->hyper.mean_g, rz, rr0, gs[PSYGP__NTHETA] = { 0 };
     bool ord = g->desc.lik == PSYGP_LIK_ORDINAL;
     psygp__scr_of(g, &s);
     am = psygp__psv(&s, ld, PSYGP__PS_AM); ag = psygp__psv(&s, ld, PSYGP__PS_AG);
@@ -6083,7 +6083,7 @@ static bool psygp__fit_grad_ps(psygp_gp* g, const psygp__param* p, int np,
      * implicit term through the gradient of dlog p/dc in z. The fitted
      * coordinate is the log gap below, as in the GP model. */
     if (ord) {
-        double gc[PSYGP_MAX_OUTCOMES];
+        double gc[PSYGP_MAX_OUTCOMES] = { 0 };
         int nout = g->desc.n_outcomes;
         for (int m = 1; m < nout - 1; m++) {
             double ex = 0.0;
@@ -6120,7 +6120,7 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
     bool gauss = (g->desc.lik == PSYGP_LIK_GAUSSIAN);
     bool clamped = false;
     double *q, *s2, *bv, *s3, *tv, *tmp, *piv;
-    double aa[PSYGP__NTHETA], tr[PSYGP__NTHETA];
+    double aa[PSYGP__NTHETA] = { 0 }, tr[PSYGP__NTHETA] = { 0 };
     psygp__scr_of(g, &s);
     if (psygp__fpcg_desc(&g->desc) && g->fit_th_n == np && g->fit_valid && g->N_fit == g->N &&
         memcmp(s.stv + (size_t)PSYGP__STV * ld, th, (size_t)np * sizeof(double)) == 0) {
@@ -6292,7 +6292,7 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
      * the log gap to the cutpoint below, which is why one gap moves every
      * cutpoint above it. */
     if (g->desc.lik == PSYGP_LIK_ORDINAL) {
-        double gc[PSYGP_MAX_OUTCOMES];
+        double gc[PSYGP_MAX_OUTCOMES] = { 0 };
         int nout = g->desc.n_outcomes;
         bool any = false;
         for (int t = 0; t < np; t++) if (p[t].kind == PSYGP__P_CUT) any = true;
@@ -6601,7 +6601,7 @@ static int psygp__level_set(psygp_gp* g, bool compare) {
 
 static int psygp__fit_run(psygp_gp* g, bool resume) {
     psygp__param p[PSYGP__NTHETA];
-    double th0[PSYGP__NTHETA], th1[PSYGP__NTHETA], v0 = 0.0, v1;
+    double th0[PSYGP__NTHETA] = { 0 }, th1[PSYGP__NTHETA] = { 0 }, v0 = 0.0, v1;
     int rc, np = psygp__params(g, p);
     bool guard = g->fit_valid && np > 0 && g->N >= 2;
     /* The level-set guard is for the GP model on a one-latent discrete
@@ -6737,7 +6737,7 @@ static int psygp__scen_probs(const psygp_gp* g, double fv, double other, double*
  * GAUSSIAN, where it is the information of one noisy reading. */
 static double psygp__bald(const psygp_gp* g, const psygp__scr* s,
                           double mu, double sd, double other) {
-    double pm[PSYGP_MAX_OUTCOMES], pf[PSYGP_MAX_OUTCOMES];
+    double pm[PSYGP_MAX_OUTCOMES] = { 0 }, pf[PSYGP_MAX_OUTCOMES] = { 0 };
     double eh = 0.0;
     int nout = 0;
     if (g->desc.lik == PSYGP_LIK_GAUSSIAN) {
@@ -6770,7 +6770,7 @@ static int psygp__scenarios(const psygp_gp* g, const psygp__scr* s,
         }
         return PSYGP_QUAD_N;
     } else {
-        double pm[PSYGP_MAX_OUTCOMES], pf[PSYGP_MAX_OUTCOMES];
+        double pm[PSYGP_MAX_OUTCOMES] = { 0 }, pf[PSYGP_MAX_OUTCOMES] = { 0 };
         int nout = psygp__scen_probs(g, mu, other, pf);
         for (int j = 0; j < nout; j++) pm[j] = 0.0;
         if (sd > 0.0) {
@@ -6918,7 +6918,7 @@ static int psygp__ps_nodes(const psygp__scr* s, const psygp__mg* o, double* gk,
  * product rule would need 20 x 20. */
 static void psygp__ps_moments(const psygp_gp* g, const psygp__scr* s, double xint,
                               const psygp__mg* o, double* eq, double* vq) {
-    double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], e1 = 0.0, e2 = 0.0;
+    double gk[PSYGP_QUAD_N] = { 0 }, wk[PSYGP_QUAD_N] = { 0 }, e1 = 0.0, e2 = 0.0;
     int nk = psygp__ps_nodes(s, o, gk, wk);
     for (int k = 0; k < nk; k++) {
         double muf, sdf, q1;
@@ -6936,7 +6936,7 @@ static void psygp__ps_moments(const psygp_gp* g, const psygp__scr* s, double xin
  * minus the second. Returns the outcome count. */
 static int psygp__ps_mix(const psygp_gp* g, const psygp__scr* s, double xint,
                          const psygp__mg* o, double* pm, double* eh) {
-    double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], pf[PSYGP_MAX_OUTCOMES];
+    double gk[PSYGP_QUAD_N] = { 0 }, wk[PSYGP_QUAD_N] = { 0 }, pf[PSYGP_MAX_OUTCOMES] = { 0 };
     int nout = psygp__bern(g) ? 2 : g->desc.n_outcomes;
     int nk = psygp__ps_nodes(s, o, gk, wk);
     for (int j = 0; j < nout; j++) pm[j] = 0.0;
@@ -6987,7 +6987,7 @@ typedef struct psygp__lvl {
 
 static void psygp__lvl_prep(const psygp__scr* s, double ft, const psygp__mg* o,
                             psygp__lvl* L) {
-    double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], sc2 = o->vm;
+    double gk[PSYGP_QUAD_N] = { 0 }, wk[PSYGP_QUAD_N] = { 0 }, sc2 = o->vm;
     int nk = psygp__ps_nodes(s, o, gk, wk);
     if (o->vg > 0.0) sc2 -= o->cmg * o->cmg / o->vg;
     L->isc = sc2 > 0.0 ? 1.0 / sqrt(sc2) : 0.0;
@@ -7056,7 +7056,7 @@ static void psygp__ps_lookahead(const psygp__mg* oi, const double* v, double d1,
 }
 
 static double psygp__h2(double p) {
-    double pp[2];
+    double pp[2] = { 0 };
     pp[0] = 1.0 - p; pp[1] = p;
     return psygp__entropy(pp, 2);
 }
@@ -7067,11 +7067,11 @@ static double psygp__h2(double p) {
 static double psygp__ps_localmi(const psygp_gp* g, const psygp__scr* s,
                                 const double* x, const psygp__mg* o) {
     double xint = x[g->desc.intensity_dim], ft = psygp__f_level(g, g->desc.target_p);
-    double pm[PSYGP_MAX_OUTCOMES], eh = 0.0, ehy = 0.0, pi0;
+    double pm[PSYGP_MAX_OUTCOMES] = { 0 }, eh = 0.0, ehy = 0.0, pi0;
     int nout = psygp__ps_mix(g, s, xint, o, pm, &eh);
     pi0 = psygp__ps_level(s, xint, ft, o, false);
     for (int y = 0; y < nout; y++) {
-        double J[2], d1, w, c, v[2];
+        double J[2] = { 0 }, d1, w, c, v[2] = { 0 };
         psygp__mg o2;
         if (!(pm[y] > 0.0)) continue;
         psygp__ps_site(g, o, xint, (double)y, J, &d1, &w, &c);
@@ -7112,7 +7112,7 @@ static double psygp__ps_score(const psygp_gp* g, const psygp__scr* s,
         case PSYGP_ACQ_EI: {
             /* The one-latent expected improvement at each node of the g
              * quadrature, where f is Gaussian. */
-            double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], acc = 0.0;
+            double gk[PSYGP_QUAD_N] = { 0 }, wk[PSYGP_QUAD_N] = { 0 }, acc = 0.0;
             int nk = psygp__ps_nodes(s, o, gk, wk);
             for (int k = 0; k < nk; k++) {
                 double muf, sdf;
@@ -7122,7 +7122,7 @@ static double psygp__ps_score(const psygp_gp* g, const psygp__scr* s,
             return acc;
         }
         case PSYGP_ACQ_BALD: {
-            double pm[PSYGP_MAX_OUTCOMES], eh;
+            double pm[PSYGP_MAX_OUTCOMES] = { 0 }, eh;
             int nout = psygp__ps_mix(g, s, xint, o, pm, &eh);
             return psygp__entropy(pm, nout) - eh;
         }
@@ -7164,8 +7164,8 @@ static void psygp__ps_eavc(psygp_gp* g, psygp__scr* s) {
         const double* cj = psygp__cand(g, j);
         const psygp_real* v1j = s->ps_v + (size_t)(2 * j) * ld;
         const psygp_real* v2j = s->ps_v + (size_t)(2 * j + 1) * ld;
-        double pm[PSYGP_MAX_OUTCOMES], eh, J[2], c = 0.0, d1[PSYGP_MAX_OUTCOMES];
-        double wy[PSYGP_MAX_OUTCOMES], dv[PSYGP_MAX_OUTCOMES], sc = 0.0;
+        double pm[PSYGP_MAX_OUTCOMES] = { 0 }, eh, J[2] = { 0 }, c = 0.0, d1[PSYGP_MAX_OUTCOMES] = { 0 };
+        double wy[PSYGP_MAX_OUTCOMES] = { 0 }, dv[PSYGP_MAX_OUTCOMES] = { 0 }, sc = 0.0;
         const double* prev = NULL;
         memcpy(&oj, s->ps_c + (size_t)5 * j, sizeof(oj));
         psygp__ps_mix(g, s, cj[id], &oj, pm, &eh);
@@ -7181,7 +7181,7 @@ static void psygp__ps_eavc(psygp_gp* g, psygp__scr* s) {
                  * posterior prepared for the whole column. */
                 const psygp_real* v1i = s->ps_v + (size_t)(2 * i) * ld;
                 const psygp_real* v2i = s->ps_v + (size_t)(2 * i + 1) * ld;
-                double vi[2];
+                double vi[2] = { 0 };
                 psygp__mg oi;
                 memcpy(&oi, s->ps_c + (size_t)5 * i, sizeof(oi));
                 vi[0] = psygp__kctx(g, 0, ci, cj) * J[0] - psygp__dotr(v1i, wj, n);
@@ -7263,8 +7263,8 @@ static double psygp__score_one(const psygp_gp* g, const psygp__scr* s,
         case PSYGP_ACQ_BALD:
             return psygp__bald(g, s, mu, sd, other);
         case PSYGP_ACQ_LOCALMI: {
-            double oy[PSYGP__NSCEN], op[PSYGP__NSCEN];
-            double cjj = sd * sd, pi0, eh = 0.0, pp[2];
+            double oy[PSYGP__NSCEN] = { 0 }, op[PSYGP__NSCEN] = { 0 };
+            double cjj = sd * sd, pi0, eh = 0.0, pp[2] = { 0 };
             int nsc;
             if (!(cjj > 0.0)) return 0.0;
             pi0 = psygp__Phi_fast((mu - other - fstar) / sd);
@@ -7295,7 +7295,7 @@ static double psygp__score_one(const psygp_gp* g, const psygp__scr* s,
  * that aims at the same level set. */
 static double psygp__point_score(const psygp_gp* g, const psygp__scr* s,
                                  const double* x) {
-    double mus[PSYGP_MAX_OUTCOMES], sds[PSYGP_MAX_OUTCOMES], total = 0.0;
+    double mus[PSYGP_MAX_OUTCOMES] = { 0 }, sds[PSYGP_MAX_OUTCOMES] = { 0 }, total = 0.0;
     double beta = g->desc.acq_beta > 0.0 ? g->desc.acq_beta : 1.96;
     double fstar = psygp__f_star(g);
     psygp_acq acq = g->desc.acq == PSYGP_ACQ_EAVC ? PSYGP_ACQ_LSE : g->desc.acq;
@@ -7384,7 +7384,7 @@ static bool psygp__refine(const psygp_gp* g, const psygp__scr* s, double* x,
                           psygp__objective obj) {
     const psygp_desc* d = &g->desc;
     const double r = 0.61803398874989484820;
-    double h[PSYGP_MAX_DIMS], x0[PSYGP_MAX_DIMS];
+    double h[PSYGP_MAX_DIMS] = { 0 }, x0[PSYGP_MAX_DIMS] = { 0 };
     double fx = obj(g, s, x);
     bool moved = false;
     psygp__refine_step(g, h);
@@ -7506,7 +7506,7 @@ static void psygp__acq_class(psygp_gp* g, const psygp__scr* s, int c) {
                 sc = psygp__score_one(g, s, acq, mu, sd, other, beta, fstar);
                 break;
             case PSYGP_ACQ_EAVC: {
-                double oy[PSYGP__NSCEN], op[PSYGP__NSCEN];
+                double oy[PSYGP__NSCEN] = { 0 }, op[PSYGP__NSCEN] = { 0 };
                 const psygp_real* row = g->cand_cov + (size_t)j * M;
                 double cjj = row[j];
                 int nsc = psygp__scenarios(g, s, mu, sd, other, oy, op);
@@ -7970,7 +7970,7 @@ static int psygp__next_impl(psygp_gp* g, const int* subset, int nsub, double* x)
         psygp__free_point(g, x);
         g->proposed = -1;
     } else if (subset && g->desc.acq == PSYGP_ACQ_RANDOM) {
-        double p[PSYGP_MAX_DIMS], bd = 0.0;
+        double p[PSYGP_MAX_DIMS] = { 0 }, bd = 0.0;
         psygp__free_point(g, p);
         for (int i = 0; i < nsub; i++) {
             const double* c = psygp__cand(g, subset[i]);
@@ -8159,7 +8159,7 @@ PSYGP_API double psygp_acq_score(const psygp_gp* g, int index) {
 
 static int psygp__record(psygp_gp* g, const double* x, const double* x2, double yv) {
     int n, nd, rc, n_init;
-    double xs[PSYGP_MAX_DIMS], xs2[PSYGP_MAX_DIMS];
+    double xs[PSYGP_MAX_DIMS] = { 0 }, xs2[PSYGP_MAX_DIMS] = { 0 };
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
     if (!x || (psygp__is_pair(g) && !x2)) return PSYGP_ERR_ARG;
     if (g->N >= g->N_max) return PSYGP_ERR_FULL;
@@ -8345,7 +8345,7 @@ PSYGP_API int psygp_predict_f_many(const psygp_gp* g, const double* xs, int n,
      * stack and nothing borrows the candidate cache. */
     for (int b0 = 0; b0 < n; b0 += PSYGP__BLK) {
         int cnt = n - b0 < PSYGP__BLK ? n - b0 : PSYGP__BLK;
-        double mub[PSYGP__BLK], sdb[PSYGP__BLK];
+        double mub[PSYGP__BLK] = { 0 }, sdb[PSYGP__BLK] = { 0 };
         psygp__predict_many(g, &s, xs + (size_t)b0 * nd, cnt, k, mub, sdb);
         if (mu) psygp__copy(mu + b0, mub, cnt);
         if (sd) psygp__copy(sd + b0, sdb, cnt);
@@ -8388,7 +8388,7 @@ PSYGP_API int psygp_predict_p_many(const psygp_gp* g, const double* xs, int n,
     psygp__scr_of(g, &s);
     for (int b0 = 0; b0 < n; b0 += PSYGP__BLK) {
         int cnt = n - b0 < PSYGP__BLK ? n - b0 : PSYGP__BLK;
-        double mub[PSYGP__BLK], sdb[PSYGP__BLK];
+        double mub[PSYGP__BLK] = { 0 }, sdb[PSYGP__BLK] = { 0 };
         rc = psygp_predict_f_many(g, xs + (size_t)b0 * nd, cnt, 0, mub, sdb);
         if (rc != PSYGP_OK) return rc;
         if (g->desc.monotone_dims)
@@ -8434,7 +8434,7 @@ PSYGP_API int psygp_predict_outcomes(const psygp_gp* g, const double* x, double*
     if (g->K > 1) {
         /* One-latent quadrature per class, then normalized: the exact softmax
          * expectation is a K-dimensional integral. */
-        double mu[PSYGP_MAX_OUTCOMES], sd[PSYGP_MAX_OUTCOMES], tot = 0.0;
+        double mu[PSYGP_MAX_OUTCOMES] = { 0 }, sd[PSYGP_MAX_OUTCOMES] = { 0 }, tot = 0.0;
         for (int c = 0; c < g->K; c++) {
             double m, v;
             psygp__predict_k(g, &s, x, c, &m, &v, s.t1, s.t2);
@@ -8456,7 +8456,7 @@ PSYGP_API int psygp_predict_outcomes(const psygp_gp* g, const double* x, double*
     } else {
         double m, v, sd;
         int nout = psygp__bern(g) ? 2 : g->desc.n_outcomes;
-        double pf[PSYGP_MAX_OUTCOMES];
+        double pf[PSYGP_MAX_OUTCOMES] = { 0 };
         psygp__predict_k(g, &s, x, 0, &m, &v, s.t1, s.t2);
         sd = sqrt(v);
         for (int j = 0; j < nout; j++) p[j] = 0.0;
@@ -8477,7 +8477,7 @@ PSYGP_API int psygp_threshold(const psygp_gp* g, const double* ctx, double targe
                               double* x, double* lo, double* hi) {
     psygp__scr s;
     psygp_gp* mg = (psygp_gp*)g;
-    double pt[PSYGP_MAX_DIMS];
+    double pt[PSYGP_MAX_DIMS] = { 0 };
     double v, a, b;
     int nd, id, cross = 0, ca = 0, cb = 0;
     bool ha, hb;
