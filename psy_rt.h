@@ -1,4 +1,4 @@
-/* psy_rt.h - v0.4.0 - public domain single-header real-time timing library
+/* psy_rt.h - v0.4.1 - public domain single-header real-time timing library
  *
  *   The clock, the waits, the scheduling ladder, the one-shot deadline
  *   worker and the background-compute pump that a psychophysics rig needs,
@@ -17,6 +17,10 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.4.1 - MinGW: the worker and pump threads start with the x87 control
+ *          word of the thread that started them, not Windows' default, so
+ *          x87 libm code (mingw-w64's msvcrt exp and pow) gives the same bits
+ *          on the pump as on the main thread.
  *   v0.4.0 - An Emscripten branch, so the pump, the worker and the adaptive
  *          headers' async layers run in node and in a browser worker. It is
  *          the POSIX path with the Linux- and Mach-only calls taken out: the
@@ -80,7 +84,7 @@
  *          now builds this header without /std:c11.
  *   v0.1 - first release.
  *
- *   STATUS: v0.4.0. The Windows path is built and measured on Windows 11 by
+ *   STATUS: v0.4.1. The Windows path is built and measured on Windows 11 by
  *   examples/rt_jitter.c, and also builds in MSVC's default (pre-C11) C mode,
  *   which is what the Python and MEX bindings compile with. The Linux path is
  *   built as C11, as C++17 and with PSYRT_NO_THREADS (warnings as errors) and
@@ -655,8 +659,8 @@
  * The string always matches the three numbers. */
 #define PSYRT_VERSION_MAJOR  0
 #define PSYRT_VERSION_MINOR  4
-#define PSYRT_VERSION_PATCH  0
-#define PSYRT_VERSION_STRING "0.4.0"
+#define PSYRT_VERSION_PATCH  1
+#define PSYRT_VERSION_STRING "0.4.1"
 
 /* Feature-test macro for clock_nanosleep() and mlockall() in the Linux
  * implementation. Defined here, before the first system header, so it takes
@@ -2128,7 +2132,30 @@ typedef struct psyrt__wstate {
     HANDLE timer;   /* the coarse wait                                    */
     HANDLE wakeup;  /* auto-reset: a submit happened during a timed wait  */
     bool   hires;
+    unsigned short fpcw; /* the starting thread's x87 control word, MinGW */
 } psyrt__wstate;
+
+/* A thread Windows creates starts with the x87 control word at 0x27F (53-bit
+ * precision), but mingw-w64's msvcrt startup code runs fninit on the main
+ * thread and leaves it at 0x37F (64-bit), and that CRT's exp and pow are x87
+ * code, so the same exp() on the pump thread can differ from the main
+ * thread's by an ulp (measured: exp(-3.2171) and pow(12.5, 1.37) with GCC
+ * 16.1 / mingw-w64 14 msvcrt). The new thread takes the control word of the
+ * thread that started it, so work moved onto it computes what it computed
+ * before. MSVC and UCRT math are SSE2, where this word is not read. */
+#if defined(__MINGW32__) && (defined(__x86_64__) || defined(__i386__))
+static unsigned short psyrt__fpcw_get(void) {
+    unsigned short cw;
+    __asm__ __volatile__("fnstcw %0" : "=m"(cw));
+    return cw;
+}
+static void psyrt__fpcw_set(unsigned short cw) {
+    __asm__ __volatile__("fldcw %0" : : "m"(cw));
+}
+#else
+static unsigned short psyrt__fpcw_get(void) { return 0; }
+static void psyrt__fpcw_set(unsigned short cw) { (void)cw; }
+#endif
 
 #endif
 
@@ -2414,8 +2441,15 @@ static void psyrt__worker_wake(psyrt_worker* w) {
 
 static void psyrt__worker_loop(psyrt_worker* w);
 
+static DWORD psyrt__worker_thread(psyrt_worker* w);
+
 static DWORD WINAPI psyrt__worker_main(LPVOID arg) {
-    psyrt_worker* w = (psyrt_worker*)arg;
+    /* First, before anything computes on this thread. */
+    psyrt__fpcw_set(psyrt__w((psyrt_worker*)arg)->fpcw);
+    return psyrt__worker_thread((psyrt_worker*)arg);
+}
+
+static DWORD psyrt__worker_thread(psyrt_worker* w) {
     psyrt_policy pol = w->no_elevate ? PSYRT_POLICY_NORMAL
                                      : psyrt_thread_elevate(&w->sched);
     /* See the POSIX twin: after the elevation, before the handshake. */
@@ -2466,6 +2500,7 @@ bool psyrt_worker_start(psyrt_worker* w, const psyrt_worker_desc* desc) {
         DeleteCriticalSection(&s->cs);
         return false;
     }
+    s->fpcw = psyrt__fpcw_get();
     s->thread = CreateThread(NULL, 0, psyrt__worker_main, w, 0, NULL);
     if (!s->thread) {
         snprintf(w->error, sizeof(w->error), "worker: thread create failed (err %lu)",
@@ -2660,6 +2695,7 @@ typedef struct psyrt__pstate {
     CONDITION_VARIABLE donecv;
     CRITICAL_SECTION   pub;
     HANDLE             thread;
+    unsigned short     fpcw;   /* see psyrt__fpcw_get()                     */
 } psyrt__pstate;
 
 #endif
@@ -3139,8 +3175,15 @@ void psyrt_pump_stop(psyrt_pump* p) {
 
 #else /* PSYRT__WINDOWS */
 
+static DWORD psyrt__pump_thread(psyrt_pump* p);
+
 static DWORD WINAPI psyrt__pump_main(LPVOID arg) {
-    psyrt_pump* p = (psyrt_pump*)arg;
+    /* First, before anything computes on this thread; see psyrt__fpcw_get(). */
+    psyrt__fpcw_set(psyrt__p((psyrt_pump*)arg)->fpcw);
+    return psyrt__pump_thread((psyrt_pump*)arg);
+}
+
+static DWORD psyrt__pump_thread(psyrt_pump* p) {
     psyrt_policy pol = psyrt__pump_priority(p->below_normal);
     bool ok;
     if (p->pin_cpu > 0) (void)psyrt_thread_pin(p->pin_cpu);
@@ -3181,6 +3224,7 @@ bool psyrt_pump_start(psyrt_pump* p, const psyrt_pump_desc* desc) {
     InitializeConditionVariable(&s->donecv);
     /* Before the thread exists; see the POSIX twin. */
     psyrt__sc_store(&p->locks_live, 1);
+    s->fpcw = psyrt__fpcw_get();
     s->thread = CreateThread(NULL, 0, psyrt__pump_main, p, 0, NULL);
     if (!s->thread) {
         DWORD err = GetLastError();
