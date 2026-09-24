@@ -1,4 +1,4 @@
-/* psy_rt.h - v0.3.1 - public domain single-header real-time timing library
+/* psy_rt.h - v0.4.0 - public domain single-header real-time timing library
  *
  *   The clock, the waits, the scheduling ladder, the one-shot deadline
  *   worker and the background-compute pump that a psychophysics rig needs,
@@ -9,12 +9,26 @@
  *   the base the other psy headers stand on: psy_parallel.h and psy_serial.h
  *   both include it and both run their trailing edges on the worker below.
  *
- *   Targets Windows, Linux and macOS. C++17, C11, or the pre-C11 C dialect
- *   MSVC compiles with by default. Nothing but the OS.
+ *   Targets Windows, Linux and macOS, and WebAssembly through Emscripten
+ *   (node, or a browser worker) with the scheduling ladder collapsed; see
+ *   WEBASSEMBLY. C++17, C11, or the pre-C11 C dialect MSVC compiles with by
+ *   default. Nothing but the OS.
  *
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.4.0 - An Emscripten branch, so the pump, the worker and the adaptive
+ *          headers' async layers run in node and in a browser worker. It is
+ *          the POSIX path with the Linux- and Mach-only calls taken out: the
+ *          scheduling ladder collapses to PSYRT_POLICY_NORMAL, pinning,
+ *          timer slack, memory locking and timer resolution report false,
+ *          sleeps are the relative nanosleep loop, and
+ *          psyrt_get_clock_info() measures the clock's step instead of
+ *          trusting Emscripten's clock_getres(). psyrt_describe() adds
+ *          "platform=wasm ladder=none" there and nowhere else. A worker or
+ *          pump started in a module built without -pthread fails with a
+ *          message naming the flag. No other platform changes behavior. See
+ *          WEBASSEMBLY.
  *   v0.3.1 - psyrt_pump_wait() is safe against a concurrent psyrt_pump_stop()
  *          or psyrt_pump_start() at ANY point, not only once it has parked.
  *          v0.3 checked for a live pump and then took its mutex, and a stop
@@ -66,7 +80,7 @@
  *          now builds this header without /std:c11.
  *   v0.1 - first release.
  *
- *   STATUS: v0.3.1. The Windows path is built and measured on Windows 11 by
+ *   STATUS: v0.4.0. The Windows path is built and measured on Windows 11 by
  *   examples/rt_jitter.c, and also builds in MSVC's default (pre-C11) C mode,
  *   which is what the Python and MEX bindings compile with. The Linux path is
  *   built as C11, as C++17 and with PSYRT_NO_THREADS (warnings as errors) and
@@ -85,9 +99,26 @@
  *   main thread stops and restarts the pump 300 times, idle, draining and
  *   dropping), clean under ThreadSanitizer on Linux and run on Windows; a
  *   copy of the header whose stop skips the waiter drain is caught by the
- *   same TSan run, so the clean result is not an instrumentation accident. Both platforms returned PSYRT_POLICY_BELOW_NORMAL, and
- *   on Linux the nice value moved on the pump thread only (+5) with the calling
- *   thread's left alone, which is what the per-thread claim in PUMP rests on.
+ *   same TSan run, so the clean result is not an instrumentation accident.
+ *   Both platforms returned PSYRT_POLICY_BELOW_NORMAL, and on Linux the nice
+ *   value moved on the pump thread only (+5) with the calling thread's left
+ *   alone, which is what the per-thread claim in PUMP rests on.
+ *   The Emscripten path is built with emcc 6.0.10 as C11 and C++17 with
+ *   warnings as errors, with -pthread, without it and with PSYRT_NO_THREADS,
+ *   and run under node 24 with -pthread -sPROXY_TO_PTHREAD=1: the whole of
+ *   tests/adapt/psy_rt_test.c passes there, wait-versus-stop hammer
+ *   included, as do examples/rt_jitter.c, examples/rt_pump.c, and the
+ *   QUEST+ and GP test suites with their async layers on. Under node the
+ *   clock claims 1 ns and shows a smallest step of 0.26 us on a pthread and
+ *   0.48 us on the main thread, where one read costs 0.6 us and 3.4 us. Over
+ *   five rt_jitter runs of 2 ms waits on a pthread, on a loaded development
+ *   machine running node inside Docker, the median wake was 118 to 251 us
+ *   late with no spin window, 0.1 to 47 us with the default 200 us, and
+ *   0.1 us with 1 ms; the p99 ranged from 0.1 ms to 20 ms and belongs to the
+ *   host, not to wasm. Measure on the machine you will use.
+ *   No browser has run any of it: the WEBASSEMBLY notes on the main thread,
+ *   cross-origin isolation and coarsened clocks are the platform's
+ *   documented rules, not measurements.
  *   The macOS pump, like the rest of the macOS path, has not been compiled or
  *   run here at all, so its relative condition wait and its
  *   THREAD_PRECEDENCE_POLICY rung are written, not tested; CI compiles them and
@@ -508,7 +539,80 @@
  *   them gone, lets every registered waiter out, and destroys nothing until
  *   the counter is zero. So a binding needs no wait slicing and no deferral
  *   of its own. The other calls keep the ordinary rule: do not race a submit,
- *   a lock or a start with a stop.
+ *   a lock or a start with a stop. One cost follows from the counter: a
+ *   thread that calls psyrt_pump_wait() in a tight loop on a pump that is
+ *   stopping keeps the counter above zero part of the time, and the stop
+ *   waits in 100 us polls until it catches a zero. The test's hammer does
+ *   exactly that, with two such threads, and its 300 start-and-stop cycles
+ *   took 0.4 to 4.3 s in all across Linux, Windows and node, thread creation
+ *   included; a caller that sleeps between waits never sees it.
+ *
+ *   ---------------------------------------------------------------------
+ *   WEBASSEMBLY
+ *   ---------------------------------------------------------------------
+ *   Under Emscripten (__EMSCRIPTEN__) the header compiles as a subset of its
+ *   POSIX path. What a wasm module can and cannot have, call by call:
+ *
+ *     Clock    clock_gettime(CLOCK_MONOTONIC), which Emscripten backs with
+ *              performance.now() in a browser and the high-resolution timer
+ *              in node. Browsers COARSEN performance.now() to between 5 us
+ *              and 100 us (by browser and version) unless the page is
+ *              cross-origin isolated (COOP and COEP headers), which also
+ *              enables threads; an isolated page gets a finer clock, how much
+ *              finer being the browser's decision, which is why it is
+ *              measured below and not stated here. Every
+ *              read is a call out to JavaScript, so it costs far more than a
+ *              native read. Emscripten's clock_getres() reports 1 ns whatever
+ *              the host does, so on this platform, and only here,
+ *              psyrt_get_clock_info() MEASURES the smallest step two reads
+ *              can see and reports that instead. Log it: it is the
+ *              resolution of every timestamp you take.
+ *     Waits    psyrt_sleep_until() is the relative nanosleep loop macOS uses,
+ *              then the spin. In a pthread (a Web Worker) or on node's main
+ *              thread that is a real blocking wait on a futex. On a
+ *              BROWSER'S MAIN THREAD it is not usable: blocking there freezes
+ *              rendering and input, and Emscripten turns a main-thread sleep
+ *              into a busy-wait. The browser frame loop belongs to
+ *              requestAnimationFrame, which is where a stimulus is drawn; the
+ *              waits in this header are for worker threads, node, and tools.
+ *              A build WITHOUT -pthread has no futex at all, and every sleep
+ *              in it is a busy-wait even under node.
+ *     Ladder   Collapsed. A wasm thread is a Web Worker and no page can ask
+ *              for its priority, so psyrt_thread_elevate() returns
+ *              PSYRT_POLICY_NORMAL without trying (Emscripten's scheduling
+ *              stubs report success and would be believed otherwise);
+ *              psyrt_thread_pin(), psyrt_thread_set_timer_slack(),
+ *              psyrt_process_lock_memory() and
+ *              psyrt_timer_resolution_begin() return false; and
+ *              psyrt_describe() ends its line with "platform=wasm
+ *              ladder=none" so a log cannot mistake NORMAL for a refusal. The
+ *              pump's below-normal rung is PSYRT_POLICY_NORMAL here.
+ *     Threads  The worker and the pump need -pthread, and in a browser the
+ *              page must be cross-origin isolated for SharedArrayBuffer to
+ *              exist. Built without -pthread they still compile and link
+ *              (Emscripten provides pthread stubs), and start() fails with a
+ *              message that names the missing flag; PSYRT_NO_THREADS drops
+ *              them as on every other platform. With -pthread, build the
+ *              program with -sPROXY_TO_PTHREAD=1 so main() itself runs on a
+ *              pthread and may block, and -sEXIT_RUNTIME=1 so its return code
+ *              reaches node. This is the configuration the tests run in:
+ *
+ *       emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -I. \
+ *            -o rt_pump.js examples/rt_pump.c && node rt_pump.js
+ *
+ *              Node 24 runs threaded modules with no extra flag. The
+ *              adaptive headers' tests also want -sSTACK_SIZE=16MB,
+ *              -sINITIAL_MEMORY=64MB and -sALLOW_MEMORY_GROWTH=1; with
+ *              -pthread, emcc warns that memory growth is slower for
+ *              JavaScript code (-Wpthreads-mem-growth), which does not touch
+ *              anything here and can be silenced.
+ *
+ *   What this buys a browser experiment is the pump: the frame loop stays in
+ *   requestAnimationFrame on the main thread, a QUEST+ or GP update runs on
+ *   a pump thread, and the frame callback polls psyrt_pump_done_seq() exactly
+ *   as a native loop does. No timing claim in this header survives the trip
+ *   to a browser unchanged; run examples/rt_jitter.c under the runtime you
+ *   will use and log its psy_rt: line.
  *
  *   ---------------------------------------------------------------------
  *   BUILDING
@@ -538,6 +642,8 @@
  *
  *       cc -O2 -pthread -I. -o rt_jitter examples/rt_jitter.c
  *       cl /O2 /I. examples\rt_jitter.c
+ *       emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -I. \
+ *            -o rt_jitter.js examples/rt_jitter.c     # then: node rt_jitter.js
  *
  *   ---------------------------------------------------------------------
  *   LICENSE: public domain / MIT-0, see end of file.
@@ -548,9 +654,9 @@
 /* The version of this header, for a binding's __version__ and for a log line.
  * The string always matches the three numbers. */
 #define PSYRT_VERSION_MAJOR  0
-#define PSYRT_VERSION_MINOR  3
-#define PSYRT_VERSION_PATCH  1
-#define PSYRT_VERSION_STRING "0.3.1"
+#define PSYRT_VERSION_MINOR  4
+#define PSYRT_VERSION_PATCH  0
+#define PSYRT_VERSION_STRING "0.4.0"
 
 /* Feature-test macro for clock_nanosleep() and mlockall() in the Linux
  * implementation. Defined here, before the first system header, so it takes
@@ -567,12 +673,15 @@
  * _DEFAULT_SOURCE is a superset of what this header needs and is the same
  * macro both transport headers ask for, so every include order agrees.
  *
- * Linux only, deliberately. Setting a feature macro on macOS drops
- * __DARWIN_C_LEVEL out of __DARWIN_C_FULL, which hides exactly what the
+ * Linux and Emscripten only, deliberately. Setting a feature macro on macOS
+ * drops __DARWIN_C_LEVEL out of __DARWIN_C_FULL, which hides exactly what the
  * Darwin path needs: pthread_mach_thread_np and
- * pthread_cond_timedwait_relative_np. */
-#if defined(__linux__) && !defined(_DEFAULT_SOURCE) && !defined(_GNU_SOURCE) && \
-    !defined(_POSIX_C_SOURCE) && !defined(_XOPEN_SOURCE)
+ * pthread_cond_timedwait_relative_np. Emscripten's libc is musl, which under
+ * -std=c11 shows nothing past ISO C (not even clock_gettime) unless a feature
+ * macro asks, and _DEFAULT_SOURCE is the one it honors the same way glibc
+ * does. */
+#if (defined(__linux__) || defined(__EMSCRIPTEN__)) && !defined(_DEFAULT_SOURCE) && \
+    !defined(_GNU_SOURCE) && !defined(_POSIX_C_SOURCE) && !defined(_XOPEN_SOURCE)
     #define _DEFAULT_SOURCE 1
 #endif
 
@@ -620,8 +729,11 @@ PSYRT_API uint64_t psyrt_now_us(void);
 typedef struct psyrt_clock_info {
     uint64_t resolution_ns; /* the tick the clock counts in: clock_getres() on
                              * POSIX, 1 s / QueryPerformanceFrequency() on
-                             * Windows. Not the cost of reading the clock and
-                             * not the accuracy of a wait. */
+                             * Windows, and on Emscripten the larger of
+                             * clock_getres() and the smallest step two reads
+                             * actually show (see WEBASSEMBLY). Not the cost
+                             * of reading the clock and not the accuracy of a
+                             * wait. */
     bool hires_timer;       /* Windows: a CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
                              * timer could be created (Win10 1803+). False
                              * means every OS wait is quantized to the ~15.6 ms
@@ -1249,6 +1361,13 @@ PSYRT_API psyrt_policy psyrt_pump_policy(const psyrt_pump* p);
 /* Pick the concrete platform once. */
 #if defined(_WIN32)
     #define PSYRT__WINDOWS 1
+#elif defined(__EMSCRIPTEN__)
+    /* Before the Linux test on purpose: Emscripten is a POSIX subset with its
+     * own rules (no scheduling ladder, no affinity, no mlockall, no absolute
+     * clock_nanosleep promise), and none of the Linux-only syscalls below
+     * exist in a wasm module. See WEBASSEMBLY. */
+    #define PSYRT__POSIX 1
+    #define PSYRT__EMSCRIPTEN 1
 #elif defined(__linux__)
     #define PSYRT__POSIX 1
     #define PSYRT__LINUX 1
@@ -1256,7 +1375,7 @@ PSYRT_API psyrt_policy psyrt_pump_policy(const psyrt_pump* p);
     #define PSYRT__POSIX 1
     #define PSYRT__DARWIN 1
 #else
-    #error "psy_rt: unsupported platform (need Windows, Linux or macOS)"
+    #error "psy_rt: unsupported platform (need Windows, Linux, macOS or Emscripten)"
 #endif
 
 /* The third form covers MSVC's legacy C dialect, which is what setuptools and
@@ -1500,7 +1619,7 @@ psyrt_policy psyrt_thread_elevate(const psyrt_sched_deadline* rt) {
 #endif /* PSYRT__WINDOWS */
 
 /* ======================================================================= *
- *  POSIX (Linux and macOS)
+ *  POSIX (Linux, macOS, and Emscripten as a subset)
  * ======================================================================= */
 #if defined(PSYRT__POSIX)
 
@@ -1508,9 +1627,13 @@ psyrt_policy psyrt_thread_elevate(const psyrt_sched_deadline* rt) {
 #include <errno.h>
 #include <sched.h>
 #include <pthread.h>
-#include <sys/mman.h>
-#include <sys/resource.h>   /* setpriority(), for the pump's below-normal rung */
 #include <unistd.h>
+#if !defined(PSYRT__EMSCRIPTEN)
+    /* mlockall() and setpriority(): nothing in a wasm module can lock pages or
+     * renice a thread, and the Emscripten stubs would report success. */
+    #include <sys/mman.h>
+    #include <sys/resource.h>
+#endif
 
 #if defined(PSYRT__LINUX)
     #include <sys/syscall.h>
@@ -1554,10 +1677,12 @@ void psyrt_thread_cleanup(void) {
 }
 
 static void psyrt__coarse_wait_until(uint64_t until_ns) {
-#if defined(PSYRT__DARWIN)
-    /* Darwin has no absolute clock_nanosleep, so the remainder is recomputed
-     * from the clock each time round: an early or interrupted wake cannot
-     * shorten the total, and a late one is not paid twice. */
+#if defined(PSYRT__DARWIN) || defined(PSYRT__EMSCRIPTEN)
+    /* Darwin has no absolute clock_nanosleep, and Emscripten's sleeps are
+     * relative waits on a shared-memory futex (Atomics.wait) whatever the call
+     * says, so the remainder is recomputed from the clock each time round: an
+     * early or interrupted wake cannot shorten the total, and a late one is
+     * not paid twice. */
     for (;;) {
         uint64_t now = psyrt_now_ns();
         if (now >= until_ns) return;
@@ -1582,6 +1707,29 @@ void psyrt_get_clock_info(psyrt_clock_info* out) {
         out->resolution_ns = (uint64_t)res.tv_sec * 1000000000ull + (uint64_t)res.tv_nsec;
     else
         out->resolution_ns = 0;
+#if defined(PSYRT__EMSCRIPTEN)
+    {
+        /* Emscripten's clock_getres answers 1 ns whatever the host does, and
+         * the host decides: performance.now() is coarsened to 5 us to 100 us
+         * in a browser page that is not cross-origin isolated, and each read
+         * is a call out to JavaScript. So measure the smallest step two reads
+         * can see, over 64 steps or 5 ms, and report the larger of the two
+         * numbers. Under node the step is the cost of a read, which a single
+         * preemption can inflate, hence 64 samples rather than a few. This is
+         * the only platform where psyrt_get_clock_info() measures instead of
+         * asking. */
+        uint64_t start = psyrt_now_ns(), prev = start, now, step = UINT64_MAX;
+        int changes = 0;
+        while (changes < 64 && (now = psyrt_now_ns()) - start < 5000000ull) {
+            if (now != prev) {
+                if (now - prev < step) step = now - prev;
+                prev = now;
+                changes++;
+            }
+        }
+        if (changes > 0 && step > out->resolution_ns) out->resolution_ns = step;
+    }
+#endif
     /* The POSIX sleep syscalls already work at the clock's own resolution;
      * there is no second-class timer to fall back to. */
     out->hires_timer = true;
@@ -1623,9 +1771,16 @@ bool psyrt_thread_pin(int cpu) {
 }
 
 bool psyrt_process_lock_memory(void) {
+#if defined(PSYRT__EMSCRIPTEN)
+    /* A wasm heap is one ArrayBuffer the JavaScript engine owns; there is
+     * nothing to lock and no call that could. Emscripten's mlockall stub
+     * returns 0, which would be logged as a lock that never happened. */
+    return false;
+#else
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) return false;
     psyrt__mem_locked = true;
     return true;
+#endif
 }
 
 bool psyrt_timer_resolution_begin(void) {
@@ -1695,6 +1850,14 @@ static bool psyrt__darwin_time_constraint(const psyrt_sched_deadline* rt) {
 #endif /* PSYRT__DARWIN */
 
 psyrt_policy psyrt_thread_elevate(const psyrt_sched_deadline* rt) {
+#if defined(PSYRT__EMSCRIPTEN)
+    /* The ladder collapses: a wasm thread is a Web Worker, scheduled by the
+     * browser or node like any other, with no priority a page can ask for.
+     * Emscripten's pthread_setschedparam stub returns success, so the FIFO
+     * attempt below would report a rung that does not exist. */
+    (void)rt;
+    return PSYRT_POLICY_NORMAL;
+#else
     psyrt_sched_deadline r;
     memset(&r, 0, sizeof(r));
     if (rt) r = *rt;
@@ -1735,6 +1898,7 @@ psyrt_policy psyrt_thread_elevate(const psyrt_sched_deadline* rt) {
      * thread on Linux. */
     (void)psyrt_thread_set_timer_slack(1);
     return PSYRT_POLICY_NORMAL;
+#endif /* PSYRT__EMSCRIPTEN */
 }
 
 #endif /* PSYRT__POSIX */
@@ -1824,15 +1988,23 @@ int psyrt_describe(const psyrt_report* r, char* buf, size_t cap) {
                  (unsigned long long)r->timer_slack_ns);
     else
         snprintf(slack, sizeof(slack), "n/a");
+#if defined(PSYRT__EMSCRIPTEN)
+    /* Said on the line itself, so a log read later cannot mistake NORMAL for
+     * "a ladder was tried and refused": on wasm there is no ladder. */
+    const char* platform = " platform=wasm ladder=none";
+#else
+    const char* platform = "";
+#endif
     int n = snprintf(buf, cap,
                      "psy_rt: policy=%s clock_res=%lluns slack=%s "
-                     "hires_timer=%s mlock=%s timer_res=%s",
+                     "hires_timer=%s mlock=%s timer_res=%s%s",
                      psyrt_policy_name(r->policy),
                      (unsigned long long)r->clock_res_ns,
                      slack,
                      r->hires_timer ? "yes" : "no",
                      r->memory_locked ? "yes" : "no",
-                     r->timer_resolution_raised ? "yes" : "no");
+                     r->timer_resolution_raised ? "yes" : "no",
+                     platform);
     /* snprintf reports what it WOULD have written; the caller wants what is
      * in the buffer. */
     if (n < 0) { buf[0] = '\0'; return 0; }
@@ -1849,6 +2021,17 @@ int psyrt_describe(const psyrt_report* r, char* buf, size_t cap) {
  *  nothing allocates once it is running.
  * ======================================================================= */
 #ifndef PSYRT_NO_THREADS
+
+/* Appended to a failed thread creation. A wasm module built without -pthread
+ * links Emscripten's pthread stubs, so everything compiles and the first
+ * pthread_create() says only "Not supported"; the cause is a build flag and
+ * the message should say which. */
+#if defined(PSYRT__EMSCRIPTEN) && !defined(__EMSCRIPTEN_PTHREADS__)
+    #define PSYRT__THREAD_HINT " (this wasm module was built without -pthread; " \
+                               "see WEBASSEMBLY)"
+#else
+    #define PSYRT__THREAD_HINT ""
+#endif
 
 /* `running` is the one field that crosses threads outside the worker lock:
  * a job may call psyrt_worker_submit() at the instant psyrt_worker_stop()
@@ -2120,7 +2303,8 @@ bool psyrt_worker_start(psyrt_worker* w, const psyrt_worker_desc* desc) {
     if (rc != 0) {
         pthread_cond_destroy(&s->cv);
         pthread_mutex_destroy(&s->mtx);
-        snprintf(w->error, sizeof(w->error), "worker: thread create: %s", strerror(rc));
+        snprintf(w->error, sizeof(w->error), "worker: thread create: %s%s",
+                 strerror(rc), PSYRT__THREAD_HINT);
         return false;
     }
     pthread_mutex_lock(&s->mtx);
@@ -2901,8 +3085,8 @@ bool psyrt_pump_start(psyrt_pump* p, const psyrt_pump_desc* desc) {
         pthread_cond_destroy(&s->cv);
         pthread_mutex_destroy(&s->pub);
         pthread_mutex_destroy(&s->mtx);
-        snprintf(p->error, sizeof(p->error), "pump: thread create: %s",
-                 strerror(rc_thread));
+        snprintf(p->error, sizeof(p->error), "pump: thread create: %s%s",
+                 strerror(rc_thread), PSYRT__THREAD_HINT);
         return false;
     }
     pthread_mutex_lock(&s->mtx);

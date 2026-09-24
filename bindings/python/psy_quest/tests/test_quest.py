@@ -424,3 +424,96 @@ def test_wait_racing_a_draining_stop():
     assert got.get("queued", -1) >= seqs[-1]
     assert isinstance(errs.get("never"), pq.Closed)
     assert q.n_trials == 4
+
+
+# --- snapshots (psy_quest.h 0.5.0) -------------------------------------------
+
+SNAP_PARAMS = [(-3.0, 0.0, 41), pq.values([1.0, 2.0, 3.0, 4.0], nuisance=True), 0.5, 0.02]
+
+
+def _snap_run(q, rng, n, start=0):
+    """Drive trials start..n-1 against a fixed observer; proposals and posteriors."""
+    props, posts = [], []
+    for k in range(start, n):
+        i = q.next()
+        props.append(i)
+        q.update(i, q.simulate(i, TRUTH, rng.random()))
+        posts.append(bytes(q.posterior()))
+    return props, posts
+
+
+@pytest.mark.parametrize("cut", [0, 1, 7, 23])
+@pytest.mark.parametrize("pending", [False, True])
+def test_resume_matches_the_uninterrupted_run(cut, pending):
+    # A random subset and random ties go through rng, so the generator's
+    # position is part of what has to survive the cut.
+    def make(gen):
+        return pq.Quest(PSI_STIM, SNAP_PARAMS, rng=gen.random, subset_size=8,
+                        tiebreak=pq.TIE_RANDOM, stop_trials=1000)
+    ref_gen, obs_ref = random.Random(11), random.Random(99)
+    ref = make(ref_gen)
+    ref_props, ref_posts = _snap_run(ref, obs_ref, 24)
+
+    gen, obs = random.Random(11), random.Random(99)
+    a = make(gen)
+    _snap_run(a, obs, cut)
+    if pending:
+        a.next()                 # a proposal made, no update yet
+    snap, gen_state = a.save(), gen.getstate()
+    del a
+
+    gen2 = random.Random()
+    gen2.setstate(gen_state)     # the generator is the caller's
+    b = pq.Quest.load(snap, PSI_STIM, SNAP_PARAMS, rng=gen2.random, subset_size=8,
+                      tiebreak=pq.TIE_RANDOM, stop_trials=1000)
+    assert b.n_trials == cut
+    props, posts = _snap_run(b, obs, 24, cut)
+    assert props == ref_props[cut:]
+    assert posts == ref_posts[cut:]
+    assert b.estimate(pq.EST_MEAN) == ref.estimate(pq.EST_MEAN)
+    assert b.history() == ref.history()
+    assert gen2.getstate() == ref_gen.getstate()
+
+
+def test_resume_with_pf_batch():
+    q = pq.Quest(PSI_STIM, PSI_PARAMS, pf_batch=gumbel_batch, stop_trials=100)
+    ref = pq.Quest(PSI_STIM, PSI_PARAMS, pf_batch=gumbel_batch, stop_trials=100)
+    outcomes = [1, 1, 0, 1, 0, 1, 1, 1, 0, 1]
+    run(q, outcomes[:4])
+    run(ref, outcomes)
+    q2 = pq.Quest.load(q.save(), PSI_STIM, PSI_PARAMS, pf_batch=gumbel_batch, stop_trials=100)
+    run(q2, outcomes[4:])
+    assert bytes(q2.posterior()) == bytes(ref.posterior())
+
+
+def test_load_refuses_a_mismatched_desc():
+    q = pq.Quest(PSI_STIM, PSI_PARAMS, stop_trials=50)
+    run(q, [1, 0, 1])
+    snap = q.save()
+    with pytest.raises(pq.Error, match="stop_trials") as e:
+        pq.Quest.load(snap, PSI_STIM, PSI_PARAMS, stop_trials=60)
+    assert not isinstance(e.value, pq.ArgumentError)
+    with pytest.raises(pq.Error):
+        pq.Quest.load(snap, [(-3.0, 0.0, 30)], PSI_PARAMS, stop_trials=50)
+    with pytest.raises(pq.Error):
+        pq.Quest.load(snap[:-5], PSI_STIM, PSI_PARAMS, stop_trials=50)
+    # The priors are not compared: the saved posterior replaces them.
+    thr = pq.values(PSI_PARAMS[0], prior=[1.0] * 20 + [5.0] + [1.0] * 20)
+    q2 = pq.Quest.load(snap, PSI_STIM, [thr] + PSI_PARAMS[1:], stop_trials=50)
+    assert bytes(q2.posterior()) == bytes(q.posterior())
+
+
+def test_queue_depth_one_pushes_back():
+    params = [(-3.0, 0.0, 61), (0.5, 6.0, 12), pq.values([0.45, 0.5, 0.55], nuisance=True),
+              pq.values([0.0, 0.03, 0.06], nuisance=True)]
+    q = pq.Quest(PSI_STIM, params, no_table=True, stop_trials=10000)
+    with pq.Async(q, queue_depth=1) as a:
+        accepted = 0
+        with pytest.raises(pq.Busy):
+            for _ in range(3):   # one in flight, one queued, the next refused
+                a.submit(5, 1)
+                accepted += 1
+        assert accepted <= 2
+    assert q.n_trials == accepted
+    with pytest.raises(pq.ArgumentError):
+        pq.Async(q, queue_depth=pq.ASYNC_QUEUE + 1)

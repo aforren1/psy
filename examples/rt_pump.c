@@ -17,7 +17,14 @@
  * Build (from the repository root):
  *     cc -O2 -pthread -I. -o rt_pump examples/rt_pump.c     # Linux / macOS
  *     cl /O2 /I. examples\rt_pump.c                         # Windows (MSVC)
+ *     emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -I. \
+ *          -o rt_pump.js examples/rt_pump.c && node rt_pump.js    # wasm
  * or:  cmake -B build && cmake --build build
+ *
+ * A wasm build without -pthread compiles, cannot start the pump, says so and
+ * exits 0. In a browser the frame loop would be requestAnimationFrame rather
+ * than psyrt_sleep_until(); the pump side is the same. See WEBASSEMBLY in
+ * psy_rt.h.
  *
  * Usage: rt_pump [frames] [frame_ms]
  *     rt_pump           # 120 frames of 16 ms, about 2 seconds

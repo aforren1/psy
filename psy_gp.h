@@ -1,4 +1,4 @@
-/* psy_gp.h - v0.4.0 - public domain single-header Gaussian-process adaptive library
+/* psy_gp.h - v0.14.0 - public domain single-header Gaussian-process adaptive library
  *
  *   Nonparametric and semiparametric Bayesian adaptive psychophysics: a
  *   Gaussian-process model over a multidimensional stimulus space with
@@ -22,6 +22,94 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.14.0 - desc.fit_pcg (a new field at the end of psygp_desc, off by
+ *          default): conjugate-gradient Newton steps in a fit's evaluations
+ *          and in the psychometric model's mode search, rejected line-search
+ *          points undone by a copy, and no refit of a point the model already
+ *          stands at; 2.6 times on a 500-trial 6-D GP fit and 3.7 times on
+ *          the psychometric model's. The explicit B^-1 of the gradient walks
+ *          rows instead of columns, 2.7 times faster with the same bits, so
+ *          every result at the defaults is v0.13.1's. See CONJUGATE GRADIENTS
+ *          IN A FIT under MEMORY, COST AND THREADS.
+ *   v0.13.1 - no code change. The 6-D contrast sensitivity problem's stuck
+ *          flat model (guess 0.5, mean at its bound, p = 0.5 everywhere)
+ *          is v0.4.1's behavior, fixed since v0.5.0 by the mean prior; the
+ *          test now replays its first 30 trials with and without the prior.
+ *          The cost section quotes the 6-D numbers.
+ *   v0.13.0 - desc.fit_max_evals and desc.fit_tol (0 = the old 40 and 1e-8),
+ *          psygp_fit() returns 1 when converged and 0 when the budget ran
+ *          out (it returned 0 for both), and psygp_fit_delta() reads the
+ *          objective's change. A psygp_fit() after one the budget stopped
+ *          continues with its step length. A caller that tested
+ *          psygp_fit() == 0 for success must test >= 0. Scheduled fits, and
+ *          so every session result at the defaults, are v0.12.0's.
+ *   v0.12.0 - snapshots: psygp_save_size(), psygp_save() and psygp_load(), a
+ *          versioned little-endian byte image of the whole session that
+ *          resumes it bit for bit without replay. See SNAPSHOTS under
+ *          MEMORY, COST AND THREADS.
+ *   v0.11.0 - desc.pcg_threshold: above it (default 512, so never at the
+ *          default PSYGP_MAX_TRIALS), an update's Newton steps are
+ *          preconditioned conjugate-gradient solves with the previous factor
+ *          as the preconditioner, 2.6 to 3.3 times faster from N = 1024 on.
+ *          The history moves from the handle into the memory block, so the
+ *          handle is 2.5 KB and PSYGP_MAX_TRIALS can be raised to 2048 with
+ *          the caller's memory; psygp_memory_size() grows by 144 bytes a
+ *          trial. psygp_desc gains pcg_threshold at its end.
+ *   v0.10.0 - desc.monotone_dims, AEPsych's monotonic projection of the
+ *          posterior mean along the masked dimensions, for predict_p,
+ *          predict_p_many, predict_p_var, the threshold and the level-set
+ *          acquisitions; a new field at the end of psygp_desc. The copies
+ *          whose count is an int are loops instead of memcpy, which gcc 13's
+ *          -Wstringop-overflow flagged at -O3 under _FORTIFY_SOURCE; results
+ *          are v0.9.0's to the bit. See MONOTONIC PROJECTION under KERNELS.
+ *   v0.9.0 - mixed parameters: desc.dim_kind[] (CONTINUOUS, INTEGER,
+ *          CATEGORICAL) and desc.dim_levels[], new fields at the end of
+ *          psygp_desc that a binding must add. A categorical kernel factor
+ *          exp(-(1 - delta) / l); candidates, init points, refinement,
+ *          updates and threshold contexts honor the kinds. A description
+ *          with every dimension CONTINUOUS gives v0.8.0's results to the bit.
+ *          See DIMENSION KINDS under KERNELS.
+ *   v0.8.0 - PSYGP_LIK_PAIRWISE, comparisons of two stimuli, with
+ *          psygp_next_pair(), psygp_update_pair() and psygp_predict_pair().
+ *          psygp_trial gains x2 at its end and the handle a second stimulus
+ *          array; a binding that mirrors psygp_trial must add the field.
+ *          Nothing else changes. See MODEL and examples/gp_pairwise.c.
+ *   v0.7.0 - optimization: PSYGP_ACQ_UCB, PSYGP_ACQ_EI and PSYGP_ACQ_THOMPSON
+ *          for finding the stimulus the observer prefers most, desc.minimize
+ *          (a new field at the end of psygp_desc), and psygp_argmax(). See
+ *          ACQUISITION and examples/gp_optimize.c. Nothing else changes.
+ *   v0.6.0 - desc.priors: every weak-prior parameter at run time, a
+ *          {center, sd, ceiling} per hyperparameter with zero meaning the
+ *          measured default, and psygp_get_priors() to read what is in force.
+ *          The compile-time PSYGP__PS_MG_RISE, PSYGP__PRIOR_MG_SD,
+ *          PSYGP__PS_MG_HI and PSYGP__PS_OS_G are gone. psygp_desc gains
+ *          priors at its end, so a binding that mirrors it must add the
+ *          field; at the defaults every result is v0.5.0's to the bit.
+ *   v0.5.0 - three defects the cross-method comparison
+ *          (tests/compare/methods_compare.py) found, fixed, each with its
+ *          recorded trials replayed in the test. (1) A psychometric-model fit
+ *          could restore its accepted point from a rejected point's mode, run
+ *          the mode search into its step cap on a saturated plateau, and leave
+ *          a log marginal likelihood of -1e49 with no error: the mode search
+ *          now rejects a result below Psi at the prior mean and restarts cold
+ *          (PSYGP_ERR_NUMERIC if that fails), a restore that misses its value
+ *          is refitted cold, and a whole fit that ends worse than it began is
+ *          undone. (2) A GP-model fit could jump to a data-favored
+ *          short-lengthscale mode that redraws the level set: a fit that
+ *          reclassifies more than 5% of the candidates after a settled one is
+ *          undone once. (3) The GP model's mean had no prior and ran to its
+ *          bound on data that are mostly one way: it now has a normal prior
+ *          (sd 0.7) on the discrete likelihoods, and EAVC falls back to the
+ *          straddle when its expected level set is empty or full. (2) and (3)
+ *          change what the GP model computes by default; nothing changes in a
+ *          run none of them touches except through the mean prior. See
+ *          HYPERPARAMETERS and ACQUISITION.
+ *   v0.4.1 - no behavior changed. Why PSYGP_MODEL_PSYCHOMETRIC's fitted mean
+ *          slope is about half the true one (its prior, not the Laplace
+ *          approximation), and why that prior stays (every looser setting
+ *          measured reopens the threshold tail under LSE and leaves the band
+ *          error where it was), under HYPERPARAMETERS; and the prior's center,
+ *          sd and ceiling as compile-time knobs for measuring it.
  *   v0.4.0 - three changes to PSYGP_MODEL_PSYCHOMETRIC. Its hyperparameter
  *          gradient is analytic (one conjugate-gradient adjoint solve through
  *          the true Hessian, preconditioned by the Gauss-Newton posterior),
@@ -85,7 +173,7 @@
  *          gradient under CATEGORICAL is central differences, not analytic.
  *   v0.0 - specification. Declarations and the manual, no implementation.
  *
- *   STATUS: v0.4.0. Implemented and checked by tests/adapt/psy_gp_test.c,
+ *   STATUS: v0.14.0. Implemented and checked by tests/adapt/psy_gp_test.c,
  *   which builds and passes as C11, C99 and C++17 under gcc with -Wall
  *   -Wextra -Wpedantic -Wshadow -Werror, with and without PSYGP_ASYNC, as
  *   MSVC's default C dialect with /W4 /WX both ways, and is clean under
@@ -273,6 +361,16 @@
  *   to nothing. CANDIDATES has the audiometric numbers, where the grid is
  *   coarse and it matters.
  *
+ *   The later additions are checked there as well, and each section says
+ *   what it measured: PAIRWISE's trial kernel, mode and predictions against a
+ *   dense 2N posterior; the mixed dimension kinds' kernel values, their
+ *   analytic lengthscale gradient against differences (2e-5 at worst) and
+ *   every proposal on its levels and integers; the monotonic projection
+ *   against a brute force through psygp_predict_f(), to the bit; the
+ *   conjugate-gradient Newton steps against factoring, to 4e-11; desc.fit_pcg's
+ *   fits against the factored fits in lockstep, step by step, to 2e-9; and
+ *   132 snapshot resumes against the uninterrupted sessions, byte for byte.
+ *
  *   The float build of PSYGP_REAL passes the same test with the tolerances
  *   PRECISION lists, measured rather than assumed, with PSYGP_LIK_GAUSSIAN
  *   rejected at open and its checks skipped. That includes the psychometric
@@ -281,6 +379,39 @@
  *   objective is too rough for differences to resolve more; on the 7 dB
  *   observer the float build's threshold error is 0.98 dB against the double
  *   build's 1.12, band error 0.143 against 0.141, same streams.
+ *
+ *   KNOWN TAILS. The cross-method comparison (tests/compare/methods_compare.py,
+ *   streams seeded [20170310, problem, replication]) has no collapsed run
+ *   left after v0.5.0, and three single replications that are poor for a
+ *   reason the header does not fix:
+ *   - csf6 (6-D), GP model, LSE, replication 5: MAE(p) 0.125 and 82 contexts
+ *     of 118 with no crossing at trial 300 (0.077 and 57 at trial 500). No
+ *     hyperparameter is at a bound (contrast lengthscale 1.35 in 0.075 to 3,
+ *     output scale 0.61, mean 0.05). The cause is the problem's numbers: with
+ *     guess 0.5 and no lapse, p at the prior mean is 0.75, the target, so in
+ *     every context the data have not reached the column crosses or not on
+ *     the sign of a mean near 0, and LSE in 6-D leaves most contexts
+ *     unreached. Replication 4 of the same method has 25.
+ *   - The psychometric model with LSE: metabolic+sensory beta 2 replication
+ *     14 (9.5 dB) and older-normal beta 0.5 replication 10 (7.6 dB). The
+ *     log-slope output scale is not at its ceiling (0.33 and 0.49 of 10). In
+ *     both a fit shortens the threshold GP's frequency lengthscale (3.2 to
+ *     0.55 at trial 65; 9.1 to 1.35 at trial 125, after the model had sat at
+ *     1.15 dB for 40 trials), the defect-2 jump of the GP model, and LSE then
+ *     puts 59 and 49 of its 150 trials in one frequency column. The level-set
+ *     guard that stops the jump in the GP model does not run for the
+ *     psychometric model; extended to it as a trial, it sees 4.8% of the
+ *     candidates flip at the trial-125 fit, under its 5% trigger, so it would
+ *     take retuning to one run to catch it, and that was not done. EAVC on
+ *     the same streams ends at 0.85 and 0.93 dB.
+ *   - The 2-D CSF, GP model, EAVC, replication 12: 7.0 dB. The error is all in
+ *     the highest-frequency columns, whose threshold (-5 dB) is at the top of
+ *     the box: the posterior mean falls and rises again along intensity there,
+ *     and the first crossing is at -42 dB. desc.monotone_dims on the
+ *     intensity removes it (1.9 dB); over the 20 replications it takes the
+ *     mean threshold error from 1.65 to 1.58 dB and the worst from 6.99 to
+ *     2.51, but MAE(p) from 0.086 to 0.092, and five replications get worse
+ *     (three by 1 to 1.5 dB), which is why the projection stays opt-in.
  *
  *   NOT verified: nothing is compared against AEPsych yet, so the
  *   agreement claim of docs/psy_adapt.md is still a plan, and the Laplace
@@ -294,6 +425,10 @@
  *   platform other than x86-64 has been built or run. The async layer has run
  *   on Linux (pthreads) and on Windows (MSVC, native threads, and the OS
  *   granted the below-normal drop); psy_rt.h's macOS path is untested here.
+ *   gcc 13 has not built this header here: the fix for its
+ *   -Wstringop-overflow report at -O3 is by construction (no memcpy takes a
+ *   size derived from an int), and clang 18 (zig cc 0.13) builds the test,
+ *   the examples and both compile units clean with -Werror.
  *
  *   ---------------------------------------------------------------------
  *   USAGE
@@ -348,7 +483,7 @@
  *   MODEL
  *   ---------------------------------------------------------------------
  *   A latent field f ~ GP(mean, kernel) over a box [lo, hi] of n_dims
- *   dimensions, observed through one of four likelihoods (desc.lik):
+ *   dimensions, observed through one of five likelihoods (desc.lik):
  *
  *     PSYGP_LIK_BERNOULLI   p(y = 1 | f) = link(f), or with a floor and a
  *                           ceiling desc.guess + (1 - guess - lapse)
@@ -376,6 +511,50 @@
  *                           y = f + noise, noise sd a hyperparameter.
  *                           Exact Gaussian posterior, no Newton. AEPsych's
  *                           GaussianLikelihood.
+ *     PSYGP_LIK_PAIRWISE    comparisons: a trial shows two stimuli, y = 1
+ *                           when the first was preferred, and
+ *                           p = link(f(x1) - f(x2)) (Chu and Ghahramani
+ *                           2005), f a latent utility. The likelihood sees
+ *                           only the difference d = f(x1) - f(x2), which is
+ *                           itself a GP with the four-term kernel
+ *                           k(x1,x1') + k(x2,x2') - k(x1,x2') - k(x2,x1'), so
+ *                           the inference is the Bernoulli Laplace on an N x N
+ *                           matrix, exact Newton, and the utility is
+ *                           predicted through the cross kernel
+ *                           k(x, x1) - k(x, x2). The mean cancels out of every
+ *                           difference, so it is fixed at 0 and not fitted,
+ *                           and the utility is identified up to that constant.
+ *                           psygp_next_pair() proposes a pair,
+ *                           psygp_update_pair() records one, psygp_argmax()
+ *                           reports the favorite, psygp_predict_f(.., 0, ..)
+ *                           the utility and psygp_predict_pair() P(x1 is
+ *                           preferred to x2). psygp_next(), psygp_update(),
+ *                           psygp_predict_p() and psygp_threshold() have no
+ *                           meaning for a comparison and refuse it, and so
+ *                           does the async layer, which submits single
+ *                           stimuli. Pair selection: BALD or BALV score the
+ *                           comparison between the best stimulus so far and
+ *                           each candidate, on d; THOMPSON takes the favorites
+ *                           of two posterior draws of the utility; RANDOM and
+ *                           the init phase take two Halton points. Measured
+ *                           with examples/gp_pairwise.c (a utility peaked at
+ *                           (0.3, 0.7), preference Phi(2 (u1 - u2)), 80
+ *                           comparisons, 12 streams): BALD and Thompson put
+ *                           psygp_argmax() within 0.036 of the peak, in 12 of
+ *                           12 streams, and BALV, which maximizes a
+ *                           comparison's uncertainty and so spreads its
+ *                           pairs, within 0.138, in 3 of 12. 1.5 to 3 ms a
+ *                           comparison. Not with the psychometric model, a
+ *                           floor or ceiling, or the level-set acquisitions.
+ *
+ *   More than one outcome per trial (a detection and a confidence rating, a
+ *   matching setting and a reaction time) is one handle per outcome: K
+ *   independent GPs over the same box, each opened with its own likelihood,
+ *   each updated with its own outcome of the shared stimulus, the proposal
+ *   taken from whichever handle the design is about or chosen by the caller
+ *   from their psygp_acq_score() values. There is no multi-output type:
+ *   independent outputs share nothing a joint model would use, and correlated
+ *   ones need a coregionalization kernel this header does not have.
  *
  *   The link (desc.link) is the probit by default, the logit on request;
  *   it applies to BERNOULLI and ORDINAL.
@@ -602,10 +781,105 @@
  *                         kernel is kept as it was, for reproducibility.
  *                         Under CATEGORICAL each latent gets its own a and
  *                         b.
- *     Monotonicity along the intensity dimension is not enforced by either
- *     kernel (AEPsych's monotonic projection is not here). The threshold
- *     search treats the posterior mean as monotonic and reports where it
- *     is not.
+ *   DIMENSION KINDS (desc.dim_kind, desc.dim_levels)
+ *     Every dimension is PSYGP_DIM_CONTINUOUS unless desc.dim_kind says
+ *     otherwise, and the intensity dimension always is.
+ *     PSYGP_DIM_INTEGER     the integers in [lo, hi] (lo and hi must be
+ *                           integers): a count of repetitions, a number of
+ *                           tones. The kernel is the RBF term on the
+ *                           coordinates rounded to the nearest integer, so a
+ *                           prediction at 1.2 is the prediction at 1.
+ *     PSYGP_DIM_CATEGORICAL dim_levels unordered levels, coded 0 .. levels - 1
+ *                           with the box [0, levels - 1]: a talker, a masker
+ *                           type, an ear. Its kernel factor is
+ *                           exp(-(1 - delta) / l), 1 for the same level and
+ *                           exp(-1 / l) for any two different ones, so every
+ *                           level borrows from every other through the one
+ *                           fitted l: large l, the levels behave alike; small
+ *                           l, each is its own function. No order is implied,
+ *                           which is the difference from coding the levels as
+ *                           a CONTINUOUS axis, where level 0 and level 2 are
+ *                           further apart than 0 and 1 whatever the data say.
+ *                           Its lengthscale's start, bounds and prior are
+ *                           those of a span of 4: prior center and start 1
+ *                           (two levels correlated e^-1 = 0.37), bounds 0.2
+ *                           to 8 (0.007 to 0.88).
+ *     The kinds multiply into both kernels (a categorical context of SEMIP's
+ *     intercept and slope GPs, of the psychometric model's threshold and
+ *     slope GPs) and into the analytic hyperparameter gradient. Candidates
+ *     honor them: a product grid enumerates a CATEGORICAL dimension's levels
+ *     (its grid[d] is 0 or the level count) and rounds an INTEGER one (grid[d]
+ *     at most the number of integers); Halton points, the init phase and
+ *     RANDOM draw integers and levels with equal shares; a caller's candidate
+ *     set must already hold them. Refinement (CANDIDATES) scores every level
+ *     of a CATEGORICAL dimension and every integer within one candidate
+ *     spacing (at least the two neighbors) of an INTEGER one, instead of the
+ *     golden section. psygp_update() stores the rounded coordinates, and
+ *     psygp_threshold() rounds its context. Measured with the field of
+ *     test_mixed in tests/adapt/psy_gp_test.c (a 3-level context whose middle
+ *     level is the far one, an integer context 0 to 4, threshold RMSE over the
+ *     15 cells, LSE on a 21 x 3 x 5 grid with refine_steps 2, 20 streams):
+ *
+ *       trials                          45       80      120
+ *       GP, kinds                     0.041    0.024    0.024
+ *       GP, both contexts CONTINUOUS  0.066    0.047    0.035
+ *       psychometric model, kinds     0.046    0.025    0.022
+ *
+ *     The kinds cost 0.6 to 3.0 ms a trial against 0.4 to 2.2 for the same
+ *     sessions as CONTINUOUS: the per-dimension kernel term is a branch
+ *     instead of a multiply. A description with every dimension CONTINUOUS
+ *     takes the old code path and gives the old results to the bit.
+ *
+ *   MONOTONIC PROJECTION (desc.monotone_dims)
+ *     Neither kernel knows that p rises with the intensity, and on a sparse
+ *     or noisy run the GP model's posterior mean can fall along it; the
+ *     threshold search then takes the first crossing and says there was more
+ *     than one (psygp_threshold_multi_cross()). Bit d of
+ *     desc.monotone_dims (increasing) replaces the posterior mean at x with
+ *     its largest value over the points below x on the candidate line through
+ *     x along dimension d (every masked dimension's line at once, their
+ *     product, when several are set), x included. That is AEPsych's
+ *     MonotonicProjectionGP. The line is the product grid's own when there is
+ *     one, and otherwise as many evenly spaced points as M candidates would
+ *     have along one side of a grid, 9 to 65. psygp_predict_p(),
+ *     psygp_predict_p_many(), psygp_predict_p_var(), psygp_threshold() (and
+ *     so desc.stop_threshold_sd) and the level-set acquisitions LSE, EAVC and
+ *     LOCALMI read the projected mean; psygp_predict_f() and
+ *     psygp_predict_f_many() still report the latent posterior, and BALV,
+ *     BALD and the optimization acquisitions are unchanged.
+ *     It is a projection of the MEAN, not a constraint on the posterior: the
+ *     variance, the Laplace mode, the hyperparameter fit and the look-ahead
+ *     covariance are what they would be without it. Two consequences the test
+ *     measures: the projected mean never falls from one line point to the
+ *     next, but between two line points it can fall by as much as the
+ *     unprojected mean does inside one spacing; and E[p], which also depends
+ *     on the variance, can fall wherever the variance changes, which it does
+ *     near every trial.
+ *     GP model only, one latent: not with PSYGP_MODEL_PSYCHOMETRIC (monotone
+ *     in the intensity by construction), CATEGORICAL or PAIRWISE, and not on a
+ *     CATEGORICAL dimension. Cost: a projected prediction is a posterior mean,
+ *     one kernel row and a dot product, at every line point below x, at most
+ *     65 of them per masked dimension; on a product grid the acquisition
+ *     projects all M candidates by a running maximum, in O(M).
+ *     Measured with examples/gp_audiometric.c (intensity masked, every
+ *     phenotype at beta = 2, 20 replications, the same seeds; pooled
+ *     threshold error in dB and MAE(p), trials 25 / 50 / 100 / 150):
+ *
+ *       lse         9.43 / 4.24 / 2.47 / 2.05 dB   MAE(p) 0.0764 at 150
+ *       lse-mono    7.81 / 3.90 / 2.20 / 1.79 dB          0.0731
+ *       eavc       10.53 / 5.12 / 2.81 / 2.07 dB          0.0617
+ *       eavc-mono  10.72 / 4.98 / 2.50 / 1.96 dB          0.0596
+ *       bald       19.69 / 11.93 / 7.29 / 5.88 dB         0.0660
+ *       bald-mono  the same thresholds                    0.0636
+ *
+ *     The projection helps LSE most (13% less threshold error at trial 150,
+ *     17% at trial 25), because its straddle reads the mean directly and a
+ *     dip in the mean is a false level-set crossing it will sample. EAVC gains
+ *     3 to 11% from trial 50 on and nothing before. BALD's proposals do not
+ *     read the mean, so its thresholds are unchanged and only the reported
+ *     field improves, by up to 4%. The price is a few more fits at the
+ *     output-scale ceiling (2 and 5 runs of 80 for lse-mono and eavc-mono
+ *     against 0 and 1) and, under EAVC, about 8% more time a trial.
  *
  *   HYPERPARAMETERS (desc.hyper, desc.fit)
  *     lengthscale[d], outputscale and mean for RBF; a second lengthscale
@@ -639,21 +913,116 @@
  *     gap and 1e-3 to 10 for the noise sd; a zero bound field means the
  *     default, so a bound of exactly zero cannot be asked for.
  *     One objective-plus-gradient evaluation is one Laplace refit plus
- *     O(N^2) per hyperparameter, and a fit stops after 40 of them or when
- *     no uphill step is left. The step is monotone: a fit never leaves the
- *     model with a lower marginal likelihood than it started with.
+ *     O(N^2) per hyperparameter, and a fit stops after desc.fit_max_evals of
+ *     them (0 = 40), when no gradient component exceeds desc.fit_tol (0 =
+ *     1e-8, in objective units per unit of the fitted coordinate, which is
+ *     the logarithm for a scale), or when no uphill step is left.
+ *     psygp_fit() returns 1 when it stopped for one of the last two reasons
+ *     and 0 when the budget ran out (or a guard below undid it), and
+ *     psygp_fit_delta() is the objective's change. The budget is small on
+ *     purpose, because a scheduled fit runs inside the trial loop, and on a
+ *     large data set it does not converge: on Letham et al.'s 6-D contrast
+ *     sensitivity data (tests/compare/compare_gp_csfdata.py, 500-trial
+ *     subsets) one psygp_fit() never did, and it took about 3 repeated
+ *     fits for the GP model and 7 for the psychometric model, whose
+ *     lengthscales drift along a flat ridge, before the log marginal moved by
+ *     less than 1e-3 nats. For an analysis rather than a session, call
+ *     psygp_fit() until it returns 1 or psygp_fit_delta() is below the
+ *     change you care about, or raise desc.fit_max_evals. A psygp_fit() that
+ *     follows one the budget stopped keeps that fit's step length instead of
+ *     starting again at a quarter of the gradient, which is what lets a
+ *     repeated small budget make progress: in the test, a 4-evaluation fit
+ *     repeated reaches the hyperparameters one 48-evaluation fit reaches, where
+ *     restarting the step left it stuck after three rounds. A scheduled fit
+ *     always starts afresh, as before. The step is
+ *     monotone: a fit never leaves the
+ *     model with a lower objective than it started with, and since v0.5.0
+ *     that is checked rather than assumed: psygp_fit() and a scheduled fit
+ *     compare the objective after the fit with the one before and undo the
+ *     fit if it is worse or not finite, and a restore inside the ascent that
+ *     does not come back to the value its point was accepted at is refitted
+ *     from the prior mean. The mode search enforces its own half: the mode
+ *     maximizes Psi, so a result that is not finite or scores below Psi at
+ *     the prior mean is not the mode, and the search restarts from the prior
+ *     mean, and returns PSYGP_ERR_NUMERIC if that fails too. Both were missing
+ *     until the cross-method comparison found a psychometric-model fit that
+ *     restored its accepted point from a rejected point's mode, where the
+ *     Gauss-Newton search ran into its step cap on a plateau of saturated
+ *     links and reported success with a log marginal likelihood of -1e49
+ *     (tests/adapt/psy_gp_test.c replays the recorded trials).
  *     CATEGORICAL is the exception: its gradient is central differences on
  *     the same objective (2 P + 1 refits per gradient), because the
  *     implicit term of eq. 5.23 needs third derivatives of a coupled block
  *     Hessian. It is correct but slow, and it is the one part of the fit
  *     that is not analytic.
-     *
- *     WEAK PRIORS (desc.no_hyper_prior). AEPsych puts gamma priors on the
+ *
+ *     WEAK PRIORS (desc.priors, desc.no_hyper_prior). Every prior parameter
+ *     is a field of desc.priors, a psygp_prior {center, sd, ceiling} per
+ *     hyperparameter; zero means the default in this table, a negative sd
+ *     turns that one prior off, desc.no_hyper_prior turns them all off, and
+ *     psygp_get_priors() reports what is in force with the defaults filled
+ *     in. The defaults, and where each was measured:
+ *
+ *       lengthscale    log-normal, center 0.25 (hi - lo) of its dimension,
+ *                      sd 1 in the log. The 1-D and audiometric observers
+ *                      of v0.1 (below).
+ *       outputscale    log-normal, center 1, sd 0.7; under PSYCHOMETRIC the
+ *                      threshold GP's, center (span / 4)^2. v0.1 below, and
+ *                      the center-at-1 comparison against a box on [1, 4].
+ *       outputscale_b  SEMIP's slope GP, as outputscale. v0.1.
+ *       outputscale_g  PSYCHOMETRIC's log-slope GP, center 0.3, sd 0.7. The
+ *                      sensory tail of v0.4.0 (below).
+ *       mean           the GP model's mean on a discrete likelihood, normal,
+ *                      center 0, sd 0.7. The novel discrimination function
+ *                      of v0.5.0 (below), and a floor that swallows the
+ *                      mean: with guess = 0.5, a first fit on data at the
+ *                      floor rate (5 yes of 10 on the 6-D contrast
+ *                      sensitivity problem, csf6 replication 4 of
+ *                      tests/compare/methods_compare.py) has its likelihood
+ *                      maximum at p = 0.5 everywhere, mean at its lower
+ *                      bound, where the gradient in the mean vanishes;
+ *                      v0.4.1 stayed there for 300 trials, log marginal
+ *                      300 ln 0.5. With the prior the mean is -0.52 at
+ *                      trial 10 and p spans 0.65 to 0.69; the test replays
+ *                      those trials with and without it. Starting the mean
+ *                      from the observed yes rate would not help: a rate at
+ *                      the floor maps to a latent of minus infinity.
+ *       mean_g         PSYCHOMETRIC's mean log-slope, normal in the log,
+ *                      center a rise of 0.25 of the intensity axis, sd 1,
+ *                      ceiling a rise of 1/256 of it. The runaway of v0.3.0
+ *                      and the slope study of v0.4.1 (below).
+ *       noise_sd       GAUSSIAN's noise, off unless center and sd are set.
+ *
+ *     The rise fractions of mean_g are the axis span over the slope's
+ *     reciprocal: a center of 0.1 is a prior slope of 10 / span. Changing any
+ *     of these changes a fit, so the numbers in this manual hold at the
+ *     defaults only.
+ *     AEPsych puts gamma priors on the
  *     lengthscales and optimizes the variational ELBO with autodiff. This is
  *     the same gradient by hand, with priors of the same purpose:
  *     log-normal on every lengthscale, centered on the default (hi - lo) / 4
  *     with an sd of 1 in logarithms, and log-normal on the output scales,
- *     centered at 1 with an sd of 0.7. Nothing on the mean or the cutpoints.
+ *     centered at 1 with an sd of 0.7. Since v0.5.0 the GP model's mean has
+ *     one too, on the discrete likelihoods: normal, centered at 0 (p = 0.5,
+ *     or the middle of the floor and ceiling), sd 0.7. Nothing on GAUSSIAN's
+ *     mean, which is in the caller's units, or on the cutpoints.
+ *     The mean is where the field goes far from every trial, and a run whose
+ *     responses are mostly one way sent it to its bound of 5 with nothing to
+ *     stop it: on AEPsych's novel discrimination function (p has a floor of
+ *     0.5 at the bottom edge and rises steeply, so most responses are yes) the
+ *     model then called the whole box above the 0.75 level and most columns
+ *     lost their crossing. Measured with 100 replications of 150 EAVC trials
+ *     (the sd, then columns of 30 with no crossing, runs with more than half
+ *     missing, threshold error, fitted mean): none, 21.9, 81, 0.081, 3.33;
+ *     2, 19.7, 70, 0.083, 2.51; 1, 5.9, 17, 0.062, 1.20; 0.7, 2.7, 7, 0.054,
+ *     0.63; 0.5, 2.9, 5, 0.052, 0.33. Under LSE the same five give 3.0, 1.4
+ *     and 0.3 to 0.7 columns. 0.7 is the default, and on
+ *     tests/compare/methods_compare.py's eleven 2-D problems (the eight
+ *     audiograms, novel detection and discrimination, the CSF), 20
+ *     replications each, it changes no GP threshold error by more than the
+ *     spread between replications except novel discrimination under EAVC,
+ *     from 21.9 columns without a crossing to 1.2, and the CSF, from 1.5 to
+ *     1.9 such columns to 0.1 to 0.9.
  *     Under PSYGP_MODEL_PSYCHOMETRIC the threshold GP's output-scale prior is
  *     centered on its default, (span / 4)^2, and the mean log-slope mean_g has
  *     a normal prior of its own, centered on its default log(4 / span) with an
@@ -703,6 +1072,68 @@
  *     threshold lengthscale is NOT the mechanism, contrary to a diagnosis
  *     from one dumped replication: it is the rule on metabolic, whose
  *     threshold really is smooth, and rare on sensory at every center.
+ *
+ *     THE FITTED MEAN SLOPE IS LOW, AND ITS PRIOR STAYS. On the audiometric
+ *     observer exp(mean_g) comes out at about half the true slope (0.24 to
+ *     0.30 per dB against 0.5 at beta 2), and it is the mean_g prior that puts
+ *     it there, not the Laplace approximation. Measured on one metabolic
+ *     beta 2 replication, with every other hyperparameter at its fitted
+ *     value: the Laplace log marginal likelihood alone peaks at a slope of
+ *     0.51 per dB, the truth, and so does the same marginal with the true
+ *     Hessian in place of the Gauss-Newton one (they differ by 0.1 nats at
+ *     the peak and at most 1.1 on the shallow side); the prior costs 1.9
+ *     nats between 0.24 and 0.51 per dB, which moves the objective's maximum
+ *     to 0.24, the fitted value, where the analytic gradient is -2e-3.
+ *     Tightening the mode to 1e-13 moves the fitted mean_g by 4e-4.
+ *     Loosening the prior was measured, and it is the wrong fix. 20
+ *     replications on each of metabolic and sensory at beta 2 and 0.5, trial
+ *     150, pooled over the four cells; the slope ratio is exp(mean_g) over the
+ *     true slope, the band is MAE(p) where the true p is in [0.05, 0.95] on a
+ *     30 x 300 grid, and each threshold is the mean error in dB (worst
+ *     replication):
+ *
+ *     center  sd   slope ratio     LSE          BALV         EAVC      band
+ *                  lse balv eavc
+ *     1/4     1    .44 .54 .47   1.94 (3.6)   1.77 (5.9)   1.40 (4.3)   .22
+ *     1/4     1.5  .66 .79 .73   3.78 (10.3)  1.91 (6.4)   2.43 (7.3)   .23
+ *     1/4     2    .81 .92 .83   6.75 (9.7)   1.90 (5.4)   2.22 (8.2)   .23
+ *     1/10    1    .61 .70 .64   2.11 (7.0)   1.67 (3.9)   2.00 (6.5)   .23
+ *     1/10    1.5  .94 .86 .86   5.23 (10.3)  1.97 (4.5)   1.93 (5.1)   .23
+ *     1/10    2    .89 .88 .98   3.88 (11.4)  2.02 (6.1)   2.45 (6.3)   .23
+ *     1/20    1    .88 .82 .75   4.42 (11.0)  1.95 (4.6)   1.95 (5.4)   .23
+ *     1/20    1.5  .98 .90 .81   4.70 (13.6)  2.26 (4.8)   2.08 (5.9)   .24
+ *     1/20    2   1.01 .93 .97   5.82 (17.7)  1.71 (4.3)   2.60 (9.7)   .24
+ *
+ *     (The center is the rise the prior expects, as a fraction of the
+ *     intensity axis; 1/4 is the default.) Every setting that lifts the
+ *     slope ratio above 0.6 reopens the tail under LSE, worst replications
+ *     of 7 to 18 dB; BALV is indifferent to the prior; and the band error
+ *     does not move at all. The 2-D observer of the test agrees: at 1/4, sd 1
+ *     it gets 0.72, 0.75 and 0.60 dB under LSE, BALV and EAVC with a band of
+ *     0.07 to 0.09, and every looser setting makes LSE 1.9 to 3.0 dB with a
+ *     band of 0.14 to 0.20, while the slope under LSE and EAVC OVERSHOOTS the
+ *     truth (0.5 to 1.0 per dB against 0.37). The mechanism is the one the
+ *     prior was introduced for: a level-set acquisition puts its trials at
+ *     the threshold, where the slope is poorly identified, and a fit with room
+ *     to steepen does, into the flat tail where trials stop informing the
+ *     threshold. BALV, which spreads its trials, recovers the slope at any
+ *     setting (0.33 to 0.43 per dB on the 2-D observer against 0.37). The
+ *     early runaway itself stayed rare everywhere: at most 5 runs of 20 had
+ *     mean_g at its ceiling or the log marginal above -2 by trial 25, and
+ *     then only at 1/20 with sd 2.
+ *     Nor is the slope what holds the band error. A model with the exact
+ *     slope and a threshold off by the 1.1 to 1.3 dB this one is off by
+ *     would score a band MAE of 0.15 to 0.17 at beta 2, which is what it
+ *     scores; at beta 0.5 an exact slope with a 1.4 dB threshold error would
+ *     score 0.48, and this model scores 0.26 to 0.31, because the posterior
+ *     mean of p averages over the threshold's uncertainty and is correctly
+ *     shallower than any one psychometric function. Per replication the band
+ *     error tracks the threshold error (correlation 0.46 to 0.93). The band is
+ *     a threshold-location metric at these widths, and the way to lower it is
+ *     a better threshold. desc.priors.mean_g sets the center, the sd and the
+ *     ceiling for that kind of measurement, and a desc.hyper.mean_g fixed at
+ *     the true slope's logarithm is the way to use a slope known in
+ *     advance.
  *     They are what stops the fit from interpolating its own trials. Type-II
  *     maximum likelihood on a run whose responses nearly separate keeps
  *     improving as the output scale grows and the lengthscale shrinks, so it
@@ -864,6 +1295,37 @@
  *                        under psygp_next_subset() it is the subset
  *                        candidate nearest the drawn point.
  *
+ *     OPTIMIZATION: "find the stimulus the observer rates highest" rather
+ *     than a level set. q is the target quantity (P(y = 1), P(y >= k*),
+ *     one-against-the-rest P(y = k*), or E[y] under GAUSSIAN), maximized, or
+ *     minimized under desc.minimize; target_p is not needed.
+ *     PSYGP_ACQ_UCB      E[q] + acq_beta sd[q] (1.96 by default).
+ *     PSYGP_ACQ_EI       E[max(q - best, 0)], the expected improvement over
+ *                        the best posterior mean of q at a stimulus already
+ *                        tried (the posterior mean, since a binary outcome is
+ *                        not the quantity being optimized). Closed form under
+ *                        GAUSSIAN, quadrature over f otherwise.
+ *     PSYGP_ACQ_THOMPSON one joint draw of the latent at every candidate from
+ *                        the M x M posterior covariance the look-ahead builds,
+ *                        and the argmax of the draw's q. Needs desc.rng, for
+ *                        the normal variates; GP model only; never refined,
+ *                        since a draw has no value between candidates. Under
+ *                        CATEGORICAL only the target class is drawn.
+ *     psygp_argmax() then reports the stimulus with the best posterior mean
+ *     of q. The repeat guard below does not apply to these three (returning
+ *     to the optimum is the point); the flat test does. Measured with
+ *     examples/gp_optimize.c on a 2-D bump, 80 trials, 12 streams: under
+ *     GAUSSIAN all three put the argmax within 0.02 of the maximum by trial
+ *     20 and within 0.01 by trial 50 (Thompson best, 0.006 at trial 80), in
+ *     12 of 12 streams; under BERNOULLI, with the bump covering a tenth of
+ *     the box and p = 0.02 outside it, UCB finds it in 8 of 12, EI in 7 and
+ *     Thompson in 9. A stream that misses is one whose first trials all
+ *     answer 0: the model then sees a flat field, UCB spends its trials at
+ *     the box corners, where the latent sd is largest and a tail observation
+ *     shrinks it slowly, and EI has nothing to improve on; a longer init
+ *     phase is the remedy. Cost per trial at N = 80, M = 441: UCB and EI 1 to
+ *     1.7 ms, Thompson 10 to 11 (the M x M covariance and its Cholesky).
+ *
  *     Expectations over one latent are Gauss-Hermite quadrature with
  *     PSYGP_QUAD_N (20) nodes. Under CATEGORICAL the latents are coupled
  *     by the softmax, and BALV, BALD and the look-aheads score each class
@@ -891,6 +1353,43 @@
  *     seeds, and the contour left the box in 14 of 30 context columns; with it,
  *     and with the priors above, the error falls to 8.1 dB pooled over the four
  *     phenotypes and no context column fails to cross.
+ *
+ *     EAVC WITH AN EMPTY LEVEL SET. When the expected number of candidates
+ *     above the level is under one half or within one half of all of them,
+ *     the model puts the level outside the box, every look-ahead moves the
+ *     volume by almost nothing, and EAVC's argmax is noise (on the novel
+ *     discrimination function it sampled the middle of the intensity range
+ *     with every threshold in the bottom fifth). That trial is chosen by the
+ *     LSE straddle instead, which walks toward the edge the level is past. On
+ *     its own this took the columns without a crossing there from 21.9 to 12.2
+ *     of 30; with the mean prior above it rarely engages.
+ *
+ *     THE LEVEL-SET GUARD (GP model, one-latent discrete likelihoods). A
+ *     scheduled fit that reclassifies more than 5% of the candidates against
+ *     the target, coming right after a fit that reclassified fewer than 2%,
+ *     is undone, once: a fit proposed right after an undone one is accepted,
+ *     so data that really demand the change get it one fit later. The
+ *     failure it stops is a data-favored short-lengthscale mode: on the
+ *     audiometric metabolic beta 0.5 observer a fit at trial 145 moved the
+ *     lengthscales from (3.8 octaves, 41 dB) to (0.62, 7.5) at a log marginal
+ *     likelihood 12 nats higher, interpolated the eleven sampled frequency
+ *     columns, sent the unsampled ones to the mean, and took the threshold
+ *     error from 2.0 to 37.8 dB. Neither a stronger prior nor a floor on the
+ *     lengthscale stops that: the mean prior above holds the damage to 3.2 dB
+ *     on the same trials, and a floor of one candidate spacing to 4.6, but
+ *     the jump itself happens either way. The thresholds come from 1440
+ *     scheduled fits of examples/gp_audiometric.c (20 replications, LSE,
+ *     EAVC and BALV, metabolic and sensory at beta 2 and 0.5): after the
+ *     first two fits the median fit reclassifies under 2% of the candidates;
+ *     9 fits worsened the threshold by more than 3 dB, reclassifying 3 to
+ *     25%; and the rule above undoes 19 fits, 8 of those 9, none of the fits
+ *     that improved the threshold by more than 1 dB, and 113 dB of added error
+ *     in all. On the comparison's own seeds, an independent check, it leaves
+ *     every GP cell within its spread and the metabolic beta 0.5 LSE cell at
+ *     1.89 dB (worst 3.74) against 4.09 (worst 37.8) before. It costs two
+ *     candidate predictions per fit. It does not run under
+ *     psygp_fit_step() called by the caller or the async layer's fit_in_idle,
+ *     which have no before and after to compare.
  *
  *     What the guard does NOT do, in that one configuration: restore the run's
  *     dependence on the responses. Instrumented, SEMIP with LSE on the
@@ -952,7 +1451,8 @@
  *     display can actually produce. Else desc.grid[d]
  *     points per dimension for a product grid, last dimension fastest,
  *     endpoints included (every grid[d] must be at least 1 once one of them
- *     is set). Else a Halton set of
+ *     is set, except a CATEGORICAL dimension's, which is its level count; see
+ *     DIMENSION KINDS under KERNELS). Else a Halton set of
  *     desc.n_candidates points (default 512). psygp_next_subset()
  *     restricts one trial to some of the candidates. The candidate set is
  *     also the set the look-ahead volume is measured on and the spacing
@@ -1096,6 +1596,11 @@
  *       the posterior first; the two differ by the posterior's skew and agree
  *       as it narrows. PSYGP_ERR_NOCROSS when E falls outside the box, and
  *       psygp_threshold_multi_cross() is always false.
+ *     psygp_argmax(g, x, &value)
+ *       The stimulus with the highest posterior mean of the target quantity
+ *       (lowest under desc.minimize): the best candidate, refined by
+ *       desc.refine_steps on the same objective. The optimization
+ *       counterpart of psygp_threshold(), for any acquisition.
  *     psygp_get_hyper(g, out) and psygp_log_marginal(g) for the fit.
  *
  *   STOPPING (desc.stop_trials, desc.stop_threshold_sd)
@@ -1153,11 +1658,12 @@
  *   matrix (the slope GP's), 18 N*8 vectors and M*40 bytes, and under EAVC
  *   2*M*N*8 for the look-ahead's columns and M*8, where the GP model's EAVC
  *   takes M*M*8 and M*N*8.
- *   Measured: Bernoulli at N = 512, M = 512 is 6.44 MB
- *   with LSE and 10.44 MB with EAVC; N = 200, M = 512 with LSE is 1.11 MB;
- *   a 3-class categorical at N = M = 512 with LSE is 12.54 MB. The handle
- *   itself is 42 KB at the default ceilings, nearly all of it the 512-trial
- *   history. Nothing allocates after open.
+ *   Measured: Bernoulli at N = 512, M = 512 is 6.53 MB
+ *   with LSE and 10.53 MB with EAVC; N = 200, M = 512 with LSE is 1.14 MB;
+ *   a 3-class categorical at N = M = 512 with LSE is 12.63 MB; Bernoulli at
+ *   N = 2048, M = 256 with LSE is 97.9 MB (MB here are 2^20 bytes). The
+ *   history is in the block, N * 144 bytes, so the handle itself is 2.5 KB
+ *   whatever PSYGP_MAX_TRIALS is. Nothing allocates after open.
  *
  *   Per update: a Laplace refit warm-started from the last mode, typically
  *   2 to 4 Newton steps, each an N x N Cholesky (N^3 / 3 flops) plus two
@@ -1166,9 +1672,22 @@
  *   term, so about 2.5 K times the Bernoulli cost; none under
  *   GAUSSIAN, where the kernel Cholesky grows by one row per trial in
  *   O(N^2). A hyperparameter fit
- *   is up to 40 refits with gradients and is the expensive call: run it
- *   in the inter-trial interval one psygp_fit_step() at a time, or set
- *   fit_every to 0 and call psygp_fit() when you choose.
+ *   is up to desc.fit_max_evals (40) refits with gradients and is the
+ *   expensive call: run it in the inter-trial interval one psygp_fit_step()
+ *   at a time, or set fit_every to 0 and call psygp_fit() when you choose.
+ *   On a large data set a converged fit is minutes: on 500 trials of the 6-D
+ *   contrast sensitivity data (HYPERPARAMETERS), about 33 s for the GP model
+ *   and 541 s for the psychometric model on the loaded machine that ran
+ *   tests/compare/compare_gp_csfdata.py, and 8.7 s and about 210 s (updates
+ *   included) for the same protocol on a quiet one. desc.fit_pcg (below)
+ *   takes them to 3.4 s and 57 s. At PSYGP_MAX_TRIALS 1024 the GP model's
+ *   block is about 25 MB, and an 800-trial fit costs about 4 times the
+ *   500-trial one.
+ *   Per trial in 6-D, the psychometric model with EAVC and 1000 candidates
+ *   is about 4 s on a loaded machine: the look-ahead is M^2 N with M = 1000,
+ *   and every one of the 1000 contexts takes its own bivariate quadrature.
+ *   A 6-D session wants a few hundred candidates, a per-point acquisition
+ *   (BALD, BALV, LSE) or the async layer, and usually two of the three.
  *
  *   desc.refit_every buys the update down to O(N^2). The exact Laplace
  *   factor cannot grow by a row, because the Hessian W changes in every
@@ -1185,10 +1704,125 @@
  *   after the last exact refit put the posterior 1.7e-4 of probability
  *   away from the exact one, and psygp_refit() erases it. BERNOULLI and
  *   ORDINAL only; GAUSSIAN is already incremental and CATEGORICAL always
- *   refits. Past this, a preconditioned conjugate
- *   gradient solve using the previous factor, which makes an EXACT Newton
- *   step O(N^2) times a handful of iterations, is planned for a later version
- *   and is written up in docs/psy_adapt.md.
+ *   refits.
+ *
+ *   desc.pcg_threshold keeps the update exact and makes its Newton steps
+ *   O(N^2). Above that many trials (0 = 512, negative = never), an update's
+ *   Newton steps solve B x = r by conjugate gradients instead of factoring
+ *   B, preconditioned by the factor the previous update left, bordered by
+ *   the new trial's row. At the first step that bordered factor is B's own,
+ *   because the old sites' W has not moved yet; at the later steps it is
+ *   close, and each solve takes a few iterations of one matrix-vector
+ *   product and two triangular solves, 2 N^2 each, to a relative residual of
+ *   1e-13. One factorization remains per update, at the end, for the
+ *   predictive variances and the log determinant, where the factored path
+ *   does one per Newton step; a solve that has not converged in 60
+ *   iterations falls back to factoring. BERNOULLI, ORDINAL and PAIRWISE,
+ *   the one-latent Laplace; a hyperparameter fit, CATEGORICAL, GAUSSIAN (no
+ *   Newton) and the psychometric model factor as before, unless
+ *   desc.fit_pcg (below) says otherwise. The result is the
+ *   factored path's to the Newton tolerance, not to the bit: the test
+ *   replays 200 trials both ways and finds the modes 4e-11 apart and the
+ *   predictions 5e-12. The default of 512 is the default PSYGP_MAX_TRIALS,
+ *   so a build that does not raise it never takes the path and every
+ *   earlier result stands to the bit.
+ *   Measured on one x86-64 desktop core under WSL2, gcc -O2, Bernoulli probit
+ *   RBF over a 2-D box, M = 256, fixed hyperparameters, PSYGP_MAX_TRIALS
+ *   2048 with the caller's 97.9 MB block, one update in ms, factored against
+ *   conjugate gradients (about 20 iterations an update, summed over its
+ *   Newton steps), and one psygp_next():
+ *
+ *       N     factored     CG    next
+ *      64       0.25      0.37    0.6
+ *      96       0.35      0.33    0.6
+ *     128       1.05      0.93    1.8
+ *     256       9.3       3.2     3.5
+ *     512      34        15      14
+ *    1024     340       130      75
+ *    1536    1697       605     279
+ *    2048    3858      1169    ~500
+ *
+ *   So the crossover is near N = 100, the gain grows to 2.6 times at
+ *   N = 1024 and 3.3 at 2048, and it is capped there by the one
+ *   factorization an exact update still needs (N^3 / 3: 360 M flops at
+ *   1024, 2.9 G at 2048).
+ *   Setting pcg_threshold to 100 buys 1.1 to 2.9 times between 128 and 512
+ *   trials, at the price of results that match earlier versions to 1e-11
+ *   instead of to the bit.
+ *
+ *   CONJUGATE GRADIENTS IN A FIT (desc.fit_pcg). What a fit evaluation
+ *   factors, measured with gprof on fold 0 of the 6-D contrast sensitivity
+ *   data (500 trials, the protocol of tests/compare/compare_gp_csfdata.py:
+ *   stepped fits until a whole one moves the log marginal by < 1e-3 nats):
+ *     GP model: 189 evaluations for 40 gradients, 136 fit steps. Every
+ *     evaluation is a warm-started Newton search, 3.4 steps on average, each a
+ *     Cholesky of B (635 in all, 58% of the time); a gradient adds B^-1
+ *     explicitly for the trace terms (27%). A third of the evaluations are not
+ *     search at all: a rejected line-search point is undone by refitting the
+ *     old point from the rejected point's mode, and the gradient step after an
+ *     accepted point refits the point it is already at.
+ *     Psychometric model: the Gauss-Newton mode search converges linearly,
+ *     about 27 steps a search, each a Cholesky of I + U' K U: 16514
+ *     factorizations for 552 searches (500 updates and 52 evaluations), 90% of
+ *     the time.
+ *   Which solves can reuse a factor: every one. The hyperparameters move a
+ *   little per line-search point and the Gauss-Newton U a little per step, so
+ *   the factor the last evaluation or the last step left is a close
+ *   preconditioner, and a conjugate-gradient solve with it takes about 7
+ *   iterations of two matrix products and two triangular solves (a quarter of
+ *   a factorization at N = 500, less below). What cannot be reused is the log
+ *   determinant: the objective is log p(y | f) - 1/2 a'h - log|B|, and a line
+ *   search accepts or rejects on it. Measured on the same fits, 54% (GP) and
+ *   70% (psychometric) of the accept-or-reject decisions were within 1e-3
+ *   nats, so an estimate of log|B| (stochastic Lanczos, Hutchinson) would
+ *   have to be good to well under 1e-3 nats to leave them alone, which takes
+ *   far more probe vectors than a factorization costs (not measured here),
+ *   and would give up reproducibility besides; a factor reused for k
+ *   evaluations gives no log|B| at the new point at all. So
+ *   every evaluation still ends in one factorization, and fit_pcg removes the
+ *   others:
+ *     - the Newton or Gauss-Newton steps solve by preconditioned conjugate
+ *       gradients (tolerance 1e-13), with one factorization at the end of the
+ *       search for log|B|, the predictions and the gradient; a solve that
+ *       takes 60 iterations falls back to factoring;
+ *     - a rejected line-search point is undone by copying back the state the
+ *       accepted point left (the factor, the mode vectors, the
+ *       hyperparameters), held in a second N x N block;
+ *     - the gradient step after an accepted point reuses the state that point
+ *       left instead of refitting it;
+ *     - the psychometric model's updates take the same conjugate-gradient mode
+ *       search, preconditioned by the last trial's factor bordered by the new
+ *       row.
+ *   An inexact Newton variant (solve only to 1e-3 of the last step's size)
+ *   cut the conjugate-gradient iterations by a third and was dropped: the
+ *   modes it left were less accurate, the analytic gradient with them, and on
+ *   ten audiogram sessions its psychometric fits stopped 0.38 nats lower on
+ *   average.
+ *   Measured (thread CPU time on an idle x86-64 core, gcc -O2, fold 0, the
+ *   shorter of two runs; the fits reach the same point to the printed
+ *   digits, 136 and 779 steps both ways, and the same held-out log loss):
+ *
+ *                           v0.13.1    v0.14.0    v0.14.0, fit_pcg
+ *     GP model, fit          8.7 s      6.9 s      3.4 s
+ *     psychometric, updates  32 s       32 s       14 s
+ *     psychometric, fit      181 s      168 s      43 s
+ *
+ *   (v0.14.0 without the switch is faster because the explicit B^-1 now walks
+ *   rows: 118 to 44 ms at N = 500, the same bits.) The factorizations fall
+ *   from 635 to 101 (GP) and from 16514 to 555 (psychometric). On the
+ *   audiogram's box at N = 150 (an LSE session replayed into each
+ *   configuration, ten seeds) the GP fit goes from 0.25 to 0.16 s, to the
+ *   same log marginal, and the psychometric fit from 3.2 to 2.3 s, to log
+ *   marginal -68.503 against -68.500 and threshold error 1.318 against 1.314
+ *   dB: the two paths agree to the Newton tolerance at every evaluation, and
+ *   on the psychometric model's flat ridge of lengthscales that is enough to
+ *   end a fit at a different point of the ridge. That is also why fit_pcg is
+ *   off by default: the default path keeps every earlier result to the bit.
+ *   The test runs the two paths in lockstep, one fit step at a time, under
+ *   BERNOULLI, ORDINAL, PAIRWISE and the psychometric model, and finds them
+ *   at the same point after every step to 2e-9. Memory: another N x N block
+ *   and 23 N-vectors, 2.2 MB at N = 512. GAUSSIAN (no Newton step) and
+ *   CATEGORICAL ignore the switch.
  *
  *   Per next: M candidates, each a kernel row (N) and a triangular solve
  *   (N^2 / 2), so M*N^2/2 flops: 256 candidates at N = 200 is 5 M, at
@@ -1219,6 +1853,16 @@
  *     EAVC, exact refit every trial     216
  *     EAVC, no refit inside the loop    265
  *
+ *   Past 400 trials the frame is gone for an exact update whatever the
+ *   solver: with conjugate-gradient Newton steps (desc.pcg_threshold) an
+ *   update is 15 ms at N = 512, 130 ms at 1024 and 1.2 s at 2048, and
+ *   psygp_next() at M = 256 adds 14, 75 and about 500 ms (it is M N^2 / 2).
+ *   A session that long takes its trials from another thread (PSYGP_ASYNC,
+ *   where a proposal is late by the update's cost in frames, 8 frames at
+ *   N = 1024), or runs desc.refit_every with an exact refit between blocks,
+ *   or both; a larger PSYGP_MAX_TRIALS changes the memory, not the frame
+ *   arithmetic.
+ *
  *   A hyperparameter fit does not fit a frame at any useful N, which is what
  *   psygp_fit_step() is for: on the same machine at N = 400 one step is 43 to
  *   74 ms and a whole fit is 40 steps, 1.8 to 2.3 s, so a fit spread one step
@@ -1245,7 +1889,70 @@
  *   and the same history give the same posterior, the same proposals and
  *   the same fit. A saved history replayed through psygp_update()
  *   restores a run, except that the fit schedule is by trial count, so
- *   replay with the same fit_every.
+ *   replay with the same fit_every, and a stepped fit's progress is not in
+ *   the history. A snapshot (SNAPSHOTS) restores it without the replay.
+ *
+ *   SNAPSHOTS (psygp_save_size, psygp_save, psygp_load)
+ *     psygp_save() writes psygp_save_size(g) bytes; psygp_load() opens a
+ *     handle from them and a desc that re-supplies what a snapshot cannot
+ *     carry (the pointers: rng and rng_ctx, candidates, memory), checks the
+ *     desc's numbers against the saved ones, and the session continues where
+ *     it was cut, a pending proposal included, with no refit and no replay:
+ *     the next proposal, the next update and every estimate are the
+ *     uninterrupted session's to the bit. The generator's state is the
+ *     caller's: save it beside the snapshot and put it back before the next
+ *     call. The test cuts sessions under eleven configurations (GP LSE with
+ *     refinement, GP EAVC, the psychometric model with BALD and EAVC,
+ *     CATEGORICAL, ORDINAL with refit_every, GAUSSIAN UCB, PAIRWISE
+ *     Thompson, and mixed kinds with a monotone projection and conjugate-
+ *     gradient updates, and GP LSE and the psychometric model with
+ *     desc.fit_pcg) at six trials each, before and after the proposal,
+ *     a stepped fit in progress, and loads into a handle filled with
+ *     garbage: all 132 resumed sessions match the uninterrupted ones in every
+ *     proposal and in their final snapshots, byte for byte.
+ *     SNAPSHOT LAYOUT, format 1. Every integer is little-endian two's
+ *     complement, written and read byte by byte, so a snapshot moves between
+ *     compilers and platforms of the same PSYGP_REAL; an f64 is the IEEE 754
+ *     bit pattern as a u64, and a psygp_real is its own bit pattern (8 bytes,
+ *     or 4 in a float build).
+ *       magic     4 bytes "PSGP", then u32 format (1), u8 sizeof(psygp_real)
+ *       desc      every number of psygp_desc in field order, arrays to
+ *                 n_dims (hyper, hyper_min and hyper_max each as
+ *                 lengthscale, outputscale, mean, lengthscale_b,
+ *                 outputscale_b, PSYGP_MAX_OUTCOMES - 1 cutpoints, noise_sd,
+ *                 lengthscale_g, outputscale_g, mean_g; bools as u8; each
+ *                 prior as center, sd, ceiling); rng and candidates as u8
+ *                 set-or-not, and a caller's candidate set value by value
+ *       state     i32 N, N_fit, halton_index, proposed, last_index, repeats,
+ *                 fit_state, fit_evals, fit_back, stop; u8 fit_valid,
+ *                 multi_cross, fit_blocked; f64 fit_step, fit_best,
+ *                 log_marginal, fit_flip, opt_best, ps_tol, fit_delta; i32
+ *                 fit_conv; the hyperparameters in force as above
+ *       history   N + 1 entries (the last is the pending proposal, if any):
+ *                 f64 x[n_dims], f64 y, u8 proposed, u8 init, and f64
+ *                 x2[n_dims] under PAIRWISE
+ *       trials    X (N x n_dims), X2 under PAIRWISE, y (N)
+ *       cands     the generated candidate set, M x n_dims, when desc has none
+ *       posterior per latent: f, W, the likelihood gradient, alpha,
+ *                 sqrt(W) (N each) and the factor's lower triangle; the
+ *                 kernel matrix's lower triangle; under the psychometric
+ *                 model the slope GP's kernel matrix and the 18 site vectors
+ *                 (N each); under CATEGORICAL the coupling factor; the
+ *                 stepped fit's 6 x PSYGP__NTHETA f64
+ *       fit_pcg   only when desc.fit_pcg applies: i32 the count of the last
+ *                 evaluation's theta and that many f64; u8 stash set, and
+ *                 when set f64 its objective and log marginal, its
+ *                 hyperparameters, its factor's lower triangle and its
+ *                 23 N-vectors
+ *     The candidate cache is not saved; it is a function of the rest and the
+ *     next psygp_next() rebuilds it. Size: about (K + 1 + [psychometric]) N^2
+ *     / 2 psygp_reals plus 30 N f64s, 23 KB at N = 40 in two dimensions,
+ *     about 200 KB at N = 150 and 2.1 MB at N = 512.
+ *     psygp_load() compares the desc section with the desc it is given and
+ *     names the first field that differs, range-checks the counters, and
+ *     fails a wrong, truncated or corrupt snapshot with a message and the
+ *     handle closed. Nothing but the bytes is checked: a snapshot edited to
+ *     hold other finite numbers loads, and the session continues from them.
  *
  *   ---------------------------------------------------------------------
  *   SIMULATION
@@ -1466,9 +2173,9 @@
 /* The version of this header, for a log line or a compile-time check. The
  * string is the three numbers, and the test asserts that it stays so. */
 #define PSYGP_VERSION_MAJOR  0
-#define PSYGP_VERSION_MINOR  4
+#define PSYGP_VERSION_MINOR  14
 #define PSYGP_VERSION_PATCH  0
-#define PSYGP_VERSION_STRING "0.4.0"
+#define PSYGP_VERSION_STRING "0.14.0"
 
 /* The one optional dependency, and it comes FIRST: psy_rt.h sets a
  * feature-test macro for the Linux clock calls and can only do that before the
@@ -1542,7 +2249,10 @@ typedef enum psygp_lik {
     PSYGP_LIK_BERNOULLI = 0, /* y in {0, 1}, p = link(f) (default)          */
     PSYGP_LIK_ORDINAL,       /* y in 0..K-1 ordered, K - 1 cutpoints        */
     PSYGP_LIK_CATEGORICAL,   /* y in 0..K-1 unordered, K latents, softmax   */
-    PSYGP_LIK_GAUSSIAN       /* y real, y = f + noise                       */
+    PSYGP_LIK_GAUSSIAN,      /* y real, y = f + noise                       */
+    PSYGP_LIK_PAIRWISE       /* a trial is two stimuli; y = 1 if the first
+                              * was preferred, p = link(f(x1) - f(x2)).
+                              * psygp_next_pair() / psygp_update_pair()    */
 } psygp_lik;
 
 typedef enum psygp_kernel {
@@ -1564,13 +2274,27 @@ typedef enum psygp_model {
     PSYGP_MODEL_PSYCHOMETRIC     /* threshold and slope GPs over the context */
 } psygp_model;
 
+/* What a dimension's values are; see KERNELS. The intensity dimension is
+ * always CONTINUOUS. */
+typedef enum psygp_dim_kind {
+    PSYGP_DIM_CONTINUOUS = 0,    /* any value in [lo, hi] (default)         */
+    PSYGP_DIM_INTEGER,           /* the integers in [lo, hi]; lo and hi are
+                                  * integers                                */
+    PSYGP_DIM_CATEGORICAL        /* unordered levels 0 .. dim_levels - 1;
+                                  * lo = 0, hi = dim_levels - 1             */
+} psygp_dim_kind;
+
 typedef enum psygp_acq {
     PSYGP_ACQ_LSE = 0,     /* level-set straddle (default)                  */
     PSYGP_ACQ_EAVC,        /* look-ahead expected absolute volume change    */
     PSYGP_ACQ_LOCALMI,     /* look-ahead local mutual information           */
     PSYGP_ACQ_BALV,        /* posterior variance of the target quantity     */
     PSYGP_ACQ_BALD,        /* outcome / latent mutual information           */
-    PSYGP_ACQ_RANDOM       /* Halton, or desc.rng, every trial              */
+    PSYGP_ACQ_RANDOM,      /* Halton, or desc.rng, every trial              */
+    PSYGP_ACQ_UCB,         /* optimization: E[q] + beta sd[q]               */
+    PSYGP_ACQ_EI,          /* optimization: expected improvement of q       */
+    PSYGP_ACQ_THOMPSON     /* optimization: argmax of one posterior sample;
+                            * needs desc.rng. GP model only                 */
 } psygp_acq;
 
 typedef enum psygp_stop {
@@ -1602,6 +2326,51 @@ typedef struct psygp_hyper {
     double mean_g;                 /* GP m(c) uses lengthscale, outputscale,
                                     * mean                                  */
 } psygp_hyper;
+
+/* One weak hyperparameter prior. Zero in any field means the measured
+ * default (HYPERPARAMETERS has each one and where it was measured); a
+ * NEGATIVE sd turns that one prior off. For a scale (lengthscale, output
+ * scale, noise) the prior is log-normal: center is the scale's median and sd
+ * the sd of its logarithm. For a mean it is normal: center and sd in the
+ * latent's units. */
+typedef struct psygp_prior {
+    double center;
+    double sd;
+    double ceiling;            /* mean_g only: the steepest mean slope
+                                * allowed, as a rise fraction of the
+                                * intensity axis (see mean_g below)        */
+} psygp_prior;
+
+/* The weak priors of HYPERPARAMETERS, all of them. desc.no_hyper_prior is the
+ * master switch and turns every one off. */
+typedef struct psygp_priors {
+    psygp_prior lengthscale;   /* center as a fraction of (hi - lo) of its
+                                * dimension, for every lengthscale set
+                                * (the GP's, SEMIP's slope GP's, and the
+                                * psychometric model's two). 0.25, sd 1   */
+    psygp_prior outputscale;   /* 1, sd 0.7; under PSYCHOMETRIC the threshold
+                                * GP's, center (span / 4)^2 in squared
+                                * intensity units                          */
+    psygp_prior outputscale_b; /* SEMIP's slope GP. 1, sd 0.7              */
+    psygp_prior outputscale_g; /* PSYCHOMETRIC's log-slope GP. 0.3, sd 0.7;
+                                * its center is also outputscale_g's
+                                * default value                            */
+    psygp_prior mean;          /* the GP model's mean on a discrete
+                                * likelihood, normal. 0, sd 0.7. None on
+                                * GAUSSIAN's mean or the psychometric
+                                * model's threshold mean                   */
+    psygp_prior mean_g;        /* PSYCHOMETRIC's mean log-slope, normal in
+                                * log(slope). center as a RISE fraction of
+                                * the intensity axis: the prior's slope is
+                                * 1 / (center * span), so 0.25 (the
+                                * default) is a rise a quarter of the axis
+                                * wide. sd 1. ceiling: the fit's upper
+                                * bound, the same way, 1 / 256; it is also
+                                * the default of hyper_max.mean_g           */
+    psygp_prior noise_sd;      /* GAUSSIAN's noise sd. Off by default (no
+                                * prior was ever measured to be needed);
+                                * set center and sd to turn it on          */
+} psygp_priors;
 
 /* Run description. Zero-initialize it and set only what you need.
  * Required: n_dims in [1, PSYGP_MAX_DIMS], lo[d] < hi[d] for each, and at
@@ -1667,6 +2436,31 @@ typedef struct psygp_desc {
                                    * CANDIDATES. Last in the struct so the
                                    * fields before it keep their offsets.   */
     psygp_model  model;           /* GP (0) by default; see MODEL           */
+    psygp_priors priors;          /* 0 = the measured defaults; see
+                                   * HYPERPARAMETERS                        */
+    bool         minimize;        /* the optimization acquisitions and
+                                   * psygp_argmax() minimize the target
+                                   * quantity instead of maximizing it     */
+    psygp_dim_kind dim_kind[PSYGP_MAX_DIMS]; /* CONTINUOUS (0) by default;
+                                   * see KERNELS                            */
+    int          dim_levels[PSYGP_MAX_DIMS]; /* a CATEGORICAL dimension's
+                                   * level count, at least 2                */
+    unsigned     monotone_dims;   /* bit d set: the posterior mean is
+                                   * projected to increase along dimension
+                                   * d; see MONOTONIC PROJECTION           */
+    int          pcg_threshold;   /* above this many trials an update's
+                                   * Newton steps solve by conjugate
+                                   * gradients; 0 = 512, negative = never.
+                                   * See MEMORY, COST AND THREADS          */
+    int          fit_max_evals;   /* a fit's objective evaluations; 0 = 40 */
+    double       fit_tol;         /* a fit has converged when no gradient
+                                   * component of its objective exceeds
+                                   * this; 0 = 1e-8. See HYPERPARAMETERS   */
+    bool         fit_pcg;         /* conjugate-gradient Newton steps in a
+                                   * fit's evaluations and in the
+                                   * psychometric model's mode search; off
+                                   * by default. See MEMORY, COST AND
+                                   * THREADS                               */
 } psygp_desc;
 
 /* --- handle ------------------------------------------------------------ */
@@ -1676,6 +2470,7 @@ typedef struct psygp_trial {
     double  y;          /* the outcome index, or the value under GAUSSIAN   */
     uint8_t proposed;   /* 1 when x is exactly what psygp_next() proposed  */
     uint8_t init;       /* 1 when the trial fell in the init phase          */
+    double  x2[PSYGP_MAX_DIMS]; /* PAIRWISE: the second stimulus            */
 } psygp_trial;
 
 /* Handle. The caller allocates it and treats every field as opaque. Must
@@ -1693,10 +2488,19 @@ typedef struct psygp_gp {
     size_t      mem_size;
     bool        mem_owned;
     double*     X;             /* N_max x n_dims                           */
+    double*     X2;            /* the same for the second stimulus of a
+                                * PAIRWISE trial                           */
     double*     y;             /* N_max                                    */
     psygp_real* Kmat;          /* N_max x N_max kernel matrix; the
                                 * threshold GP's under PSYCHOMETRIC       */
     psygp_real* Kg;            /* the log-slope GP's, PSYCHOMETRIC only    */
+    double      fit_flip;      /* level-set change of the last accepted
+                                * fit, a fraction of M; -1 before one      */
+    bool        fit_blocked;   /* the last fit was undone by the guard     */
+    psygp_priors priors;       /* desc.priors with the defaults filled in */
+    double      opt_best;      /* EI's incumbent: the best signed posterior
+                                * mean of q at a trial so far               */
+    bool        mixed;         /* some dimension is not CONTINUOUS         */
     double      ps_tol;        /* its Newton tolerance, PSYGP__PS_TOL; a
                                 * field so a gradient check can converge one
                                 * handle's mode further than a session needs */
@@ -1724,7 +2528,23 @@ typedef struct psygp_gp {
     bool        multi_cross;   /* last threshold search crossed > once     */
     psygp_stop  stop;
     bool        open;
-    psygp_trial history[PSYGP_MAX_TRIALS];
+    psygp_trial* history;      /* N_max trials, in the memory block        */
+    double      fit_delta;     /* the objective's change over the last
+                                * whole fit, as applied                    */
+    int         fit_conv;      /* how psygp_fit_step() last ended: 1 at a
+                                * stationary point, 0 out of budget        */
+    bool        fit_resume;    /* this fit continues one the budget cut    */
+    int         fit_th_n;      /* desc.fit_pcg: how many hyperparameters the
+                                * last fit evaluation had (its theta is in
+                                * the stash block), 0 when unknown         */
+    bool        stash_ok;      /* desc.fit_pcg: the stash holds the state
+                                * at the fit's current point              */
+    double      stash_val;     /* its objective                            */
+    double      stash_lm;      /* its log marginal likelihood              */
+    psygp_hyper stash_hyper;   /* its hyperparameters                      */
+    int         pcg_iters;     /* conjugate-gradient iterations the last
+                                * update's Newton steps took; 0 when they
+                                * factored                                 */
     char        error[256];
 } psygp_gp;
 
@@ -1755,6 +2575,14 @@ PSYGP_API bool        psygp_is_open(const psygp_gp* g);
  * never refines, since the caller asked for one of the listed candidates. */
 PSYGP_API int psygp_next(psygp_gp* g, double* x);
 
+/* PSYGP_LIK_PAIRWISE's psygp_next(): the pair to show, first and second.
+ * During the init phase and under RANDOM, two Halton points; under
+ * PSYGP_ACQ_BALD or BALV, the candidate with the best posterior mean utility
+ * against the candidate whose comparison with it scores highest; under
+ * THOMPSON, the argmaxes of two posterior samples. Returns 0, or a
+ * PSYGP_ERR_* below it. */
+PSYGP_API int psygp_next_pair(psygp_gp* g, double* x1, double* x2);
+
 /* psygp_next() restricted to the `n` candidate indices in `subset`. Skips
  * the init phase. */
 PSYGP_API int psygp_next_subset(psygp_gp* g, const int* subset, int n, double* x);
@@ -1773,6 +2601,15 @@ PSYGP_API int psygp_update(psygp_gp* g, const double* x, int outcome);
 
 /* The same for a continuous outcome under PSYGP_LIK_GAUSSIAN. */
 PSYGP_API int psygp_update_real(psygp_gp* g, const double* x, double y);
+/* PSYGP_LIK_PAIRWISE: x1 and x2 were compared, and outcome is 1 if x1 was
+ * preferred, 0 if x2 was. */
+PSYGP_API int psygp_update_pair(psygp_gp* g, const double* x1, const double* x2,
+                                int outcome);
+/* PSYGP_LIK_PAIRWISE: P(x1 is preferred to x2) under the posterior. The
+ * utility itself is psygp_predict_f(g, x, 0, ...) and its best stimulus is
+ * psygp_argmax(). */
+PSYGP_API double psygp_predict_pair(const psygp_gp* g, const double* x1,
+                                    const double* x2);
 
 PSYGP_API bool       psygp_done(const psygp_gp* g);
 PSYGP_API psygp_stop psygp_stop_reason(const psygp_gp* g);
@@ -1832,14 +2669,36 @@ PSYGP_API int psygp_fit_step(psygp_gp* g);
 PSYGP_API int psygp_refit(psygp_gp* g);
 
 /* Fit the hyperparameters left zero in desc.hyper, from the values in force;
- * see HYPERPARAMETERS. Works whether or not desc.fit is on, and returns 0 with
- * nothing done when fewer than two trials are recorded or no field is free.
- * Returns 0 or PSYGP_ERR_*. Expensive; see MEMORY, COST AND THREADS. */
+ * see HYPERPARAMETERS. Works whether or not desc.fit is on. Returns 1 when
+ * the fit converged (no gradient component above desc.fit_tol, a step that
+ * can no longer move, or nothing to fit: fewer than two trials or no free
+ * field), 0 when it spent desc.fit_max_evals evaluations first or a guard
+ * undid it (call it again to continue from where it stopped), or
+ * PSYGP_ERR_*. psygp_fit_delta() is the objective's change. Expensive; see
+ * MEMORY, COST AND THREADS. */
 PSYGP_API int psygp_fit(psygp_gp* g);
+
+/* The change in the fit objective (log marginal plus log prior) over the last
+ * whole fit, psygp_fit() or a scheduled one, as applied: 0 when a guard undid
+ * it. Repeating psygp_fit() until this is small is how to converge a fit that
+ * the evaluation budget stops. NAN on a closed handle. */
+PSYGP_API double psygp_fit_delta(const psygp_gp* g);
 
 /* The hyperparameters in force, and the log marginal likelihood of the
  * current fit (Laplace-approximate, or exact under GAUSSIAN). */
 PSYGP_API int    psygp_get_hyper(const psygp_gp* g, psygp_hyper* out);
+/* The stimulus the posterior mean of the target quantity is highest at
+ * (lowest under desc.minimize): the best candidate, refined by
+ * desc.refine_steps as psygp_next() refines. Fills x[n_dims] and, if value is
+ * not NULL, the posterior mean of the target quantity there. Returns the
+ * candidate index, -1 for a refined point, or a PSYGP_ERR_* below -1. The
+ * optimization counterpart of psygp_threshold(). */
+PSYGP_API int    psygp_argmax(psygp_gp* g, double* x, double* value);
+
+/* The priors in force: desc.priors with every zero replaced by its default
+ * for this model and box, and a prior that is off (negative sd, or
+ * desc.no_hyper_prior) reported with sd -1. */
+PSYGP_API int    psygp_get_priors(const psygp_gp* g, psygp_priors* out);
 PSYGP_API double psygp_log_marginal(const psygp_gp* g);
 
 /* --- candidates and history -------------------------------------------- */
@@ -1849,6 +2708,20 @@ PSYGP_API int psygp_candidate(const psygp_gp* g, int index, double* x);
 
 PSYGP_API int                psygp_n_trials(const psygp_gp* g);
 PSYGP_API const psygp_trial* psygp_history(const psygp_gp* g, int* n);
+
+/* --- snapshots --------------------------------------------------------- */
+
+/* Snapshot: bytes needed (0 on a closed handle); write them (returns the
+ * bytes written, or PSYGP_ERR_ARG when cap is too small); and rebuild an open
+ * handle from them. `desc` re-supplies the pointers (rng and rng_ctx,
+ * candidates, memory) and must agree with the snapshot on every number; a
+ * mismatch, a wrong magic, format or PSYGP_REAL, or a truncated or corrupt
+ * snapshot fails the load with a message in psygp_error() and leaves the
+ * handle closed. SNAPSHOTS gives the layout. */
+PSYGP_API size_t psygp_save_size(const psygp_gp* g);
+PSYGP_API int    psygp_save(const psygp_gp* g, void* buf, size_t cap);
+PSYGP_API bool   psygp_load(psygp_gp* g, const psygp_desc* desc, const void* buf,
+                            size_t len);
 
 /* --- simulation -------------------------------------------------------- */
 
@@ -2363,6 +3236,17 @@ static double psygp__dotrr(const psygp_real* a, const psygp_real* b, int n) {
 /* Everything is row-major with an explicit leading dimension, so an N x N
  * matrix keeps its stride while N grows with the trial count. */
 
+/* Copies with an int count, as loops rather than memcpy: a count that reaches
+ * memcpy as size_t after a signed multiply is one gcc's -Wstringop-overflow can
+ * prove "may be negative" under _FORTIFY_SOURCE at -O3, and every count here is
+ * a trial, dimension or parameter count that is never negative. */
+static void psygp__copy(double* dst, const double* src, int n) {
+    for (int i = 0; i < n; i++) dst[i] = src[i];
+}
+static void psygp__copyr(psygp_real* dst, const psygp_real* src, int n) {
+    for (int i = 0; i < n; i++) dst[i] = src[i];
+}
+
 /* In-place lower Cholesky of the lower triangle. The upper triangle is left
  * alone. Returns false on a non-positive pivot, which is the one numeric
  * failure the API reports. */
@@ -2406,18 +3290,24 @@ static void psygp__gemv(const psygp_real* A, int n, int ld, const double* x,
     for (int i = 0; i < n; i++) y[i] = psygp__dotr(A + (size_t)i * ld, x, n);
 }
 
-/* Invert a lower-triangular factor in place. Column order matters: row i is
- * read for columns j..i-1 before column j of it is overwritten, so j must run
- * upward. */
-static void psygp__tri_inv(psygp_real* L, int n, int ld) {
+/* Invert a lower-triangular factor in place, row by row: row i of the
+ * inverse is -(sum_k L_ik Linv_kj) / L_ii over the rows k < i already
+ * inverted. The sums run k outer and j inner, so every access walks a row
+ * (the column walk this replaced was a cache miss per term at N = 500, three
+ * times slower), and each acc[j] still adds its terms in increasing k from
+ * k = j, the order of the column form, so the result is the same to the bit.
+ * acc holds n doubles. */
+static void psygp__tri_inv(psygp_real* L, int n, int ld, double* acc) {
     for (int i = 0; i < n; i++) {
         psygp_real* ri = L + (size_t)i * ld;
         double inv = 1.0 / ri[i];
-        for (int j = 0; j < i; j++) {
-            double s = 0.0;
-            for (int k = j; k < i; k++) s += (double)ri[k] * L[(size_t)k * ld + j];
-            ri[j] = (psygp_real)(-s * inv);
+        for (int j = 0; j < i; j++) acc[j] = 0.0;
+        for (int k = 0; k < i; k++) {
+            const psygp_real* rk = L + (size_t)k * ld;
+            double a = (double)ri[k];
+            for (int j = 0; j <= k; j++) acc[j] += a * rk[j];
         }
+        for (int j = 0; j < i; j++) ri[j] = (psygp_real)(-acc[j] * inv);
         ri[i] = (psygp_real)inv;
     }
 }
@@ -2473,11 +3363,13 @@ static void psygp__lu_solve(const psygp_real* A, int n, int ld, const double* pi
  * each one is staged in `tmp` before it overwrites the row it was read from. */
 static void psygp__tri_sqr(psygp_real* A, int n, int ld, double* tmp) {
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j <= i; j++) {
-            double s = 0.0;
-            for (int k = i; k < n; k++)
-                s += (double)A[(size_t)k * ld + i] * A[(size_t)k * ld + j];
-            tmp[j] = s;
+        /* k outer, j inner: rows, not columns, and each tmp[j] still sums in
+         * increasing k from k = i, so the bits are the column form's. */
+        for (int j = 0; j <= i; j++) tmp[j] = 0.0;
+        for (int k = i; k < n; k++) {
+            const psygp_real* rk = A + (size_t)k * ld;
+            double a = (double)rk[i];
+            for (int j = 0; j <= i; j++) tmp[j] += a * rk[j];
         }
         for (int j = 0; j <= i; j++) {
             A[(size_t)i * ld + j] = (psygp_real)tmp[j];
@@ -2546,19 +3438,35 @@ typedef struct psygp__scr {
     double* ps_c;     /* 5 x M: (m, g) posteriors at the candidates, the same */
     psygp_real* ps_v; /* 2M x Nmax: L^-1 U' k(X, c) for m and g, EAVC only    */
     double* ps_p0;    /* M: P(level) now, EAVC's baseline                     */
+    psygp_real* stL;  /* Nmax x Nmax: the fit's accepted factor, fit_pcg only */
+    double* stv;      /* the fit's accepted vectors and theta, fit_pcg only   */
 } psygp__scr;
 
 /* One walk of the arena for both jobs: psygp_memory_size() calls it with a
  * null base to add up the bytes, psygp_open() and every hot function call it
  * with the real base to get their pointers. One function, so the size and the
  * layout cannot drift apart. */
+/* The fit's stash: f, W, grad, alpha, sqrt(W) and the psychometric vectors,
+ * N each, then the theta the stash was taken at. */
+#define PSYGP__STV (5 + PSYGP__PS_VEC)
+
+/* desc.fit_pcg applies to the one-latent Laplace (BERNOULLI, ORDINAL,
+ * PAIRWISE) and the psychometric model; GAUSSIAN has no Newton step and
+ * CATEGORICAL's is K coupled factorizations. */
+static bool psygp__fpcg_desc(const psygp_desc* d) {
+    return d->fit_pcg && (d->model == PSYGP_MODEL_PSYCHOMETRIC ||
+                          (d->lik != PSYGP_LIK_GAUSSIAN && d->lik != PSYGP_LIK_CATEGORICAL));
+}
+
 static size_t psygp__layout(const psygp_desc* d, int Nmax, int M, int K,
                             unsigned char* base, psygp_gp* g, psygp__scr* s) {
     size_t off = 0;
     int nd = d->n_dims;
+    bool fpcg = psygp__fpcg_desc(d);
     bool cat  = (d->lik == PSYGP_LIK_CATEGORICAL);
     bool ps   = (d->model == PSYGP_MODEL_PSYCHOMETRIC);
-    bool look = (d->acq == PSYGP_ACQ_EAVC) && !ps;
+    bool pair = (d->lik == PSYGP_LIK_PAIRWISE);
+    bool look = (d->acq == PSYGP_ACQ_EAVC || d->acq == PSYGP_ACQ_THOMPSON || pair) && !ps;
     bool pslook = (d->acq == PSYGP_ACQ_EAVC) && ps;
 
 #define PSYGP__TAKE(pp, count) do {                                  \
@@ -2575,7 +3483,12 @@ static size_t psygp__layout(const psygp_desc* d, int Nmax, int M, int K,
                 / sizeof(double)) * sizeof(double);                  \
     } while (0)
 
+    /* The history first: psygp_trial holds doubles, so its size is a whole
+     * number of them and the blocks after it stay aligned. */
+    if (base && g) g->history = (psygp_trial*)(base + off);
+    off += (size_t)Nmax * sizeof(psygp_trial);
     PSYGP__TAKE(g ? &g->X : NULL,       (size_t)Nmax * nd);
+    PSYGP__TAKE(g ? &g->X2 : NULL,      pair ? (size_t)Nmax * nd : 0);
     PSYGP__TAKE(g ? &g->y : NULL,       (size_t)Nmax);
     PSYGP__TAKER(g ? &g->Kmat : NULL,   (size_t)Nmax * Nmax);
     PSYGP__TAKER(g ? &g->L : NULL,      (size_t)K * Nmax * Nmax);
@@ -2616,6 +3529,8 @@ static size_t psygp__layout(const psygp_desc* d, int Nmax, int M, int K,
     PSYGP__TAKE(s ? &s->ps_c : NULL,    ps ? (size_t)5 * M : 0);
     PSYGP__TAKER(s ? &s->ps_v : NULL,   pslook ? (size_t)2 * M * Nmax : 0);
     PSYGP__TAKE(s ? &s->ps_p0 : NULL,   pslook ? (size_t)M : 0);
+    PSYGP__TAKER(s ? &s->stL : NULL,    fpcg ? (size_t)Nmax * Nmax : 0);
+    PSYGP__TAKE(s ? &s->stv : NULL,     fpcg ? (size_t)PSYGP__STV * Nmax + PSYGP__NTHETA : 0);
 #undef PSYGP__TAKE
 #undef PSYGP__TAKER
     return off;
@@ -2646,6 +3561,62 @@ static void psygp__err(char* buf, size_t cap, const char* fmt, ...) {
     va_end(ap);
 }
 
+/* The value a coordinate stands for: the nearest integer, or level, on a
+ * dimension that is not CONTINUOUS. Rounding here and not only where stimuli
+ * are made means a prediction at 1.2 on an INTEGER dimension is the
+ * prediction at 1, which is what the observer would have been shown. */
+static double psygp__coord(const psygp_desc* d, int i, double v) {
+    return d->dim_kind[i] == PSYGP_DIM_CONTINUOUS ? v : floor(v + 0.5);
+}
+
+/* One dimension's term q in exp(-q / 2), and in *dlog its derivative against
+ * log lengthscale, so dk/dlog l = k * dlog. A CATEGORICAL dimension has no
+ * distance, only same or different, and exp(-(1 - delta) / l) lets every
+ * level borrow from every other through a single fitted l: large l, the
+ * levels act alike; small l, each level is its own function. */
+static double psygp__dq(const psygp_desc* d, int i, double a, double b, double ls,
+                        double* dlog) {
+    double q;
+    if (d->dim_kind[i] == PSYGP_DIM_CATEGORICAL) {
+        q = floor(a + 0.5) != floor(b + 0.5) ? 2.0 / ls : 0.0;
+        if (dlog) *dlog = 0.5 * q;
+        return q;
+    }
+    if (d->dim_kind[i] == PSYGP_DIM_INTEGER) {
+        a = floor(a + 0.5);
+        b = floor(b + 0.5);
+    }
+    q = (a - b) / ls;
+    q *= q;
+    if (dlog) *dlog = q;
+    return q;
+}
+
+/* The span a dimension's lengthscale defaults, bounds and prior are relative
+ * to. A CATEGORICAL dimension's span in level numbers means nothing, so it
+ * gets a fixed 4: prior center and start 1 (levels correlated e^-1 = 0.37),
+ * bounds 0.2 to 8 (e^-5 to 0.88). */
+static double psygp__ls_range(const psygp_desc* d, int i) {
+    return d->dim_kind[i] == PSYGP_DIM_CATEGORICAL ? 4.0 : d->hi[i] - d->lo[i];
+}
+
+/* A dimension's point count on a product grid: its levels when CATEGORICAL,
+ * whatever grid[] says (0 or the level count). */
+static int psygp__grid_n(const psygp_desc* d, int i) {
+    return d->dim_kind[i] == PSYGP_DIM_CATEGORICAL ? d->dim_levels[i] : d->grid[i];
+}
+
+/* A unit-interval draw as a coordinate: uniform over the box, or over the
+ * integers or levels, each with the same share. */
+static double psygp__from_unit(const psygp_desc* d, int i, double u) {
+    double n;
+    if (d->dim_kind[i] == PSYGP_DIM_CONTINUOUS)
+        return d->lo[i] + (d->hi[i] - d->lo[i]) * u;
+    n = d->hi[i] - d->lo[i];
+    u = floor(u * (n + 1.0));
+    return d->lo[i] + (u < n ? u : n);
+}
+
 /* Shared by psygp_memory_size() (which returns 0 on failure) and psygp_open()
  * (which reports why). Fills the three sizes the layout needs. */
 static bool psygp__validate(const psygp_desc* d, char* err, size_t cap,
@@ -2669,7 +3640,92 @@ static bool psygp__validate(const psygp_desc* d, char* err, size_t cap,
                    d->intensity_dim, nd - 1);
         return false;
     }
-    if (d->lik < PSYGP_LIK_BERNOULLI || d->lik > PSYGP_LIK_GAUSSIAN) {
+    for (int i = 0; i < nd; i++) {
+        psygp_dim_kind dk = d->dim_kind[i];
+        if (dk < PSYGP_DIM_CONTINUOUS || dk > PSYGP_DIM_CATEGORICAL) {
+            psygp__err(err, cap, "dim_kind[%d] = %d is not a psygp_dim_kind", i, (int)dk);
+            return false;
+        }
+        if (dk != PSYGP_DIM_CONTINUOUS && i == d->intensity_dim) {
+            psygp__err(err, cap, "dim_kind[%d]: the intensity dimension is "
+                       "CONTINUOUS; thresholds are searched along it", i);
+            return false;
+        }
+        if (dk == PSYGP_DIM_INTEGER &&
+            (floor(d->lo[i]) != d->lo[i] || floor(d->hi[i]) != d->hi[i])) {
+            psygp__err(err, cap, "dim_kind[%d] is INTEGER: lo and hi must be "
+                       "integers, not %g and %g", i, d->lo[i], d->hi[i]);
+            return false;
+        }
+        if (dk == PSYGP_DIM_CATEGORICAL &&
+            (d->dim_levels[i] < 2 || d->lo[i] != 0.0 ||
+             d->hi[i] != (double)(d->dim_levels[i] - 1))) {
+            psygp__err(err, cap, "dim_kind[%d] is CATEGORICAL: dim_levels must be "
+                       "at least 2 and the box [0, dim_levels - 1]", i);
+            return false;
+        }
+        if (dk == PSYGP_DIM_CATEGORICAL && d->grid[i] != 0 &&
+            d->grid[i] != d->dim_levels[i]) {
+            psygp__err(err, cap, "grid[%d] = %d: a CATEGORICAL dimension's grid is "
+                       "its %d levels (0 says the same)", i, d->grid[i],
+                       d->dim_levels[i]);
+            return false;
+        }
+        if (dk == PSYGP_DIM_INTEGER && d->grid[i] > (int)(d->hi[i] - d->lo[i]) + 1) {
+            psygp__err(err, cap, "grid[%d] = %d: an INTEGER dimension holds only "
+                       "%d values", i, d->grid[i], (int)(d->hi[i] - d->lo[i]) + 1);
+            return false;
+        }
+    }
+    if (d->monotone_dims) {
+        if (nd < 32 && (d->monotone_dims >> nd) != 0u) {
+            psygp__err(err, cap, "monotone_dims = 0x%x names a dimension past "
+                       "n_dims = %d", d->monotone_dims, nd);
+            return false;
+        }
+        if (d->model != PSYGP_MODEL_GP || d->lik == PSYGP_LIK_CATEGORICAL ||
+            d->lik == PSYGP_LIK_PAIRWISE) {
+            psygp__err(err, cap, "monotone_dims projects the one latent of the GP "
+                       "model: not with PSYGP_MODEL_PSYCHOMETRIC (monotone in the "
+                       "intensity already), CATEGORICAL or PAIRWISE");
+            return false;
+        }
+        for (int i = 0; i < nd; i++)
+            if (((d->monotone_dims >> i) & 1u) && d->dim_kind[i] == PSYGP_DIM_CATEGORICAL) {
+                psygp__err(err, cap, "monotone_dims: dimension %d is CATEGORICAL, "
+                           "and unordered levels have no direction", i);
+                return false;
+            }
+    }
+    if (d->candidates) {
+        for (int j = 0; j < d->n_candidates; j++)
+            for (int i = 0; i < nd; i++) {
+                double v = d->candidates[(size_t)j * nd + i];
+                if (psygp__coord(d, i, v) != v) {
+                    psygp__err(err, cap, "candidate %d: %g is not a value of "
+                               "dimension %d's kind", j, v, i);
+                    return false;
+                }
+            }
+    }
+    if (d->lik == PSYGP_LIK_PAIRWISE) {
+        if (d->model != PSYGP_MODEL_GP || d->kernel != PSYGP_KERNEL_RBF) {
+            psygp__err(err, cap, "PSYGP_LIK_PAIRWISE is the GP model with the RBF "
+                       "kernel: a comparison has no intensity to be psychometric in");
+            return false;
+        }
+        if (d->acq != PSYGP_ACQ_BALD && d->acq != PSYGP_ACQ_BALV &&
+            d->acq != PSYGP_ACQ_THOMPSON && d->acq != PSYGP_ACQ_RANDOM) {
+            psygp__err(err, cap, "PSYGP_LIK_PAIRWISE proposes pairs with BALD, BALV, "
+                       "THOMPSON or RANDOM");
+            return false;
+        }
+        if (d->guess != 0.0 || d->lapse != 0.0) {
+            psygp__err(err, cap, "guess and lapse do not apply to PSYGP_LIK_PAIRWISE");
+            return false;
+        }
+    }
+    if (d->lik < PSYGP_LIK_BERNOULLI || d->lik > PSYGP_LIK_PAIRWISE) {
         psygp__err(err, cap, "lik = %d is not a psygp_lik", (int)d->lik);
         return false;
     }
@@ -2681,9 +3737,32 @@ static bool psygp__validate(const psygp_desc* d, char* err, size_t cap,
         psygp__err(err, cap, "link = %d is not a psygp_link", (int)d->link);
         return false;
     }
-    if (d->acq < PSYGP_ACQ_LSE || d->acq > PSYGP_ACQ_RANDOM) {
+    if (d->acq == PSYGP_ACQ_THOMPSON || d->lik == PSYGP_LIK_PAIRWISE) {
+        if (d->acq == PSYGP_ACQ_THOMPSON && !d->rng) {
+            psygp__err(err, cap, "PSYGP_ACQ_THOMPSON draws a posterior sample and "
+                       "needs desc.rng");
+            return false;
+        }
+        if (d->model == PSYGP_MODEL_PSYCHOMETRIC) {
+            psygp__err(err, cap, "PSYGP_ACQ_THOMPSON is GP-model only; use UCB or EI "
+                       "with PSYGP_MODEL_PSYCHOMETRIC");
+            return false;
+        }
+    }
+    if (d->acq < PSYGP_ACQ_LSE || d->acq > PSYGP_ACQ_THOMPSON) {
         psygp__err(err, cap, "acq = %d is not a psygp_acq", (int)d->acq);
         return false;
+    }
+    {
+        const psygp_priors* pr = &d->priors;
+        if (pr->lengthscale.center < 0.0 || pr->outputscale.center < 0.0 ||
+            pr->outputscale_b.center < 0.0 || pr->outputscale_g.center < 0.0 ||
+            pr->mean_g.center < 0.0 || pr->mean_g.ceiling < 0.0 ||
+            pr->noise_sd.center < 0.0) {
+            psygp__err(err, cap, "a prior center or ceiling is negative; scales "
+                       "and rise fractions are positive (0 = the default)");
+            return false;
+        }
     }
     if (d->model != PSYGP_MODEL_GP && d->model != PSYGP_MODEL_PSYCHOMETRIC) {
         psygp__err(err, cap, "model = %d is not a psygp_model", (int)d->model);
@@ -2829,13 +3908,13 @@ static bool psygp__validate(const psygp_desc* d, char* err, size_t cap,
         if (any) {
             double prod = 1.0;
             for (int i = 0; i < nd; i++) {
-                if (d->grid[i] < 1) {
+                if (psygp__grid_n(d, i) < 1) {
                     psygp__err(err, cap,
                                "grid[%d] = %d: every dimension needs at least 1 point",
                                i, d->grid[i]);
                     return false;
                 }
-                prod *= (double)d->grid[i];
+                prod *= (double)psygp__grid_n(d, i);
             }
             if (prod > (double)PSYGP__M_CAP) {
                 psygp__err(err, cap, "the product grid has %.0f points, cap is %d",
@@ -2843,7 +3922,7 @@ static bool psygp__validate(const psygp_desc* d, char* err, size_t cap,
                 return false;
             }
             M = 1;
-            for (int i = 0; i < nd; i++) M *= d->grid[i];
+            for (int i = 0; i < nd; i++) M *= psygp__grid_n(d, i);
         } else {
             M = d->n_candidates > 0 ? d->n_candidates : 512;
         }
@@ -2852,7 +3931,8 @@ static bool psygp__validate(const psygp_desc* d, char* err, size_t cap,
         psygp__err(err, cap, "n_candidates = %d, cap is %d", M, PSYGP__M_CAP);
         return false;
     }
-    if (d->acq == PSYGP_ACQ_EAVC && M > PSYGP__M_CAP_LOOK) {
+    if ((d->acq == PSYGP_ACQ_EAVC || d->acq == PSYGP_ACQ_THOMPSON ||
+         d->lik == PSYGP_LIK_PAIRWISE) && M > PSYGP__M_CAP_LOOK) {
         psygp__err(err, cap,
                    "EAVC holds an M x M covariance: M = %d, cap is %d", M,
                    PSYGP__M_CAP_LOOK);
@@ -2885,9 +3965,14 @@ static void psygp__kparts(const psygp_gp* g, const double* xa, const double* xb,
     int nd = g->desc.n_dims, id = g->desc.intensity_dim;
     double qa = 0.0;
     if (g->desc.kernel == PSYGP_KERNEL_RBF) {
-        for (int i = 0; i < nd; i++) {
-            double dd = (xa[i] - xb[i]) / h->lengthscale[i];
-            qa += dd * dd;
+        if (g->mixed) {
+            for (int i = 0; i < nd; i++)
+                qa += psygp__dq(&g->desc, i, xa[i], xb[i], h->lengthscale[i], NULL);
+        } else {
+            for (int i = 0; i < nd; i++) {
+                double dd = (xa[i] - xb[i]) / h->lengthscale[i];
+                qa += dd * dd;
+            }
         }
         *ka = h->outputscale * exp(-0.5 * qa);
         *kb = 0.0;
@@ -2897,6 +3982,11 @@ static void psygp__kparts(const psygp_gp* g, const double* xa, const double* xb,
         for (int i = 0; i < nd; i++) {
             double dl;
             if (i == id) continue;
+            if (g->mixed) {
+                qa += psygp__dq(&g->desc, i, xa[i], xb[i], h->lengthscale[i], NULL);
+                qb += psygp__dq(&g->desc, i, xa[i], xb[i], h->lengthscale_b[i], NULL);
+                continue;
+            }
             dl = (xa[i] - xb[i]) / h->lengthscale[i];
             qa += dl * dl;
             dl = (xa[i] - xb[i]) / h->lengthscale_b[i];
@@ -2918,6 +4008,35 @@ static bool psygp__is_ps(const psygp_gp* g) {
     return g->desc.model == PSYGP_MODEL_PSYCHOMETRIC;
 }
 
+/* The covariance between trial i's latent and f(x). A trial's latent is f at
+ * its stimulus, or under PAIRWISE the difference f(x1) - f(x2), whose
+ * covariance with f(x) is the difference of two kernel values. Every
+ * predictor goes through this, so PAIRWISE predicts the utility f with the
+ * same formulas. */
+static double psygp__kx(const psygp_gp* g, int i, const double* x) {
+    int nd = g->desc.n_dims;
+    double v = psygp__kernel(g, g->X + (size_t)i * nd, x);
+    if (g->desc.lik == PSYGP_LIK_PAIRWISE)
+        v -= psygp__kernel(g, g->X2 + (size_t)i * nd, x);
+    return v;
+}
+
+/* The covariance between two trials' latents: under PAIRWISE the four-term
+ * kernel of the differences. */
+static double psygp__kt(const psygp_gp* g, int i, int j) {
+    int nd = g->desc.n_dims;
+    const double* xi = g->X + (size_t)i * nd;
+    const double* xj = g->X + (size_t)j * nd;
+    double v = psygp__kernel(g, xi, xj);
+    if (g->desc.lik == PSYGP_LIK_PAIRWISE) {
+        const double* yi = g->X2 + (size_t)i * nd;
+        const double* yj = g->X2 + (size_t)j * nd;
+        v += psygp__kernel(g, yi, yj) - psygp__kernel(g, xi, yj) -
+             psygp__kernel(g, yi, xj);
+    }
+    return v;
+}
+
 /* The two context kernels of PSYGP_MODEL_PSYCHOMETRIC, RBF-ARD over every
  * dimension but the intensity: which = 0 for the threshold GP m, 1 for the
  * log-slope GP g. With one dimension there is no context, and each GP is a
@@ -2931,6 +4050,7 @@ static double psygp__kctx(const psygp_gp* g, int which, const double* xa,
     for (int i = 0; i < nd; i++) {
         double dd;
         if (i == id) continue;
+        if (g->mixed) { q += psygp__dq(&g->desc, i, xa[i], xb[i], ls[i], NULL); continue; }
         dd = (xa[i] - xb[i]) / ls[i];
         q += dd * dd;
     }
@@ -2941,7 +4061,10 @@ static double psygp__kctx(const psygp_gp* g, int which, const double* xa,
  * and then they share the posterior of (m, g) exactly. */
 static bool psygp__same_ctx(const psygp_gp* g, const double* xa, const double* xb) {
     int nd = g->desc.n_dims, id = g->desc.intensity_dim;
-    for (int i = 0; i < nd; i++) if (i != id && xa[i] != xb[i]) return false;
+    const psygp_desc* d = &g->desc;
+    for (int i = 0; i < nd; i++)
+        if (i != id && psygp__coord(d, i, xa[i]) != psygp__coord(d, i, xb[i]))
+            return false;
     return true;
 }
 
@@ -2951,9 +4074,30 @@ static bool psygp__same_ctx(const psygp_gp* g, const double* xa, const double* x
 static double psygp__ispan(const psygp_desc* d) {
     return d->hi[d->intensity_dim] - d->lo[d->intensity_dim];
 }
-#ifndef PSYGP__PS_OS_G
-#define PSYGP__PS_OS_G 0.3
-#endif
+/* desc.priors with every zero replaced by its measured default. A negative sd
+ * stays negative (that prior off). */
+static psygp_priors psygp__priors_resolve(const psygp_desc* d) {
+    psygp_priors r = d->priors;
+    double q = 0.25 * (d->hi[d->intensity_dim] - d->lo[d->intensity_dim]);
+    bool ps = d->model == PSYGP_MODEL_PSYCHOMETRIC;
+#define PSYGP__DEF(f, v) do { if (r.f == 0.0) r.f = (v); } while (0)
+    PSYGP__DEF(lengthscale.center, 0.25);
+    PSYGP__DEF(lengthscale.sd, 1.0);
+    PSYGP__DEF(outputscale.center, ps ? q * q : 1.0);
+    PSYGP__DEF(outputscale.sd, 0.7);
+    PSYGP__DEF(outputscale_b.center, 1.0);
+    PSYGP__DEF(outputscale_b.sd, 0.7);
+    PSYGP__DEF(outputscale_g.center, 0.3);
+    PSYGP__DEF(outputscale_g.sd, 0.7);
+    PSYGP__DEF(mean.sd, 0.7);                 /* center 0 is its default */
+    PSYGP__DEF(mean_g.center, 0.25);
+    PSYGP__DEF(mean_g.sd, 1.0);
+    PSYGP__DEF(mean_g.ceiling, 1.0 / 256.0);
+    if (r.noise_sd.center == 0.0 || r.noise_sd.sd == 0.0) r.noise_sd.sd = -1.0;
+#undef PSYGP__DEF
+    return r;
+}
+
 static double psygp__ps_os_m(const psygp_desc* d) {
     double q = 0.25 * psygp__ispan(d);
     return q * q;
@@ -2990,7 +4134,7 @@ static int psygp__params_ps(const psygp_gp* g, psygp__param* p) {
         const double* lsmin = which ? d->hyper_min.lengthscale_g : d->hyper_min.lengthscale;
         const double* lsmax = which ? d->hyper_max.lengthscale_g : d->hyper_max.lengthscale;
         for (int i = 0; i < nd; i++) {
-            double range = d->hi[i] - d->lo[i];
+            double range = psygp__ls_range(d, i);
             if (i == id || ls0[i] != 0.0) continue;
             p[np].kind = which ? PSYGP__P_LSG : PSYGP__P_LS;
             p[np].dim = i; p[np].logsp = true;
@@ -3021,7 +4165,8 @@ static int psygp__params_ps(const psygp_gp* g, psygp__param* p) {
         /* A rise from 16 times the axis down to a sixty-fourth of it. */
         p[np].kind = PSYGP__P_MEANG; p[np].dim = 0; p[np].logsp = false;
         p[np].lo = psygp__pick(d->hyper_min.mean_g, log(0.25 / span));
-        p[np].hi = psygp__pick(d->hyper_max.mean_g, log(256.0 / span));
+        p[np].hi = psygp__pick(d->hyper_max.mean_g,
+                               log(1.0 / (g->priors.mean_g.ceiling * span)));
         np++;
     }
     if (d->lik == PSYGP_LIK_ORDINAL && h0->cutpoint[0] == 0.0) {
@@ -3042,7 +4187,7 @@ static int psygp__params(const psygp_gp* g, psygp__param* p) {
     bool semip = (d->kernel == PSYGP_KERNEL_SEMIP);
     if (psygp__is_ps(g)) return psygp__params_ps(g, p);
     for (int i = 0; i < nd; i++) {
-        double range = d->hi[i] - d->lo[i];
+        double range = psygp__ls_range(d, i);
         if (semip && i == id) continue;   /* no lengthscale along x */
         if (h0->lengthscale[i] != 0.0) continue;
         p[np].kind = PSYGP__P_LS; p[np].dim = i; p[np].logsp = true;
@@ -3056,7 +4201,9 @@ static int psygp__params(const psygp_gp* g, psygp__param* p) {
         p[np].hi = log(psygp__pick(d->hyper_max.outputscale, 10.0));
         np++;
     }
-    if (h0->mean == 0.0) {
+    /* A comparison sees only differences, which the mean cancels out of:
+     * under PAIRWISE it stays at hyper.mean (0) and is not fitted. */
+    if (h0->mean == 0.0 && d->lik != PSYGP_LIK_PAIRWISE) {
         p[np].kind = PSYGP__P_MEAN; p[np].dim = 0; p[np].logsp = false;
         p[np].lo = psygp__pick(d->hyper_min.mean, -5.0);
         p[np].hi = psygp__pick(d->hyper_max.mean, 5.0);
@@ -3064,7 +4211,7 @@ static int psygp__params(const psygp_gp* g, psygp__param* p) {
     }
     if (semip) {
         for (int i = 0; i < nd; i++) {
-            double range = d->hi[i] - d->lo[i];
+            double range = psygp__ls_range(d, i);
             if (i == id) continue;
             if (h0->lengthscale_b[i] != 0.0) continue;
             p[np].kind = PSYGP__P_LSB; p[np].dim = i; p[np].logsp = true;
@@ -3158,6 +4305,11 @@ static void psygp__kernel_grad(const psygp_gp* g, const psygp__param* p, int np,
         double dd;
         switch (p[i].kind) {
             case PSYGP__P_LS:
+                if (g->mixed) {
+                    psygp__dq(&g->desc, dm, xa[dm], xb[dm], h->lengthscale[dm], &dd);
+                    dk[i] = ka * dd;
+                    break;
+                }
                 dd = (xa[dm] - xb[dm]) / h->lengthscale[dm];
                 dk[i] = ka * dd * dd;
                 break;
@@ -3165,6 +4317,11 @@ static void psygp__kernel_grad(const psygp_gp* g, const psygp__param* p, int np,
                 dk[i] = ka;
                 break;
             case PSYGP__P_LSB:
+                if (g->mixed) {
+                    psygp__dq(&g->desc, dm, xa[dm], xb[dm], h->lengthscale_b[dm], &dd);
+                    dk[i] = xx * kb * dd;
+                    break;
+                }
                 dd = (xa[dm] - xb[dm]) / h->lengthscale_b[dm];
                 dk[i] = xx * kb * dd * dd;
                 break;
@@ -3179,6 +4336,15 @@ static void psygp__kernel_grad(const psygp_gp* g, const psygp__param* p, int np,
 }
 
 /* --- likelihoods -------------------------------------------------------- */
+
+/* PAIRWISE is the Bernoulli likelihood on d = f(x1) - f(x2), so every
+ * one-latent likelihood function treats the two alike. */
+static bool psygp__bern(const psygp_gp* g) {
+    return g->desc.lik == PSYGP_LIK_BERNOULLI || g->desc.lik == PSYGP_LIK_PAIRWISE;
+}
+static bool psygp__is_pair(const psygp_gp* g) {
+    return g->desc.lik == PSYGP_LIK_PAIRWISE;
+}
 
 /* The span the link is squeezed into: p = guess + span * link(f). One for a
  * likelihood the floor and ceiling do not apply to, so every formula below can
@@ -3239,7 +4405,7 @@ static void psygp__ord_G(const psygp_gp* g, double fv, int j, double* G) {
  * likelihoods. */
 static void psygp__ll(const psygp_gp* g, double fv, double yv,
                       double* lp, double* d1, double* d2, double* d3) {
-    if (g->desc.lik == PSYGP_LIK_BERNOULLI &&
+    if (psygp__bern(g) &&
         (g->desc.guess > 0.0 || g->desc.lapse > 0.0)) {
         /* p(y = 1) = guess + span link(f). The tail-stable forms below do not
          * apply once there is a floor, so this path works from the link and
@@ -3264,7 +4430,7 @@ static void psygp__ll(const psygp_gp* g, double fv, double yv,
         *d1 = r;
         *d2 = q2 / q - r * r;
         *d3 = q3 / q - 3.0 * (q2 / q) * r + 2.0 * r * r * r;
-    } else if (g->desc.lik == PSYGP_LIK_BERNOULLI) {
+    } else if (psygp__bern(g)) {
         if (g->desc.link == PSYGP_LINK_LOGIT) {
             double t = yv > 0.5 ? 1.0 : 0.0;
             double pr = psygp__sigmoid(fv), q = pr * (1.0 - pr);
@@ -3318,7 +4484,7 @@ static void psygp__ll_cut(const psygp_gp* g, double fv, double yv, int m,
 static void psygp__probs_of_f(const psygp_gp* g, double fv, double* p) {
     int link = (int)g->desc.link;
     double span = psygp__span(g);
-    if (g->desc.lik == PSYGP_LIK_BERNOULLI) {
+    if (psygp__bern(g)) {
         p[1] = g->desc.guess + span * psygp__link(link, fv);
         p[0] = 1.0 - p[1];
     } else {
@@ -3387,11 +4553,12 @@ static void psygp__kmat_row(psygp_gp* g, int n) {
         return;
     }
     for (int i = 0; i < n; i++) {
-        double v = psygp__kernel(g, g->X + (size_t)i * nd, xn);
+        double v = psygp__kt(g, i, n);
         g->Kmat[(size_t)n * ld + i] = (psygp_real)v;
         g->Kmat[(size_t)i * ld + n] = (psygp_real)v;
     }
-    g->Kmat[(size_t)n * ld + n] = (psygp_real)(psygp__kernel(g, xn, xn) + psygp__jitter(g));
+    (void)xn;
+    g->Kmat[(size_t)n * ld + n] = (psygp_real)(psygp__kt(g, n, n) + psygp__jitter(g));
 }
 
 /* The whole matrix, after a hyperparameter change. */
@@ -3400,6 +4567,81 @@ static void psygp__kmat_build(psygp_gp* g) {
 }
 
 /* --- Laplace, one latent ------------------------------------------------ */
+
+/* The relative residual a conjugate-gradient Newton solve stops at, and its
+ * iteration budget: past that many iterations a factorization is cheaper at
+ * the N where the path is on, and the step falls back to one. */
+#ifndef PSYGP__NPCG_TOL
+#define PSYGP__NPCG_TOL (sizeof(psygp_real) == sizeof(double) ? 1e-13 : 1e-6)
+#endif
+#define PSYGP__NPCG_MAX 60
+
+static bool psygp__pcg_on(const psygp_gp* g, int n) {
+    int th = g->desc.pcg_threshold == 0 ? 512 : g->desc.pcg_threshold;
+    return th >= 0 && n > th;
+}
+
+/* Solve B x = rhs, B = I + W^1/2 K W^1/2, by conjugate gradients
+ * preconditioned with the factor in g->L. That factor is B's at the previous
+ * trial's mode, bordered by the new trial's row, which is B itself at the
+ * first Newton step and close to it at every later one, so a step takes a
+ * few O(N^2) iterations where a factorization takes N^3 / 3. With u2 set, B
+ * is the psychometric model's I + U' K U, sW standing for U's m entries and u2
+ * for its g entries against g->Kg. wk holds six N-vectors. Returns the
+ * iteration count, or -1 when the budget ran out. */
+static int psygp__pcg(const psygp_gp* g, int n, const double* sW, const double* u2,
+                      const double* rhs, double rtol, double* x, double* wk) {
+    int ld = g->N_max;
+    double *r = wk, *z = wk + ld, *pv = wk + 2 * ld, *q = wk + 3 * ld, *u = wk + 4 * ld;
+    double *q2 = wk + 5 * ld;
+    double rz, rr0 = psygp__dot(rhs, rhs, n), tol;
+    for (int i = 0; i < n; i++) { x[i] = 0.0; r[i] = rhs[i]; z[i] = rhs[i]; }
+    if (!(rr0 > 0.0)) return 0;
+    tol = rtol * rtol * rr0;
+    psygp__tri_fwd(g->L, n, ld, z);
+    psygp__tri_bwd(g->L, n, ld, z);
+    psygp__copy(pv, z, n);
+    rz = psygp__dot(r, z, n);
+    for (int it = 1; it <= PSYGP__NPCG_MAX; it++) {
+        double alpha, rz2;
+        for (int i = 0; i < n; i++) u[i] = sW[i] * pv[i];
+        psygp__gemv(g->Kmat, n, ld, u, q);
+        if (u2) {
+            for (int i = 0; i < n; i++) u[i] = u2[i] * pv[i];
+            psygp__gemv(g->Kg, n, ld, u, q2);
+            for (int i = 0; i < n; i++) q[i] = pv[i] + sW[i] * q[i] + u2[i] * q2[i];
+        } else {
+            for (int i = 0; i < n; i++) q[i] = pv[i] + sW[i] * q[i];
+        }
+        alpha = rz / psygp__dot(pv, q, n);
+        if (!(alpha == alpha)) return -1;
+        for (int i = 0; i < n; i++) { x[i] += alpha * pv[i]; r[i] -= alpha * q[i]; }
+        if (psygp__dot(r, r, n) <= tol) return it;
+        psygp__copy(z, r, n);
+        psygp__tri_fwd(g->L, n, ld, z);
+        psygp__tri_bwd(g->L, n, ld, z);
+        rz2 = psygp__dot(r, z, n);
+        for (int i = 0; i < n; i++) pv[i] = z[i] + (rz2 / rz) * pv[i];
+        rz = rz2;
+    }
+    return -1;
+}
+
+/* B at the current W into g->L's lower triangle, factored. */
+static bool psygp__b_factor(psygp_gp* g, int n, const double* sW, double* logdet) {
+    int ld = g->N_max;
+    for (int i = 0; i < n; i++) {
+        const psygp_real* kr = g->Kmat + (size_t)i * ld;
+        psygp_real* br = g->L + (size_t)i * ld;
+        double si = sW[i];
+        for (int j = 0; j <= i; j++) br[j] = (psygp_real)(si * kr[j] * sW[j]);
+        br[i] += 1.0;
+    }
+    if (!psygp__chol(g->L, n, ld)) return false;
+    *logdet = 0.0;
+    for (int i = 0; i < n; i++) *logdet += log(g->L[(size_t)i * ld + i]);
+    return true;
+}
 
 /* Newton's method to the mode of the latent posterior, in the form of
  * Rasmussen & Williams Algorithm 3.1: the step goes through
@@ -3416,9 +4658,10 @@ static void psygp__kmat_build(psygp_gp* g) {
 static int psygp__laplace(psygp_gp* g, int mode) {
     psygp__scr s;
     int n = g->N, ld = g->N_max;
-    double mean = g->hyper.mean;
+    double mean = psygp__is_pair(g) ? 0.0 : g->hyper.mean;
     double *fv, *W, *d1, *sW, *a, *h, *b, *cv, *an, *hn;
     double psi = 0.0, logdet = 0.0, ll = 0.0;
+    bool pcg, border;
     psygp__scr_of(g, &s);
     fv = g->f; W = g->W; d1 = g->grad; sW = s.sW; a = s.alpha;
     h = s.t1; b = s.t2; cv = s.t3; an = s.t4; hn = s.t5;
@@ -3427,10 +4670,30 @@ static int psygp__laplace(psygp_gp* g, int mode) {
      * across steps, so f is always recomputed from alpha rather than carried
      * over. Any alpha gives a consistent pair, which is what makes a warm start
      * safe after the kernel has changed under it. */
+    /* Psi at the prior mean, the floor any mode must clear (see
+     * psygp__laplace_ps). */
+    double psi0 = 0.0;
+    for (int i = 0; i < n; i++) {
+        double lp, x1, x2, x3;
+        psygp__ll(g, mean, g->y[i], &lp, &x1, &x2, &x3);
+        psi0 += lp;
+    }
     if (mode == PSYGP__START_COLD) for (int i = 0; i < n; i++) a[i] = 0.0;
     else if (mode == PSYGP__START_ROW) a[n - 1] = 0.0;
     psygp__gemv(g->Kmat, n, ld, a, h);
     for (int i = 0; i < n; i++) fv[i] = mean + h[i];
+    /* The conjugate-gradient path needs the previous trial's factor intact,
+     * so only an update (one row added to a valid state) takes it. */
+    pcg = mode == PSYGP__START_ROW && n > 1 && g->fit_valid && g->N_fit == n - 1 &&
+          psygp__pcg_on(g, n);
+    border = pcg;
+    /* desc.fit_pcg: a fit evaluation starts from the last one's mode, and the
+     * factor that evaluation left, B at the old hyperparameters, is the
+     * preconditioner. */
+    if (!pcg && mode == PSYGP__START_KEEP && psygp__fpcg_desc(&g->desc) &&
+        g->fit_valid && g->N_fit == n)
+        pcg = true;
+    g->pcg_iters = 0;
 
     for (int it = 0; it < PSYGP__NEWTON_MAX; it++) {
         double ah = 0.0, step = 1.0;
@@ -3447,26 +4710,49 @@ static int psygp__laplace(psygp_gp* g, int mode) {
             W[i] = w;
             sW[i] = sqrt(w);
         }
+        if (border && pcg && it == 0) {
+            /* Border the previous factor with the new trial's row of B: the
+             * old sites' W is unchanged at this point, so the bordered factor
+             * is B's own and the first solve converges at once. */
+            double* row = s.blk;
+            const psygp_real* kn = g->Kmat + (size_t)(n - 1) * ld;
+            psygp_real* ln = g->L + (size_t)(n - 1) * ld;
+            double dd = 1.0 + W[n - 1] * (double)kn[n - 1];
+            for (int j = 0; j < n - 1; j++) row[j] = sW[n - 1] * (double)kn[j] * sW[j];
+            psygp__tri_fwd(g->L, n - 1, ld, row);
+            dd -= psygp__dot(row, row, n - 1);
+            if (dd > 0.0) {
+                for (int j = 0; j < n - 1; j++) ln[j] = (psygp_real)row[j];
+                ln[n - 1] = (psygp_real)sqrt(dd);
+            } else {
+                pcg = false;
+            }
+        }
         /* B = I + W^1/2 K W^1/2, lower triangle only: the Cholesky reads no
          * more than that. */
-        for (int i = 0; i < n; i++) {
-            const psygp_real* kr = g->Kmat + (size_t)i * ld;
-            psygp_real* br = g->L + (size_t)i * ld;
-            double si = sW[i];
-            for (int j = 0; j <= i; j++) br[j] = (psygp_real)(si * kr[j] * sW[j]);
-            br[i] += 1.0;
-        }
-        if (!psygp__chol(g->L, n, ld)) return PSYGP_ERR_NUMERIC;
-        logdet = 0.0;
-        for (int i = 0; i < n; i++) logdet += log(g->L[(size_t)i * ld + i]);
+        if (!pcg && !psygp__b_factor(g, n, sW, &logdet)) return PSYGP_ERR_NUMERIC;
         for (int i = 0; i < n; i++) ah += a[i] * h[i];
         psi = -0.5 * ah + ll;
 
         for (int i = 0; i < n; i++) b[i] = W[i] * h[i] + d1[i];
         psygp__gemv(g->Kmat, n, ld, b, cv);
         for (int i = 0; i < n; i++) cv[i] *= sW[i];
-        psygp__tri_fwd(g->L, n, ld, cv);
-        psygp__tri_bwd(g->L, n, ld, cv);
+        if (pcg) {
+            double* sol = s.blk + (size_t)6 * ld;
+            int k = psygp__pcg(g, n, sW, NULL, cv, PSYGP__NPCG_TOL, sol, s.blk);
+            if (k >= 0) {
+                psygp__copy(cv, sol, n);
+                g->pcg_iters += k;
+            } else {
+                /* Out of budget: factor this step and every later one. */
+                pcg = false;
+                if (!psygp__b_factor(g, n, sW, &logdet)) return PSYGP_ERR_NUMERIC;
+            }
+        }
+        if (!pcg) {
+            psygp__tri_fwd(g->L, n, ld, cv);
+            psygp__tri_bwd(g->L, n, ld, cv);
+        }
         for (int i = 0; i < n; i++) an[i] = b[i] - sW[i] * cv[i];
         psygp__gemv(g->Kmat, n, ld, an, hn);
 
@@ -3507,6 +4793,14 @@ static int psygp__laplace(psygp_gp* g, int mode) {
             step *= 0.5;
         }
         if (!moved) break;   /* no uphill step left; L still matches f */
+    }
+    /* The conjugate-gradient path never factored, and prediction and the log
+     * determinant need B's factor at the W the loop ended on: one
+     * factorization for the update instead of one per Newton step. */
+    if (pcg && !psygp__b_factor(g, n, sW, &logdet)) return PSYGP_ERR_NUMERIC;
+    if (!(psi == psi) || !(logdet == logdet) || psi - psi0 < -1e-9 * (1.0 + fabs(psi0))) {
+        if (mode != PSYGP__START_COLD) return psygp__laplace(g, PSYGP__START_COLD);
+        return PSYGP_ERR_NUMERIC;
     }
     g->log_marginal = psi - logdet;
     g->N_fit = n;
@@ -3576,16 +4870,14 @@ static int psygp__laplace_cat(psygp_gp* g, int mode) {
             if (!psygp__chol(Lc, n, ld)) return PSYGP_ERR_NUMERIC;
             /* E_c = Z'Z with Z = L_c^-1 D_c^1/2. */
             for (int i = 0; i < n; i++)
-                memcpy(s.Rm + (size_t)i * ld, Lc + (size_t)i * ld,
-                       (size_t)(i + 1) * sizeof(psygp_real));
-            psygp__tri_inv(s.Rm, n, ld);
+                psygp__copyr(s.Rm + (size_t)i * ld, Lc + (size_t)i * ld, i + 1);
+            psygp__tri_inv(s.Rm, n, ld, cv);
             for (int i = 0; i < n; i++)
                 for (int j = 0; j <= i; j++) s.Rm[(size_t)i * ld + j] = (psygp_real)(s.Rm[(size_t)i * ld + j] * sc[j]);
             psygp__tri_sqr(s.Rm, n, ld, cv);
             if (c == 0) {
                 for (int i = 0; i < n; i++)
-                    memcpy(s.Echol + (size_t)i * ld, s.Rm + (size_t)i * ld,
-                           (size_t)(i + 1) * sizeof(psygp_real));
+                    psygp__copyr(s.Echol + (size_t)i * ld, s.Rm + (size_t)i * ld, i + 1);
             } else {
                 for (int i = 0; i < n; i++)
                     for (int j = 0; j <= i; j++)
@@ -3879,11 +5171,32 @@ static double psygp__ps_sites(psygp_gp* g, const psygp__scr* s, const double* hm
 #define PSYGP__PS_TOL (sizeof(psygp_real) == sizeof(double) ? 1e-8 : 1e-5)
 #endif
 
-static int psygp__laplace_ps(psygp_gp* g, int mode) {
+/* B = I + U' K U at the current U, lower triangle, into g->L, factored. */
+static bool psygp__ps_b_factor(psygp_gp* g, int n, const double* um, const double* ug) {
+    int ld = g->N_max;
+    for (int i = 0; i < n; i++) {
+        const psygp_real* kr = g->Kmat + (size_t)i * ld;
+        const psygp_real* gr = g->Kg + (size_t)i * ld;
+        psygp_real* br = g->L + (size_t)i * ld;
+        for (int j = 0; j <= i; j++)
+            br[j] = (psygp_real)(um[i] * kr[j] * um[j] + ug[i] * gr[j] * ug[j]);
+        br[i] += 1.0;
+    }
+    return psygp__chol(g->L, n, ld);
+}
+
+/* desc.fit_pcg's mode search: psygp__laplace_ps with every Gauss-Newton solve
+ * a conjugate-gradient one preconditioned by the newest factor in g->L, and a
+ * factorization only when there is none to use (a cold start), when a solve
+ * runs out of iterations, and once at the end for the log determinant and the
+ * predictions. The Gauss-Newton search converges linearly and takes 20 to 30
+ * steps at N = 500; the factorized search factors at every one. */
+static int psygp__laplace_ps_cg(psygp_gp* g, int mode) {
     psygp__scr s;
     int n = g->N, ld = g->N_max;
     double *am, *ag, *hm, *hg, *um, *ug, *gm, *gg, *bm, *bg, *nm, *ng, *qm, *qg, *t;
-    double psi = 0.0, logdet = 0.0;
+    double psi = 0.0, logdet = 0.0, psi0;
+    bool have, fresh = false;
     psygp__scr_of(g, &s);
     am = psygp__psv(&s, ld, PSYGP__PS_AM); ag = psygp__psv(&s, ld, PSYGP__PS_AG);
     hm = psygp__psv(&s, ld, PSYGP__PS_HM); hg = psygp__psv(&s, ld, PSYGP__PS_HG);
@@ -3893,7 +5206,152 @@ static int psygp__laplace_ps(psygp_gp* g, int mode) {
     nm = psygp__psv(&s, ld, PSYGP__PS_NM); ng = psygp__psv(&s, ld, PSYGP__PS_NG);
     qm = psygp__psv(&s, ld, PSYGP__PS_QM); qg = psygp__psv(&s, ld, PSYGP__PS_QG);
     t = s.t1;
+    for (int i = 0; i < n; i++) bm[i] = bg[i] = 0.0;
+    psi0 = psygp__ps_sites(g, &s, bm, bg, false);
+    have = g->fit_valid && mode != PSYGP__START_COLD &&
+           (g->N_fit == n || (mode == PSYGP__START_ROW && g->N_fit == n - 1 && n > 1));
+    if (mode == PSYGP__START_COLD) {
+        for (int i = 0; i < n; i++) am[i] = ag[i] = 0.0;
+    } else if (mode == PSYGP__START_ROW) {
+        am[n - 1] = ag[n - 1] = 0.0;
+    }
+    psygp__gemv(g->Kmat, n, ld, am, hm);
+    psygp__gemv(g->Kg, n, ld, ag, hg);
+    g->pcg_iters = 0;
 
+    for (int it = 0; ; it++) {
+        double ll, step = 1.0;
+        bool moved = false;
+        ll = psygp__ps_sites(g, &s, hm, hg, true);
+        fresh = false;
+        if (have && it == 0 && g->N_fit == n - 1) {
+            /* A new trial: the old sites' h and U are unchanged, so the old
+             * factor bordered by the new row is B itself. */
+            double* row = s.blk;
+            const psygp_real* kn = g->Kmat + (size_t)(n - 1) * ld;
+            const psygp_real* gn = g->Kg + (size_t)(n - 1) * ld;
+            psygp_real* ln = g->L + (size_t)(n - 1) * ld;
+            double dd = 1.0 + um[n - 1] * (double)kn[n - 1] * um[n - 1] +
+                        ug[n - 1] * (double)gn[n - 1] * ug[n - 1];
+            for (int j = 0; j < n - 1; j++)
+                row[j] = um[n - 1] * (double)kn[j] * um[j] + ug[n - 1] * (double)gn[j] * ug[j];
+            psygp__tri_fwd(g->L, n - 1, ld, row);
+            dd -= psygp__dot(row, row, n - 1);
+            if (dd > 0.0) {
+                for (int j = 0; j < n - 1; j++) ln[j] = (psygp_real)row[j];
+                ln[n - 1] = (psygp_real)sqrt(dd);
+                fresh = true;
+            } else {
+                have = false;
+            }
+        }
+        if (!have) {
+            if (!psygp__ps_b_factor(g, n, um, ug)) return PSYGP_ERR_NUMERIC;
+            have = fresh = true;
+        }
+        psi = -0.5 * (psygp__dot(am, hm, n) + psygp__dot(ag, hg, n)) + ll;
+        if (it >= PSYGP__NEWTON_MAX) break;
+
+        for (int i = 0; i < n; i++) {
+            double r = um[i] * hm[i] + ug[i] * hg[i];
+            bm[i] = um[i] * r + gm[i];
+            bg[i] = ug[i] * r + gg[i];
+        }
+        psygp__gemv(g->Kmat, n, ld, bm, nm);
+        psygp__gemv(g->Kg, n, ld, bg, ng);
+        for (int i = 0; i < n; i++) t[i] = um[i] * nm[i] + ug[i] * ng[i];
+        if (fresh) {
+            psygp__tri_fwd(g->L, n, ld, t);
+            psygp__tri_bwd(g->L, n, ld, t);
+        } else {
+            double* sol = s.blk + (size_t)6 * ld;
+            int k = psygp__pcg(g, n, um, ug, t, PSYGP__NPCG_TOL, sol, s.blk);
+            if (k >= 0) {
+                psygp__copy(t, sol, n);
+                g->pcg_iters += k;
+            } else {
+                if (!psygp__ps_b_factor(g, n, um, ug)) return PSYGP_ERR_NUMERIC;
+                fresh = true;
+                psygp__tri_fwd(g->L, n, ld, t);
+                psygp__tri_bwd(g->L, n, ld, t);
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            nm[i] = bm[i] - um[i] * t[i];
+            ng[i] = bg[i] - ug[i] * t[i];
+        }
+        psygp__gemv(g->Kmat, n, ld, nm, qm);
+        psygp__gemv(g->Kg, n, ld, ng, qg);
+        {
+            double dmax = 0.0, hmax = 0.0;
+            for (int i = 0; i < n; i++) {
+                double d1 = fabs(qm[i] - hm[i]), d2 = fabs(qg[i] - hg[i]);
+                if (d1 > dmax) dmax = d1;
+                if (d2 > dmax) dmax = d2;
+                if (fabs(hm[i]) > hmax) hmax = fabs(hm[i]);
+                if (fabs(hg[i]) > hmax) hmax = fabs(hg[i]);
+            }
+            if (dmax <= g->ps_tol * (1.0 + hmax)) break;
+        }
+        for (int ls = 0; ls < 20; ls++) {
+            double ah2 = 0.0, psi2;
+            for (int i = 0; i < n; i++) {
+                double atm = am[i] + step * (nm[i] - am[i]);
+                double atg = ag[i] + step * (ng[i] - ag[i]);
+                bm[i] = hm[i] + step * (qm[i] - hm[i]);
+                bg[i] = hg[i] + step * (qg[i] - hg[i]);
+                ah2 += atm * bm[i] + atg * bg[i];
+            }
+            psi2 = -0.5 * ah2 + psygp__ps_sites(g, &s, bm, bg, false);
+            if (psi2 > psi - 1e-13 * (1.0 + fabs(psi))) {
+                for (int i = 0; i < n; i++) {
+                    am[i] += step * (nm[i] - am[i]);
+                    ag[i] += step * (ng[i] - ag[i]);
+                    hm[i] = bm[i];
+                    hg[i] = bg[i];
+                }
+                moved = true;
+                break;
+            }
+            step *= 0.5;
+        }
+        if (!moved) break;   /* the sites are still the ones at h */
+    }
+    /* The log determinant, the predictions and the gradient need B's factor
+     * at the sites the search ended on. */
+    if (!fresh && !psygp__ps_b_factor(g, n, um, ug)) return PSYGP_ERR_NUMERIC;
+    logdet = 0.0;
+    for (int i = 0; i < n; i++) logdet += log(g->L[(size_t)i * ld + i]);
+    if (!(psi == psi) || !(logdet == logdet) || psi - psi0 < -1e-9 * (1.0 + fabs(psi0))) {
+        if (mode != PSYGP__START_COLD) return psygp__laplace_ps_cg(g, PSYGP__START_COLD);
+        return PSYGP_ERR_NUMERIC;
+    }
+    g->log_marginal = psi - logdet;
+    g->N_fit = n;
+    g->fit_valid = true;
+    return PSYGP_OK;
+}
+
+static int psygp__laplace_ps(psygp_gp* g, int mode) {
+    psygp__scr s;
+    int n = g->N, ld = g->N_max;
+    double *am, *ag, *hm, *hg, *um, *ug, *gm, *gg, *bm, *bg, *nm, *ng, *qm, *qg, *t;
+    double psi = 0.0, logdet = 0.0, psi0;
+    psygp__scr_of(g, &s);
+    am = psygp__psv(&s, ld, PSYGP__PS_AM); ag = psygp__psv(&s, ld, PSYGP__PS_AG);
+    hm = psygp__psv(&s, ld, PSYGP__PS_HM); hg = psygp__psv(&s, ld, PSYGP__PS_HG);
+    um = psygp__psv(&s, ld, PSYGP__PS_UM); ug = psygp__psv(&s, ld, PSYGP__PS_UG);
+    gm = psygp__psv(&s, ld, PSYGP__PS_GM); gg = psygp__psv(&s, ld, PSYGP__PS_GG);
+    bm = psygp__psv(&s, ld, PSYGP__PS_BM); bg = psygp__psv(&s, ld, PSYGP__PS_BG);
+    nm = psygp__psv(&s, ld, PSYGP__PS_NM); ng = psygp__psv(&s, ld, PSYGP__PS_NG);
+    qm = psygp__psv(&s, ld, PSYGP__PS_QM); qg = psygp__psv(&s, ld, PSYGP__PS_QG);
+    t = s.t1;
+    if (g->desc.fit_pcg) return psygp__laplace_ps_cg(g, mode);
+
+    /* Psi at the prior mean, a = 0: the mode maximizes Psi, so a result below
+     * this is not the mode, whatever the iteration says about its steps. */
+    for (int i = 0; i < n; i++) bm[i] = bg[i] = 0.0;
+    psi0 = psygp__ps_sites(g, &s, bm, bg, false);
     if (mode == PSYGP__START_COLD) {
         for (int i = 0; i < n; i++) am[i] = ag[i] = 0.0;
     } else if (mode == PSYGP__START_ROW) {
@@ -3975,6 +5433,17 @@ static int psygp__laplace_ps(psygp_gp* g, int mode) {
             break;
         }
     }
+    /* A warm start far from the mode (a hyperparameter step that rescaled K
+     * under the old a, so h = K a and exp(g) are enormous) can run the
+     * Gauss-Newton iteration into its step cap on a plateau where the link
+     * has saturated: Psi near -1e49, every gradient zero, and nothing above
+     * to flag it. A result that is not finite, or scores below the prior
+     * mean, is not the mode; start again from the prior mean, and if that
+     * fails too, the posterior is not usable and the caller hears so. */
+    if (!(psi == psi) || !(logdet == logdet) || psi - psi0 < -1e-9 * (1.0 + fabs(psi0))) {
+        if (mode != PSYGP__START_COLD) return psygp__laplace_ps(g, PSYGP__START_COLD);
+        return PSYGP_ERR_NUMERIC;
+    }
     g->log_marginal = psi - logdet;
     g->N_fit = n;
     g->fit_valid = true;
@@ -4018,7 +5487,8 @@ static void psygp__predict_k(const psygp_gp* g, const psygp__scr* s,
     const double* sw = s->sW + (size_t)k * ld;
     const psygp_real* Lk = g->L + (size_t)k * ld * ld;
     if (n == 0) { *mu = g->hyper.mean; *var = kxx; return; }
-    for (int i = 0; i < n; i++) w1[i] = psygp__kernel(g, g->X + (size_t)i * nd, x);
+    (void)nd;
+    for (int i = 0; i < n; i++) w1[i] = psygp__kx(g, i, x);
     m = psygp__dot(al, w1, n);
     for (int i = 0; i < n; i++) w2[i] = sw[i] * w1[i];
     psygp__tri_fwd(Lk, n, ld, w2);
@@ -4056,7 +5526,7 @@ static void psygp__predict_many(const psygp_gp* g, const psygp__scr* s,
             double* row = s->blk + (size_t)(j - b0) * ld;
             kxx[j - b0] = psygp__kernel(g, xj, xj);
             for (int i = 0; i < nf; i++)
-                row[i] = psygp__kernel(g, g->X + (size_t)i * nd, xj);
+                row[i] = psygp__kx(g, i, xj);
         }
         for (int j = b0; j < b1; j++) {
             const double* row = s->blk + (size_t)(j - b0) * ld;
@@ -4069,7 +5539,7 @@ static void psygp__predict_many(const psygp_gp* g, const psygp__scr* s,
             v -= psygp__dot(wv, wv, nf);
             if (g->K > 1) {
                 double* w2 = s->t6;
-                memcpy(w2, wv, (size_t)nf * sizeof(double));
+                psygp__copy(w2, wv, nf);
                 psygp__tri_bwd(Lk, nf, ld, w2);
                 for (int i = 0; i < nf; i++) w2[i] *= sw[i];
                 psygp__tri_fwd(s->Echol, nf, ld, w2);
@@ -4080,9 +5550,117 @@ static void psygp__predict_many(const psygp_gp* g, const psygp__scr* s,
     }
 }
 
+/* --- monotonic projection ---------------------------------------------- */
+
+/* The candidate line along dimension d: the product grid's values when there
+ * is one, else as many evenly spaced points as M candidates would have along
+ * one side of a regular grid, 9 to 65 of them. */
+static int psygp__line_n(const psygp_gp* g, int d) {
+    const psygp_desc* ds = &g->desc;
+    int n, any = 0;
+    if (!ds->candidates) {
+        for (int i = 0; i < ds->n_dims; i++) if (ds->grid[i] != 0) any = 1;
+        if (any) return psygp__grid_n(ds, d);
+    }
+    n = (int)ceil(pow((double)g->M, 1.0 / (double)ds->n_dims));
+    if (n < 9) n = 9;
+    if (n > 65) n = 65;
+    return n;
+}
+
+#define PSYGP__LINE_MAX 66
+
+/* Latent 0's posterior mean alone: the projection needs the mean at many
+ * points and never their variances, and the mean is one kernel row and a dot
+ * product, where the variance is a triangular solve. */
+static double psygp__mean0(const psygp_gp* g, const psygp__scr* s, const double* x,
+                           double* w) {
+    int n = g->N_fit;
+    if (n == 0) return g->hyper.mean;
+    for (int i = 0; i < n; i++) w[i] = psygp__kx(g, i, x);
+    return g->hyper.mean + psygp__dot(s->alpha, w, n);
+}
+
+/* AEPsych's MonotonicProjectionGP: the posterior mean at x replaced by its
+ * largest value over the points below x on the candidate lines through x
+ * along every masked dimension (their product when several are masked), x
+ * itself included, whose mean the caller passes in mu. A projection of the
+ * mean; the variance and the posterior itself are left alone. */
+static double psygp__mono_mu(const psygp_gp* g, const psygp__scr* s, const double* x,
+                             double mu, double* w) {
+    const psygp_desc* d = &g->desc;
+    double vals[PSYGP_MAX_DIMS][PSYGP__LINE_MAX], y[PSYGP_MAX_DIMS];
+    int md[PSYGP_MAX_DIMS], cnt[PSYGP_MAX_DIMS], at[PSYGP_MAX_DIMS], nm = 0;
+    int nd = d->n_dims;
+    double best = mu;
+    for (int i = 0; i < nd; i++) {
+        int n, c = 0;
+        if (!((d->monotone_dims >> i) & 1u)) continue;
+        n = psygp__line_n(g, i);
+        for (int k = 0; k < n; k++) {
+            double v = psygp__coord(d, i, n == 1 ? 0.5 * (d->lo[i] + d->hi[i])
+                       : d->lo[i] + (d->hi[i] - d->lo[i]) * (double)k / (double)(n - 1));
+            if (v < x[i]) vals[nm][c++] = v;
+        }
+        vals[nm][c++] = x[i];
+        md[nm] = i;
+        cnt[nm] = c;
+        at[nm] = 0;
+        nm++;
+    }
+    psygp__copy(y, x, nd);
+    for (;;) {
+        bool self = true;
+        for (int m = 0; m < nm; m++) {
+            y[md[m]] = vals[m][at[m]];
+            if (at[m] != cnt[m] - 1) self = false;
+        }
+        if (!self) {
+            double v = psygp__mean0(g, s, y, w);
+            if (v > best) best = v;
+        }
+        {
+            int m = 0;
+            while (m < nm && ++at[m] == cnt[m]) at[m++] = 0;
+            if (m == nm) break;
+        }
+    }
+    return best;
+}
+
+/* The level-set acquisitions read the projected mean. */
+static bool psygp__mono_acq(const psygp_gp* g) {
+    psygp_acq a = g->desc.acq;
+    return g->desc.monotone_dims != 0u &&
+           (a == PSYGP_ACQ_LSE || a == PSYGP_ACQ_EAVC || a == PSYGP_ACQ_LOCALMI);
+}
+
+/* The projection of every candidate's mean. On a product grid the lines are
+ * the grid's own, and a running maximum along each masked dimension in turn
+ * gives the maximum over the lower orthant in O(M); any other set takes the
+ * point-by-point projection. */
+static void psygp__mono_cands(psygp_gp* g, const psygp__scr* s) {
+    const psygp_desc* d = &g->desc;
+    int M = g->M, nd = d->n_dims, any = 0;
+    double* mu = g->cand_mu;
+    if (!d->candidates) for (int i = 0; i < nd; i++) if (d->grid[i] != 0) any = 1;
+    if (any) {
+        for (int i = 0; i < nd; i++) {
+            int stride = 1, n = psygp__grid_n(d, i);
+            if (!((d->monotone_dims >> i) & 1u)) continue;
+            for (int k = i + 1; k < nd; k++) stride *= psygp__grid_n(d, k);
+            for (int j = 0; j < M; j++)
+                if ((j / stride) % n > 0 && mu[j - stride] > mu[j]) mu[j] = mu[j - stride];
+        }
+        return;
+    }
+    for (int j = 0; j < M; j++)
+        mu[j] = psygp__mono_mu(g, s, psygp__cand(g, j), mu[j], s->t1);
+}
+
 static void psygp__cand_fill(psygp_gp* g, int kv) {
     psygp__scr s;
-    int n = g->N_fit, ld = g->N_max, nd = g->desc.n_dims, M = g->M, K = g->K;
+    int n = g->N_fit, ld = g->N_max, M = g->M, K = g->K;
     psygp__scr_of(g, &s);
     for (int b0 = 0; b0 < M; b0 += PSYGP__BLK) {
         int b1 = b0 + PSYGP__BLK < M ? b0 + PSYGP__BLK : M;
@@ -4092,7 +5670,7 @@ static void psygp__cand_fill(psygp_gp* g, int kv) {
             double* row = s.blk + (size_t)(j - b0) * ld;
             kxx[j - b0] = psygp__kernel(g, cj, cj);
             for (int i = 0; i < n; i++)
-                row[i] = psygp__kernel(g, g->X + (size_t)i * nd, cj);
+                row[i] = psygp__kx(g, i, cj);
         }
         for (int k = 0; k < K; k++) {
             const double* al = s.alpha + (size_t)k * ld;
@@ -4114,7 +5692,7 @@ static void psygp__cand_fill(psygp_gp* g, int kv) {
                 }
                 if (K > 1) {
                     double* w2 = s.t6;
-                    memcpy(w2, wv, (size_t)n * sizeof(double));
+                    psygp__copy(w2, wv, n);
                     psygp__tri_bwd(Lk, n, ld, w2);
                     for (int i = 0; i < n; i++) w2[i] *= sw[i];
                     psygp__tri_fwd(s.Echol, n, ld, w2);
@@ -4177,43 +5755,61 @@ static void psygp__cand_cov_build(psygp_gp* g, int kv) {
  * loop with a Halton point. */
 #define PSYGP__REPEAT_MAX 3
 
-#define PSYGP__PRIOR_LS_SD 1.0
-#define PSYGP__PRIOR_OS_SD 0.7
 /* The psychometric model's mean log-slope gets a normal prior as well, centered
  * on its default: separable responses favor an infinitely steep function just as
  * they favor an infinite output scale, and a step is worse than useless here,
  * because every observation then sits in the flat tail of the link, carries no
  * curvature, and leaves the Laplace posterior of the threshold where it was. */
-#ifndef PSYGP__PRIOR_MG_SD
-#define PSYGP__PRIOR_MG_SD 1.0
+#ifndef PSYGP__EAVC_GUARD
+#define PSYGP__EAVC_GUARD 1
 #endif
 
 static double psygp__log_prior(const psygp_gp* g, const psygp__param* p, int np,
                                const double* th, double* grad) {
+    const psygp_priors* pr = &g->priors;
     double lp = 0.0;
     if (g->desc.no_hyper_prior) return 0.0;
     for (int i = 0; i < np; i++) {
         double sd, center, v;
         switch (p[i].kind) {
             case PSYGP__P_LS: case PSYGP__P_LSB: case PSYGP__P_LSG:
-                sd = PSYGP__PRIOR_LS_SD;
-                center = log(0.25 * (g->desc.hi[p[i].dim] - g->desc.lo[p[i].dim]));
+                sd = pr->lengthscale.sd;
+                center = log(pr->lengthscale.center *
+                             psygp__ls_range(&g->desc, p[i].dim));
                 break;
-            case PSYGP__P_OS: case PSYGP__P_OSB: case PSYGP__P_OSG:
-                sd = PSYGP__PRIOR_OS_SD;
-                /* log 1, or the threshold GP's default variance, which is in
-                 * squared intensity units */
-                center = p[i].kind == PSYGP__P_OS && psygp__is_ps(g)
-                         ? log(psygp__ps_os_m(&g->desc))
-                         : p[i].kind == PSYGP__P_OSG ? log(PSYGP__PS_OS_G) : 0.0;
+            case PSYGP__P_OS:
+                sd = pr->outputscale.sd;
+                center = log(pr->outputscale.center);
+                break;
+            case PSYGP__P_OSB:
+                sd = pr->outputscale_b.sd;
+                center = log(pr->outputscale_b.center);
+                break;
+            case PSYGP__P_OSG:
+                sd = pr->outputscale_g.sd;
+                center = log(pr->outputscale_g.center);
                 break;
             case PSYGP__P_MEANG:
-                sd = PSYGP__PRIOR_MG_SD;
-                center = log(4.0 / psygp__ispan(&g->desc));
+                sd = pr->mean_g.sd;
+                center = log(1.0 / (pr->mean_g.center * psygp__ispan(&g->desc)));
+                break;
+            case PSYGP__P_MEAN:
+                /* The GP model's mean on a discrete likelihood: where the
+                 * field goes far from every trial. Unconstrained, a run whose
+                 * responses are mostly one way sends it to its bound, and the
+                 * whole unsampled box with it. */
+                if (psygp__is_ps(g) || g->desc.lik == PSYGP_LIK_GAUSSIAN) continue;
+                sd = pr->mean.sd;
+                center = pr->mean.center;
+                break;
+            case PSYGP__P_NOISE:
+                sd = pr->noise_sd.sd;
+                center = pr->noise_sd.center > 0.0 ? log(pr->noise_sd.center) : 0.0;
                 break;
             default:
-                continue;                /* none on the mean or the cutpoints */
+                continue;                /* none on the cutpoints */
         }
+        if (!(sd > 0.0)) continue;       /* that prior is off */
         v = (psygp__clamp(th[i], p[i].lo, p[i].hi) - center) / sd;
         lp -= 0.5 * v * v;
         if (grad) grad[i] -= v / sd;
@@ -4284,9 +5880,8 @@ static bool psygp__fit_grad_ps(psygp_gp* g, const psygp__param* p, int np,
     /* B^-1, dense: the trace terms and the log-determinant's z-gradient read
      * every element. */
     for (int i = 0; i < n; i++)
-        memcpy(s.Rm + (size_t)i * ld, g->L + (size_t)i * ld,
-               (size_t)(i + 1) * sizeof(psygp_real));
-    psygp__tri_inv(s.Rm, n, ld);
+        psygp__copyr(s.Rm + (size_t)i * ld, g->L + (size_t)i * ld, i + 1);
+    psygp__tri_inv(s.Rm, n, ld, s.t1);
     psygp__tri_sqr(s.Rm, n, ld, s.t1);
 
     /* Per trial: the slope, the part of the true Hessian the Gauss-Newton W
@@ -4406,7 +6001,14 @@ static bool psygp__fit_grad_ps(psygp_gp* g, const psygp__param* p, int np,
                 for (int q = 0; q < np; q++) {
                     if (p[q].kind == kos) gs[q] += c * k0;
                     else if (p[q].kind == kls) {
-                        double dd = (xi[p[q].dim] - xj[p[q].dim]) / ls[p[q].dim];
+                        int dm = p[q].dim;
+                        double dd;
+                        if (g->mixed) {
+                            psygp__dq(&g->desc, dm, xi[dm], xj[dm], ls[dm], &dd);
+                            gs[q] += c * k0 * dd;
+                            continue;
+                        }
+                        dd = (xi[dm] - xj[dm]) / ls[dm];
                         gs[q] += c * k0 * dd * dd;
                     }
                 }
@@ -4462,11 +6064,22 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
     double *q, *s2, *bv, *s3, *tv, *tmp, *piv;
     double aa[PSYGP__NTHETA], tr[PSYGP__NTHETA];
     psygp__scr_of(g, &s);
-    psygp__theta_set(g, p, np, th);
-    psygp__kmat_build(g);
-    rc = psygp__infer(g, g->fit_valid && g->N_fit == g->N ? PSYGP__START_KEEP
-                                                        : PSYGP__START_COLD, 0);
-    if (rc != PSYGP_OK) { g->fit_valid = false; return rc; }
+    if (psygp__fpcg_desc(&g->desc) && g->fit_th_n == np && g->fit_valid && g->N_fit == g->N &&
+        memcmp(s.stv + (size_t)PSYGP__STV * ld, th, (size_t)np * sizeof(double)) == 0) {
+        /* desc.fit_pcg: the model already stands at these hyperparameters
+         * (the gradient step after an accepted line-search point), and a
+         * refit from its own mode would only repeat it. */
+    } else {
+        psygp__theta_set(g, p, np, th);
+        psygp__kmat_build(g);
+        rc = psygp__infer(g, g->fit_valid && g->N_fit == g->N ? PSYGP__START_KEEP
+                                                            : PSYGP__START_COLD, 0);
+        if (rc != PSYGP_OK) { g->fit_valid = false; g->fit_th_n = 0; return rc; }
+        if (psygp__fpcg_desc(&g->desc)) {
+            psygp__copy(s.stv + (size_t)PSYGP__STV * ld, th, np);
+            g->fit_th_n = np;
+        }
+    }
     *val = g->log_marginal + psygp__log_prior(g, p, np, th, NULL);
     if (!grad) return PSYGP_OK;
     if (psygp__is_ps(g)) {
@@ -4481,9 +6094,8 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
      * every element of it. Under GAUSSIAN sqrt(W) is 1 and the factor already
      * holds K + noise^2 I, so the same lines give (K + noise^2 I)^-1. */
     for (int i = 0; i < n; i++)
-        memcpy(s.Rm + (size_t)i * ld, g->L + (size_t)i * ld,
-               (size_t)(i + 1) * sizeof(psygp_real));
-    psygp__tri_inv(s.Rm, n, ld);
+        psygp__copyr(s.Rm + (size_t)i * ld, g->L + (size_t)i * ld, i + 1);
+    psygp__tri_inv(s.Rm, n, ld, tmp);
     psygp__tri_sqr(s.Rm, n, ld, tmp);
     for (int i = 0; i < n; i++)
         for (int j = 0; j < n; j++)
@@ -4548,6 +6160,19 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
             double dk[PSYGP__NTHETA];
             double wgt = (i == j) ? 1.0 : 2.0;
             psygp__kernel_grad(g, p, np, xi, g->X + (size_t)j * g->desc.n_dims, dk);
+            if (psygp__is_pair(g)) {
+                /* d(k(x1i,x1j) + k(x2i,x2j) - k(x1i,x2j) - k(x2i,x1j)) */
+                const double* yi = g->X2 + (size_t)i * g->desc.n_dims;
+                const double* xj = g->X + (size_t)j * g->desc.n_dims;
+                const double* yj = g->X2 + (size_t)j * g->desc.n_dims;
+                double d2[PSYGP__NTHETA];
+                psygp__kernel_grad(g, p, np, yi, yj, d2);
+                for (int u = 0; u < np; u++) dk[u] += d2[u];
+                psygp__kernel_grad(g, p, np, xi, yj, d2);
+                for (int u = 0; u < np; u++) dk[u] -= d2[u];
+                psygp__kernel_grad(g, p, np, yi, xj, d2);
+                for (int u = 0; u < np; u++) dk[u] -= d2[u];
+            }
             for (int t = 0; t < np; t++) {
                 if (dk[t] == 0.0) continue;
                 aa[t] += wgt * s.alpha[i] * dk[t] * s.alpha[j];
@@ -4565,7 +6190,7 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
             case PSYGP__P_LS: case PSYGP__P_OS:
             case PSYGP__P_LSB: case PSYGP__P_OSB:
                 gv = 0.5 * aa[t] - 0.5 * tr[t];
-                memcpy(bv, s.kg + (size_t)t * ld, (size_t)n * sizeof(double));
+                psygp__copy(bv, s.kg + (size_t)t * ld, n);
                 break;
             case PSYGP__P_MEAN:
                 for (int i = 0; i < n; i++) { gv += s.alpha[i]; bv[i] = 1.0; }
@@ -4591,7 +6216,7 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
              * Hessian, and an LU solve when a clamped entry means R was built
              * from something else. The implicit term is then s2' s3 (eq. 5.24). */
             if (clamped) {
-                memcpy(s3, bv, (size_t)n * sizeof(double));
+                psygp__copy(s3, bv, n);
                 psygp__lu_solve(g->L, n, ld, piv, s3);
                 for (int i = 0; i < n; i++) gv += s2[i] * s3[i];
             } else {
@@ -4624,7 +6249,7 @@ static int psygp__fit_eval(psygp_gp* g, const psygp__param* p, int np,
                 }
                 psygp__gemv(g->Kmat, n, ld, tv, bv);
                 if (clamped) {
-                    memcpy(s3, bv, (size_t)n * sizeof(double));
+                    psygp__copy(s3, bv, n);
                     psygp__lu_solve(g->L, n, ld, piv, s3);
                     for (int i = 0; i < n; i++) ex += s2[i] * s3[i];
                 } else {
@@ -4680,7 +6305,7 @@ static int psygp__fit_grad_fd(psygp_gp* g, const psygp__param* p, int np,
     tw = s.th + 5 * PSYGP__NTHETA;
     rc = psygp__fit_eval(g, p, np, th, val, NULL);
     if (rc != PSYGP_OK) return rc;
-    memcpy(tw, th, (size_t)np * sizeof(double));
+    psygp__copy(tw, th, np);
     for (int i = 0; i < np; i++) {
         double step = PSYGP__FD_STEP * (1.0 + fabs(th[i])), vp, vm;
         double hi = th[i] + step, lo = th[i] - step;
@@ -4714,9 +6339,60 @@ static int psygp__fit_value_grad(psygp_gp* g, const psygp__param* p, int np,
  * to the end. Every exit leaves the model at the best point found, so a caller
  * that stops stepping early still has a consistent posterior. */
 #define PSYGP__FIT_EVALS 40
+
+static int psygp__fit_evals_max(const psygp_gp* g) {
+    return g->desc.fit_max_evals > 0 ? g->desc.fit_max_evals : PSYGP__FIT_EVALS;
+}
 #define PSYGP__FIT_IDLE  0
 #define PSYGP__FIT_GRAD  1
 #define PSYGP__FIT_TRY   2
+
+/* desc.fit_pcg: the state at the fit's current point, so a rejected
+ * line-search point is undone by a copy instead of a refit from the rejected
+ * point's mode. */
+static void psygp__stash(psygp_gp* g, double val) {
+    psygp__scr s;
+    int n = g->N, ld = g->N_max;
+    psygp__scr_of(g, &s);
+    if (!psygp__fpcg_desc(&g->desc)) return;
+    for (int i = 0; i < n; i++)
+        psygp__copyr(s.stL + (size_t)i * ld, g->L + (size_t)i * ld, i + 1);
+    psygp__copy(s.stv, g->f, n);
+    psygp__copy(s.stv + (size_t)ld, g->W, n);
+    psygp__copy(s.stv + (size_t)2 * ld, g->grad, n);
+    psygp__copy(s.stv + (size_t)3 * ld, s.alpha, n);
+    psygp__copy(s.stv + (size_t)4 * ld, s.sW, n);
+    if (psygp__is_ps(g))
+        for (int v = 0; v < PSYGP__PS_VEC; v++)
+            psygp__copy(s.stv + (size_t)(5 + v) * ld, s.ps + (size_t)v * ld, n);
+    g->stash_val = val;
+    g->stash_lm = g->log_marginal;
+    g->stash_hyper = g->hyper;
+    g->stash_ok = true;
+}
+
+static void psygp__unstash(psygp_gp* g, const double* th, int np) {
+    psygp__scr s;
+    int n = g->N, ld = g->N_max;
+    psygp__scr_of(g, &s);
+    g->hyper = g->stash_hyper;
+    psygp__kmat_build(g);
+    for (int i = 0; i < n; i++)
+        psygp__copyr(g->L + (size_t)i * ld, s.stL + (size_t)i * ld, i + 1);
+    psygp__copy(g->f, s.stv, n);
+    psygp__copy(g->W, s.stv + (size_t)ld, n);
+    psygp__copy(g->grad, s.stv + (size_t)2 * ld, n);
+    psygp__copy(s.alpha, s.stv + (size_t)3 * ld, n);
+    psygp__copy(s.sW, s.stv + (size_t)4 * ld, n);
+    if (psygp__is_ps(g))
+        for (int v = 0; v < PSYGP__PS_VEC; v++)
+            psygp__copy(s.ps + (size_t)v * ld, s.stv + (size_t)(5 + v) * ld, n);
+    g->log_marginal = g->stash_lm;
+    g->N_fit = n;
+    g->fit_valid = true;
+    psygp__copy(s.stv + (size_t)PSYGP__STV * ld, th, np);
+    g->fit_th_n = np;
+}
 
 PSYGP_API int psygp_fit_step(psygp_gp* g) {
     psygp__scr s;
@@ -4729,6 +6405,7 @@ PSYGP_API int psygp_fit_step(psygp_gp* g) {
     np = psygp__params(g, p);
     if (np == 0 || g->N < 2) {   /* nothing free, or nothing to fit it to */
         g->fit_state = PSYGP__FIT_IDLE;
+        g->fit_conv = 1;
         return 0;
     }
     psygp__scr_of(g, &s);
@@ -4737,11 +6414,15 @@ PSYGP_API int psygp_fit_step(psygp_gp* g) {
         psygp__theta_get(g, p, np, th);
         g->fit_evals = 0;
         g->fit_back = 0;
-        g->fit_step = 0.0;
+        /* A psygp_fit() that follows one the budget stopped keeps its step:
+         * started over at 1/4 of the gradient, a small budget spends itself
+         * rediscovering the step and never moves. */
+        if (!g->fit_resume) g->fit_step = 0.0;
         g->fit_state = PSYGP__FIT_GRAD;
     }
-    if (g->fit_evals >= PSYGP__FIT_EVALS) {
+    if (g->fit_evals >= psygp__fit_evals_max(g)) {
         g->fit_state = PSYGP__FIT_IDLE;
+        g->fit_conv = 0;
         return 0;
     }
     if (g->fit_state == PSYGP__FIT_GRAD) {
@@ -4753,8 +6434,12 @@ PSYGP_API int psygp_fit_step(psygp_gp* g) {
             return rc;
         }
         g->fit_best = val;
+        psygp__stash(g, val);
         for (int i = 0; i < np; i++) if (fabs(gr[i]) > gmax) gmax = fabs(gr[i]);
-        if (!(gmax > 1e-8)) return 0;                    /* converged */
+        if (!(gmax > (g->desc.fit_tol > 0.0 ? g->desc.fit_tol : 1e-8))) {
+            g->fit_conv = 1;                             /* converged */
+            return 0;
+        }
         if (!(g->fit_step > 0.0)) g->fit_step = 0.25 / gmax;
         g->fit_back = 0;
         g->fit_state = PSYGP__FIT_TRY;
@@ -4766,12 +6451,16 @@ PSYGP_API int psygp_fit_step(psygp_gp* g) {
             cand[i] = psygp__clamp(th[i] + g->fit_step * gr[i], p[i].lo, p[i].hi);
             move += fabs(cand[i] - th[i]);
         }
-        if (move < 1e-10) { g->fit_state = PSYGP__FIT_IDLE; return 0; }
+        if (move < 1e-10) {   /* pinned at the bounds: a constrained optimum */
+            g->fit_state = PSYGP__FIT_IDLE;
+            g->fit_conv = 1;
+            return 0;
+        }
         rc = psygp__fit_eval(g, p, np, cand, &val, NULL);
         g->fit_evals++;
         if (rc == PSYGP_OK &&
             val > g->fit_best + PSYGP__FIT_TOL * (1.0 + fabs(g->fit_best))) {
-            memcpy(th, cand, (size_t)np * sizeof(double));
+            psygp__copy(th, cand, np);
             g->fit_best = val;
             g->fit_step *= 2.0;
             g->fit_state = PSYGP__FIT_GRAD;
@@ -4782,24 +6471,131 @@ PSYGP_API int psygp_fit_step(psygp_gp* g) {
          * steps. That is the second refit a step can cost. */
         g->fit_step *= 0.5;
         g->fit_back++;
-        if (psygp__fit_eval(g, p, np, th, &val, NULL) != PSYGP_OK) {
+        if (g->stash_ok) {
+            psygp__unstash(g, th, np);
+            if (g->fit_back >= 12) {
+                g->fit_state = PSYGP__FIT_IDLE;
+                g->fit_conv = 1;
+                return 0;
+            }
+            return 1;
+        }
+        rc = psygp__fit_eval(g, p, np, th, &val, NULL);
+        if (rc != PSYGP_OK ||
+            !(val >= g->fit_best - PSYGP__FIT_TOL * (1.0 + fabs(g->fit_best)))) {
+            /* The restore warm-starts from the REJECTED point's mode, which
+             * can be far from this one; if it did not come back to the value
+             * this point was accepted at, refit it from the prior mean. */
+            g->fit_valid = false;
+            rc = psygp__fit_eval(g, p, np, th, &val, NULL);
+        }
+        if (rc != PSYGP_OK) {
             g->fit_state = PSYGP__FIT_IDLE;
             return PSYGP_ERR_NUMERIC;
         }
         /* The restore is bookkeeping, not search, so it does not spend the
          * budget: what the budget counts is how much of the hyperparameter
          * space the fit is allowed to look at. */
-        if (g->fit_back >= 12) { g->fit_state = PSYGP__FIT_IDLE; return 0; }
+        if (g->fit_back >= 12) {
+            /* No uphill step at 1/4096 of the last one that worked: as
+             * stationary as this ascent can tell. */
+            g->fit_state = PSYGP__FIT_IDLE;
+            g->fit_conv = 1;
+            return 0;
+        }
         return 1;
     }
 }
 
-static int psygp__fit_run(psygp_gp* g) {
-    int rc;
+/* A whole fit, and the promise the manual makes about it checked rather than
+ * assumed: the objective afterwards is compared with the one before, and if it
+ * is worse or not finite the fit is undone and the model refitted at the
+ * hyperparameters it started from. The ascent is monotone by construction;
+ * this is the guard for the ways a Laplace refit inside it can still go
+ * wrong, and it costs one objective evaluation when nothing did. */
+/* The level-set guard's two thresholds, as fractions of the candidates: a fit
+ * that reclassifies more than PSYGP__FLIP_JUMP of them (above or below the
+ * target) right after one that reclassified fewer than PSYGP__FLIP_SETTLED is
+ * undone. See HYPERPARAMETERS for how they were set. */
+#define PSYGP__FLIP_JUMP    0.05
+#define PSYGP__FLIP_SETTLED 0.02
+
+static double psygp__q_smooth(const psygp_gp* g, const psygp__scr* s,
+                              double mu, double sd, double other);
+
+/* The candidates' classification against the target, into s->score as 0 or
+ * 1, or the number that differ from what is there. The acquisition cache is
+ * stale after a fit anyway, so its buffer is free. */
+static int psygp__level_set(psygp_gp* g, bool compare) {
+    psygp__scr s;
+    int flips = 0;
+    psygp__scr_of(g, &s);
+    psygp__cand_fill(g, -1);
+    for (int j = 0; j < g->M; j++) {
+        double above = psygp__q_smooth(g, &s, g->cand_mu[j], s.cand_sd[j], 0.0) >
+                       g->desc.target_p ? 1.0 : 0.0;
+        if (compare) flips += above != s.score[j];
+        else s.score[j] = above;
+    }
+    g->cand_valid = false;
+    return flips;
+}
+
+static int psygp__fit_run(psygp_gp* g, bool resume) {
+    psygp__param p[PSYGP__NTHETA];
+    double th0[PSYGP__NTHETA], th1[PSYGP__NTHETA], v0 = 0.0, v1;
+    int rc, np = psygp__params(g, p);
+    bool guard = g->fit_valid && np > 0 && g->N >= 2;
+    /* The level-set guard is for the GP model on a one-latent discrete
+     * likelihood, where the failure it stops was measured. */
+    bool lguard = guard && !psygp__is_ps(g) && g->K == 1 &&
+                  g->desc.lik != PSYGP_LIK_GAUSSIAN && g->desc.target_p > 0.0;
+    g->fit_delta = 0.0;
+    if (guard) {
+        psygp__theta_get(g, p, np, th0);
+        v0 = g->log_marginal + psygp__log_prior(g, p, np, th0, NULL);
+        if (!(v0 == v0)) guard = lguard = false;
+    }
+    if (lguard) psygp__level_set(g, false);
     g->fit_state = PSYGP__FIT_IDLE;
+    g->fit_resume = resume && g->fit_conv == 0 && g->fit_step > 0.0;
+    g->fit_conv = 1;
     while ((rc = psygp_fit_step(g)) > 0) { }
     g->fit_state = PSYGP__FIT_IDLE;
-    return rc;
+    g->fit_resume = false;
+    if (lguard && rc == PSYGP_OK && g->fit_valid) {
+        /* A settled model whose fit suddenly redraws the level set: the
+         * failure measured on the audiometric observer, where a data-favored
+         * short-lengthscale mode interpolates the sampled columns and sends
+         * every unsampled one to the mean. Undo it, once: a fit proposed right
+         * after an undone one is accepted, so data that really do demand the
+         * change get it one fit later. */
+        double flip = (double)psygp__level_set(g, true) / (double)g->M;
+        if (g->fit_flip >= 0.0 && g->fit_flip < PSYGP__FLIP_SETTLED &&
+            flip > PSYGP__FLIP_JUMP && !g->fit_blocked) {
+            double v;
+            g->fit_blocked = true;
+            rc = psygp__fit_eval(g, p, np, th0, &v, NULL);
+            if (rc == PSYGP_OK && !(v == v)) rc = PSYGP_ERR_NUMERIC;
+            return rc < 0 ? rc : 0;
+        }
+        g->fit_flip = flip;
+        g->fit_blocked = false;
+    }
+    if (guard) {
+        psygp__theta_get(g, p, np, th1);
+        v1 = g->fit_valid ? g->log_marginal + psygp__log_prior(g, p, np, th1, NULL)
+                          : (double)NAN;
+        if (!(v1 == v1) || v1 < v0 - PSYGP__FIT_TOL * (1.0 + fabs(v0))) {
+            double v;
+            g->fit_valid = false;              /* refit from the prior mean */
+            rc = psygp__fit_eval(g, p, np, th0, &v, NULL);
+            if (rc == PSYGP_OK && !(v == v)) rc = PSYGP_ERR_NUMERIC;
+            return rc < 0 ? rc : 0;
+        }
+        g->fit_delta = v1 - v0;
+    }
+    return rc < 0 ? rc : g->fit_conv;
 }
 
 /* --- the target quantity under the posterior ---------------------------- */
@@ -4833,7 +6629,7 @@ static double psygp__q_smooth(const psygp_gp* g, const psygp__scr* s,
                               double mu, double sd, double other) {
     double acc = 0.0;
     if (g->desc.lik == PSYGP_LIK_GAUSSIAN) return mu;
-    if (g->desc.lik == PSYGP_LIK_BERNOULLI && g->desc.link == PSYGP_LINK_PROBIT)
+    if (psygp__bern(g) && g->desc.link == PSYGP_LINK_PROBIT)
         return g->desc.guess +
                psygp__span(g) * psygp__Phi(mu / sqrt(1.0 + sd * sd));
     if (!(sd > 0.0)) return psygp__q_of_f(g, mu, other);
@@ -4875,7 +6671,7 @@ static int psygp__scen_probs(const psygp_gp* g, double fv, double other, double*
         return 2;
     }
     psygp__probs_of_f(g, fv, p);
-    return g->desc.lik == PSYGP_LIK_BERNOULLI ? 2 : g->desc.n_outcomes;
+    return psygp__bern(g) ? 2 : g->desc.n_outcomes;
 }
 
 /* BALD: the mutual information between the outcome and the latent (Houlsby et
@@ -4953,6 +6749,37 @@ static void psygp__site(const psygp_gp* g, double mu, double yv, double other,
         *d1 = dd1;
         *w = -dd2 > 0.0 ? -dd2 : 0.0;
     }
+}
+
+static bool psygp__is_opt(psygp_acq acq) {
+    return acq == PSYGP_ACQ_UCB || acq == PSYGP_ACQ_EI || acq == PSYGP_ACQ_THOMPSON;
+}
+
+static double psygp__opt_sign(const psygp_gp* g) {
+    return g->desc.minimize ? -1.0 : 1.0;
+}
+
+/* Expected improvement of the signed target quantity over g->opt_best, with f
+ * Gaussian: closed form under GAUSSIAN, where q is f itself, and a quadrature
+ * over f otherwise, since q is a monotone but nonlinear function of it. */
+static double psygp__ei(const psygp_gp* g, const psygp__scr* s, double mu,
+                        double sd, double other) {
+    double sg = psygp__opt_sign(g), best = g->opt_best, acc = 0.0;
+    if (g->desc.lik == PSYGP_LIK_GAUSSIAN) {
+        double m = sg * mu - best, z;
+        if (!(sd > 0.0)) return m > 0.0 ? m : 0.0;
+        z = m / sd;
+        return m * psygp__Phi(z) + sd * exp(-0.5 * z * z) / PSYGP__SQRT2PI;
+    }
+    if (!(sd > 0.0)) {
+        double m = sg * psygp__q_of_f(g, mu, other) - best;
+        return m > 0.0 ? m : 0.0;
+    }
+    for (int i = 0; i < PSYGP_QUAD_N; i++) {
+        double m = sg * psygp__q_of_f(g, mu + PSYGP__SQRT2 * sd * s->gh_x[i], other) - best;
+        if (m > 0.0) acc += s->gh_w[i] * m;
+    }
+    return acc / PSYGP__SQRTPI;
 }
 
 /* --- the psychometric model's predictive ------------------------------- */
@@ -5052,7 +6879,7 @@ static void psygp__ps_moments(const psygp_gp* g, const psygp__scr* s, double xin
 static int psygp__ps_mix(const psygp_gp* g, const psygp__scr* s, double xint,
                          const psygp__mg* o, double* pm, double* eh) {
     double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], pf[PSYGP_MAX_OUTCOMES];
-    int nout = g->desc.lik == PSYGP_LIK_BERNOULLI ? 2 : g->desc.n_outcomes;
+    int nout = psygp__bern(g) ? 2 : g->desc.n_outcomes;
     int nk = psygp__ps_nodes(s, o, gk, wk);
     for (int j = 0; j < nout; j++) pm[j] = 0.0;
     *eh = 0.0;
@@ -5219,6 +7046,23 @@ static double psygp__ps_score(const psygp_gp* g, const psygp__scr* s,
         case PSYGP_ACQ_BALV:
             psygp__ps_moments(g, s, xint, o, &eq, &vq);
             return vq;
+        case PSYGP_ACQ_UCB: {
+            double beta = g->desc.acq_beta > 0.0 ? g->desc.acq_beta : 1.96;
+            psygp__ps_moments(g, s, xint, o, &eq, &vq);
+            return psygp__opt_sign(g) * eq + beta * sqrt(vq);
+        }
+        case PSYGP_ACQ_EI: {
+            /* The one-latent expected improvement at each node of the g
+             * quadrature, where f is Gaussian. */
+            double gk[PSYGP_QUAD_N], wk[PSYGP_QUAD_N], acc = 0.0;
+            int nk = psygp__ps_nodes(s, o, gk, wk);
+            for (int k = 0; k < nk; k++) {
+                double muf, sdf;
+                psygp__ps_node(o, xint, gk[k], &muf, &sdf);
+                acc += wk[k] * psygp__ei(g, s, muf, sdf, 0.0);
+            }
+            return acc;
+        }
         case PSYGP_ACQ_BALD: {
             double pm[PSYGP_MAX_OUTCOMES], eh;
             int nout = psygp__ps_mix(g, s, xint, o, pm, &eh);
@@ -5240,7 +7084,7 @@ static double psygp__ps_score(const psygp_gp* g, const psygp__scr* s,
  * column. What is left is M^2 x outcomes x PSYGP_QUAD_N Gaussian CDFs. */
 static void psygp__ps_eavc(psygp_gp* g, psygp__scr* s) {
     int M = g->M, n = g->N_fit, ld = g->N_max, id = g->desc.intensity_dim;
-    int nout = g->desc.lik == PSYGP_LIK_BERNOULLI ? 2 : g->desc.n_outcomes;
+    int nout = psygp__bern(g) ? 2 : g->desc.n_outcomes;
     double ft = psygp__f_level(g, g->desc.target_p);
     double* wj = psygp__psv(s, ld, PSYGP__PS_KM);
     psygp__lvl lv[PSYGP_MAX_OUTCOMES];
@@ -5347,6 +7191,13 @@ static double psygp__score_one(const psygp_gp* g, const psygp__scr* s,
                                psygp_acq acq, double mu, double sd, double other,
                                double beta, double fstar) {
     switch (acq) {
+        case PSYGP_ACQ_UCB: {
+            double v = psygp__q_var(g, s, mu, sd, other);
+            return psygp__opt_sign(g) * psygp__q_smooth(g, s, mu, sd, other) +
+                   beta * sqrt(v > 0.0 ? v : 0.0);
+        }
+        case PSYGP_ACQ_EI:
+            return psygp__ei(g, s, mu, sd, other);
         case PSYGP_ACQ_LSE:
             return beta * sd - fabs(mu - other - fstar);
         case PSYGP_ACQ_BALV:
@@ -5401,6 +7252,7 @@ static double psygp__point_score(const psygp_gp* g, const psygp__scr* s,
         psygp__predict_k(g, s, x, c, &mus[c], &v, s->t1, s->t2);
         sds[c] = sqrt(v);
     }
+    if (psygp__mono_acq(g) && K == 1) mus[0] = psygp__mono_mu(g, s, x, mus[0], s->t1);
     for (int c = 0; c < K; c++) {
         double other = 0.0;
         if (K > 1) {
@@ -5409,9 +7261,32 @@ static double psygp__point_score(const psygp_gp* g, const psygp__scr* s,
             for (int cc = 0; cc < K; cc++) if (cc != c) fs[nr++] = mus[cc];
             other = psygp__logsumexp(fs, nr);
         }
+        if (psygp__is_opt(acq) && K > 1 && c != g->desc.target_outcome) continue;
         total += psygp__score_one(g, s, acq, mus[c], sds[c], other, beta, fstar);
     }
     return total;
+}
+
+static void psygp__target_latent(const psygp_gp* g, const psygp__scr* s,
+                                 const double* x, double* mu, double* sd,
+                                 double* other, double* w1, double* w2);
+
+/* The signed posterior mean of the target quantity at x: the objective of
+ * psygp_argmax() and of its refinement. */
+static double psygp__mean_score(const psygp_gp* g, const psygp__scr* s,
+                                const double* x) {
+    double v;
+    if (psygp__is_ps(g)) {
+        psygp__mg o;
+        psygp__ps_post(g, s, x, &o);
+        psygp__ps_moments(g, s, x[g->desc.intensity_dim], &o, &v, NULL);
+    } else {
+        double mu, sd, other;
+        psygp__target_latent(g, s, x, &mu, &sd, &other, s->t1, s->t2);
+        /* A comparison's quantity is the latent utility itself. */
+        v = psygp__is_pair(g) ? mu : psygp__q_smooth(g, s, mu, sd, other);
+    }
+    return psygp__opt_sign(g) * v;
 }
 
 /* Golden-section iterations per dimension per round: the bracket of two
@@ -5429,7 +7304,8 @@ static void psygp__refine_step(const psygp_gp* g, double* h) {
     for (int k = 0; k < nd; k++) {
         double span = d->hi[k] - d->lo[k];
         if (!d->candidates && grid)
-            h[k] = d->grid[k] > 1 ? span / (double)(d->grid[k] - 1) : 0.0;
+            h[k] = psygp__grid_n(d, k) > 1
+                 ? span / (double)(psygp__grid_n(d, k) - 1) : 0.0;
         else
             h[k] = span * pow((double)g->M, -1.0 / (double)nd);
     }
@@ -5443,34 +7319,60 @@ static void psygp__refine_step(const psygp_gp* g, double* h) {
  * straddle's own optimum, which is a different acquisition. A move is taken
  * only when it scores strictly higher, so the result is never worse than the
  * candidate by the objective it is judged on. Returns true when x moved. */
-static bool psygp__refine(const psygp_gp* g, const psygp__scr* s, double* x) {
+typedef double (*psygp__objective)(const psygp_gp* g, const psygp__scr* s,
+                                   const double* x);
+
+static bool psygp__refine(const psygp_gp* g, const psygp__scr* s, double* x,
+                          psygp__objective obj) {
     const psygp_desc* d = &g->desc;
     const double r = 0.61803398874989484820;
     double h[PSYGP_MAX_DIMS], x0[PSYGP_MAX_DIMS];
-    double fx = psygp__point_score(g, s, x);
+    double fx = obj(g, s, x);
     bool moved = false;
     psygp__refine_step(g, h);
-    memcpy(x0, x, (size_t)d->n_dims * sizeof(double));
+    psygp__copy(x0, x, d->n_dims);
     for (int round = 0; round < d->refine_steps; round++) {
         bool moved_round = false;
         for (int k = 0; k < d->n_dims; k++) {
             double a, b, c1, c2, f1, f2, keep = x[k];
+            if (d->dim_kind[k] != PSYGP_DIM_CONTINUOUS) {
+                /* No bracket to shrink: every level, or every integer within
+                 * the bracket (at least the two neighbors), is scored. */
+                double from, to, best = keep;
+                if (d->dim_kind[k] == PSYGP_DIM_CATEGORICAL) {
+                    from = d->lo[k];
+                    to = d->hi[k];
+                } else {
+                    double w = h[k] > 1.0 ? floor(h[k]) : 1.0;
+                    if (w > 16.0) w = 16.0;
+                    from = x0[k] - w > d->lo[k] ? x0[k] - w : d->lo[k];
+                    to = x0[k] + w < d->hi[k] ? x0[k] + w : d->hi[k];
+                }
+                for (double v = from; v <= to; v += 1.0) {
+                    if (v == keep) continue;
+                    x[k] = v;
+                    f1 = obj(g, s, x);
+                    if (f1 > fx) { fx = f1; best = v; moved_round = true; }
+                }
+                x[k] = best;
+                continue;
+            }
             if (!(h[k] > 0.0)) continue;
             a = x0[k] - h[k] > d->lo[k] ? x0[k] - h[k] : d->lo[k];
             b = x0[k] + h[k] < d->hi[k] ? x0[k] + h[k] : d->hi[k];
             c1 = b - r * (b - a);
             c2 = a + r * (b - a);
-            x[k] = c1; f1 = psygp__point_score(g, s, x);
-            x[k] = c2; f2 = psygp__point_score(g, s, x);
+            x[k] = c1; f1 = obj(g, s, x);
+            x[k] = c2; f2 = obj(g, s, x);
             for (int it = 0; it < PSYGP__GOLDEN_ITERS; it++) {
                 if (f1 >= f2) {
                     b = c2; c2 = c1; f2 = f1;
                     c1 = b - r * (b - a);
-                    x[k] = c1; f1 = psygp__point_score(g, s, x);
+                    x[k] = c1; f1 = obj(g, s, x);
                 } else {
                     a = c1; c1 = c2; f1 = f2;
                     c2 = a + r * (b - a);
-                    x[k] = c2; f2 = psygp__point_score(g, s, x);
+                    x[k] = c2; f2 = obj(g, s, x);
                 }
             }
             if (f1 >= f2 && f1 > fx) { x[k] = c1; fx = f1; moved_round = true; }
@@ -5519,6 +7421,12 @@ static void psygp__acq_class(psygp_gp* g, const psygp__scr* s, int c) {
                   : (mus[j] > s->cand_t[j] ? 1.0 : 0.0);
             V0 += s->cand_p0[j];
         }
+        /* An expected level set of no candidate or of every candidate: the
+         * model believes the level is outside the box, every look-ahead
+         * changes the volume by almost nothing, and the argmax is noise. The
+         * straddle aims at the level itself, so it walks toward the edge the
+         * level is past. */
+        if (PSYGP__EAVC_GUARD && (V0 < 0.5 || V0 > (double)M - 0.5)) acq = PSYGP_ACQ_LSE;
     }
     for (int j = 0; j < M; j++) {
         double mu = mus[j], sd = sds[j], other = 0.0, sc = 0.0;
@@ -5529,11 +7437,14 @@ static void psygp__acq_class(psygp_gp* g, const psygp__scr* s, int c) {
                 if (cc != c) fs[nr++] = g->cand_mu[(size_t)cc * M + j];
             other = psygp__logsumexp(fs, nr);
         }
+        if (psygp__is_opt(acq) && K > 1 && c != g->desc.target_outcome) continue;
         switch (acq) {
             case PSYGP_ACQ_LSE:
             case PSYGP_ACQ_BALV:
             case PSYGP_ACQ_BALD:
             case PSYGP_ACQ_LOCALMI:
+            case PSYGP_ACQ_UCB:
+            case PSYGP_ACQ_EI:
                 sc = psygp__score_one(g, s, acq, mu, sd, other, beta, fstar);
                 break;
             case PSYGP_ACQ_EAVC: {
@@ -5578,17 +7489,86 @@ static void psygp__acq_class(psygp_gp* g, const psygp__scr* s, int c) {
 }
 
 /* Score every candidate under desc.acq. */
+/* EI's incumbent: the best signed posterior mean of the target quantity at a
+ * stimulus already tried. The posterior mean and not the observed outcome,
+ * because a binary outcome is not the quantity being optimized. */
+static void psygp__opt_incumbent(psygp_gp* g) {
+    psygp__scr s;
+    int nd = g->desc.n_dims;
+    double best = -HUGE_VAL;
+    psygp__scr_of(g, &s);
+    for (int i = 0; i < g->N; i++) {
+        double v = psygp__mean_score(g, &s, g->X + (size_t)i * nd);
+        if (v > best) best = v;
+    }
+    if (g->N == 0) best = psygp__opt_sign(g) * psygp__q_smooth(g, &s, g->hyper.mean, 0.0, 0.0);
+    g->opt_best = best;
+}
+
+/* A standard normal variate from the caller's generator (Box and Muller). */
+static double psygp__normal(const psygp_gp* g) {
+    double u1 = g->desc.rng(g->desc.rng_ctx), u2 = g->desc.rng(g->desc.rng_ctx);
+    if (!(u1 > 1e-300)) u1 = 1e-300;
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * 3.14159265358979323846 * u2);
+}
+
+/* Thompson sampling: one draw of the target latent at every candidate from
+ * its joint posterior (the M x M covariance the look-ahead builds, factored
+ * with a jitter that grows until it factors), and the signed target quantity
+ * of the draw as the score. Under CATEGORICAL only the target class is drawn
+ * and the others stay at their means, the one-against-the-rest
+ * approximation of the rest of the header. */
+static void psygp__thompson(psygp_gp* g, psygp__scr* s) {
+    int M = g->M, K = g->K, kv = K > 1 ? g->desc.target_outcome : 0;
+    double sg = psygp__opt_sign(g), dmean = 0.0, jit;
+    double* z = s->cand_t;
+    bool ok = false;
+    psygp__cand_cov_build(g, kv);
+    for (int j = 0; j < M; j++) dmean += g->cand_cov[(size_t)j * M + j];
+    dmean = dmean > 0.0 ? dmean / M : 1.0;
+    for (jit = 1e-9 * dmean; jit < 1e-2 * dmean && !ok; jit *= 100.0) {
+        if (jit > 1e-9 * dmean) psygp__cand_cov_build(g, kv);
+        for (int j = 0; j < M; j++) g->cand_cov[(size_t)j * M + j] += (psygp_real)jit;
+        ok = psygp__chol(g->cand_cov, M, M);
+    }
+    for (int j = 0; j < M; j++) z[j] = psygp__normal(g);
+    for (int i = 0; i < M; i++) {
+        double f = g->cand_mu[(size_t)kv * M + i], other = 0.0;
+        if (ok) {
+            const psygp_real* row = g->cand_cov + (size_t)i * M;
+            for (int j = 0; j <= i; j++) f += row[j] * z[j];
+        } else {
+            f += s->cand_sd[(size_t)kv * M + i] * z[i];   /* independent draws */
+        }
+        if (K > 1) {
+            double fs[PSYGP_MAX_OUTCOMES] = { 0.0 };
+            int nr = 0;
+            for (int cc = 0; cc < K; cc++)
+                if (cc != kv) fs[nr++] = g->cand_mu[(size_t)cc * M + i];
+            other = psygp__logsumexp(fs, nr);
+        }
+        s->score[i] = sg * psygp__q_of_f(g, f, other);
+    }
+}
+
 static void psygp__acq_fill(psygp_gp* g) {
     psygp__scr s;
     int M = g->M, K = g->K;
     bool look = (g->desc.acq == PSYGP_ACQ_EAVC);
+    if (g->desc.acq == PSYGP_ACQ_EI) psygp__opt_incumbent(g);
     if (psygp__is_ps(g)) { psygp__ps_fill(g); return; }
     psygp__scr_of(g, &s);
     for (int j = 0; j < M; j++) s.score[j] = 0.0;
     if (g->desc.acq == PSYGP_ACQ_RANDOM) { psygp__cand_fill(g, -1); return; }
+    if (g->desc.acq == PSYGP_ACQ_THOMPSON) {
+        psygp__thompson(g, &s);
+        g->cand_valid = true;
+        return;
+    }
     for (int c = 0; c < K; c++) {
         if (look) psygp__cand_cov_build(g, c);
         else if (c == 0) psygp__cand_fill(g, -1);
+        if (psygp__mono_acq(g)) psygp__mono_cands(g, &s);
         psygp__acq_class(g, &s, c);
     }
     g->cand_valid = true;
@@ -5607,19 +7587,18 @@ static void psygp__candidates_make(psygp_gp* g) {
         for (int j = 0; j < M; j++) {
             int rest = j;
             for (int i = nd - 1; i >= 0; i--) {
-                int n = d->grid[i], k = rest % n;
+                int n = psygp__grid_n(d, i), k = rest % n;
                 rest /= n;
-                g->cand[(size_t)j * nd + i] = n == 1
+                g->cand[(size_t)j * nd + i] = psygp__coord(d, i, n == 1
                     ? 0.5 * (d->lo[i] + d->hi[i])
-                    : d->lo[i] + (d->hi[i] - d->lo[i]) * (double)k / (double)(n - 1);
+                    : d->lo[i] + (d->hi[i] - d->lo[i]) * (double)k / (double)(n - 1));
             }
         }
     } else {
         for (int j = 0; j < M; j++)
             for (int i = 0; i < nd; i++)
-                g->cand[(size_t)j * nd + i] =
-                    d->lo[i] + (d->hi[i] - d->lo[i]) *
-                    psygp__radinv((unsigned)j + 1u, psygp__nth_prime(i));
+                g->cand[(size_t)j * nd + i] = psygp__from_unit(d, i,
+                    psygp__radinv((unsigned)j + 1u, psygp__nth_prime(i)));
     }
 }
 
@@ -5631,13 +7610,13 @@ static void psygp__free_point(psygp_gp* g, double* x) {
     if (d->rng) {
         for (int i = 0; i < nd; i++) {
             double u = psygp__clamp(d->rng(d->rng_ctx), 0.0, 1.0);
-            x[i] = d->lo[i] + (d->hi[i] - d->lo[i]) * u;
+            x[i] = psygp__from_unit(d, i, u);
         }
     } else {
         g->halton_index++;
         for (int i = 0; i < nd; i++)
-            x[i] = d->lo[i] + (d->hi[i] - d->lo[i]) *
-                   psygp__radinv((unsigned)g->halton_index, psygp__nth_prime(i));
+            x[i] = psygp__from_unit(d, i,
+                   psygp__radinv((unsigned)g->halton_index, psygp__nth_prime(i)));
     }
 }
 
@@ -5666,6 +7645,15 @@ static void psygp__target_latent(const psygp_gp* g, const psygp__scr* s,
         *sd = sqrt(v);
         *other = 0.0;
     }
+}
+
+/* target_latent with the monotonic projection of the mean, for everything that
+ * reports a probability or a threshold. */
+static void psygp__target_latent_p(const psygp_gp* g, const psygp__scr* s,
+                                   const double* x, double* mu, double* sd,
+                                   double* other, double* w1, double* w2) {
+    psygp__target_latent(g, s, x, mu, sd, other, w1, w2);
+    if (g->desc.monotone_dims) *mu = psygp__mono_mu(g, s, x, *mu, w1);
 }
 
 static bool psygp__in_box(const psygp_gp* g, const double* x) {
@@ -5704,7 +7692,7 @@ static double psygp__curve(const psygp_gp* g, const psygp__scr* s, double* x,
                            double v, double nsd, double* w1, double* w2) {
     double mu, sd, other;
     x[g->desc.intensity_dim] = v;
-    psygp__target_latent(g, s, x, &mu, &sd, &other, w1, w2);
+    psygp__target_latent_p(g, s, x, &mu, &sd, &other, w1, w2);
     if (nsd == 0.0) return psygp__q_smooth(g, s, mu, sd, other);
     return psygp__q_of_f(g, mu + nsd * sd, other);
 }
@@ -5782,7 +7770,7 @@ static void psygp__hyper_defaults(psygp_gp* g) {
     const psygp_desc* d = &g->desc;
     *h = d->hyper;
     for (int i = 0; i < d->n_dims; i++) {
-        double q = 0.25 * (d->hi[i] - d->lo[i]);
+        double q = 0.25 * psygp__ls_range(d, i);
         if (h->lengthscale[i] == 0.0) h->lengthscale[i] = q;
         if (h->lengthscale_b[i] == 0.0) h->lengthscale_b[i] = q;
     }
@@ -5793,11 +7781,12 @@ static void psygp__hyper_defaults(psygp_gp* g) {
         int id = d->intensity_dim;
         for (int i = 0; i < d->n_dims; i++)
             if (h->lengthscale_g[i] == 0.0)
-                h->lengthscale_g[i] = 0.25 * (d->hi[i] - d->lo[i]);
+                h->lengthscale_g[i] = 0.25 * psygp__ls_range(d, i);
         if (d->hyper.outputscale == 0.0) h->outputscale = psygp__ps_os_m(d);
         if (h->mean == 0.0) h->mean = 0.5 * (d->lo[id] + d->hi[id]);
-        if (h->outputscale_g == 0.0) h->outputscale_g = PSYGP__PS_OS_G;
-        if (h->mean_g == 0.0) h->mean_g = log(4.0 / psygp__ispan(d));
+        if (h->outputscale_g == 0.0) h->outputscale_g = g->priors.outputscale_g.center;
+        if (h->mean_g == 0.0)
+            h->mean_g = log(1.0 / (g->priors.mean_g.center * psygp__ispan(d)));
     }
     if (d->lik == PSYGP_LIK_ORDINAL && h->cutpoint[0] == 0.0)
         for (int m = 0; m < d->n_outcomes - 1; m++) h->cutpoint[m] = (double)m;
@@ -5817,6 +7806,9 @@ PSYGP_API bool psygp_open(psygp_gp* g, const psygp_desc* desc) {
     if (!psygp__validate(desc, g->error, sizeof(g->error), &Nmax, &M, &K))
         return false;
     g->desc = *desc;
+    g->priors = psygp__priors_resolve(desc);
+    for (int i = 0; i < desc->n_dims; i++)
+        if (desc->dim_kind[i] != PSYGP_DIM_CONTINUOUS) g->mixed = true;
     g->N_max = Nmax;
     g->M = M;
     g->K = K;
@@ -5855,6 +7847,8 @@ PSYGP_API bool psygp_open(psygp_gp* g, const psygp_desc* desc) {
     g->last_index = -1;
     g->repeats = 0;
     g->ps_tol = PSYGP__PS_TOL;
+    g->fit_flip = -1.0;
+    g->fit_blocked = false;
     g->N_fit = 0;
     g->fit_valid = true;
     g->cand_valid = false;
@@ -5912,7 +7906,7 @@ static int psygp__next_impl(psygp_gp* g, const int* subset, int nsub, double* x)
     /* A proposal that has not been answered yet is handed out again, so a
      * caller that asks twice shows the same stimulus. */
     if (g->history[g->N].proposed) {
-        memcpy(x, g->history[g->N].x, (size_t)nd * sizeof(double));
+        psygp__copy(x, g->history[g->N].x, nd);
         return g->proposed;
     }
     psygp__scr_of(g, &s);
@@ -5933,7 +7927,7 @@ static int psygp__next_impl(psygp_gp* g, const int* subset, int nsub, double* x)
             }
             if (best < 0 || dd < bd) { bd = dd; best = subset[i]; }
         }
-        memcpy(x, psygp__cand(g, best), (size_t)nd * sizeof(double));
+        psygp__copy(x, psygp__cand(g, best), nd);
         g->proposed = best;
     } else {
         double ssum = 0.0;
@@ -5965,32 +7959,132 @@ static int psygp__next_impl(psygp_gp* g, const int* subset, int nsub, double* x)
             bool flat = bscore - mean <= 1e-9 * (1.0 + fabs(mean));
             g->repeats = (best == g->last_index) ? g->repeats + 1 : 1;
             g->last_index = best;
+            /* Returning to the optimum is what an optimization acquisition is
+             * for, so only the flat test applies to those. */
+            if (psygp__is_opt(g->desc.acq)) g->repeats = 0;
             if (flat || g->repeats > PSYGP__REPEAT_MAX) {
                 psygp__free_point(g, x);
                 g->repeats = 0;
                 g->last_index = -1;
                 g->proposed = -1;
-                memcpy(g->history[g->N].x, x, (size_t)nd * sizeof(double));
+                psygp__copy(g->history[g->N].x, x, nd);
                 g->history[g->N].proposed = 1;
                 g->history[g->N].init = 0;
                 return -1;
             }
         }
-        memcpy(x, psygp__cand(g, best), (size_t)nd * sizeof(double));
+        psygp__copy(x, psygp__cand(g, best), nd);
         g->proposed = best;
         /* The repeat guard above counts grid winners, not refined points, so
          * a run that keeps refining around one candidate still trips it. */
-        if (!subset && g->desc.refine_steps > 0 && psygp__refine(g, &s, x))
+        if (!subset && g->desc.refine_steps > 0 &&
+            g->desc.acq != PSYGP_ACQ_THOMPSON &&
+            psygp__refine(g, &s, x, psygp__point_score))
             g->proposed = -1;
     }
-    memcpy(g->history[g->N].x, x, (size_t)nd * sizeof(double));
+    psygp__copy(g->history[g->N].x, x, nd);
     g->history[g->N].proposed = 1;
     g->history[g->N].init = (uint8_t)((!subset && g->N < n_init) ? 1 : 0);
     return g->proposed;
 }
 
 PSYGP_API int psygp_next(psygp_gp* g, double* x) {
+    if (g && g->open && psygp__is_pair(g)) return PSYGP_ERR_CLOSED;  /* next_pair */
     return psygp__next_impl(g, NULL, 0, x);
+}
+
+/* Two standard normal draws per candidate pair of samples need the M x M
+ * factor once; this is its factorization with a jitter that grows until it
+ * factors. Returns false to fall back to independent draws. */
+static bool psygp__cand_cov_chol(psygp_gp* g, int kv) {
+    int M = g->M;
+    double dmean = 0.0, jit;
+    bool ok = false;
+    psygp__cand_cov_build(g, kv);
+    for (int j = 0; j < M; j++) dmean += g->cand_cov[(size_t)j * M + j];
+    dmean = dmean > 0.0 ? dmean / M : 1.0;
+    for (jit = 1e-9 * dmean; jit < 1e-2 * dmean && !ok; jit *= 100.0) {
+        if (jit > 1e-9 * dmean) psygp__cand_cov_build(g, kv);
+        for (int j = 0; j < M; j++) g->cand_cov[(size_t)j * M + j] += (psygp_real)jit;
+        ok = psygp__chol(g->cand_cov, M, M);
+    }
+    return ok;
+}
+
+/* The argmax over candidates of one posterior draw of the utility, skipping
+ * candidate `not`. */
+static int psygp__draw_argmax(psygp_gp* g, psygp__scr* s, bool ok, int not_j) {
+    int M = g->M, best = -1;
+    double bv = -HUGE_VAL, sg = psygp__opt_sign(g);
+    double* z = s->cand_t;
+    for (int j = 0; j < M; j++) z[j] = psygp__normal(g);
+    for (int i = 0; i < M; i++) {
+        double f = g->cand_mu[i];
+        if (ok) {
+            const psygp_real* row = g->cand_cov + (size_t)i * M;
+            for (int j = 0; j <= i; j++) f += row[j] * z[j];
+        } else {
+            f += s->cand_sd[i] * z[i];
+        }
+        if (i != not_j && (best < 0 || sg * f > bv)) { bv = sg * f; best = i; }
+    }
+    return best;
+}
+
+PSYGP_API int psygp_next_pair(psygp_gp* g, double* x1, double* x2) {
+    psygp__scr s;
+    int nd, M, j1 = -1, j2 = -1;
+    if (!g || !g->open) return PSYGP_ERR_CLOSED;
+    if (!psygp__is_pair(g) || !x1 || !x2) return PSYGP_ERR_ARG;
+    if (g->N >= g->N_max) return PSYGP_ERR_FULL;
+    nd = g->desc.n_dims;
+    M = g->M;
+    if (g->history[g->N].proposed) {      /* asked twice: the same pair */
+        psygp__copy(x1, g->history[g->N].x, nd);
+        psygp__copy(x2, g->history[g->N].x2, nd);
+        return PSYGP_OK;
+    }
+    if (!g->fit_valid) return PSYGP_ERR_NUMERIC;
+    psygp__scr_of(g, &s);
+    if (g->N < psygp__n_init(g) || g->desc.acq == PSYGP_ACQ_RANDOM) {
+        psygp__free_point(g, x1);
+        psygp__free_point(g, x2);
+    } else if (g->desc.acq == PSYGP_ACQ_THOMPSON) {
+        /* Two independent draws of the utility; each one's favorite. */
+        bool ok = psygp__cand_cov_chol(g, 0);
+        j1 = psygp__draw_argmax(g, &s, ok, -1);
+        j2 = psygp__draw_argmax(g, &s, ok, j1);
+    } else {
+        /* The best candidate so far against the one whose comparison with it
+         * is most informative: the difference d = f(x1) - f(x2) is Gaussian
+         * with variance var1 + var2 - 2 cov12, cov12 from the L^-1 W^1/2 k
+         * columns the candidate cache keeps. */
+        double sg = psygp__opt_sign(g), bv = -HUGE_VAL, bs = -HUGE_VAL;
+        int n = g->N_fit, ld = g->N_max;
+        psygp__cand_fill(g, 0);
+        for (int j = 0; j < M; j++)
+            if (j1 < 0 || sg * g->cand_mu[j] > bv) { bv = sg * g->cand_mu[j]; j1 = j; }
+        for (int j = 0; j < M; j++) {
+            double md, vd, sc, c12;
+            if (j == j1) continue;
+            c12 = psygp__kernel(g, psygp__cand(g, j1), psygp__cand(g, j)) -
+                  psygp__dotrr(s.V + (size_t)j1 * ld, s.V + (size_t)j * ld, n);
+            md = g->cand_mu[j1] - g->cand_mu[j];
+            vd = s.cand_sd[j1] * s.cand_sd[j1] + s.cand_sd[j] * s.cand_sd[j] - 2.0 * c12;
+            if (vd < 0.0) vd = 0.0;
+            sc = g->desc.acq == PSYGP_ACQ_BALV ? psygp__q_var(g, &s, md, sqrt(vd), 0.0)
+                                               : psygp__bald(g, &s, md, sqrt(vd), 0.0);
+            if (j2 < 0 || sc > bs) { bs = sc; j2 = j; }
+        }
+    }
+    if (j1 >= 0) psygp__copy(x1, psygp__cand(g, j1), nd);
+    if (j2 >= 0) psygp__copy(x2, psygp__cand(g, j2), nd);
+    g->cand_valid = false;
+    psygp__copy(g->history[g->N].x, x1, nd);
+    psygp__copy(g->history[g->N].x2, x2, nd);
+    g->history[g->N].proposed = 1;
+    g->history[g->N].init = (uint8_t)(g->N < psygp__n_init(g) ? 1 : 0);
+    return PSYGP_OK;
 }
 
 PSYGP_API int psygp_next_subset(psygp_gp* g, const int* subset, int n, double* x) {
@@ -6009,32 +8103,47 @@ PSYGP_API double psygp_acq_score(const psygp_gp* g, int index) {
     return s.score[index];
 }
 
-static int psygp__record(psygp_gp* g, const double* x, double yv) {
+static int psygp__record(psygp_gp* g, const double* x, const double* x2, double yv) {
     int n, nd, rc, n_init;
+    double xs[PSYGP_MAX_DIMS], xs2[PSYGP_MAX_DIMS];
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
-    if (!x) return PSYGP_ERR_ARG;
+    if (!x || (psygp__is_pair(g) && !x2)) return PSYGP_ERR_ARG;
     if (g->N >= g->N_max) return PSYGP_ERR_FULL;
-    if (!psygp__in_box(g, x)) return PSYGP_ERR_ARG;
+    if (!psygp__in_box(g, x) || (x2 && !psygp__in_box(g, x2))) return PSYGP_ERR_ARG;
     nd = g->desc.n_dims;
+    if (g->mixed) {
+        /* The history holds what was shown: integers and levels. */
+        for (int i = 0; i < nd; i++) xs[i] = psygp__coord(&g->desc, i, x[i]);
+        x = xs;
+        if (x2) {
+            for (int i = 0; i < nd; i++) xs2[i] = psygp__coord(&g->desc, i, x2[i]);
+            x2 = xs2;
+        }
+    }
     n = g->N;
     n_init = psygp__n_init(g);
     {
         psygp_trial* t = &g->history[n];
         bool same = t->proposed != 0;
         for (int i = 0; i < nd && same; i++) if (t->x[i] != x[i]) same = false;
-        memcpy(t->x, x, (size_t)nd * sizeof(double));
+        if (x2) for (int i = 0; i < nd && same; i++) if (t->x2[i] != x2[i]) same = false;
+        psygp__copy(t->x, x, nd);
+        if (x2) psygp__copy(t->x2, x2, nd);
         t->y = yv;
         t->proposed = (uint8_t)(same ? 1 : 0);
         t->init = (uint8_t)(n < n_init ? 1 : 0);
     }
-    memcpy(g->X + (size_t)n * nd, x, (size_t)nd * sizeof(double));
+    psygp__copy(g->X + (size_t)n * nd, x, nd);
+    if (x2) psygp__copy(g->X2 + (size_t)n * nd, x2, nd);
     g->y[n] = yv;
     g->N = n + 1;
     g->proposed = -1;
     g->cand_valid = false;
-    if (g->N < PSYGP_MAX_TRIALS) memset(&g->history[g->N], 0, sizeof(psygp_trial));
+    if (g->N < g->N_max) memset(&g->history[g->N], 0, sizeof(psygp_trial));
     psygp__kmat_row(g, n);
     g->fit_state = PSYGP__FIT_IDLE;   /* a stepped fit was fitting other data */
+    g->fit_th_n = 0;
+    g->stash_ok = false;
     /* The cheap path when desc.refit_every says so, with the exact refit as
      * the fallback if the bordered Cholesky will not factor. */
     if (psygp__can_grow(g) && (g->N % g->desc.refit_every) != 0)
@@ -6061,8 +8170,8 @@ static int psygp__record(psygp_gp* g, const double* x, double yv) {
     }
     if (g->desc.fit && g->desc.fit_every > 0 && g->N >= n_init &&
         (g->N - n_init) % g->desc.fit_every == 0) {
-        rc = psygp__fit_run(g);
-        if (rc != PSYGP_OK) { g->stop = psygp__stop_reason(g); return rc; }
+        rc = psygp__fit_run(g, false);
+        if (rc < 0) { g->stop = psygp__stop_reason(g); return rc; }
     }
     g->stop = psygp__stop_reason(g);
     return PSYGP_OK;
@@ -6071,17 +8180,44 @@ static int psygp__record(psygp_gp* g, const double* x, double yv) {
 PSYGP_API int psygp_update(psygp_gp* g, const double* x, int outcome) {
     int nout;
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
-    if (g->desc.lik == PSYGP_LIK_GAUSSIAN) return PSYGP_ERR_ARG;
-    nout = g->desc.lik == PSYGP_LIK_BERNOULLI ? 2 : g->desc.n_outcomes;
+    if (g->desc.lik == PSYGP_LIK_GAUSSIAN || psygp__is_pair(g)) return PSYGP_ERR_ARG;
+    nout = psygp__bern(g) ? 2 : g->desc.n_outcomes;
     if (outcome < 0 || outcome >= nout) return PSYGP_ERR_ARG;
-    return psygp__record(g, x, (double)outcome);
+    return psygp__record(g, x, NULL, (double)outcome);
+}
+
+PSYGP_API int psygp_update_pair(psygp_gp* g, const double* x1, const double* x2,
+                                int outcome) {
+    if (!g || !g->open) return PSYGP_ERR_CLOSED;
+    if (!psygp__is_pair(g) || (outcome != 0 && outcome != 1)) return PSYGP_ERR_ARG;
+    return psygp__record(g, x1, x2, (double)outcome);
+}
+
+PSYGP_API double psygp_predict_pair(const psygp_gp* g, const double* x1,
+                                    const double* x2) {
+    psygp__scr s;
+    double m1, v1, m2, v2, c12, vd;
+    int n, ld;
+    if (!g || !g->open || !psygp__is_pair(g) || !x1 || !x2 || !g->fit_valid ||
+        !psygp__in_box(g, x1) || !psygp__in_box(g, x2))
+        return (double)NAN;
+    psygp__scr_of(g, &s);
+    n = g->N_fit; ld = g->N_max;
+    psygp__predict_k(g, &s, x1, 0, &m1, &v1, s.t1, s.t3);
+    psygp__predict_k(g, &s, x2, 0, &m2, &v2, s.t2, s.t4);
+    /* t3 and t4 hold L^-1 W^1/2 k for the two points; their dot is the part
+     * of the prior covariance the data explain. */
+    c12 = psygp__kernel(g, x1, x2) - (n > 0 ? psygp__dot(s.t3, s.t4, n) : 0.0);
+    (void)ld;
+    vd = v1 + v2 - 2.0 * c12;
+    return psygp__q_smooth(g, &s, m1 - m2, sqrt(vd > 0.0 ? vd : 0.0), 0.0);
 }
 
 PSYGP_API int psygp_update_real(psygp_gp* g, const double* x, double y) {
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
     if (g->desc.lik != PSYGP_LIK_GAUSSIAN) return PSYGP_ERR_ARG;
     if (!(y == y)) return PSYGP_ERR_ARG;
-    return psygp__record(g, x, y);
+    return psygp__record(g, x, NULL, y);
 }
 
 /* --- public: estimates -------------------------------------------------- */
@@ -6111,7 +8247,8 @@ PSYGP_API int psygp_predict_f(const psygp_gp* g, const double* x, int k,
 PSYGP_API double psygp_predict_p(const psygp_gp* g, const double* x) {
     psygp__scr s;
     double mu, sd, other;
-    if (!g || !g->open || !x || !psygp__in_box(g, x) || !g->fit_valid)
+    if (!g || !g->open || !x || !psygp__in_box(g, x) || !g->fit_valid ||
+        psygp__is_pair(g))
         return (double)NAN;
     psygp__scr_of(g, &s);
     if (psygp__is_ps(g)) {
@@ -6121,7 +8258,7 @@ PSYGP_API double psygp_predict_p(const psygp_gp* g, const double* x) {
         psygp__ps_moments(g, &s, x[g->desc.intensity_dim], &o, &eq, NULL);
         return eq;
     }
-    psygp__target_latent(g, &s, x, &mu, &sd, &other, s.t1, s.t2);
+    psygp__target_latent_p(g, &s, x, &mu, &sd, &other, s.t1, s.t2);
     return psygp__q_smooth(g, &s, mu, sd, other);
 }
 
@@ -6156,8 +8293,8 @@ PSYGP_API int psygp_predict_f_many(const psygp_gp* g, const double* xs, int n,
         int cnt = n - b0 < PSYGP__BLK ? n - b0 : PSYGP__BLK;
         double mub[PSYGP__BLK], sdb[PSYGP__BLK];
         psygp__predict_many(g, &s, xs + (size_t)b0 * nd, cnt, k, mub, sdb);
-        if (mu) memcpy(mu + b0, mub, (size_t)cnt * sizeof(double));
-        if (sd) memcpy(sd + b0, sdb, (size_t)cnt * sizeof(double));
+        if (mu) psygp__copy(mu + b0, mub, cnt);
+        if (sd) psygp__copy(sd + b0, sdb, cnt);
     }
     return PSYGP_OK;
 }
@@ -6200,6 +8337,9 @@ PSYGP_API int psygp_predict_p_many(const psygp_gp* g, const double* xs, int n,
         double mub[PSYGP__BLK], sdb[PSYGP__BLK];
         rc = psygp_predict_f_many(g, xs + (size_t)b0 * nd, cnt, 0, mub, sdb);
         if (rc != PSYGP_OK) return rc;
+        if (g->desc.monotone_dims)
+            for (int i = 0; i < cnt; i++)
+                mub[i] = psygp__mono_mu(g, &s, xs + (size_t)(b0 + i) * nd, mub[i], s.t1);
         for (int i = 0; i < cnt; i++)
             p[b0 + i] = psygp__q_smooth(g, &s, mub[i], sdb[i], 0.0);
     }
@@ -6219,7 +8359,7 @@ PSYGP_API double psygp_predict_p_var(const psygp_gp* g, const double* x) {
         psygp__ps_moments(g, &s, x[g->desc.intensity_dim], &o, &eq, &vq);
         return vq;
     }
-    psygp__target_latent(g, &s, x, &mu, &sd, &other, s.t1, s.t2);
+    psygp__target_latent_p(g, &s, x, &mu, &sd, &other, s.t1, s.t2);
     return psygp__q_var(g, &s, mu, sd, other);
 }
 
@@ -6261,7 +8401,7 @@ PSYGP_API int psygp_predict_outcomes(const psygp_gp* g, const double* x, double*
         if (tot > 0.0) for (int c = 0; c < g->K; c++) p[c] /= tot;
     } else {
         double m, v, sd;
-        int nout = g->desc.lik == PSYGP_LIK_BERNOULLI ? 2 : g->desc.n_outcomes;
+        int nout = psygp__bern(g) ? 2 : g->desc.n_outcomes;
         double pf[PSYGP_MAX_OUTCOMES];
         psygp__predict_k(g, &s, x, 0, &m, &v, s.t1, s.t2);
         sd = sqrt(v);
@@ -6300,7 +8440,7 @@ PSYGP_API int psygp_threshold(const psygp_gp* g, const double* ctx, double targe
         return PSYGP_ERR_ARG;   /* no such level exists with this floor */
     for (int i = 0, k = 0; i < nd; i++) {
         if (i == id) { pt[i] = g->desc.lo[i]; continue; }
-        pt[i] = ctx[k++];
+        pt[i] = psygp__coord(&g->desc, i, ctx[k++]);
     }
     for (int i = 0; i < nd; i++) {
         if (i == id) continue;
@@ -6359,15 +8499,58 @@ PSYGP_API bool psygp_threshold_multi_cross(const psygp_gp* g) {
 
 PSYGP_API int psygp_fit(psygp_gp* g) {
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
-    if (g->N < 2) return PSYGP_OK;
+    if (g->N < 2) { g->fit_delta = 0.0; return 1; }
     if (!g->fit_valid) return PSYGP_ERR_NUMERIC;
-    return psygp__fit_run(g);
+    return psygp__fit_run(g, true);
+}
+
+PSYGP_API double psygp_fit_delta(const psygp_gp* g) {
+    if (!g || !g->open) return (double)NAN;
+    return g->fit_delta;
 }
 
 PSYGP_API int psygp_refit(psygp_gp* g) {
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
     if (g->N == 0) return PSYGP_OK;
     return psygp__infer(g, PSYGP__START_KEEP, 0);
+}
+
+PSYGP_API int psygp_argmax(psygp_gp* g, double* x, double* value) {
+    psygp__scr s;
+    int nd, best = -1, rc;
+    double bv = -HUGE_VAL;
+    if (!g || !g->open) return PSYGP_ERR_CLOSED;
+    if (!x) return PSYGP_ERR_ARG;
+    if (g->desc.lik == PSYGP_LIK_CATEGORICAL &&
+        (g->desc.target_outcome < 0 || g->desc.target_outcome >= g->K))
+        return PSYGP_ERR_ARG;
+    if (!g->fit_valid) return PSYGP_ERR_NUMERIC;
+    nd = g->desc.n_dims;
+    psygp__scr_of(g, &s);
+    for (int j = 0; j < g->M; j++) {
+        double v = psygp__mean_score(g, &s, psygp__cand(g, j));
+        if (best < 0 || v > bv) { bv = v; best = j; }
+    }
+    psygp__copy(x, psygp__cand(g, best), nd);
+    rc = best;
+    if (g->desc.refine_steps > 0 && psygp__refine(g, &s, x, psygp__mean_score)) rc = -1;
+    if (value) *value = psygp__opt_sign(g) * psygp__mean_score(g, &s, x);
+    return rc;
+}
+
+PSYGP_API int psygp_get_priors(const psygp_gp* g, psygp_priors* out) {
+    if (!g || !g->open) return PSYGP_ERR_CLOSED;
+    if (!out) return PSYGP_ERR_ARG;
+    *out = g->priors;
+    if (g->desc.no_hyper_prior) {
+        out->lengthscale.sd = out->outputscale.sd = out->outputscale_b.sd = -1.0;
+        out->outputscale_g.sd = out->mean.sd = out->mean_g.sd = out->noise_sd.sd = -1.0;
+    }
+#define PSYGP__OFF(f) do { if (!(out->f.sd > 0.0)) out->f.sd = -1.0; } while (0)
+    PSYGP__OFF(lengthscale); PSYGP__OFF(outputscale); PSYGP__OFF(outputscale_b);
+    PSYGP__OFF(outputscale_g); PSYGP__OFF(mean); PSYGP__OFF(mean_g); PSYGP__OFF(noise_sd);
+#undef PSYGP__OFF
+    return PSYGP_OK;
 }
 
 PSYGP_API int psygp_get_hyper(const psygp_gp* g, psygp_hyper* out) {
@@ -6392,7 +8575,7 @@ PSYGP_API int psygp_n_candidates(const psygp_gp* g) {
 PSYGP_API int psygp_candidate(const psygp_gp* g, int index, double* x) {
     if (!g || !g->open) return PSYGP_ERR_CLOSED;
     if (!x || index < 0 || index >= g->M) return PSYGP_ERR_ARG;
-    memcpy(x, psygp__cand(g, index), (size_t)g->desc.n_dims * sizeof(double));
+    psygp__copy(x, psygp__cand(g, index), g->desc.n_dims);
     return PSYGP_OK;
 }
 
@@ -6405,6 +8588,465 @@ PSYGP_API const psygp_trial* psygp_history(const psygp_gp* g, int* n) {
     if (!g || !g->open) { if (n) *n = 0; return NULL; }
     if (n) *n = g->N;
     return g->history;
+}
+
+/* --- public: snapshots -------------------------------------------------- */
+
+#define PSYGP__SNAP_FORMAT 1u
+
+/* One writer for three jobs, as in psy_trials.h: count (out and cmp NULL),
+ * write (out), and compare against a snapshot (cmp), which is how
+ * psygp_load() checks the desc without a second description of the layout
+ * that could drift from the first. */
+typedef struct psygp__w {
+    unsigned char*       out;
+    const unsigned char* cmp;
+    size_t               pos;
+    size_t               cap;
+    const char*          diff;   /* compare: the first field that differs */
+} psygp__w;
+
+static void psygp__put(psygp__w* w, uint64_t v, int nbytes, const char* name) {
+    for (int i = 0; i < nbytes; i++) {
+        unsigned char b = (unsigned char)((v >> (8 * i)) & 0xffu);
+        if (w->out) {
+            if (w->pos < w->cap) w->out[w->pos] = b;
+        } else if (w->cmp && !w->diff) {
+            if (w->pos >= w->cap || w->cmp[w->pos] != b) w->diff = name;
+        }
+        w->pos++;
+    }
+}
+
+static void psygp__put_i32(psygp__w* w, int v, const char* name) {
+    psygp__put(w, (uint64_t)(uint32_t)v, 4, name);
+}
+
+static void psygp__put_f64(psygp__w* w, double v, const char* name) {
+    uint64_t u;
+    memcpy(&u, &v, sizeof(u));
+    psygp__put(w, u, 8, name);
+}
+
+static void psygp__put_f64s(psygp__w* w, const double* v, int n, const char* name) {
+    for (int i = 0; i < n; i++) psygp__put_f64(w, v[i], name);
+}
+
+/* A psygp_real, as its own bit pattern: 8 bytes in a double build, 4 in a
+ * float one, which the header's real size records. */
+static void psygp__put_real(psygp__w* w, psygp_real v, const char* name) {
+    /* A switch and not an if: the size is a constant, and MSVC /W4 flags an
+     * if on a constant (C4127). */
+    switch (sizeof(psygp_real)) {
+        case sizeof(double): {
+            uint64_t u;
+            memcpy(&u, &v, sizeof(u));
+            psygp__put(w, u, 8, name);
+            break;
+        }
+        default: {
+            uint32_t u;
+            memcpy(&u, &v, sizeof(u));
+            psygp__put(w, u, 4, name);
+            break;
+        }
+    }
+}
+
+/* The lower triangle of an n x n matrix with leading dimension ld: all a
+ * factor holds, and all of a symmetric matrix. */
+static void psygp__put_tril(psygp__w* w, const psygp_real* A, int n, int ld,
+                            const char* name) {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j <= i; j++) psygp__put_real(w, A[(size_t)i * ld + j], name);
+}
+
+static void psygp__put_hyper(psygp__w* w, const psygp_hyper* h, int nd, const char* name) {
+    psygp__put_f64s(w, h->lengthscale, nd, name);
+    psygp__put_f64(w, h->outputscale, name);
+    psygp__put_f64(w, h->mean, name);
+    psygp__put_f64s(w, h->lengthscale_b, nd, name);
+    psygp__put_f64(w, h->outputscale_b, name);
+    psygp__put_f64s(w, h->cutpoint, PSYGP_MAX_OUTCOMES - 1, name);
+    psygp__put_f64(w, h->noise_sd, name);
+    psygp__put_f64s(w, h->lengthscale_g, nd, name);
+    psygp__put_f64(w, h->outputscale_g, name);
+    psygp__put_f64(w, h->mean_g, name);
+}
+
+static void psygp__put_prior(psygp__w* w, const psygp_prior* p, const char* name) {
+    psygp__put_f64(w, p->center, name);
+    psygp__put_f64(w, p->sd, name);
+    psygp__put_f64(w, p->ceiling, name);
+}
+
+/* Every number of the desc, in field order; the pointers only as whether they
+ * are set, since the caller re-supplies them. A caller-owned candidate set is
+ * compared value by value: it is part of what the snapshot's state means. */
+static void psygp__put_desc(psygp__w* w, const psygp_desc* d) {
+    int nd = d->n_dims;
+    psygp__put_i32(w, nd, "n_dims");
+    psygp__put_f64s(w, d->lo, nd, "lo");
+    psygp__put_f64s(w, d->hi, nd, "hi");
+    psygp__put_i32(w, d->intensity_dim, "intensity_dim");
+    psygp__put_i32(w, (int)d->lik, "lik");
+    psygp__put_i32(w, d->n_outcomes, "n_outcomes");
+    psygp__put_i32(w, (int)d->kernel, "kernel");
+    psygp__put_i32(w, (int)d->link, "link");
+    psygp__put_f64(w, d->guess, "guess");
+    psygp__put_f64(w, d->lapse, "lapse");
+    psygp__put_hyper(w, &d->hyper, nd, "hyper");
+    psygp__put(w, d->fit ? 1u : 0u, 1, "fit");
+    psygp__put_i32(w, d->fit_every, "fit_every");
+    psygp__put(w, d->no_hyper_prior ? 1u : 0u, 1, "no_hyper_prior");
+    psygp__put_i32(w, d->refit_every, "refit_every");
+    psygp__put_hyper(w, &d->hyper_min, nd, "hyper_min");
+    psygp__put_hyper(w, &d->hyper_max, nd, "hyper_max");
+    psygp__put_f64(w, d->jitter, "jitter");
+    psygp__put_i32(w, (int)d->acq, "acq");
+    psygp__put_f64(w, d->target_p, "target_p");
+    psygp__put_f64(w, d->target_value, "target_value");
+    psygp__put_i32(w, d->target_outcome, "target_outcome");
+    psygp__put_f64(w, d->acq_beta, "acq_beta");
+    psygp__put_i32(w, d->n_init, "n_init");
+    psygp__put(w, d->rng ? 1u : 0u, 1, "rng");
+    psygp__put(w, d->candidates ? 1u : 0u, 1, "candidates");
+    psygp__put_i32(w, d->n_candidates, "n_candidates");
+    if (d->candidates)
+        psygp__put_f64s(w, d->candidates, d->n_candidates * nd, "candidates[]");
+    for (int i = 0; i < nd; i++) psygp__put_i32(w, d->grid[i], "grid");
+    psygp__put_i32(w, d->stop_trials, "stop_trials");
+    psygp__put_f64(w, d->stop_threshold_sd, "stop_threshold_sd");
+    psygp__put_f64s(w, d->stop_context, nd, "stop_context");
+    psygp__put_i32(w, d->max_trials, "max_trials");
+    psygp__put_i32(w, d->refine_steps, "refine_steps");
+    psygp__put_i32(w, (int)d->model, "model");
+    psygp__put_prior(w, &d->priors.lengthscale, "priors.lengthscale");
+    psygp__put_prior(w, &d->priors.outputscale, "priors.outputscale");
+    psygp__put_prior(w, &d->priors.outputscale_b, "priors.outputscale_b");
+    psygp__put_prior(w, &d->priors.outputscale_g, "priors.outputscale_g");
+    psygp__put_prior(w, &d->priors.mean, "priors.mean");
+    psygp__put_prior(w, &d->priors.mean_g, "priors.mean_g");
+    psygp__put_prior(w, &d->priors.noise_sd, "priors.noise_sd");
+    psygp__put(w, d->minimize ? 1u : 0u, 1, "minimize");
+    for (int i = 0; i < nd; i++) psygp__put_i32(w, (int)d->dim_kind[i], "dim_kind");
+    for (int i = 0; i < nd; i++) psygp__put_i32(w, d->dim_levels[i], "dim_levels");
+    psygp__put(w, d->monotone_dims, 4, "monotone_dims");
+    psygp__put_i32(w, d->pcg_threshold, "pcg_threshold");
+    psygp__put_i32(w, d->fit_max_evals, "fit_max_evals");
+    psygp__put_f64(w, d->fit_tol, "fit_tol");
+    psygp__put(w, d->fit_pcg ? 1u : 0u, 1, "fit_pcg");
+}
+
+/* The handle's state after the desc: counters, the hyperparameters in force,
+ * the trials, the generated candidates, and the posterior exactly as it
+ * stands (mode, Hessian, factors, kernel matrices, the psychometric model's
+ * vectors and a stepped fit's place), so a resumed session computes what the
+ * uninterrupted one would have, bit for bit, with no refit. The candidate
+ * cache is not saved: it is a function of the rest and is rebuilt on the
+ * next psygp_next(). */
+static void psygp__put_state(psygp__w* w, const psygp_gp* g) {
+    psygp__scr s;
+    int nd = g->desc.n_dims, n = g->N, ld = g->N_max, K = g->K, M = g->M;
+    bool pair = g->desc.lik == PSYGP_LIK_PAIRWISE, ps = psygp__is_ps(g);
+    psygp__scr_of(g, &s);
+    psygp__put_i32(w, n, "N");
+    psygp__put_i32(w, g->N_fit, "N_fit");
+    psygp__put_i32(w, g->halton_index, "halton_index");
+    psygp__put_i32(w, g->proposed, "proposed");
+    psygp__put_i32(w, g->last_index, "last_index");
+    psygp__put_i32(w, g->repeats, "repeats");
+    psygp__put_i32(w, g->fit_state, "fit_state");
+    psygp__put_i32(w, g->fit_evals, "fit_evals");
+    psygp__put_i32(w, g->fit_back, "fit_back");
+    psygp__put_i32(w, (int)g->stop, "stop");
+    psygp__put(w, g->fit_valid ? 1u : 0u, 1, "fit_valid");
+    psygp__put(w, g->multi_cross ? 1u : 0u, 1, "multi_cross");
+    psygp__put(w, g->fit_blocked ? 1u : 0u, 1, "fit_blocked");
+    psygp__put_f64(w, g->fit_step, "fit_step");
+    psygp__put_f64(w, g->fit_best, "fit_best");
+    psygp__put_f64(w, g->log_marginal, "log_marginal");
+    psygp__put_f64(w, g->fit_flip, "fit_flip");
+    psygp__put_f64(w, g->opt_best, "opt_best");
+    psygp__put_f64(w, g->ps_tol, "ps_tol");
+    psygp__put_f64(w, g->fit_delta, "fit_delta");
+    psygp__put_i32(w, g->fit_conv, "fit_conv");
+    psygp__put_hyper(w, &g->hyper, nd, "hyper in force");
+    /* The history, and the pending proposal at index N when there is one. */
+    for (int i = 0; i <= n && i < ld; i++) {
+        const psygp_trial* t = &g->history[i];
+        psygp__put_f64s(w, t->x, nd, "history");
+        psygp__put_f64(w, t->y, "history");
+        psygp__put(w, t->proposed, 1, "history");
+        psygp__put(w, t->init, 1, "history");
+        if (pair) psygp__put_f64s(w, t->x2, nd, "history");
+    }
+    psygp__put_f64s(w, g->X, n * nd, "X");
+    if (pair) psygp__put_f64s(w, g->X2, n * nd, "X2");
+    psygp__put_f64s(w, g->y, n, "y");
+    if (!g->desc.candidates) psygp__put_f64s(w, g->cand, M * nd, "candidates");
+    for (int k = 0; k < K; k++) {
+        psygp__put_f64s(w, g->f + (size_t)k * ld, n, "f");
+        psygp__put_f64s(w, g->W + (size_t)k * ld, n, "W");
+        psygp__put_f64s(w, g->grad + (size_t)k * ld, n, "grad");
+        psygp__put_f64s(w, s.alpha + (size_t)k * ld, n, "alpha");
+        psygp__put_f64s(w, s.sW + (size_t)k * ld, n, "sW");
+        psygp__put_tril(w, g->L + (size_t)k * ld * ld, n, ld, "L");
+    }
+    psygp__put_tril(w, g->Kmat, n, ld, "Kmat");
+    if (ps) {
+        psygp__put_tril(w, g->Kg, n, ld, "Kg");
+        for (int v = 0; v < PSYGP__PS_VEC; v++)
+            psygp__put_f64s(w, s.ps + (size_t)v * ld, n, "ps");
+    }
+    if (g->desc.lik == PSYGP_LIK_CATEGORICAL) psygp__put_tril(w, s.Echol, n, ld, "Echol");
+    psygp__put_f64s(w, s.th, 6 * PSYGP__NTHETA, "fit_step state");
+    if (psygp__fpcg_desc(&g->desc)) {
+        psygp__put_i32(w, g->fit_th_n, "fit_th_n");
+        psygp__put_f64s(w, s.stv + (size_t)PSYGP__STV * ld, g->fit_th_n, "fit theta");
+        psygp__put(w, g->stash_ok ? 1u : 0u, 1, "stash_ok");
+        if (g->stash_ok) {
+            psygp__put_f64(w, g->stash_val, "stash");
+            psygp__put_f64(w, g->stash_lm, "stash");
+            psygp__put_hyper(w, &g->stash_hyper, nd, "stash");
+            psygp__put_tril(w, s.stL, n, ld, "stash");
+            for (int v = 0; v < PSYGP__STV; v++)
+                psygp__put_f64s(w, s.stv + (size_t)v * ld, n, "stash");
+        }
+    }
+}
+
+static void psygp__put_all(psygp__w* w, const psygp_gp* g) {
+    psygp__put(w, 'P', 1, "magic");
+    psygp__put(w, 'S', 1, "magic");
+    psygp__put(w, 'G', 1, "magic");
+    psygp__put(w, 'P', 1, "magic");
+    psygp__put(w, PSYGP__SNAP_FORMAT, 4, "format");
+    psygp__put(w, (uint64_t)sizeof(psygp_real), 1, "PSYGP_REAL");
+    psygp__put_desc(w, &g->desc);
+    psygp__put_state(w, g);
+}
+
+PSYGP_API size_t psygp_save_size(const psygp_gp* g) {
+    psygp__w w;
+    if (!g || !g->open) return 0;
+    memset(&w, 0, sizeof(w));
+    psygp__put_all(&w, g);
+    return w.pos;
+}
+
+PSYGP_API int psygp_save(const psygp_gp* g, void* buf, size_t cap) {
+    psygp__w w;
+    size_t need;
+    if (!g || !g->open) return PSYGP_ERR_CLOSED;
+    need = psygp_save_size(g);
+    if (!buf || cap < need || need > 0x7fffffff) return PSYGP_ERR_ARG;
+    memset(&w, 0, sizeof(w));
+    w.out = (unsigned char*)buf;
+    w.cap = cap;
+    psygp__put_all(&w, g);
+    return (int)w.pos;
+}
+
+typedef struct psygp__r {
+    const unsigned char* in;
+    size_t               pos;
+    size_t               len;
+    bool                 bad;
+} psygp__r;
+
+static uint64_t psygp__get(psygp__r* r, int nbytes) {
+    uint64_t v = 0;
+    if (r->bad || r->len - r->pos < (size_t)nbytes) {
+        r->bad = true;
+        return 0;
+    }
+    for (int i = 0; i < nbytes; i++) v |= (uint64_t)r->in[r->pos + (size_t)i] << (8 * i);
+    r->pos += (size_t)nbytes;
+    return v;
+}
+
+static int psygp__get_i32(psygp__r* r) { return (int)(int32_t)(uint32_t)psygp__get(r, 4); }
+
+static double psygp__get_f64(psygp__r* r) {
+    uint64_t u = psygp__get(r, 8);
+    double v;
+    memcpy(&v, &u, sizeof(v));
+    return v;
+}
+
+static void psygp__get_f64s(psygp__r* r, double* v, int n) {
+    for (int i = 0; i < n; i++) v[i] = psygp__get_f64(r);
+}
+
+static psygp_real psygp__get_real(psygp__r* r) {
+    psygp_real v;
+    switch (sizeof(psygp_real)) {
+        case sizeof(double): {
+            uint64_t u = psygp__get(r, 8);
+            memcpy(&v, &u, sizeof(v));
+            break;
+        }
+        default: {
+            uint32_t u = (uint32_t)psygp__get(r, 4);
+            memcpy(&v, &u, sizeof(v));
+            break;
+        }
+    }
+    return v;
+}
+
+/* The lower triangle back, and the upper one mirrored from it for a
+ * symmetric matrix: psygp__kmat_row writes both halves from one value, so
+ * the mirror is the matrix it wrote. */
+static void psygp__get_tril(psygp__r* r, psygp_real* A, int n, int ld, bool sym) {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j <= i; j++) {
+            psygp_real v = psygp__get_real(r);
+            A[(size_t)i * ld + j] = v;
+            if (sym) A[(size_t)j * ld + i] = v;
+        }
+}
+
+static void psygp__get_hyper(psygp__r* r, psygp_hyper* h, int nd) {
+    psygp__get_f64s(r, h->lengthscale, nd);
+    h->outputscale = psygp__get_f64(r);
+    h->mean = psygp__get_f64(r);
+    psygp__get_f64s(r, h->lengthscale_b, nd);
+    h->outputscale_b = psygp__get_f64(r);
+    psygp__get_f64s(r, h->cutpoint, PSYGP_MAX_OUTCOMES - 1);
+    h->noise_sd = psygp__get_f64(r);
+    psygp__get_f64s(r, h->lengthscale_g, nd);
+    h->outputscale_g = psygp__get_f64(r);
+    h->mean_g = psygp__get_f64(r);
+}
+
+static bool psygp__load_fail(psygp_gp* g, const char* msg, const char* field) {
+    char buf[256];
+    if (field) psygp__err(buf, sizeof(buf), msg, field);
+    else psygp__err(buf, sizeof(buf), "%s", msg);
+    psygp_close(g);
+    memcpy(g->error, buf, sizeof(buf));
+    return false;
+}
+
+PSYGP_API bool psygp_load(psygp_gp* g, const psygp_desc* desc, const void* buf, size_t len) {
+    psygp__w w;
+    psygp__r r;
+    psygp__scr s;
+    const unsigned char* in = (const unsigned char*)buf;
+    int nd, n, ld, K, M;
+    bool pair, ps;
+    if (!g) return false;
+    if (!psygp_open(g, desc)) return false;
+    if (!in)
+        return psygp__load_fail(g, "psygp_load: null snapshot", NULL);
+    if (len < 9 || in[0] != 'P' || in[1] != 'S' || in[2] != 'G' || in[3] != 'P')
+        return psygp__load_fail(g, "psygp_load: not a psy_gp snapshot", NULL);
+    memset(&r, 0, sizeof(r));
+    r.in = in;
+    r.len = len;
+    r.pos = 4;
+    if ((uint32_t)psygp__get(&r, 4) != PSYGP__SNAP_FORMAT)
+        return psygp__load_fail(g, "psygp_load: the snapshot's format is not this "
+                                "header's", NULL);
+    if (psygp__get(&r, 1) != (uint64_t)sizeof(psygp_real))
+        return psygp__load_fail(g, "psygp_load: the snapshot was written by a build "
+                                "with another PSYGP_REAL", NULL);
+    memset(&w, 0, sizeof(w));
+    w.cmp = in;
+    w.cap = len;
+    w.pos = r.pos;
+    psygp__put_desc(&w, &g->desc);
+    if (w.diff)
+        return psygp__load_fail(g, "psygp_load: desc.%s does not match the snapshot",
+                                w.diff);
+    r.pos = w.pos;
+
+    nd = g->desc.n_dims; ld = g->N_max; K = g->K; M = g->M;
+    pair = g->desc.lik == PSYGP_LIK_PAIRWISE;
+    ps = psygp__is_ps(g);
+    psygp__scr_of(g, &s);
+    n = psygp__get_i32(&r);
+    g->N_fit = psygp__get_i32(&r);
+    g->halton_index = psygp__get_i32(&r);
+    g->proposed = psygp__get_i32(&r);
+    g->last_index = psygp__get_i32(&r);
+    g->repeats = psygp__get_i32(&r);
+    g->fit_state = psygp__get_i32(&r);
+    g->fit_evals = psygp__get_i32(&r);
+    g->fit_back = psygp__get_i32(&r);
+    g->stop = (psygp_stop)psygp__get_i32(&r);
+    g->fit_valid = psygp__get(&r, 1) != 0;
+    g->multi_cross = psygp__get(&r, 1) != 0;
+    g->fit_blocked = psygp__get(&r, 1) != 0;
+    if (r.bad || n < 0 || n > ld || g->N_fit < 0 || g->N_fit > n ||
+        g->halton_index < 0 || g->proposed < -1 || g->proposed >= M ||
+        g->last_index < -1 || g->last_index >= M || g->repeats < 0 ||
+        g->fit_state < 0 || g->fit_state > 2 || g->fit_evals < 0 || g->fit_back < 0 ||
+        (int)g->stop < (int)PSYGP_STOP_NONE || (int)g->stop > (int)PSYGP_STOP_FULL)
+        return psygp__load_fail(g, "psygp_load: the snapshot's counters are corrupt "
+                                "or truncated", NULL);
+    g->N = n;
+    g->fit_step = psygp__get_f64(&r);
+    g->fit_best = psygp__get_f64(&r);
+    g->log_marginal = psygp__get_f64(&r);
+    g->fit_flip = psygp__get_f64(&r);
+    g->opt_best = psygp__get_f64(&r);
+    g->ps_tol = psygp__get_f64(&r);
+    g->fit_delta = psygp__get_f64(&r);
+    g->fit_conv = psygp__get_i32(&r);
+    psygp__get_hyper(&r, &g->hyper, nd);
+    for (int i = 0; i <= n && i < ld; i++) {
+        psygp_trial* t = &g->history[i];
+        psygp__get_f64s(&r, t->x, nd);
+        t->y = psygp__get_f64(&r);
+        t->proposed = (uint8_t)psygp__get(&r, 1);
+        t->init = (uint8_t)psygp__get(&r, 1);
+        if (pair) psygp__get_f64s(&r, t->x2, nd);
+    }
+    psygp__get_f64s(&r, g->X, n * nd);
+    if (pair) psygp__get_f64s(&r, g->X2, n * nd);
+    psygp__get_f64s(&r, g->y, n);
+    if (!g->desc.candidates) psygp__get_f64s(&r, g->cand, M * nd);
+    for (int k = 0; k < K; k++) {
+        psygp__get_f64s(&r, g->f + (size_t)k * ld, n);
+        psygp__get_f64s(&r, g->W + (size_t)k * ld, n);
+        psygp__get_f64s(&r, g->grad + (size_t)k * ld, n);
+        psygp__get_f64s(&r, s.alpha + (size_t)k * ld, n);
+        psygp__get_f64s(&r, s.sW + (size_t)k * ld, n);
+        psygp__get_tril(&r, g->L + (size_t)k * ld * ld, n, ld, false);
+    }
+    psygp__get_tril(&r, g->Kmat, n, ld, true);
+    if (ps) {
+        psygp__get_tril(&r, g->Kg, n, ld, true);
+        for (int v = 0; v < PSYGP__PS_VEC; v++)
+            psygp__get_f64s(&r, s.ps + (size_t)v * ld, n);
+    }
+    if (g->desc.lik == PSYGP_LIK_CATEGORICAL) psygp__get_tril(&r, s.Echol, n, ld, false);
+    psygp__get_f64s(&r, s.th, 6 * PSYGP__NTHETA);
+    if (psygp__fpcg_desc(&g->desc)) {
+        g->fit_th_n = psygp__get_i32(&r);
+        if (g->fit_th_n < 0 || g->fit_th_n > PSYGP__NTHETA) r.bad = true;
+        else psygp__get_f64s(&r, s.stv + (size_t)PSYGP__STV * ld, g->fit_th_n);
+        g->stash_ok = psygp__get(&r, 1) != 0;
+        if (g->stash_ok && !r.bad) {
+            g->stash_val = psygp__get_f64(&r);
+            g->stash_lm = psygp__get_f64(&r);
+            psygp__get_hyper(&r, &g->stash_hyper, nd);
+            psygp__get_tril(&r, s.stL, n, ld, false);
+            for (int v = 0; v < PSYGP__STV; v++)
+                psygp__get_f64s(&r, s.stv + (size_t)v * ld, n);
+        }
+    }
+    if (r.bad)
+        return psygp__load_fail(g, "psygp_load: the snapshot is corrupt or truncated",
+                                NULL);
+    if (r.pos != r.len)
+        return psygp__load_fail(g, "psygp_load: bytes after the snapshot's end", NULL);
+    g->cand_valid = false;
+    g->error[0] = '\0';
+    return true;
 }
 
 /* --- public: simulation ------------------------------------------------- */

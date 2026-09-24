@@ -426,10 +426,18 @@ on sensory at beta 0.5 EAVC and LOCALMI match the staircase (1.98 and
 2.05 against 1.90) and the per-point acquisitions do not. Field error is
 0.007 to 0.033 against the RBF's 0.06 to 0.09. Through the binding on the
 metabolic phenotype the model with EAVC reaches 1.26 +- 0.09 dB and a
-field error of 0.012, against AEPsych's best of 1.29 dB and 0.18. One
-known residual: the fitted mean slope is about half the true one
-(0.22 to 0.31 per dB against 0.5), which is what keeps the band error at
-0.15; the prior on the mean log-slope is the next thing to measure.
+field error of 0.012, against AEPsych's best of 1.29 dB and 0.18. The
+fitted mean slope is about half the true one (0.22 to 0.31 per dB against
+0.5), and that was measured to be the mean log-slope prior on purpose:
+the Laplace marginal itself peaks at the true slope (0.51), the
+Gauss-Newton approximation moves it by 0.1 nats, and every prior loose
+enough to recover the slope reopens the LSE tail to 7 to 18 dB, because a
+level-set acquisition places its trials where the slope is unidentified
+and a fit with room to steepen does so into the flat tail. BALV, which
+samples the field, recovers the slope under any prior. The band error
+tracks the threshold error, not the slope (a model with the exact slope
+and our threshold error scores the same band error), so the default stays
+(v0.4.1, prior parameters as compile-time knobs).
 
 ### Laplace, not variational, in psy_gp.h
 
@@ -638,6 +646,32 @@ None of these is a measurement. `examples/quest_bench.c` and
   Figure 7 and the qualitative findings (LSE best for threshold, BALV for
   the surface, older-normal the outlier); the numerical comparison waits
   for the binding, which can run AEPsych on the same response stream.
+- **On real human data the models do not differ.** `compare_gp_csfdata.py`
+  cross-validates on Letham et al. 2022's CSF dataset (1001 trials from
+  one observer over six stimulus dimensions; downloaded at run time, not
+  vendored): held-out log loss 0.529 for AEPsych in every variant, 0.537
+  to 0.541 for our GP and psychometric models, 0.543 for logistic
+  regression on the raw inputs, all inside fold noise. Contrast and
+  pedestal carry the signal, every model puts temporal frequency and
+  eccentricity at long lengthscales, and the field is close to linear at
+  this trial count, so any smooth model does the same and the acquisition
+  is where methods differ. The model gaps measured on the synthetic
+  audiogram come from its curvature. Two things it found in the header:
+  the fit's 40-evaluation budget does not converge on this data (now a
+  runtime knob with a convergence report), and the psychometric model's
+  converged fit costs 541 s against 33 s for the GP model at 500 trials in
+  6-D, the Gauss-Newton mode search's linear convergence with a number on
+  it. The same dataset as Letham et al.'s 6-D level-set problem (a GP fit
+  to the trials as the truth, target 0.75, 10 Sobol plus 290 trials, 10
+  replications) is in [adapt_comparison.md](adapt_comparison.md): the
+  psychometric model beats the GP model on field error under every
+  acquisition, BALD best; no method resolves the threshold to 0.1 log10
+  contrast in 300 trials, and the two candidate truth surfaces (AEPsych's
+  fit and ours, equal in likelihood on the data) disagree by 0.23 log10
+  units on that same threshold, so at this trial count the threshold
+  metric cannot separate methods and the field error can. It also found
+  the GP model fitting itself into a flat p = 0.5 state under a 0.5 guess
+  floor, the unregularized mean again, now in the header queue.
 - **Done through the bindings, in one process.** `tests/compare/`
   holds the scripts. `compare_stair_psychopy.py` replays fixed response
   sequences through `psy.stair` and PsychoPy's `StairHandler` (1-up-2-down
@@ -651,6 +685,28 @@ None of these is a measurement. `examples/quest_bench.c` and
   posterior difference 6.8e-8, which is the float table; the marginalized
   selection, which questplus lacks, was checked against the marginal
   entropy computed in NumPy from questplus's own table.
+  `methods_compare.py --replay QuestPlus.nb` replays all 17 runs saved
+  in Watson's own Mathematica notebook, the reference implementation
+  behind the QUEST+ paper, through `psy.quest`: 1504 trials, 1452
+  identical selections, 52 ties within 2e-8 bits (38 of them exact
+  symmetries of the circular example), 0 differences, and all 17 final
+  joint modes identical, across every example in the paper (threshold;
+  threshold and slope; threshold, slope and lapse; cumulative normal;
+  spatial and spatiotemporal CSF; Thurstone scaling; blur; rating with 3
+  and 4 categories; circular categorization). That is the QUEST+
+  verification at its source. mQUESTPlus itself was then run in MATLAB
+  through the MEX binding (`compare_quest_mquestplus.m`): mQUESTPlus
+  drives each run, both are updated with its stimulus, and on the paper's
+  figure 2, 3 and 4 examples plus a marginalized case, 0 of 424 selections
+  differ (32 ties within 7e-10 bits, resolved by our tie rule) and the
+  posteriors agree to 4e-7. Palamedes' PAL_AMPM (Psi and Psi-marginal)
+  agrees the same way, and PAL_AMUD replays the staircase header trial
+  for trial on eight configurations, with two differences that are
+  Palamedes' design choices (it keeps the opposite-direction counter when
+  a response causes no step; a caller-changed step after the reversing
+  update applies one trial later than a schedule does), both stated in
+  psy_stair.h. The cross-method comparison on those examples and AEPsych's test
+  functions is in [adapt_comparison.md](adapt_comparison.md).
   `compare_gp_aepsych.py` runs `psy.gp` and AEPsych 0.8.0 (variational GP
   classifier, its own LSE, EAVC and BALV acquisitions optimized
   continuously) on the metabolic phenotype at beta 2, 10 replications,
@@ -714,8 +770,8 @@ None of these is a measurement. `examples/quest_bench.c` and
   drawing from one seeded NumPy generator, with the same `u` handed to
   both. `tests/compare/` holds those scripts; they are not CI (AEPsych
   pulls PyTorch) but they are the acceptance test, and their output tables
-  go into the STATUS blocks. The MEX bindings do the same for Palamedes
-  and mQUESTPlus in MATLAB.
+  go into the STATUS blocks. The MEX bindings did the same for Palamedes
+  and mQUESTPlus in MATLAB; see above.
 - **All three.** Compile checks as C11, C++17 and with the implementation
   in a second translation unit; `-Wall -Wextra -Wpedantic -Wshadow -Werror`
   and `/W4 /WX`. The compile check registers each header in the CMake
@@ -753,6 +809,76 @@ stream; see the verification plan.
 - Ordinal cutpoint fitting with few trials per category is poorly
   conditioned. The header defaults to fitting them when `desc.fit` is on;
   the verification will say whether that default should flip to fixed.
+
+## WebAssembly
+
+The four computation headers compile under emcc with no change and their
+full test suites pass under node with the same numbers as native
+(checked in the `emscripten/emsdk` image; CI runs the same). Two facts
+for a browser rig: the handles are large and the tests keep them on the
+stack, so the build needs a real stack (`-sSTACK_SIZE`) and memory growth
+for the arenas; and psy_rt.h 0.4.0 has an Emscripten branch (clock via
+`clock_gettime`, the scheduling ladder collapsed to normal, waits as
+nanosleep plus spin for worker threads, node and tools, never the browser
+main thread, threads under `-pthread` with cross-origin isolation), so
+the pump and both async layers run under node: the QUEST+ and GP async
+suites pass there bit-identical to their synchronous runs. Nothing has
+run in a browser yet; the main-thread and clock-coarsening statements
+are the browsers' documented rules. The synchronous calls fit a
+`requestAnimationFrame` interval as they fit a display frame, so a
+browser experiment needs neither threads nor the pump. psy_serial.h has
+no wasm backend; a Web Serial transport would be a new backend.
+
+## What AEPsych covers, and what this collection did about it
+
+Compared against AEPsych's current model, acquisition and generator lists
+(2026-09-23). Every item below is implemented in psy_gp.h 0.13.1 with
+its own tests, benchmark numbers in the header's manual, and a version
+bump; none changed a measured default, so every earlier number still
+reproduces.
+
+1. Runtime prior knobs. Every prior parameter becomes a `priors` block in
+   the GP desc with zero as the measured default, so a binding can set it
+   per session; `no_hyper_prior` stays as the master switch.
+2. Optimization acquisitions on the GP: UCB, expected improvement and
+   Thompson sampling, with `psygp_argmax`, for "find the setting the
+   observer prefers" rather than a level set.
+3. Pairwise comparisons: a pairwise probit likelihood (two points per
+   trial, which was preferred), Laplace on the difference, a latent
+   utility with its argmax.
+4. Mixed parameters: integer and categorical dimensions with a categorical
+   kernel, honored by candidates, init, refinement and the threshold search.
+5. Monotonic projection of the posterior mean in chosen dimensions.
+6. Scale: conjugate-gradient Newton steps with the previous factor as
+   preconditioner (`pcg_threshold`, default 512, so earlier results are
+   untouched). Measured update cost at N = 512, 1024 and 2048: 15, 130 and
+   1170 ms against 34, 340 and 3860 ms factored; the crossover is near
+   N = 100. Past about 400 trials no exact update fits a frame either
+   way, and the manual points long sessions to the async layer or
+   `refit_every`. Fits and the psychometric model's mode search got the
+   same treatment in v0.14.0 behind `fit_pcg`, off by default: one
+   factorization per search for the log determinant, which has to stay
+   exact because most line-search decisions are within 1e-3 nats, and
+   preconditioned CG for the solves. At 500 6-D trials a GP fit goes from
+   6.9 to 3.4 s and a psychometric fit from 168 to 43 s on an idle core.
+   Opt-in because on the psychometric model's flat lengthscale ridge the
+   tolerance-level differences end a fit at a slightly different point
+   (log marginal -68.503 against -68.500, threshold 1.318 against
+   1.314 dB); the default path is bit-identical to v0.13.1.
+7. Snapshots for the GP and QUEST+ handles, in the shape of
+   `psytr_save` / `psytr_load`, so a session resumes without replay:
+   108 resumes byte-identical to the uninterrupted runs under gcc and
+   MSVC.
+
+Left as they are on purpose: the further look-ahead acquisitions
+(GlobalMI, the SUR family) beyond EAVC and LocalMI; independent
+multi-outcome models, which are K handles; variational inference, which
+PCG makes unnecessary at session scale; and AEPsych's server, database
+and plotting layer. A server exists there because the model is too slow
+to run in the experiment process; these headers fit a frame, so the
+experiment calls them directly, and a MATLAB or Python session has the
+MEX or the binding. Persistence is the snapshot plus the caller's own
+data file.
 
 ## References
 

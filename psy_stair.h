@@ -1,4 +1,4 @@
-/* psy_stair.h - v0.1.1 - public domain single-header adaptive staircase library
+/* psy_stair.h - v0.1.2 - public domain single-header adaptive staircase library
  *
  *   Nonparametric adaptive procedures for psychophysics: transformed and
  *   weighted up/down staircases (Wetherill & Levitt 1965; Levitt 1971;
@@ -16,6 +16,12 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.1.2 - documentation only. STATUS records the replay against
+ *          Palamedes' PAL_AMUD, now done. The rule's counter sentence said
+ *          "the counters reset on every step and on every change of
+ *          direction", which could be read two ways; it now says what the
+ *          code does (the opposite counter resets on every response, both on
+ *          every step) and where that differs from PAL_AMUD. No code changed.
  *   v0.1.1 - version macros (PSYST_VERSION_MAJOR / MINOR / PATCH / STRING)
  *          and psyst_version(), so a program can log which header it was
  *          built from. No behavior changed.
@@ -31,7 +37,7 @@
  *          held by a limit still reports one.
  *   v0.0 - specification. Declarations and the manual, no implementation.
  *
- *   STATUS: v0.1.1. Built and run on Linux (WSL2) with gcc 11.4 as C11, C99 and
+ *   STATUS: v0.1.2. Built and run on Linux (WSL2) with gcc 11.4 as C11, C99 and
  *   C++17 under -Wall -Wextra -Wpedantic -Wshadow -Werror, and once under
  *   -fsanitize=address,undefined -fno-sanitize-recover=all with no
  *   diagnostic. Also built and run on Windows 11 with MSVC 14.51 under
@@ -50,11 +56,26 @@
  *   against 0.7500), against a 0.01 tolerance. All three sit ABOVE the
  *   target, which is the finite-step bias of the rule and not noise; shrink
  *   the step to shrink it.
- *   What is NOT done: no run against PsychoPy's StairHandler or Palamedes'
- *   PAL_AMUD. The reversal, schedule and initial-rule semantics here are
- *   read off their sources and re-derived by hand, not replayed against
- *   them; docs/psy_adapt.md makes that comparison the acceptance test and
- *   it needs the bindings. Nothing here is a timing measurement. No
+ *   Replayed against Palamedes' PAL_AMUD through the MEX binding in MATLAB
+ *   R2023a (tests/compare/compare_stair_palamedes.m), on fixed 80-trial
+ *   response sequences: 1-up-2-down, 1-up-3-down, 2-up-1-down, a reversal
+ *   stop, a weighted 1-up-1-down, limits, log10 steps and a caller-driven
+ *   step schedule are identical, level for level and reversal for reversal.
+ *   PAL_AMUD always applies the initial rule, so those descs set
+ *   initial_rule. Two differences are documented rather than papered over.
+ *   PAL_AMUD keeps the opposite-direction counter when a response causes no
+ *   step, where this header resets it on every response; the two agree
+ *   whenever n_up or n_down is 1 (see RULES). And a caller who changes
+ *   Palamedes' step after the reversing update gives the reversal trial the
+ *   OLD step, where this header, like PsychoPy, gives it the new one.
+ *   PsychoPy's StairHandler is replayed too, through the Python binding
+ *   (tests/compare/compare_stair_psychopy.py): on seven configurations
+ *   (1-up-2-down and 1-up-3-down and 2-up-1-down, step schedules, the
+ *   initial rule on and off, limits, linear, dB and log steps) no proposal
+ *   differs on any trial, the reversal indices and levels are the same, and
+ *   the estimates agree, the log and dB cases to 1e-15 because PsychoPy
+ *   multiplies where this header adds in log units.
+ *   What is NOT done here: nothing here is a timing measurement. No
  *   estimator is a fit and none carries a confidence interval. A
  *   -DPSYST_API=static build needs a translation unit that calls every
  *   function, or -Wno-unused-function.
@@ -134,8 +155,16 @@
  *     PSYST_RULE_UPDOWN  (default)
  *       Transformed up/down: after n_down consecutive correct responses the
  *       level steps down (harder); after n_up consecutive incorrect
- *       responses it steps up (easier). The counters reset on every step
- *       and on every change of direction. 1-up-1-down converges on 50%,
+ *       responses it steps up (easier). Every response resets the OTHER
+ *       direction's counter, so the runs are of consecutive responses, and
+ *       every step resets both. That is where this header and Palamedes'
+ *       PAL_AMUD part: PAL_AMUD keeps the opposite counter across a
+ *       response that causes no step, so on a 2-up-2-down track the sequence
+ *       wrong, right, wrong steps up at its third response in PAL_AMUD, which
+ *       has counted two wrongs, and here only at the next wrong, because the
+ *       right reset the count. The two agree whenever n_up or n_down is 1,
+ *       which is every 1-up-N-down and N-up-1-down rule; see STATUS.
+ *       1-up-1-down converges on 50%,
  *       1-up-2-down on 70.7%, 1-up-3-down on 79.4%, 1-up-4-down on 84.1%
  *       (Levitt 1971, Table 1; the value is 0.5^(1/n_down) for n_up = 1).
  *       Weighted up/down (Kaernbach 1991): when step_down_scale != 1 the
@@ -318,8 +347,8 @@
  * string is the three numbers, and the test asserts that it stays so. */
 #define PSYST_VERSION_MAJOR  0
 #define PSYST_VERSION_MINOR  1
-#define PSYST_VERSION_PATCH  1
-#define PSYST_VERSION_STRING "0.1.1"
+#define PSYST_VERSION_PATCH  2
+#define PSYST_VERSION_STRING "0.1.2"
 
 #include <stdint.h>
 #include <stdbool.h>

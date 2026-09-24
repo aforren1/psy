@@ -885,7 +885,7 @@ static void test_version(void) {
     CHECK(strcmp(psyst_version(), PSYST_VERSION_STRING) == 0);
     /* Pinned, and compared at run time: a constant condition is MSVC's C4127,
      * and the string from the implementation is the thing worth pinning. */
-    CHECK(strcmp(psyst_version(), "0.1.1") == 0);
+    CHECK(strcmp(psyst_version(), "0.1.2") == 0);
 }
 
 int main(void) {

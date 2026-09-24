@@ -3,6 +3,7 @@ function build(name)
 %
 %   build()             builds every psy_*.c in this directory
 %   build('parallel')   builds only psy_parallel.c
+%   build('quest')      builds only psy_quest.c
 %
 %   Run it from any directory:  run('.../bindings/mex/build.m')
 %   Each MEX file is written next to its source as psy_<name>.<mexext>.
@@ -26,6 +27,10 @@ function build(name)
     % Per-source platform gates, mirroring PSY_PLATFORMS_<lib> in
     % CMakeLists.txt. A header #errors on a platform it does not support,
     % which would fail the whole build; skip it with a message instead.
+    % The adaptive-method sources (psy_stair.c, psy_quest.c, psy_gp.c,
+    % psy_trials.c) are pure computation and build everywhere; psy_quest.c
+    % and psy_gp.c define PSYQ_ASYNC / PSYGP_ASYNC themselves, so they
+    % compile psy_rt.h and need only the thread library below.
     unsupported = {'psy_parallel.c', ismac};
 
     % mex writes its output to the current directory; build next to the
@@ -52,7 +57,8 @@ function build(name)
                 args(end+1:end+2) = {'-lsetupapi', '-ladvapi32'};   %#ok<AGROW>
             end
         else
-            % The async-pulse workers use pthreads on Linux/macOS.
+            % The async-pulse workers, and the async inference threads of
+            % psy_quest.c and psy_gp.c, use pthreads on Linux/macOS.
             args{end+1} = '-lpthread';   %#ok<AGROW>
         end
         mex(args{:});

@@ -7,6 +7,14 @@
  *     gcc ... -fsanitize=address,undefined ...
  *     gcc ... -fsanitize=thread ...
  *     cl /nologo /O2 /W4 /WX /I. tests\adapt\psy_rt_test.c
+ *     emcc -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. \
+ *         -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 \
+ *         -o rt_test.js tests/adapt/psy_rt_test.c && node rt_test.js
+ *
+ * Under Emscripten the below-normal check demands NORMAL (there is no
+ * priority to lower), test_platform() checks the collapsed ladder, and
+ * everything else, the hammer included, is the same test. A build without -pthread cannot start a thread and fails the first
+ * start; that is the platform, not the pump.
  *
  * The ThreadSanitizer run is the point of the publish-lock check: the pump
  * writes a struct while the main thread reads it, several thousand times, and
@@ -445,6 +453,9 @@ static void test_priority_and_start(void) {
         psyrt_policy pol = psyrt_pump_policy(&p);
         CHECK(pol == PSYRT_POLICY_BELOW_NORMAL || pol == PSYRT_POLICY_NORMAL,
               "a pump reports NORMAL or BELOW_NORMAL and nothing else");
+#if defined(__EMSCRIPTEN__)
+        CHECK_I(pol, PSYRT_POLICY_NORMAL, "wasm has no priority to lower");
+#endif
         CHECK_I(starts, 1, "on_start runs exactly once");
         printf("  below_normal start: policy=%s (a refusal is not an error)\n",
                psyrt_policy_name(pol));
@@ -716,6 +727,39 @@ static void test_hammer_wait_vs_stop(void) {
 
 /* ---------------------------------------------------------------- version */
 
+/* --------------------------------------------------------------- platform */
+
+/* What the platform branch promises about the clock and the ladder. The
+ * native half only reads (it must not elevate the test's own thread); the
+ * Emscripten half calls every scheduling function, because there each one is
+ * documented to refuse and none can change anything. */
+static void test_platform(void) {
+    psyrt_clock_info ci;
+    psyrt_report rep;
+    char line[192];
+    memset(&ci, 0, sizeof(ci));
+    psyrt_get_clock_info(&ci);
+    CHECK(ci.resolution_ns > 0, "the clock must report a resolution");
+    psyrt_report_get(&rep, PSYRT_POLICY_NORMAL);
+    psyrt_describe(&rep, line, sizeof(line));
+#if defined(__EMSCRIPTEN__)
+    CHECK_I(psyrt_thread_elevate(NULL), PSYRT_POLICY_NORMAL,
+            "wasm has no ladder: elevate returns NORMAL");
+    CHECK(!psyrt_thread_pin(0), "wasm cannot pin a thread");
+    CHECK(!psyrt_thread_set_timer_slack(1), "wasm has no timer slack");
+    CHECK(!psyrt_process_lock_memory(), "wasm cannot lock memory");
+    CHECK(!psyrt_timer_resolution_begin(), "wasm has no timer resolution");
+    psyrt_timer_resolution_end();
+    CHECK(strstr(line, "platform=wasm ladder=none") != NULL,
+          "psyrt_describe must say the ladder is absent on wasm");
+#else
+    CHECK(strstr(line, "platform=") == NULL,
+          "only the wasm line carries a platform field");
+#endif
+    printf("  platform: clock resolution %llu ns; %s\n",
+           (unsigned long long)ci.resolution_ns, line);
+}
+
 static void test_version(void) {
     char built[32];
     snprintf(built, sizeof(built), "%d.%d.%d", PSYRT_VERSION_MAJOR,
@@ -747,6 +791,7 @@ int main(void) {
     test_stop_releases_wait();
     test_hammer_wait_vs_stop();
     test_edges();
+    test_platform();
     test_version();
 
     printf("psy_rt_pump_test: %s (%d failures, %.1f s)\n",

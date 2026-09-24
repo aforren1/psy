@@ -137,8 +137,8 @@ static void test_version(void) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%d.%d.%d", PSYGP_VERSION_MAJOR,
              PSYGP_VERSION_MINOR, PSYGP_VERSION_PATCH);
-    CHECK(strcmp(psygp_version(), "0.4.0") == 0,
-          "psygp_version() is %s, expected 0.4.0", psygp_version());
+    CHECK(strcmp(psygp_version(), "0.14.0") == 0,
+          "psygp_version() is %s, expected 0.14.0", psygp_version());
     CHECK(strcmp(psygp_version(), PSYGP_VERSION_STRING) == 0,
           "psygp_version() %s disagrees with PSYGP_VERSION_STRING %s",
           psygp_version(), PSYGP_VERSION_STRING);
@@ -185,9 +185,9 @@ static void test_chol(void) {
         double P[9];
         for (int i = 0; i < 9; i++) C[i] = (psygp_real)A[i];
         psygp__chol(C, 3, 3);
-        psygp__tri_inv(C, 3, 3);
         {
             double tmp[3];
+            psygp__tri_inv(C, 3, 3, tmp);
             psygp__tri_sqr(C, 3, 3, tmp);
         }
         memcpy(P, A, sizeof(A));
@@ -948,7 +948,7 @@ static void test_fit(void) {
     }
     before = psygp_log_marginal(&g);
     rc = psygp_fit(&g);
-    CHECK(rc == PSYGP_OK, "psygp_fit: %s", psygp_strerror(rc));
+    CHECK(rc >= 0, "psygp_fit: %s", psygp_strerror(rc));
     after = psygp_log_marginal(&g);
     printf("  fit raised the log marginal from %.4f to %.4f\n", before, after);
     /* The fit maximizes the posterior, so the likelihood alone is allowed to
@@ -1279,7 +1279,7 @@ static void test_fit_step(void) {
         CHECK(psygp_update(&ga, x, (int)ys[i]) == PSYGP_OK, "fit_step update a");
         CHECK(psygp_update(&gb, x, (int)ys[i]) == PSYGP_OK, "fit_step update b");
     }
-    CHECK(psygp_fit(&ga) == PSYGP_OK, "whole fit");
+    CHECK(psygp_fit(&ga) >= 0, "whole fit");
     while ((rc = psygp_fit_step(&gb)) > 0) {
         double lm = psygp_log_marginal(&gb);
         CHECK(lm == lm, "the stepped fit left the model without a marginal");
@@ -2216,6 +2216,937 @@ static void test_psychometric(void) {
     }
 }
 
+/* --- regressions from the cross-method comparison ---------------------- */
+
+/* Three runs of tests/compare/methods_compare.py that broke 0.4.1, as their
+ * recorded trials (the stimuli the binding proposed and the responses its
+ * seeded stream gave), replayed through psygp_update() on the comparison's
+ * audiogram desc. The fit scheduled at the last trial of each is the one that
+ * failed. */
+/* audio-older-normal-b2, rep 14, psychometric balv: trials 1..85, replayed through
+ * psygp_update(); the fit scheduled at trial 85 is the one that failed. */
+static const double rep_on2_14_x[85][2] = {
+    { -0.32293919380754232, 117.6747652888298 },
+    { 3.0775600243359804, 17.852410078048706 },
+    { 1.841811353340745, 78.344237450510263 },
+    { -2.59765690471977, -12.692882474511862 },
+    { -1.6292514139786363, 54.477283507585526 },
+    { 0.34613528200824384, 23.012982547224709 },
+    { -3, 34.53170280245142 },
+    { 4, 16.836654487448477 },
+    { 0.94535022349087294, 2.3544685349676135 },
+    { 4, 4.6029589925279693 },
+    { -3, 21.311896062463198 },
+    { -1.0012982547224711, 12.567330897489695 },
+    { -3, 8.0920893224749726 },
+    { -0.84960747074131449, 1.7149752396937981 },
+    { 1.7715881447401371, 12.496980915120714 },
+    { 4, 11.283212344891062 },
+    { -3, 2.4951684997055752 },
+    { 1.9915761262698741, 2.5386471799175614 },
+    { -0.81277174175132483, 9.2841185525986329 },
+    { 4, 6.6020527848204011 },
+    { 1.3950483150029445, 8.9157612626987355 },
+    { -0.98019326001177687, 2.7931758072364898 },
+    { -3, 8.2059179850559403 },
+    { 4, 11.028683717572134 },
+    { 2.0099939907648685, 3.7575477121982148 },
+    { 4, 8.7584539199057829 },
+    { 2.0332729194861616, 7.1711960977252351 },
+    { 1.3078200567542695, 7.1711960977252351 },
+    { 0.76820657677782334, 7.3822460448321783 },
+    { -3, 5.4100235546967417 },
+    { -3, 6.3743954596584675 },
+    { -3, 7.0138887549322826 },
+    { 1.2894021922592747, 7.355374742675183 },
+    { 0.81642517202590947, 7.4257247250441631 },
+    { 0.51355680026869588, 7.6099033699941128 },
+    { 1.0461352820082441, 7.6099033699941128 },
+    { 3.2956521319788012, 9.2406398723866463 },
+    { -3, 6.4613528200824382 },
+    { -3, 6.8731887901943205 },
+    { 1.1268417382251212, 7.5395533876251299 },
+    { 2.3150362965326816, 8.3900966300058872 },
+    { 1.1241546080094218, 7.4525960272011593 },
+    { 2.4737620787507364, 8.644625257324817 },
+    { 1.146920340525615, 7.3822460448321783 },
+    { 0.8120773040047109, 7.2850247603062019 },
+    { -3, 6.391002837713458 },
+    { -3, 6.7593601276133528 },
+    { 0.49347819796820219, 7.4525960272011593 },
+    { -3, 6.3743954596584675 },
+    { 1.0190216814708521, 7.6099033699941128 },
+    { 3.26585140122571, 9.9504831500294433 },
+    { 1.0786231429770352, 7.5395533876251299 },
+    { 2.595652131978802, 9.354468534967614 },
+    { 0.87871376374779198, 7.1711960977252351 },
+    { 2.5377114082781183, 9.4682971975485799 },
+    { 4, 12.014794962639851 },
+    { 0.5043478680211988, 6.6890101452443727 },
+    { 2.595652131978802, 9.5117758777605665 },
+    { 0.5043478680211988, 6.531702802451421 },
+    { 0.5043478680211988, 6.7593601276133528 },
+    { -3, 5.7515095424396421 },
+    { 0.5043478680211988, 6.391002837713458 },
+    { 4, 12.041666264796847 },
+    { 3.2956521319788012, 10.476147782722292 },
+    { 0.5043478680211988, 6.1902168147085188 },
+    { 4, 12.724638240282648 },
+    { 4, 12.155494927377813 },
+    { -3, 5.1286236252208184 },
+    { -3, 5.5404595953326989 },
+    { -3, 5.9088168852325946 },
+    { 0.5, 26.666666666666664 },
+    { -3, 6.2771741751324912 },
+    { -3, 6.6724027671893822 },
+    { -3, 7.0573674351442683 },
+    { -1.25, 73.333333333333329 },
+    { -3, 7.4525960272011593 },
+    { -3, 7.8375606951560464 },
+    { -3, 7.6099033699941128 },
+    { 2.25, -4.4444444444444446 },
+    { -3, 7.3822460448321783 },
+    { -3, 7.0842387373012636 },
+    { -3, 7.5395533876251299 },
+    { -2.125, 42.222222222222221 },
+    { -3, 7.9079106775250265 },
+    { -3, 7.7237320325750787 },
+};
+static const unsigned char rep_on2_14_y[85] = {
+    1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1
+};
+
+/* audio-older-normal-b0.5, rep 6, psychometric bald: trials 1..105, replayed through
+ * psygp_update(); the fit scheduled at trial 105 is the one that failed. */
+static const double rep_on05_6_x[105][2] = {
+    { 2.7927553374320269, 119.36388431116939 },
+    { -1.4634717609733343, 29.583794809877872 },
+    { -0.69559168443083763, 83.582067247480154 },
+    { 2.2412964515388012, -6.2834766879677773 },
+    { 1.1539589762687683, 50.303653087466955 },
+    { 4, 43.75845391990579 },
+    { -3, 28.355374742675185 },
+    { -0.082971010998233674, 17.459540404667298 },
+    { -3, 11.489130329947002 },
+    { 4, 28.794082014944063 },
+    { -1.019716119217466, -1.7306764100412197 },
+    { 1.9617753955167827, 16.46829719754858 },
+    { 4, 13.488224122239433 },
+    { -3, 3.73067641004122 },
+    { 4, 3.9583337352031536 },
+    { 0.8212862362522082, 7.3822460448321783 },
+    { -0.17506033347320754, 1.9861112450677179 },
+    { 2.1248490457560361, 2.4248185173365941 },
+    { -1.5198067399882231, 9.5821258601295476 },
+    { -3, 8.2762679674249213 },
+    { 4, 11.489130329947002 },
+    { -3, 1.8019326001177698 },
+    { 2.3063405604902849, 7.2684173822512115 },
+    { 4, 6.9435387725633015 },
+    { -1.2256341042734067, 2.9773544521864377 },
+    { -3, 6.5048315002944248 },
+    { 4, 9.8366544874484756 },
+    { -3, 7.5395533876251299 },
+    { 0.37593601276133531, 7.1277174175132485 },
+    { -3, 8.3466179497939024 },
+    { 4, 10.844505072622187 },
+    { 0.5043478680211988, 6.3475241575014714 },
+    { -3, 7.4525960272011593 },
+    { 4, 11.787137637477917 },
+    { 0.5666364597430813, 5.426630932751733 },
+    { -3, 6.5751814826634059 },
+    { 4, 10.801026392410201 },
+    { -3, 7.355374742675183 },
+    { 1.204347868021199, 5.3396735723277606 },
+    { 4, 12.014794962639851 },
+    { 0.55960146150618306, 5.2424522878017852 },
+    { -3, 6.2771741751324912 },
+    { -3, 7.3118960624631981 },
+    { 4, 10.985205037360149 },
+    { -3, 8.644625257324817 },
+    { 2.1752415750147205, 6.786231429770349 },
+    { 2.0999093792292425, 7.0138887549322826 },
+    { 2.0397947215179602, 7.355374742675183 },
+    { 1.9232789287212939, 7.5830320678371166 },
+    { 1.7304045477289489, 7.7237320325750787 },
+    { -3, 7.1711960977252351 },
+    { -3, 8.0920893224749744 },
+    { 1.838224604483218, 7.6802533523630929 },
+    { 1.5418780347578025, 7.6802533523630929 },
+    { -2.3021739340105989, 6.2336954949205055 },
+    { -3, 8.2327892872129365 },
+    { 1.6523852217277712, 7.8375606951560464 },
+    { -2.3021739340105989, 5.8653382050206098 },
+    { -3, 8.2059179850559421 },
+    { -2.3021739340105989, 6.3475241575014714 },
+    { 0.5, 26.666666666666664 },
+    { -3, 8.1624393048439554 },
+    { 1.204347868021199, 5.6376808798586753 },
+    { 1.6751509542439647, 8 },
+    { 3.2956521319788012, 10.660326427672238 },
+    { -3, 7.2684173822512115 },
+    { -3, 7.4257247250441631 },
+    { -3, 7.7672107127870644 },
+    { -1.25, 73.333333333333329 },
+    { -2.4814915147342482, 6.9000600923513158 },
+    { -3, 7.8375606951560464 },
+    { 1.7163345512551527, 7.6802533523630929 },
+    { -2.3403532281084387, 6.7158814474013688 },
+    { -2.3021739340105989, 6.8297101099823356 },
+    { -2.3035174991184491, 6.7158814474013688 },
+    { 2.25, -4.4444444444444446 },
+    { -2.3021739340105989, 6.9000600923513158 },
+    { -2.3021739340105989, 7.0842387373012645 },
+    { -2.3021739340105989, 7.0138887549322835 },
+    { -2.125, 42.222222222222221 },
+    { -3, 7.2684173822512115 },
+    { -3, 7.9079106775250265 },
+    { 1.204347868021199, 6.0495168499705576 },
+    { 1.7347524157501475, 7.8644319973130408 },
+    { 3.2956521319788012, 10.573369067248267 },
+    { -3, 7.3553747426751821 },
+    { -3, 7.8375606951560464 },
+    { -3, 7.3822460448321783 },
+    { 1.375, 88.888888888888872 },
+    { -3, 7.8644319973130408 },
+    { -3, 7.3822460448321783 },
+    { 1.631280227017077, 7.7940820149440597 },
+    { 3.2956521319788012, 10.871376374779182 },
+    { -3, 7.2684173822512115 },
+    { 2.9212862362522078, 10.13466179497939 },
+    { 4, 12.935688187389589 },
+    { 4, 12.724638240282648 },
+    { 1.3907004469817459, 7.6533820502060976 },
+    { 1.0347524157501473, 7.5664246897821261 },
+    { 1.1425724725044164, 7.6099033699941128 },
+    { 2.9142512380153098, 8.2059179850559403 },
+    { -2.3021739340105989, 6.4178741398704542 },
+    { -2.3021739340105989, 6.8731887901943205 },
+    { -2.3021739340105989, 7.0138887549322835 },
+    { 0.98218595248086249, 7.5664246897821261 },
+};
+static const unsigned char rep_on05_6_y[105] = {
+    1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1
+};
+
+/* audio-metabolic-b0.5, rep 4, gp lse: trials 1..145, replayed through
+ * psygp_update(); the fit scheduled at trial 145 is the one that failed. */
+static const double rep_met05_4_x[145][2] = {
+    { 3.5513251898810267, 109.40802693367004 },
+    { -2.1001692283898592, 11.039110831916332 },
+    { -0.089919170364737511, 77.894264962524176 },
+    { 1.5136529421433806, 36.537098903208971 },
+    { 0.50160135794430971, 61.22373441234231 },
+    { 1.0504831500294427, 110.79498822265163 },
+    { -1.613556800268696, 98.934781979682029 },
+    { -2.9333635402569187, 83.602052784820401 },
+    { -2.5673762078750735, 120 },
+    { 3.5511322773906779, 85 },
+    { -2.9794082014944059, 64 },
+    { 3.7106884285114821, 71 },
+    { 4, 120 },
+    { -3, 53.65156963479096 },
+    { 4, 61.019926924690857 },
+    { -1.1844505072622185, 50 },
+    { 4, -20 },
+    { -3, 41.575181482663403 },
+    { -0.91355680026869601, 42.978260659894012 },
+    { -3, 120 },
+    { 2.3361412912433761, 71 },
+    { 1.2162439304843955, 57.021739340105988 },
+    { -3, 33.637680879858678 },
+    { -3, 28.680253352363092 },
+    { 0.3829710109982335, 120 },
+    { -3, -20 },
+    { -2.9964825008815508, 23.766304505079493 },
+    { 4, 68.269323589958788 },
+    { -2.558167275627576, 22 },
+    { -0.20652180203179812, 36 },
+    { -2.9978260659894009, 15.714975239693798 },
+    { 3.7510416566199214, 78 },
+    { -0.13553747426751847, 36 },
+    { 4, 76.53170280245142 },
+    { 3.8610356473847895, 85 },
+    { 1.9390096630005891, 57.021739340105988 },
+    { 0.39000600923513151, 36 },
+    { -3, 22.04861064226299 },
+    { -0.14257247250441657, 29 },
+    { 0.21554949273778132, 29 },
+    { 1.2249396665267926, 36 },
+    { 4, 82.708030862227659 },
+    { -1.5907910677525028, 22 },
+    { -3, 22.644625257324815 },
+    { 2.6276267967424918, 63.978260659894012 },
+    { -3, 120 },
+    { 4, 120 },
+    { -3, 21.680253352363096 },
+    { 3.8921799432457309, 78 },
+    { 1.1198067399882232, 43 },
+    { 1.8539553387625134, 50.021739340105995 },
+    { 4, 76.645531465032391 },
+    { 2.5723732032575075, 57 },
+    { -0.33109898547556293, 29 },
+    { -0.11277174175132504, 29 },
+    { -3, 120 },
+    { 1.0277174175132493, 36 },
+    { 1.1794082014944061, 36 },
+    { 2.6162439304843952, 57 },
+    { -3, 19.935688187389591 },
+    { 3.2794082014944057, 64 },
+    { 3.9347071053647689, 71 },
+    { 4, 120 },
+    { 4, 76.504831500294429 },
+    { -0.26446252573248191, 29 },
+    { -3, 23.099939907648682 },
+    { -3, 22.065218020317978 },
+    { -3, 21.084238737301266 },
+    { 2.6801932600117766, 57 },
+    { -1.8389190422298318, 22 },
+    { -1.5355374742675185, 22 },
+    { 1.064553146503239, 35.978260659894012 },
+    { 1.1723732032575078, 36.021739340105995 },
+    { 1.8794082014944062, 43 },
+    { -1.113466179497939, 22 },
+    { -0.88375606951560459, 22 },
+    { -3, 120 },
+    { 2.6644625257324814, 57.021739340105988 },
+    { -1.5864431997313042, 22 },
+    { 4, 74.418780347578021 },
+    { 3.9794082014944059, 78 },
+    { 4, 77.013888754932282 },
+    { 2.6758453919905785, 57 },
+    { 4, 120 },
+    { 4, 75.269323589958788 },
+    { 3.9609903369994113, 78 },
+    { 4, 77.566424689782124 },
+    { -3, 120 },
+    { -1.379498822265163, 22 },
+    { -3, 20.163345512551523 },
+    { -3, 22.346617949793902 },
+    { -3, 21.653382050206098 },
+    { 0.5, 26.666666666666664 },
+    { -3, 20.900060092351318 },
+    { 4, 76.461352820082439 },
+    { -0.30295899252797059, 29 },
+    { -0.21355680026869611, 29 },
+    { 2.7310989854755623, 57 },
+    { 3.2566424689782125, 64 },
+    { 3.3065218020317975, 64.021739340105995 },
+    { 1.7391002837713461, 43 },
+    { -0.25039252925868566, 29 },
+    { -0.17237320325750802, 29 },
+    { 3.2653382050206097, 64 },
+    { 3.3092089322474973, 63.978260659894012 },
+    { -3, 120 },
+    { 4, 120 },
+    { -3, 120 },
+    { 3.3416967932162884, 64 },
+    { -0.11545887196702459, 29 },
+    { -1.8020833132398424, 22 },
+    { -1.6688103937536805, 22 },
+    { -1.5469203405256149, 22 },
+    { 3.3644625257324816, 63.978260659894012 },
+    { 3.8886624441272817, 71 },
+    { 3.3135568002686959, 64.021739340105995 },
+    { 1.7347524157501475, 43 },
+    { 3.2907910677525023, 64 },
+    { -1.4602052784820403, 22 },
+    { -0.14257247250441651, 29 },
+    { -1.7056461227436699, 22 },
+    { -1.6021739340105994, 22 },
+    { 3.327626796742492, 64 },
+    { -1.5154588719670246, 22 },
+    { -0.12850247603062037, 29 },
+    { -3, 120 },
+    { 4, 120 },
+    { -3, 120 },
+    { -3, 19.908816885232596 },
+    { -3, 21.241546080094217 },
+    { -3, 20.829710109982337 },
+    { -1.25, 73.333333333333329 },
+    { -3, 22 },
+    { -3, 21.609903369994115 },
+    { -3, 21.268417382251211 },
+    { 4, -20 },
+    { 3.3547403972798837, 64 },
+    { -3, 20.900060092351318 },
+    { -0.057518148266340753, 29 },
+    { 1.7006038169758575, 43 },
+    { 3.3390096630005885, 64 },
+    { 3.8645531465032388, 71 },
+    { 3.3021739340105989, 64 },
+    { 3.327626796742492, 64 },
+    { -3, 120 },
+};
+static const unsigned char rep_met05_4_y[145] = {
+    1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1
+};
+
+
+static void audiogram_desc(psygp_desc* d, psygp_model model, psygp_acq acq) {
+    memset(d, 0, sizeof(*d));
+    d->n_dims = 2;
+    d->lo[0] = -3.0; d->hi[0] = 4.0;
+    d->lo[1] = -20.0; d->hi[1] = 120.0;
+    d->intensity_dim = 1;
+    d->grid[0] = 11; d->grid[1] = 21;
+    d->refine_steps = 2;
+    d->n_init = 5;
+    d->fit = true;
+    d->fit_every = 20;
+    d->target_p = 0.75;
+    d->stop_trials = 150;
+    d->max_trials = 150;
+    d->model = model;
+    d->acq = acq;
+}
+
+static void replay(psygp_gp* g, const double (*X)[2], const unsigned char* Y, int n,
+                   const char* name) {
+    for (int i = 0; i < n; i++) {
+        int rc = psygp_update(g, X[i], Y[i]);
+        CHECK(rc == PSYGP_OK, "%s: update %d: %s", name, i + 1, psygp_strerror(rc));
+    }
+}
+
+/* Defect 1: a scheduled fit of the psychometric model restored its accepted
+ * point from the REJECTED point's mode, the Gauss-Newton search ran into its
+ * step cap on a saturated plateau, the header reported success, and the log
+ * marginal likelihood read -1e49 from then on. */
+static void test_regress_collapse(void) {
+    struct { const double (*x)[2]; const unsigned char* y; int n; psygp_acq acq; const char* name; } run[2] = {
+        { rep_on05_6_x, rep_on05_6_y, 105, PSYGP_ACQ_BALD, "older-normal beta 0.5, rep 6" },
+        { rep_on2_14_x, rep_on2_14_y, 85, PSYGP_ACQ_BALV, "older-normal beta 2, rep 14" },
+    };
+    for (int r = 0; r < 2; r++) {
+        psygp_desc d;
+        psygp_gp g;
+        int crossed = 0;
+        double lm;
+        audiogram_desc(&d, PSYGP_MODEL_PSYCHOMETRIC, run[r].acq);
+        CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+        replay(&g, run[r].x, run[r].y, run[r].n, run[r].name);
+        lm = psygp_log_marginal(&g);
+        for (int c = 0; c < 8; c++) {
+            double ctx[1], th, lo, hi;
+            ctx[0] = -3.0 + 7.0 * c / 7.0;
+            if (psygp_threshold(&g, ctx, 0.0, &th, &lo, &hi) == PSYGP_OK) crossed++;
+        }
+        CHECK(lm == lm && lm > -1e3, "%s: log marginal %.4g after the fit", run[r].name, lm);
+        CHECK(crossed == 8, "%s: the threshold crossed at %d of 8 contexts", run[r].name, crossed);
+        printf("  %s: after the fit that collapsed in 0.4.1, log marginal %.2f, "
+               "%d of 8 contexts cross\n", run[r].name, lm, crossed);
+        psygp_close(&g);
+    }
+    /* The mode search itself: plant a warm start far from the mode (the latents
+     * a rescaled K produces) and refit. What comes back has to be the mode a
+     * cold start finds, not a plateau. */
+    {
+        psygp_desc d;
+        psygp_gp g;
+        psygp__scr s;
+        double cold, warm;
+        int ld;
+        audiogram_desc(&d, PSYGP_MODEL_PSYCHOMETRIC, PSYGP_ACQ_BALD);
+        d.fit = false;
+        CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+        replay(&g, rep_on05_6_x, rep_on05_6_y, 60, "planted start");
+        CHECK(psygp__infer(&g, PSYGP__START_COLD, 0) == PSYGP_OK, "cold fit");
+        cold = psygp_log_marginal(&g);
+        psygp__scr_of(&g, &s);
+        ld = g.N_max;
+        for (int i = 0; i < g.N; i++) {
+            psygp__psv(&s, ld, PSYGP__PS_AM)[i] = 1e6 * (i % 2 ? 1.0 : -1.0);
+            psygp__psv(&s, ld, PSYGP__PS_AG)[i] = 1e3;
+        }
+        CHECK(psygp_refit(&g) == PSYGP_OK, "refit from a planted start");
+        warm = psygp_log_marginal(&g);
+        CHECK(fabs(warm - cold) < 1e-6 * (1.0 + fabs(cold)) * tolx,
+              "planted warm start: log marginal %.10g, cold %.10g", warm, cold);
+        printf("  a warm start planted at 1e6 comes back to the cold mode: %.6f against %.6f\n",
+               warm, cold);
+        psygp_close(&g);
+    }
+}
+
+/* Defect 2: the GP model's fit at trial 145 of metabolic beta 0.5, rep 4,
+ * jumped to a short-lengthscale mode the data favor by 12 nats, interpolated
+ * the sampled columns, sent every unsampled one to the mean, and the
+ * threshold error went from 2.0 to 37.8 dB. The level-set guard undoes it. */
+static void test_regress_lengthscale(void) {
+    psygp_desc d;
+    psygp_gp g;
+    psygp_hyper h;
+    audiogram_desc(&d, PSYGP_MODEL_GP, PSYGP_ACQ_LSE);
+    CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+    replay(&g, rep_met05_4_x, rep_met05_4_y, 145, "metabolic beta 0.5, rep 4");
+    memset(&h, 0, sizeof(h));
+    psygp_get_hyper(&g, &h);
+    CHECK(h.lengthscale[0] > 1.5 && h.lengthscale[1] > 20.0,
+          "metabolic beta 0.5, rep 4: lengthscales (%.2f, %.2f) after trial 145",
+          h.lengthscale[0], h.lengthscale[1]);
+    CHECK(g.fit_blocked, "the level-set guard did not act at trial 145");
+    printf("  metabolic beta 0.5, rep 4: the fit at trial 145 was undone, "
+           "lengthscales stay (%.2f, %.2f)\n", h.lengthscale[0], h.lengthscale[1]);
+    psygp_close(&g);
+}
+
+/* Defect 3: AEPsych's novel discrimination function. p has a floor of 0.5 at
+ * the bottom edge and rises steeply, so most responses are yes; without a prior
+ * on the mean it ran to its bound, the model called the whole box above 0.75,
+ * and most columns lost their crossing. */
+static double nd_theta(double c) { double q = -1.0 + 0.2 * c; return 2.0 * (0.05 + 0.4 * q * q * c * c); }
+static double nd_p(const double* x) { return 0.5 * erfc(-(2.0 * (x[1] + 1.0) / nd_theta(x[0])) / sqrt(2.0)); }
+
+static void test_regress_novel(void) {
+    const int reps = 5;
+    double nocross = 0.0, mean = 0.0;
+    for (int r = 0; r < reps; r++) {
+        psygp_desc d;
+        psygp_gp g;
+        psygp_hyper h;
+        rng_state = 0x243F6A8885A308D3ull + 0xD15Cull + (uint64_t)r * 0x1000193ull;
+        memset(&d, 0, sizeof(d));
+        d.n_dims = 2;
+        d.lo[0] = -1.0; d.hi[0] = 1.0; d.lo[1] = -1.0; d.hi[1] = 1.0;
+        d.intensity_dim = 1;
+        d.grid[0] = 11; d.grid[1] = 21;
+        d.refine_steps = 2; d.n_init = 5; d.fit = true; d.fit_every = 20;
+        d.target_p = 0.75; d.stop_trials = 150; d.acq = PSYGP_ACQ_EAVC;
+        CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+        while (!psygp_done(&g)) {
+            double x[2], p[2];
+            psygp_next(&g, x);
+            p[1] = nd_p(x); p[0] = 1.0 - p[1];
+            psygp_update(&g, x, psygp_simulate_outcome(p, 2, rng_u()));
+        }
+        for (int c = 0; c < 30; c++) {
+            double ctx[1], th, lo, hi;
+            ctx[0] = -1.0 + 2.0 * c / 29.0;
+            if (psygp_threshold(&g, ctx, 0.0, &th, &lo, &hi) != PSYGP_OK) nocross += 1.0 / reps;
+        }
+        memset(&h, 0, sizeof(h));
+        psygp_get_hyper(&g, &h);
+        mean += h.mean / reps;
+        psygp_close(&g);
+    }
+    CHECK(nocross < 8.0, "novel discrimination, EAVC: %.1f of 30 contexts without a crossing", nocross);
+    CHECK(mean < 2.0, "novel discrimination, EAVC: fitted mean %.2f", mean);
+    printf("  novel discrimination, EAVC, %d runs of 150 trials: %.1f of 30 contexts "
+           "without a crossing, fitted mean %.2f\n", reps, nocross, mean);
+}
+
+static void test_regressions(void) {
+    printf("regressions from the cross-method comparison:\n");
+    test_regress_collapse();
+    test_regress_lengthscale();
+    test_regress_novel();
+}
+
+/* --- desc.priors -------------------------------------------------------- */
+
+/* The priors block: zero reports the measured defaults; the same values given
+ * explicitly reproduce the default run to the last bit; a negative sd turns
+ * one prior off and matches desc.no_hyper_prior for the model that has only
+ * that one moving; and a changed center changes the fit the way the objective
+ * says it should. */
+static double priors_run(const psygp_priors* pr, bool no_prior, psygp_hyper* h) {
+    psygp_desc d;
+    psygp_gp g;
+    double lm;
+    ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
+    d.stop_trials = 60;
+    d.fit = true; d.fit_every = 20;
+    d.no_hyper_prior = no_prior;
+    if (pr) d.priors = *pr;
+    rng_state = 0x243F6A8885A308D3ull + 0x5050ull;
+    if (!psygp_open(&g, &d)) { CHECK(0, "open: %s", psygp_error(&g)); return 0.0; }
+    while (!psygp_done(&g)) {
+        double x[2], p2[2];
+        psygp_next(&g, x);
+        p2[1] = ps_ptrue(x); p2[0] = 1.0 - p2[1];
+        psygp_update(&g, x, psygp_simulate_outcome(p2, 2, rng_u()));
+    }
+    memset(h, 0, sizeof(*h));
+    psygp_get_hyper(&g, h);
+    lm = psygp_log_marginal(&g);
+    psygp_close(&g);
+    return lm;
+}
+
+static void test_priors(void) {
+    psygp_desc d;
+    psygp_gp g;
+    psygp_priors pr, pr2;
+    psygp_hyper h0, h1, h2;
+    double lm0, lm1, lm2;
+    printf("desc.priors:\n");
+    ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
+    d.stop_trials = 10;
+    CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+    CHECK(psygp_get_priors(&g, &pr) == PSYGP_OK, "get_priors");
+    CHECK(pr.lengthscale.center == 0.25 && pr.lengthscale.sd == 1.0 &&
+          pr.outputscale.center == 625.0 && pr.outputscale.sd == 0.7 &&
+          pr.outputscale_g.center == 0.3 && pr.mean.sd == 0.7 &&
+          pr.mean_g.center == 0.25 && pr.mean_g.sd == 1.0 &&
+          pr.mean_g.ceiling == 1.0 / 256.0 && pr.noise_sd.sd == -1.0,
+          "the reported defaults are not the documented ones");
+    psygp_close(&g);
+    d.priors.outputscale_g.center = -1.0;
+    CHECK(!psygp_open(&g, &d), "open accepted a negative prior center");
+    d.priors.outputscale_g.center = 0.0;
+    d.no_hyper_prior = true;
+    CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+    psygp_get_priors(&g, &pr2);
+    CHECK(pr2.lengthscale.sd == -1.0 && pr2.mean_g.sd == -1.0,
+          "no_hyper_prior is not reported as every prior off");
+    psygp_close(&g);
+
+    lm0 = priors_run(NULL, false, &h0);
+    lm1 = priors_run(&pr, false, &h1);       /* the defaults, given explicitly */
+    CHECK(lm0 == lm1 && memcmp(&h0, &h1, sizeof(h0)) == 0,
+          "the defaults given explicitly do not reproduce the default run");
+    pr2 = pr;
+    pr2.mean_g.center = 0.05;                /* a rise a twentieth of the axis */
+    lm2 = priors_run(&pr2, false, &h2);
+    CHECK(h2.mean_g > h0.mean_g, "a steeper prior slope did not steepen the fit "
+          "(%.3f against %.3f)", h2.mean_g, h0.mean_g);
+    printf("  defaults reported and reproduced bit for bit (log marginal %.4f); a prior "
+           "rise of 1/20 of the axis moves the fitted mean log-slope from %.3f to %.3f"
+           "\n", lm0, h0.mean_g, h2.mean_g);
+    (void)lm2;
+}
+
+/* --- optimization acquisitions ----------------------------------------- */
+
+/* A bump with its maximum of 1 at (0.3, 0.7) and -1 far from it. */
+static double bump(const double* x) {
+    double a = x[0] - 0.3, b = x[1] - 0.7;
+    return 2.0 * exp(-(a * a + b * b) / (2.0 * 0.15 * 0.15)) - 1.0;
+}
+
+static double opt_session(psygp_acq acq, psygp_lik lik, bool minimize, int trials,
+                          int rep, double* value) {
+    psygp_desc d;
+    psygp_gp g;
+    double x[2], dx, dy;
+    rng_state = 0x243F6A8885A308D3ull + 0x0B7ull + (uint64_t)rep * 0x1000193ull +
+                (uint64_t)acq * 77u;
+    memset(&d, 0, sizeof(d));
+    d.n_dims = 2;
+    d.lo[0] = 0.0; d.hi[0] = 1.0; d.lo[1] = 0.0; d.hi[1] = 1.0;
+    d.lik = lik;
+    d.acq = acq;
+    d.minimize = minimize;
+    d.grid[0] = 21; d.grid[1] = 21;
+    d.n_init = 8; d.fit = true; d.fit_every = 10;
+    d.refine_steps = 2;
+    d.stop_trials = trials;
+    d.rng = rng_cb;
+    if (!psygp_open(&g, &d)) { CHECK(0, "open: %s", psygp_error(&g)); return 1.0; }
+    while (!psygp_done(&g)) {
+        double xn[2], fv;
+        int rc;
+        psygp_next(&g, xn);
+        fv = minimize ? -bump(xn) : bump(xn);
+        if (lik == PSYGP_LIK_GAUSSIAN) {
+            double u1 = rng_u(), u2 = rng_u();
+            if (u1 < 1e-300) u1 = 1e-300;
+            rc = psygp_update_real(&g, xn, fv + 0.1 * sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2));
+        } else {
+            double p[2];
+            p[1] = 0.5 * erfc(-(2.0 * fv) / sqrt(2.0)); p[0] = 1.0 - p[1];
+            rc = psygp_update(&g, xn, psygp_simulate_outcome(p, 2, rng_u()));
+        }
+        CHECK(rc == PSYGP_OK, "optimization update: %s", psygp_strerror(rc));
+    }
+    CHECK(psygp_argmax(&g, x, value) >= -1, "argmax");
+    psygp_close(&g);
+    dx = x[0] - 0.3; dy = x[1] - 0.7;
+    return sqrt(dx * dx + dy * dy);
+}
+
+static void test_optimize(void) {
+    static const psygp_acq acqs[3] = { PSYGP_ACQ_UCB, PSYGP_ACQ_EI, PSYGP_ACQ_THOMPSON };
+    static const char* const names[3] = { "UCB", "EI", "Thompson" };
+    psygp_desc d;
+    psygp_gp g;
+    printf("optimization acquisitions:" "\n");
+    memset(&d, 0, sizeof(d));
+    d.n_dims = 2;
+    d.lo[0] = 0.0; d.hi[0] = 1.0; d.lo[1] = 0.0; d.hi[1] = 1.0;
+    d.acq = PSYGP_ACQ_THOMPSON; d.stop_trials = 10;
+    CHECK(!psygp_open(&g, &d), "open accepted Thompson without desc.rng");
+    d.rng = rng_cb; d.model = PSYGP_MODEL_PSYCHOMETRIC; d.intensity_dim = 1;
+    d.target_p = 0.75;
+    CHECK(!psygp_open(&g, &d), "open accepted Thompson with the psychometric model");
+
+    /* EI's closed form under GAUSSIAN against the integral it is (GAUSSIAN
+     * needs the double build). */
+    if (real_is_double) {
+        double worst = 0.0;
+        memset(&d, 0, sizeof(d));
+        d.n_dims = 1; d.lo[0] = 0.0; d.hi[0] = 1.0;
+        d.lik = PSYGP_LIK_GAUSSIAN; d.acq = PSYGP_ACQ_EI; d.stop_trials = 10;
+        CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+        for (int k = 0; k < 6; k++) {
+            psygp__scr s;
+            double mu = -0.6 + 0.3 * k, sd = 0.05 + 0.1 * k, acc = 0.0;
+            const int n = 200000;
+            psygp__scr_of(&g, &s);
+            g.opt_best = 0.2;
+            for (int i = 0; i < n; i++) {
+                double m = mu - 10.0 * sd + 20.0 * sd * (i + 0.5) / n;
+                double w = exp(-0.5 * (m - mu) * (m - mu) / (sd * sd)) / (sd * 2.5066282746310002);
+                if (m > 0.2) acc += (m - 0.2) * w * 20.0 * sd / n;
+            }
+            track(&worst, fabs(psygp__ei(&g, &s, mu, sd, 0.0) - acc));
+        }
+        CHECK(worst < 1e-9, "EI closed form vs the integral %.2e", worst);
+        printf("  EI's closed form under GAUSSIAN against its integral: %.1e" "\n", worst);
+        psygp_close(&g);
+    }
+
+    for (int a = 0; a < 3; a++) {
+        double dg = 0.0, db = 0.0, dm = 0.0, vg = 0.0, vm = 0.0, v;
+        const int reps = 3;
+        for (int r = 0; r < reps; r++) {
+            if (real_is_double) {
+                dg += opt_session(acqs[a], PSYGP_LIK_GAUSSIAN, false, 40, r, &v) / reps;
+                vg += v / reps;
+                dm += opt_session(acqs[a], PSYGP_LIK_GAUSSIAN, true, 40, r, &v) / reps;
+                vm += v / reps;
+            } else {
+                vg = 1.0; vm = -1.0;
+            }
+            db += opt_session(acqs[a], PSYGP_LIK_BERNOULLI, false, 80, r, &v) / reps;
+        }
+        printf("  %-8s argmax distance from the optimum: GAUSSIAN %.3f (value %.2f, true 1), "
+               "minimized %.3f (value %.2f, true -1), BERNOULLI %.3f" "\n",
+               names[a], dg, vg, dm, vm, db);
+        CHECK(dg < 0.08, "%s: GAUSSIAN argmax %.3f from the optimum", names[a], dg);
+        CHECK(dm < 0.08, "%s: minimized argmax %.3f from the optimum", names[a], dm);
+        CHECK(fabs(vg - 1.0) < 0.2 && fabs(vm + 1.0) < 0.2,
+              "%s: argmax values %.2f and %.2f", names[a], vg, vm);
+        /* UCB is not held to the BERNOULLI bump: with a small bump and a floor
+         * of 0.02, a run whose first trials all answer 0 sends UCB to the box
+         * corners, where the latent sd is largest and a tail observation
+         * shrinks it slowly, and 80 trials can pass before it finds the bump
+         * (0.16 to 0.21 from the optimum on average over 10 runs at any beta).
+         * EI and Thompson weigh the mean and do not wander. */
+        if (acqs[a] != PSYGP_ACQ_UCB)
+            CHECK(db < 0.15, "%s: BERNOULLI argmax %.3f from the optimum", names[a], db);
+    }
+}
+
+/* --- PSYGP_LIK_PAIRWISE ------------------------------------------------- */
+
+static void pair_desc(psygp_desc* d, psygp_acq acq) {
+    memset(d, 0, sizeof(*d));
+    d->n_dims = 2;
+    d->lo[0] = 0.0; d->hi[0] = 1.0; d->lo[1] = 0.0; d->hi[1] = 1.0;
+    d->lik = PSYGP_LIK_PAIRWISE;
+    d->acq = acq;
+    d->grid[0] = 15; d->grid[1] = 15;
+    d->n_init = 6;
+    d->rng = rng_cb;
+}
+
+/* A preference observer with the bump of the optimization test as its
+ * utility: x1 is preferred with probability Phi(2 (u(x1) - u(x2))). */
+static int prefer(const double* x1, const double* x2) {
+    double p[2];
+    p[1] = 0.5 * erfc(-(2.0 * (bump(x1) - bump(x2))) / sqrt(2.0));
+    p[0] = 1.0 - p[1];
+    return psygp_simulate_outcome(p, 2, rng_u());
+}
+
+static void test_pairwise_math(void) {
+    enum { NT = 24 };
+    static double K[4 * NT * NT], A[4 * NT * NT], S[4 * NT * NT];
+    psygp_desc d;
+    psygp_gp g;
+    psygp__scr s;
+    double worst_k = 0.0, worst_mode = 0.0, pw_var = 0.0, worst_pair = 0.0;
+    int n, n2, ld;
+    rng_state = 0x243F6A8885A308D3ull + 0xFA17ull;
+    pair_desc(&d, PSYGP_ACQ_BALD);
+    d.stop_trials = 100;
+    d.hyper.lengthscale[0] = 0.3; d.hyper.lengthscale[1] = 0.3;
+    d.hyper.outputscale = 1.5;
+    d.jitter = 1e-8;
+    CHECK(psygp_open(&g, &d), "open pairwise: %s", psygp_error(&g));
+    for (int i = 0; i < NT; i++) {
+        double x1[2], x2[2];
+        x1[0] = rng_u(); x1[1] = rng_u(); x2[0] = rng_u(); x2[1] = rng_u();
+        CHECK(psygp_update_pair(&g, x1, x2, prefer(x1, x2)) == PSYGP_OK, "update_pair %d", i);
+    }
+    n = g.N; n2 = 2 * n; ld = g.N_max;
+    psygp__scr_of(&g, &s);
+    /* The 2N point kernel, stimuli x1 then x2. */
+    for (int i = 0; i < n2; i++)
+        for (int j = 0; j < n2; j++) {
+            const double* xi = i < n ? g.X + (size_t)i * 2 : g.X2 + (size_t)(i - n) * 2;
+            const double* xj = j < n ? g.X + (size_t)j * 2 : g.X2 + (size_t)(j - n) * 2;
+            K[(size_t)i * n2 + j] = psygp__kernel(&g, xi, xj) + (i == j ? 1e-8 : 0.0);
+        }
+    /* 1. The trial kernel is D K D' for the difference operator D. */
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++) {
+            double v = K[(size_t)i * n2 + j] - K[(size_t)i * n2 + n + j] -
+                       K[(size_t)(n + i) * n2 + j] + K[(size_t)(n + i) * n2 + n + j];
+            double kd = g.Kmat[(size_t)i * ld + j] - (i == j ? 1e-8 : 0.0);
+            if (i == j) v -= 2e-8;   /* the point kernel's two jitters */
+            track(&worst_k, fabs(v - kd));
+        }
+    /* 2. The utility's predicted differences at the trials are the mode. */
+    for (int i = 0; i < n; i++) {
+        double m1, m2;
+        psygp_predict_f(&g, g.X + (size_t)i * 2, 0, &m1, NULL);
+        psygp_predict_f(&g, g.X2 + (size_t)i * 2, 0, &m2, NULL);
+        track(&worst_mode, fabs((m1 - m2) - g.f[i]) / (1.0 + fabs(g.f[i])));
+    }
+    /* 3. The utility's predictive variance against the dense posterior over
+     * the 2N point latents: Sigma = (K^-1 + D' W D)^-1. */
+    memcpy(A, K, sizeof(double) * (size_t)n2 * n2);
+    tinv(A, n2);
+    memcpy(S, A, sizeof(double) * (size_t)n2 * n2);
+    for (int i = 0; i < n; i++) {
+        double w = g.W[i];
+        S[(size_t)i * n2 + i] += w;
+        S[(size_t)(n + i) * n2 + (n + i)] += w;
+        S[(size_t)i * n2 + (n + i)] -= w;
+        S[(size_t)(n + i) * n2 + i] -= w;
+    }
+    tinv(S, n2);
+    for (int t0 = 0; t0 < 4; t0++) {
+        double xs[2][2], ka[2][64], aa[2][64], mean[2], cov[2][2];
+        for (int q = 0; q < 2; q++) {
+            xs[q][0] = 0.15 + 0.2 * t0 + 0.1 * q; xs[q][1] = 0.8 - 0.15 * t0 - 0.2 * q;
+            for (int i = 0; i < n2; i++) {
+                const double* xi = i < n ? g.X + (size_t)i * 2 : g.X2 + (size_t)(i - n) * 2;
+                ka[q][i] = psygp__kernel(&g, xi, xs[q]);
+            }
+            for (int i = 0; i < n2; i++) {
+                double acc = 0.0;
+                for (int j = 0; j < n2; j++) acc += A[(size_t)i * n2 + j] * ka[q][j];
+                aa[q][i] = acc;
+            }
+            mean[q] = 0.0;
+        }
+        for (int q = 0; q < 2; q++)
+            for (int r = 0; r < 2; r++) {
+                double c = psygp__kernel(&g, xs[q], xs[r]);
+                for (int i = 0; i < n2; i++) c -= ka[q][i] * aa[r][i];
+                for (int i = 0; i < n2; i++) {
+                    double acc = 0.0;
+                    for (int j = 0; j < n2; j++) acc += S[(size_t)i * n2 + j] * aa[r][j];
+                    c += aa[q][i] * acc;
+                }
+                cov[q][r] = c;
+            }
+        for (int q = 0; q < 2; q++) {
+            double sd;
+            psygp_predict_f(&g, xs[q], 0, &mean[q], &sd);
+            track(&pw_var, fabs(sd * sd - cov[q][q]) / (1.0 + cov[q][q]));
+        }
+        {
+            double vd = cov[0][0] + cov[1][1] - 2.0 * cov[0][1];
+            double pd = 0.5 * erfc(-((mean[0] - mean[1]) / sqrt(1.0 + vd)) / sqrt(2.0));
+            track(&worst_pair, fabs(pd - psygp_predict_pair(&g, xs[0], xs[1])));
+        }
+    }
+    CHECK(worst_k < (real_is_double ? 1e-12 : 1e-5), "pairwise: trial kernel vs D K D' %.2e", worst_k);
+    CHECK(worst_mode < (real_is_double ? 1e-8 : 1e-5), "pairwise: predicted differences vs the mode %.2e", worst_mode);
+    CHECK(pw_var < 1e-6 * tolx, "pairwise: utility variance vs dense 2N %.2e", pw_var);
+    CHECK(worst_pair < 1e-6 * tolx, "pairwise: P(x1 preferred) vs dense %.2e", worst_pair);
+    printf("  trial kernel vs D K D' %.1e, predicted differences vs the mode %.1e,\n"
+           "  utility variance vs a dense 2N posterior %.1e, P(x1 preferred) %.1e\n",
+           worst_k, worst_mode, pw_var, worst_pair);
+    psygp_close(&g);
+
+    /* 4. The analytic hyperparameter gradient against differences. */
+    {
+        psygp__param pp[PSYGP__NTHETA];
+        double th[PSYGP__NTHETA], gr[PSYGP__NTHETA], tw[PSYGP__NTHETA], v, worst = 0.0;
+        int np;
+        pair_desc(&d, PSYGP_ACQ_BALD);
+        d.stop_trials = 100;
+        rng_state = 0x243F6A8885A308D3ull + 0xFA18ull;
+        CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+        for (int i = 0; i < 30; i++) {
+            double x1[2], x2[2];
+            x1[0] = rng_u(); x1[1] = rng_u(); x2[0] = rng_u(); x2[1] = rng_u();
+            psygp_update_pair(&g, x1, x2, prefer(x1, x2));
+        }
+        np = psygp__params(&g, pp);
+        psygp__theta_get(&g, pp, np, th);
+        for (int i = 0; i < np; i++)
+            th[i] = psygp__clamp(th[i] + 0.1 * (double)(i % 3 - 1), pp[i].lo, pp[i].hi);
+        psygp__fit_eval(&g, pp, np, th, &v, gr);
+        for (int i = 0; i < np; i++) {
+            double h = (real_is_double ? 1e-5 : 3e-3) * (1.0 + fabs(th[i])), vp, vm, fd;
+            memcpy(tw, th, sizeof(double) * (size_t)np);
+            tw[i] = th[i] + h; psygp__fit_eval(&g, pp, np, tw, &vp, NULL);
+            tw[i] = th[i] - h; psygp__fit_eval(&g, pp, np, tw, &vm, NULL);
+            fd = (vp - vm) / (2.0 * h);
+            track(&worst, fabs(gr[i] - fd) / (1e-3 + fabs(fd)));
+        }
+        track(&worst_grad, worst);
+        CHECK(np == 3, "pairwise: %d free hyperparameters, expected 3 (no mean)", np);
+        CHECK(worst < (real_is_double ? 1e-4 : 5e-2), "pairwise gradient vs differences %.2e", worst);
+        printf("  analytic gradient vs central differences over the 3 hyperparameters: %.1e\n",
+               worst);
+        psygp_close(&g);
+    }
+}
+
+static void test_pairwise(void) {
+    static const psygp_acq acqs[3] = { PSYGP_ACQ_BALD, PSYGP_ACQ_BALV, PSYGP_ACQ_THOMPSON };
+    static const char* const names[3] = { "BALD", "BALV", "Thompson" };
+    psygp_desc d;
+    psygp_gp g;
+    double x[2];
+    printf("PSYGP_LIK_PAIRWISE:\n");
+    pair_desc(&d, PSYGP_ACQ_LSE); d.stop_trials = 10;
+    CHECK(!psygp_open(&g, &d), "open accepted LSE with PAIRWISE");
+    pair_desc(&d, PSYGP_ACQ_BALD); d.stop_trials = 10; d.guess = 0.5;
+    CHECK(!psygp_open(&g, &d), "open accepted a guess with PAIRWISE");
+    pair_desc(&d, PSYGP_ACQ_BALD); d.stop_trials = 10;
+    CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+    CHECK(psygp_next(&g, x) < -1, "psygp_next accepted a PAIRWISE handle");
+    CHECK(psygp_update(&g, x, 1) == PSYGP_ERR_ARG, "psygp_update accepted a PAIRWISE handle");
+    psygp_close(&g);
+    test_pairwise_math();
+    for (int a = 0; a < 3; a++) {
+        double dist = 0.0;
+        const int reps = 3;
+        for (int r = 0; r < reps; r++) {
+            rng_state = 0x243F6A8885A308D3ull + 0xFA20ull + (uint64_t)r * 0x1000193ull +
+                        (uint64_t)a * 131u;
+            pair_desc(&d, acqs[a]);
+            d.fit = true; d.fit_every = 10; d.refine_steps = 2;
+            d.stop_trials = 60;
+            CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
+            while (!psygp_done(&g)) {
+                double x1[2], x2[2];
+                CHECK(psygp_next_pair(&g, x1, x2) == PSYGP_OK, "next_pair");
+                CHECK(psygp_update_pair(&g, x1, x2, prefer(x1, x2)) == PSYGP_OK, "update_pair");
+            }
+            psygp_argmax(&g, x, NULL);
+            dist += hypot(x[0] - 0.3, x[1] - 0.7) / reps;
+            psygp_close(&g);
+        }
+        printf("  %-8s 60 comparisons, argmax of the utility %.3f from the preferred stimulus\n",
+               names[a], dist);
+        /* BALV maximizes the uncertainty of a comparison and spreads its
+         * pairs rather than closing in on the peak: 0.107 on average over 10
+         * runs, against 0.061 for BALD and 0.077 for Thompson. */
+        CHECK(dist < (acqs[a] == PSYGP_ACQ_BALV ? 0.2 : 0.1),
+              "pairwise %s: argmax %.3f from the optimum", names[a], dist);
+    }
+}
+
 static void test_simulate_outcome(void) {
     double p[3] = { 0.2, 0.3, 0.5 };
     CHECK(psygp_simulate_outcome(p, 3, 0.0) == 0, "simulate at u = 0");
@@ -2458,6 +3389,993 @@ static void test_async_queue(void) {
 }
 #endif /* PSYGP_ASYNC */
 
+/* --- mixed parameter kinds --------------------------------------------- */
+
+/* A field over an intensity x in [0, 1], a 3-level categorical context c and
+ * an integer context k in 0..4: the 50% point is 0.35 + off[c] + 0.04 k. The
+ * levels are unordered on purpose, so level 1 is the far one and treating c as
+ * a continuous axis puts the wrong neighbor next to it. */
+static const double mixed_off[3] = { 0.0, 0.15, 0.05 };
+
+static double mixed_thr(int c, int k) { return 0.35 + mixed_off[c] + 0.04 * (double)k; }
+
+static int mixed_observer(const double* x) {
+    int c = (int)floor(x[1] + 0.5), k = (int)floor(x[2] + 0.5);
+    double p = 0.5 * erfc(-((x[0] - mixed_thr(c, k)) / 0.08) / sqrt(2.0));
+    return rng_u() < p ? 1 : 0;
+}
+
+static void mixed_desc(psygp_desc* d, bool kinds, psygp_model model) {
+    memset(d, 0, sizeof(*d));
+    d->n_dims = 3;
+    d->lo[0] = 0.0; d->hi[0] = 1.0;
+    d->lo[1] = 0.0; d->hi[1] = 2.0;
+    d->lo[2] = 0.0; d->hi[2] = 4.0;
+    d->grid[0] = 21; d->grid[1] = 3; d->grid[2] = 5;
+    if (kinds) {
+        d->dim_kind[1] = PSYGP_DIM_CATEGORICAL;
+        d->dim_levels[1] = 3;
+        d->dim_kind[2] = PSYGP_DIM_INTEGER;
+    }
+    d->model = model;
+    d->target_p = 0.5;
+    d->n_init = 12;
+    d->fit = true;
+    d->fit_every = 20;
+    d->refine_steps = 2;
+    d->stop_trials = 120;
+}
+
+/* Threshold RMSE over the 15 cells after a session, or -1 if a proposal or a
+ * stored trial was not an integer or level where the kinds say it must be. */
+static double mixed_session(bool kinds, psygp_model model, int stream) {
+    psygp_desc d;
+    psygp_gp g;
+    double se = 0.0;
+    int bad = 0, nh = 0;
+    const psygp_trial* h;
+    mixed_desc(&d, kinds, model);
+    rng_state = 0x243F6A8885A308D3ull + (uint64_t)stream * 0x9E3779B97F4A7C15ull;
+    if (!psygp_open(&g, &d)) {
+        CHECK(0, "mixed open: %s", psygp_error(&g));
+        return -1.0;
+    }
+    while (!psygp_done(&g)) {
+        double x[3];
+        psygp_next(&g, x);
+        if (kinds && (x[1] != floor(x[1]) || x[2] != floor(x[2]))) bad++;
+        psygp_update(&g, x, mixed_observer(x));
+    }
+    h = psygp_history(&g, &nh);
+    for (int i = 0; i < nh && kinds; i++)
+        if (h[i].x[1] != floor(h[i].x[1]) || h[i].x[2] != floor(h[i].x[2])) bad++;
+    for (int c = 0; c < 3; c++)
+        for (int k = 0; k < 5; k++) {
+            double ctx[2], t = 0.0;
+            ctx[0] = (double)c; ctx[1] = (double)k;
+            if (psygp_threshold(&g, ctx, 0.0, &t, NULL, NULL) != PSYGP_OK) t = 1.0;
+            se += (t - mixed_thr(c, k)) * (t - mixed_thr(c, k));
+        }
+    psygp_close(&g);
+    return bad ? -1.0 : sqrt(se / 15.0);
+}
+
+static void test_mixed(void) {
+    psygp_desc d;
+    psygp_gp g;
+    printf("mixed parameter kinds:\n");
+
+    /* 1. The kernel: a categorical pair is os exp(-(1 - delta) / l), an
+     * integer coordinate counts as its nearest integer. */
+    mixed_desc(&d, true, PSYGP_MODEL_GP);
+    d.hyper.lengthscale[0] = 0.2;
+    d.hyper.lengthscale[1] = 0.7;
+    d.hyper.lengthscale[2] = 1.5;
+    d.hyper.outputscale = 1.3;
+    CHECK(psygp_open(&g, &d), "mixed open: %s", psygp_error(&g));
+    {
+        double a[3] = { 0.3, 0.0, 1.0 }, b[3] = { 0.5, 2.0, 3.0 }, b2[3] = { 0.5, 1.8, 3.4 };
+        double want = 1.3 * exp(-0.5 * (1.0 + 4.0 / 2.25)) * exp(-1.0 / 0.7);
+        CLOSE(psygp__kernel(&g, a, b), want, 1e-15, "categorical and integer kernel");
+        CLOSE(psygp__kernel(&g, a, b2), psygp__kernel(&g, a, b), 0.0,
+              "the kernel on the rounded values");
+        b[1] = 0.0;
+        CLOSE(psygp__kernel(&g, a, b), 1.3 * exp(-0.5 * (1.0 + 4.0 / 2.25)), 1e-15,
+              "same level");
+    }
+    {
+        double x[3] = { 0.4, 1.2, 2.6 };
+        CHECK(psygp_update(&g, x, 1) == PSYGP_OK, "mixed update");
+        CHECK(psygp_history(&g, NULL)[0].x[1] == 1.0 &&
+              psygp_history(&g, NULL)[0].x[2] == 3.0,
+              "an update stores the level and the integer shown");
+    }
+    psygp_close(&g);
+
+    /* 2. Descriptions the kinds rule out. */
+    mixed_desc(&d, true, PSYGP_MODEL_GP);
+    d.dim_kind[0] = PSYGP_DIM_INTEGER;
+    CHECK(!psygp_open(&g, &d), "an INTEGER intensity is refused");
+    mixed_desc(&d, true, PSYGP_MODEL_GP);
+    d.hi[1] = 3.0;
+    CHECK(!psygp_open(&g, &d), "a CATEGORICAL box other than [0, levels - 1] is refused");
+    mixed_desc(&d, true, PSYGP_MODEL_GP);
+    d.hi[2] = 4.5;
+    CHECK(!psygp_open(&g, &d), "an INTEGER box with a fractional edge is refused");
+    mixed_desc(&d, true, PSYGP_MODEL_GP);
+    d.grid[2] = 7;
+    CHECK(!psygp_open(&g, &d), "an INTEGER grid finer than the integers is refused");
+    mixed_desc(&d, true, PSYGP_MODEL_GP);
+    d.grid[1] = 0;
+    CHECK(psygp_open(&g, &d) && psygp_n_candidates(&g) == 21 * 3 * 5,
+          "a CATEGORICAL grid of 0 enumerates the levels");
+    psygp_close(&g);
+    mixed_desc(&d, true, PSYGP_MODEL_GP);
+    memset(d.grid, 0, sizeof(d.grid));
+    d.n_candidates = 256;
+    CHECK(psygp_open(&g, &d), "mixed Halton open: %s", psygp_error(&g));
+    {
+        int bad = 0, seen[3] = { 0, 0, 0 };
+        for (int j = 0; j < psygp_n_candidates(&g); j++) {
+            double c[3];
+            psygp_candidate(&g, j, c);
+            if (c[1] != floor(c[1]) || c[2] != floor(c[2]) || c[1] < 0.0 || c[1] > 2.0 ||
+                c[2] < 0.0 || c[2] > 4.0) bad++;
+            else seen[(int)c[1]]++;
+        }
+        CHECK(bad == 0 && seen[0] > 60 && seen[1] > 60 && seen[2] > 60,
+              "Halton candidates on the levels and integers (%d bad, %d %d %d per level)",
+              bad, seen[0], seen[1], seen[2]);
+    }
+    psygp_close(&g);
+
+    /* 3. The analytic gradient against differences, GP (RBF and SEMIP) and
+     * psychometric, on a categorical and an integer dimension. */
+    for (int arm = 0; arm < 3; arm++) {
+        psygp__param p[PSYGP__NTHETA];
+        double th[PSYGP__NTHETA], ga[PSYGP__NTHETA], v0, vp, vm, worst = 0.0;
+        int np;
+        mixed_desc(&d, true, arm == 2 ? PSYGP_MODEL_PSYCHOMETRIC : PSYGP_MODEL_GP);
+        if (arm == 1) d.kernel = PSYGP_KERNEL_SEMIP;
+        d.stop_trials = 60;
+        rng_state = 0x243F6A8885A308D3ull + 0x3141ull * (uint64_t)(arm + 1);
+        CHECK(psygp_open(&g, &d), "mixed gradient open: %s", psygp_error(&g));
+        if (arm == 2) g.ps_tol = real_is_double ? 1e-13 : 1e-6;
+        for (int i = 0; i < 60; i++) {
+            double x[3];
+            x[0] = rng_u();
+            x[1] = floor(rng_u() * 3.0);
+            x[2] = floor(rng_u() * 5.0);
+            psygp_update(&g, x, mixed_observer(x));
+        }
+        np = psygp__params(&g, p);
+        psygp__theta_get(&g, p, np, th);
+        CHECK(psygp__fit_eval(&g, p, np, th, &v0, ga) == PSYGP_OK, "mixed fit_eval");
+        for (int i = 0; i < np; i++) {
+            double step = (real_is_double ? 1e-5 : 3e-3) * (1.0 + fabs(th[i]));
+            double save = th[i], gn, rel;
+            if (p[i].kind != PSYGP__P_LS && p[i].kind != PSYGP__P_LSB &&
+                p[i].kind != PSYGP__P_LSG) continue;
+            th[i] = save + step;
+            psygp__fit_eval(&g, p, np, th, &vp, NULL);
+            th[i] = save - step;
+            psygp__fit_eval(&g, p, np, th, &vm, NULL);
+            th[i] = save;
+            gn = (vp - vm) / (2.0 * step);
+            rel = fabs(ga[i] - gn) / (fabs(gn) > 1e-6 ? fabs(gn) : 1e-6);
+            if (rel > worst) worst = rel;
+        }
+        track(&worst_grad, worst);
+        CHECK(worst < (real_is_double ? 1e-4 : 6e-2),
+              "mixed gradient arm %d: lengthscale relative error %.3g", arm, worst);
+        printf("  %s lengthscale gradient vs differences %.1e\n",
+               arm == 0 ? "GP/RBF" : arm == 1 ? "GP/SEMIP" : "psychometric", worst);
+        psygp_close(&g);
+    }
+
+    /* 4. Sessions: every proposal lands on a level and an integer, and the
+     * kinds are measured against the same field with both contexts declared
+     * CONTINUOUS. */
+    {
+        static const char* const names[3] = { "GP, kinds", "GP, all continuous",
+                                               "psychometric, kinds" };
+        double rm[3] = { 0.0, 0.0, 0.0 };
+        int streams = 4;
+        for (int s = 0; s < streams; s++) {
+            double r0 = mixed_session(true, PSYGP_MODEL_GP, s);
+            double r1 = mixed_session(false, PSYGP_MODEL_GP, s);
+            double r2 = mixed_session(true, PSYGP_MODEL_PSYCHOMETRIC, s);
+            CHECK(r0 >= 0.0 && r2 >= 0.0, "stream %d: a proposal off the levels or integers", s);
+            rm[0] += r0 / streams;
+            rm[1] += r1 / streams;
+            rm[2] += r2 / streams;
+        }
+        CHECK(rm[0] < 0.06 && rm[2] < 0.06, "mixed threshold RMSE %.3f / %.3f", rm[0], rm[2]);
+        for (int a = 0; a < 3; a++)
+            printf("  %-20s threshold RMSE over 15 cells after 120 trials, %d streams: %.4f\n",
+                   names[a], streams, rm[a]);
+    }
+}
+
+/* --- monotonic projection ---------------------------------------------- */
+
+/* A 2-D field whose true p rises along x[1] except for a dip, so an unprojected
+ * posterior mean has somewhere to decrease. */
+static int mono_observer(const double* x) {
+    double f = 3.0 * (x[1] - 0.45) - 1.2 * exp(-((x[1] - 0.6) * (x[1] - 0.6)) / 0.005) +
+               0.5 * x[0];
+    return rng_u() < 0.5 * erfc(-f / sqrt(2.0)) ? 1 : 0;
+}
+
+static void mono_desc(psygp_desc* d, psygp_acq acq, bool grid) {
+    memset(d, 0, sizeof(*d));
+    d->n_dims = 2;
+    d->lo[0] = 0.0; d->hi[0] = 1.0;
+    d->lo[1] = 0.0; d->hi[1] = 1.0;
+    d->intensity_dim = 1;
+    if (grid) { d->grid[0] = 9; d->grid[1] = 21; }
+    else d->n_candidates = 200;
+    d->acq = acq;
+    d->target_p = 0.6;
+    d->hyper.lengthscale[0] = 0.4;
+    d->hyper.lengthscale[1] = 0.06;
+    d->monotone_dims = 1u << 1;
+    d->stop_trials = 80;
+}
+
+static void test_monotone(void) {
+    psygp_desc d;
+    psygp_gp g;
+    psygp__scr s;
+    double worst_p = 0.0, worst_c = 0.0, worst_t = 0.0;
+    int drops_on = 0, drops_off = 0, pdrops_on = 0, fdrops_on = 0;
+    printf("monotonic projection:\n");
+
+    for (int grid = 1; grid >= 0; grid--) {
+        mono_desc(&d, PSYGP_ACQ_LSE, grid != 0);
+        rng_state = 0x243F6A8885A308D3ull + 0x6D6Full + (uint64_t)grid;
+        CHECK(psygp_open(&g, &d), "mono open: %s", psygp_error(&g));
+        for (int i = 0; i < 60; i++) {
+            double x[2];
+            x[0] = rng_u();
+            x[1] = 0.3 + 0.5 * rng_u();
+            psygp_update(&g, x, mono_observer(x));
+        }
+        psygp__scr_of(&g, &s);
+        /* 1. predict_p is the link of the largest unprojected mean on the
+         * line below x, against a brute force through predict_f. */
+        for (int r = 0; r < 20; r++) {
+            double x[2], y[2], mu, sd, best, want;
+            int n = psygp__line_n(&g, 1);
+            x[0] = rng_u();
+            x[1] = rng_u();
+            psygp_predict_f(&g, x, 0, &best, &sd);
+            for (int k = 0; k < n; k++) {
+                y[0] = x[0];
+                y[1] = (double)k / (double)(n - 1);
+                if (!(y[1] < x[1])) continue;
+                psygp_predict_f(&g, y, 0, &mu, NULL);
+                if (mu > best) best = mu;
+            }
+            want = psygp__q_smooth(&g, &s, best, sd, 0.0);
+            track(&worst_p, fabs(psygp_predict_p(&g, x) - want));
+            {
+                double pm;
+                psygp_predict_p_many(&g, x, 1, &pm);
+                track(&worst_p, fabs(pm - want));
+            }
+        }
+        /* 2. The level-set acquisition's candidate means are the same
+         * projection, on the grid by a running maximum. */
+        {
+            double x[2];
+            psygp_next(&g, x);
+            for (int j = 0; j < g.M; j++) {
+                double mu, sd;
+                const double* c = psygp__cand(&g, j);
+                psygp_predict_f(&g, c, 0, &mu, &sd);
+                track(&worst_c, fabs(g.cand_mu[j] - psygp__mono_mu(&g, &s, c, mu, s.t1)));
+            }
+        }
+        /* 3. The projected mean never decreases on the candidate line, and
+         * the threshold sits at the target on the projected curve. Between
+         * line points it can, and E[p] can anywhere, which is what a
+         * projection of the mean and not a constraint means; the counts are
+         * printed. */
+        for (int c = 0; c < 5; c++) {
+            double xs[2 * 101], p[101], ctx = 0.25 * c, thr;
+            for (int k = 0; k <= 100; k++) { xs[2 * k] = ctx; xs[2 * k + 1] = 0.01 * k; }
+            psygp_predict_p_many(&g, xs, 101, p);
+            for (int k = 1; k <= 100; k++) if (p[k] < p[k - 1] - 1e-12) pdrops_on++;
+            for (int k = 0; k <= 100; k++) {
+                double sd, other;
+                psygp__target_latent_p(&g, &s, xs + 2 * k, &p[k], &sd, &other, s.t1, s.t2);
+            }
+            for (int k = 1; k <= 100; k++) if (p[k] < p[k - 1] - 1e-12) fdrops_on++;
+            {
+                /* On the line's own points the projection is a running
+                 * maximum, so it cannot step down there. */
+                int nl = psygp__line_n(&g, 1);
+                double prev = -HUGE_VAL;
+                for (int k = 0; k < nl; k++) {
+                    double pt[2], mu, sd, other;
+                    pt[0] = ctx;
+                    pt[1] = (double)k / (double)(nl - 1);
+                    psygp__target_latent_p(&g, &s, pt, &mu, &sd, &other, s.t1, s.t2);
+                    if (mu < prev - 1e-12) drops_on++;
+                    prev = mu;
+                }
+            }
+            if (psygp_threshold(&g, &ctx, 0.0, &thr, NULL, NULL) == PSYGP_OK) {
+                double pt[2];
+                pt[0] = ctx; pt[1] = thr;
+                track(&worst_t, fabs(psygp_predict_p(&g, pt) - 0.6));
+            }
+        }
+        psygp_close(&g);
+        d.monotone_dims = 0u;
+        rng_state = 0x243F6A8885A308D3ull + 0x6D6Full + (uint64_t)grid;
+        CHECK(psygp_open(&g, &d), "mono open: %s", psygp_error(&g));
+        for (int i = 0; i < 60; i++) {
+            double x[2];
+            x[0] = rng_u();
+            x[1] = 0.3 + 0.5 * rng_u();
+            psygp_update(&g, x, mono_observer(x));
+        }
+        for (int c = 0; c < 5; c++) {
+            double xs[2 * 101], p[101];
+            for (int k = 0; k <= 100; k++) { xs[2 * k] = 0.25 * c; xs[2 * k + 1] = 0.01 * k; }
+            for (int k = 0; k <= 100; k++) {
+                double sd;
+                psygp_predict_f(&g, xs + 2 * k, 0, &p[k], &sd);
+            }
+            for (int k = 1; k <= 100; k++) if (p[k] < p[k - 1] - 1e-12) drops_off++;
+        }
+        psygp_close(&g);
+    }
+    CHECK(worst_p < 1e-12, "projected predict_p vs brute force %.2e", worst_p);
+    CHECK(worst_c < 1e-12, "projected candidate means vs point by point %.2e", worst_c);
+    CHECK(drops_on == 0, "the projected mean decreased %d times on the candidate lines",
+          drops_on);
+    CHECK(drops_off > 0, "the unprojected mean never dipped, so the test tests nothing");
+    CHECK(worst_t < 1e-6, "p at the projected threshold %.2e from the target", worst_t);
+    printf("  predict_p vs brute force %.1e, candidate means %.1e, p at the threshold %.1e;\n"
+           "  steps down along 10 lines of 100: latent mean %d projected, %d unprojected;\n"
+           "  E[p] with the projected mean %d (its variance still varies along the line)\n",
+           worst_p, worst_c, worst_t, fdrops_on, drops_off, pdrops_on);
+
+    /* 4. Descriptions the projection rules out. */
+    mono_desc(&d, PSYGP_ACQ_LSE, true);
+    d.model = PSYGP_MODEL_PSYCHOMETRIC;
+    CHECK(!psygp_open(&g, &d), "monotone_dims with the psychometric model is refused");
+    mono_desc(&d, PSYGP_ACQ_LSE, true);
+    d.monotone_dims = 1u << 2;
+    CHECK(!psygp_open(&g, &d), "monotone_dims past n_dims is refused");
+    mono_desc(&d, PSYGP_ACQ_LSE, true);
+    d.dim_kind[0] = PSYGP_DIM_CATEGORICAL;
+    d.dim_levels[0] = 2;
+    d.monotone_dims = 1u;
+    CHECK(!psygp_open(&g, &d), "a monotone CATEGORICAL dimension is refused");
+
+    /* 5. A session under each level-set acquisition. */
+    {
+        static const psygp_acq acqs[3] = { PSYGP_ACQ_LSE, PSYGP_ACQ_EAVC, PSYGP_ACQ_LOCALMI };
+        for (int a = 0; a < 3; a++) {
+            int n = 0;
+            mono_desc(&d, acqs[a], true);
+            d.fit = true;
+            d.fit_every = 20;
+            d.refine_steps = 2;
+            memset(&d.hyper, 0, sizeof(d.hyper));
+            rng_state = 0x243F6A8885A308D3ull + 0x77ull * (uint64_t)(a + 1);
+            CHECK(psygp_open(&g, &d), "mono session open: %s", psygp_error(&g));
+            while (!psygp_done(&g)) {
+                double x[2];
+                if (psygp_next(&g, x) < -1) break;
+                if (psygp_update(&g, x, mono_observer(x)) != PSYGP_OK) break;
+                n++;
+            }
+            CHECK(n == 80, "mono session %d ran %d trials", a, n);
+            psygp_close(&g);
+        }
+    }
+}
+
+/* --- conjugate-gradient Newton steps ------------------------------------ */
+
+/* The same trials through two handles, one factoring every Newton step and one
+ * solving them by preconditioned conjugate gradients from trial 17 on: the
+ * modes, the log marginals and the predictions have to agree to the Newton
+ * tolerance, and the second handle has to have taken the path. */
+static void test_pcg(void) {
+    static const psygp_lik liks[3] = { PSYGP_LIK_BERNOULLI, PSYGP_LIK_ORDINAL,
+                                       PSYGP_LIK_PAIRWISE };
+    static const char* const names[3] = { "BERNOULLI", "ORDINAL", "PAIRWISE" };
+    printf("conjugate-gradient Newton steps:\n");
+    for (int l = 0; l < 3; l++) {
+        psygp_desc d;
+        psygp_gp ga, gb;
+        double worst_f = 0.0, pcg_lm = 0.0, worst_p = 0.0;
+        int iters = 0, updates = 0, n = 200;
+        memset(&d, 0, sizeof(d));
+        d.n_dims = 2;
+        d.lo[0] = 0.0; d.hi[0] = 1.0; d.lo[1] = 0.0; d.hi[1] = 1.0;
+        d.lik = liks[l];
+        d.n_outcomes = liks[l] == PSYGP_LIK_ORDINAL ? 4 : 0;
+        d.acq = liks[l] == PSYGP_LIK_PAIRWISE ? PSYGP_ACQ_BALD : PSYGP_ACQ_LSE;
+        d.target_p = 0.5;
+        d.grid[0] = 9; d.grid[1] = 9;
+        d.fit = true;
+        d.fit_every = 50;
+        d.stop_trials = n;
+        d.pcg_threshold = -1;
+        CHECK(psygp_open(&ga, &d), "pcg open: %s", psygp_error(&ga));
+        d.pcg_threshold = 16;
+        CHECK(psygp_open(&gb, &d), "pcg open: %s", psygp_error(&gb));
+        rng_state = 0x243F6A8885A308D3ull + 0x9C9ull * (uint64_t)(l + 1);
+        for (int i = 0; i < n; i++) {
+            double x[2], x2[2], f;
+            int y;
+            x[0] = rng_u(); x[1] = rng_u();
+            x2[0] = rng_u(); x2[1] = rng_u();
+            f = 4.0 * (x[0] + x[1] - 1.0) + 2.0 * sin(6.0 * x[0]);
+            if (liks[l] == PSYGP_LIK_PAIRWISE) {
+                f -= 4.0 * (x2[0] + x2[1] - 1.0) + 2.0 * sin(6.0 * x2[0]);
+                y = rng_u() < 0.5 * erfc(-f / sqrt(2.0)) ? 1 : 0;
+                psygp_update_pair(&ga, x, x2, y);
+                psygp_update_pair(&gb, x, x2, y);
+            } else {
+                double z = f + (rng_u() - 0.5) * 3.0;
+                y = liks[l] == PSYGP_LIK_ORDINAL
+                    ? (z < -1.5 ? 0 : z < 0.0 ? 1 : z < 1.5 ? 2 : 3) : (z > 0.0 ? 1 : 0);
+                psygp_update(&ga, x, y);
+                psygp_update(&gb, x, y);
+            }
+            if (gb.pcg_iters > 0) { iters += gb.pcg_iters; updates++; }
+            for (int k = 0; k < gb.N; k++)
+                track(&worst_f, fabs(ga.f[k] - gb.f[k]) / (1.0 + fabs(ga.f[k])));
+            track(&pcg_lm, fabs(psygp_log_marginal(&ga) - psygp_log_marginal(&gb)) /
+                             (1.0 + fabs(psygp_log_marginal(&ga))));
+        }
+        for (int j = 0; j < psygp_n_candidates(&ga); j++) {
+            double c[2], ma, mb, sa, sb;
+            psygp_candidate(&ga, j, c);
+            psygp_predict_f(&ga, c, 0, &ma, &sa);
+            psygp_predict_f(&gb, c, 0, &mb, &sb);
+            track(&worst_p, fabs(ma - mb) + fabs(sa - sb));
+        }
+        CHECK(updates > 150, "%s: %d updates took the conjugate-gradient path", names[l], updates);
+        CHECK(worst_f < (real_is_double ? 1e-8 : 1e-3), "%s: modes differ by %.2e", names[l], worst_f);
+        CHECK(pcg_lm < (real_is_double ? 1e-8 : 1e-3), "%s: log marginals differ by %.2e",
+              names[l], pcg_lm);
+        CHECK(worst_p < (real_is_double ? 1e-8 : 1e-3), "%s: predictions differ by %.2e",
+              names[l], worst_p);
+        printf("  %-9s %3d updates by conjugate gradients, %.1f iterations each; against\n"
+               "            factoring: mode %.1e, log marginal %.1e, prediction %.1e\n",
+               names[l], updates, updates ? (double)iters / updates : 0.0, worst_f, pcg_lm,
+               worst_p);
+        psygp_close(&ga);
+        psygp_close(&gb);
+    }
+}
+
+/* --- snapshots ---------------------------------------------------------- */
+
+/* A session cut at a trial, saved, loaded into a handle filled with garbage,
+ * and finished, against the same session uninterrupted: every proposal and the
+ * final snapshot itself have to agree to the bit. The outcomes are a hash of
+ * the trial index and the stimulus, so both runs see the same responses to the
+ * same stimuli without sharing a generator; the desc's generator state is the
+ * caller's, carried across the cut as the manual says to. */
+typedef struct snap_gen { uint64_t s; } snap_gen;
+
+static uint64_t snap_mix(uint64_t z) {
+    z += 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+static double snap_rng(void* ctx) {
+    snap_gen* gen = (snap_gen*)ctx;
+    gen->s = snap_mix(gen->s);
+    return (double)(gen->s >> 11) * (1.0 / 9007199254740992.0);
+}
+
+static double snap_u(int n, const double* x, int nd) {
+    uint64_t h = (uint64_t)n * 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < nd; i++) {
+        uint64_t b;
+        memcpy(&b, &x[i], sizeof(b));
+        h = snap_mix(h ^ b);
+    }
+    return (double)(snap_mix(h) >> 11) * (1.0 / 9007199254740992.0);
+}
+
+typedef struct snap_cfg {
+    const char* name;
+    int trials;
+    void (*setup)(psygp_desc* d);
+} snap_cfg;
+
+static void snap_base(psygp_desc* d) {
+    memset(d, 0, sizeof(*d));
+    d->n_dims = 2;
+    d->lo[0] = 0.0; d->hi[0] = 1.0; d->lo[1] = 0.0; d->hi[1] = 1.0;
+    d->intensity_dim = 1;
+    d->target_p = 0.6;
+    d->grid[0] = 7; d->grid[1] = 11;
+    d->fit = true;
+    d->fit_every = 8;
+    d->n_init = 6;
+    d->stop_trials = 400;
+}
+static void snap_lse(psygp_desc* d) { snap_base(d); d->refine_steps = 2; }
+static void snap_eavc(psygp_desc* d) {
+    snap_base(d);
+    d->acq = PSYGP_ACQ_EAVC;
+    memset(d->grid, 0, sizeof(d->grid));
+    d->n_candidates = 48;
+}
+static void snap_ps(psygp_desc* d) {
+    snap_base(d);
+    d->model = PSYGP_MODEL_PSYCHOMETRIC;
+    d->acq = PSYGP_ACQ_BALD;
+}
+static void snap_ps_eavc(psygp_desc* d) {
+    snap_base(d);
+    d->model = PSYGP_MODEL_PSYCHOMETRIC;
+    d->acq = PSYGP_ACQ_EAVC;
+}
+static void snap_cat(psygp_desc* d) {
+    snap_base(d);
+    d->lik = PSYGP_LIK_CATEGORICAL;
+    d->n_outcomes = 3;
+    d->fit_every = 12;
+}
+static void snap_ord(psygp_desc* d) {
+    snap_base(d);
+    d->lik = PSYGP_LIK_ORDINAL;
+    d->n_outcomes = 3;
+    d->refit_every = 4;
+    d->acq = PSYGP_ACQ_BALV;
+}
+static void snap_gauss(psygp_desc* d) {
+    snap_base(d);
+    d->lik = PSYGP_LIK_GAUSSIAN;
+    d->acq = PSYGP_ACQ_UCB;
+}
+static void snap_pair(psygp_desc* d) {
+    snap_base(d);
+    d->lik = PSYGP_LIK_PAIRWISE;
+    d->acq = PSYGP_ACQ_THOMPSON;
+}
+static void snap_ps_pcg(psygp_desc* d) {
+    snap_ps(d);
+    d->fit_pcg = true;
+}
+static void snap_lse_pcg(psygp_desc* d) {
+    snap_lse(d);
+    d->fit_pcg = true;
+}
+static void snap_mixed(psygp_desc* d) {
+    snap_base(d);
+    d->n_dims = 3;
+    d->lo[2] = 0.0; d->hi[2] = 2.0;
+    d->dim_kind[2] = PSYGP_DIM_CATEGORICAL;
+    d->dim_levels[2] = 3;
+    d->monotone_dims = 1u << 1;
+    d->pcg_threshold = 10;
+    d->refine_steps = 1;
+}
+
+/* One session; at trial `cut` (after the proposal when `pending`) it is saved,
+ * the handle closed and filled with garbage, and loaded back. Writes the
+ * proposals to xs and returns the final snapshot, malloc'd, in *fin. */
+static int snap_session(const snap_cfg* c, int cut, bool pending, double* xs,
+                        unsigned char** fin, size_t* fin_len) {
+    psygp_desc d;
+    psygp_gp g;
+    snap_gen gen;
+    int nd, loaded = 0;
+    c->setup(&d);
+    gen.s = 0x5EEDull;
+    /* Without a generator the init points are the header's Halton counter,
+     * which is state the snapshot has to carry; with one, they are draws. */
+    if (d.acq == PSYGP_ACQ_THOMPSON || d.acq == PSYGP_ACQ_EAVC || d.lik == PSYGP_LIK_ORDINAL) {
+        d.rng = snap_rng;
+        d.rng_ctx = &gen;
+    }
+    nd = d.n_dims;
+    if (!psygp_open(&g, &d)) { CHECK(0, "%s: open: %s", c->name, psygp_error(&g)); return 0; }
+    for (int n = 0; n < c->trials; n++) {
+        double x[PSYGP_MAX_DIMS] = { 0.0 }, x2[PSYGP_MAX_DIMS] = { 0.0 };
+        bool pair = d.lik == PSYGP_LIK_PAIRWISE;
+        for (int phase = 0; phase < 2; phase++) {
+            if (n == cut && (phase == 1) == pending) {
+                size_t len = psygp_save_size(&g);
+                unsigned char* buf = (unsigned char*)malloc(len);
+                int wrote = psygp_save(&g, buf, len);
+                CHECK(wrote == (int)len, "%s: save wrote %d of %lu", c->name, wrote,
+                      (unsigned long)len);
+                psygp_close(&g);
+                memset(&g, 0xA5, sizeof(g));
+                loaded = psygp_load(&g, &d, buf, len);
+                CHECK(loaded, "%s: load at %d: %s", c->name, cut, psygp_error(&g));
+                free(buf);
+                if (!loaded) return 0;
+            }
+            if (phase == 0) {
+                if (pair) psygp_next_pair(&g, x, x2);
+                else psygp_next(&g, x);
+            }
+        }
+        memcpy(xs + (size_t)n * 2 * PSYGP_MAX_DIMS, x, sizeof(x));
+        if (pair) {
+            double u1 = x[0] - 0.4 * x[1], u2 = x2[0] - 0.4 * x2[1];
+            memcpy(xs + (size_t)n * 2 * PSYGP_MAX_DIMS + PSYGP_MAX_DIMS, x2, sizeof(x2));
+            psygp_update_pair(&g, x, x2, snap_u(n, x, nd) < 0.5 * erfc(-(u1 - u2) * 3.0 / sqrt(2.0)));
+        } else {
+            double f = 6.0 * (x[1] - 0.3 - 0.3 * x[0]);
+            double u = snap_u(n, x, nd);
+            if (d.lik == PSYGP_LIK_GAUSSIAN) {
+                psygp_update_real(&g, x, 0.5 * f + (u - 0.5));
+            } else {
+                double p = 0.5 * erfc(-f / sqrt(2.0));
+                int y = u < p ? 1 : 0;
+                if (d.lik == PSYGP_LIK_CATEGORICAL) y = u < p * 0.6 ? 1 : (u < p ? 2 : 0);
+                if (d.lik == PSYGP_LIK_ORDINAL) y = u < p * p ? 2 : (u < p ? 1 : 0);
+                psygp_update(&g, x, y);
+            }
+        }
+        if (n % 7 == 3) psygp_fit_step(&g);   /* a stepped fit is part of the state */
+    }
+    *fin_len = psygp_save_size(&g);
+    *fin = (unsigned char*)malloc(*fin_len);
+    psygp_save(&g, *fin, *fin_len);
+    psygp_close(&g);
+    return 1;
+}
+
+static void test_snapshot(void) {
+    static const snap_cfg cfgs[] = {
+        { "GP LSE refined",        40, snap_lse },
+        { "GP EAVC",               30, snap_eavc },
+        { "psychometric BALD",     30, snap_ps },
+        { "psychometric EAVC",     24, snap_ps_eavc },
+        { "CATEGORICAL",           30, snap_cat },
+        { "ORDINAL refit_every 4", 30, snap_ord },
+        { "GAUSSIAN UCB",          30, snap_gauss },
+        { "PAIRWISE Thompson",     30, snap_pair },
+        { "mixed, monotone, PCG",  30, snap_mixed },
+        { "GP LSE, fit_pcg",       40, snap_lse_pcg },
+        { "psychometric, fit_pcg", 30, snap_ps_pcg }
+    };
+    int ncfg = (int)(sizeof(cfgs) / sizeof(cfgs[0])), resumes = 0, mismatches = 0;
+    size_t biggest = 0;
+    printf("snapshots:\n");
+    for (int c = 0; c < ncfg; c++) {
+        int T = cfgs[c].trials;
+        double* ref = (double*)calloc((size_t)T * 2 * PSYGP_MAX_DIMS, sizeof(double));
+        double* got = (double*)calloc((size_t)T * 2 * PSYGP_MAX_DIMS, sizeof(double));
+        unsigned char *fref = NULL, *fgot = NULL;
+        size_t lref = 0, lgot = 0;
+        const int cuts[6] = { 0, 1, 5, 9, 17, 23 };
+        if (!real_is_double && cfgs[c].setup == snap_gauss) {   /* double only */
+            free(ref);
+            free(got);
+            continue;
+        }
+        if (!snap_session(&cfgs[c], -1, false, ref, &fref, &lref)) continue;
+        if (lref > biggest) biggest = lref;
+        for (int k = 0; k < 6; k++) {
+            for (int pend = 0; pend < 2; pend++) {
+                bool same;
+                if (cuts[k] >= T) continue;
+                memset(got, 0, (size_t)T * 2 * PSYGP_MAX_DIMS * sizeof(double));
+                if (!snap_session(&cfgs[c], cuts[k], pend != 0, got, &fgot, &lgot)) continue;
+                same = memcmp(ref, got, (size_t)T * 2 * PSYGP_MAX_DIMS * sizeof(double)) == 0 &&
+                       lgot == lref && memcmp(fref, fgot, lref) == 0;
+                CHECK(same, "%s: resumed at trial %d%s differs from the uninterrupted run",
+                      cfgs[c].name, cuts[k], pend ? " (proposal pending)" : "");
+                resumes++;
+                if (!same) mismatches++;
+                free(fgot);
+            }
+        }
+        free(fref);
+        free(ref);
+        free(got);
+    }
+    printf("  %d resumes over %d configurations, %d differ from the uninterrupted run\n"
+           "  (proposals and the final snapshot compared byte for byte); largest\n"
+           "  final snapshot %lu bytes\n", resumes, ncfg, mismatches, (unsigned long)biggest);
+
+    /* A snapshot the desc does not match, a truncated one, and a foreign one. */
+    {
+        psygp_desc d;
+        psygp_gp g;
+        unsigned char* buf;
+        size_t len;
+        snap_lse(&d);
+        CHECK(psygp_open(&g, &d), "snapshot open");
+        for (int n = 0; n < 10; n++) {
+            double x[2];
+            psygp_next(&g, x);
+            psygp_update(&g, x, x[1] > 0.5);
+        }
+        len = psygp_save_size(&g);
+        buf = (unsigned char*)malloc(len);
+        CHECK(psygp_save(&g, buf, len - 1) == PSYGP_ERR_ARG, "save into a short buffer");
+        psygp_save(&g, buf, len);
+        psygp_close(&g);
+        d.target_p = 0.7;
+        CHECK(!psygp_load(&g, &d, buf, len) && strstr(psygp_error(&g), "target_p") &&
+              !psygp_is_open(&g), "a desc that differs is named: %s", psygp_error(&g));
+        d.target_p = 0.6;
+        CHECK(!psygp_load(&g, &d, buf, len - 3), "a truncated snapshot is refused");
+        buf[2] = 'T';
+        CHECK(!psygp_load(&g, &d, buf, len), "a foreign snapshot is refused");
+        buf[2] = 'G';
+        CHECK(psygp_load(&g, &d, buf, len), "the snapshot itself loads: %s", psygp_error(&g));
+        psygp_close(&g);
+        free(buf);
+    }
+}
+
+/* --- the fit's budget and tolerance -------------------------------------- */
+
+/* psygp_fit() says whether it converged, and repeating it until
+ * psygp_fit_delta() is small reaches what one fit with a large budget reaches. */
+static void test_fit_budget(void) {
+    psygp_desc d;
+    psygp_gp ga, gb;
+    int rounds = 0, rc = 0;
+    double la, lb;
+    printf("fit budget and tolerance:\n");
+    memset(&d, 0, sizeof(d));
+    d.n_dims = 2;
+    d.lo[0] = 0.0; d.hi[0] = 1.0; d.lo[1] = 0.0; d.hi[1] = 1.0;
+    d.target_p = 0.5;
+    d.grid[0] = 9; d.grid[1] = 9;
+    d.stop_trials = 400;
+    d.fit_max_evals = 4;
+    CHECK(psygp_open(&ga, &d), "budget open: %s", psygp_error(&ga));
+    CHECK(psygp_fit(&ga) == 1, "a fit with nothing to fit to has converged");
+    d.fit_max_evals = 400;
+    d.fit_tol = 1e-6;
+    CHECK(psygp_open(&gb, &d), "budget open: %s", psygp_error(&gb));
+    rng_state = 0x243F6A8885A308D3ull + 0xF17ull;
+    for (int i = 0; i < 120; i++) {
+        double x[2], f;
+        int y;
+        x[0] = rng_u(); x[1] = rng_u();
+        f = 3.0 * (x[1] - 0.5) + 1.5 * sin(5.0 * x[0]);
+        y = rng_u() < 0.5 * erfc(-f / sqrt(2.0)) ? 1 : 0;
+        psygp_update(&ga, x, y);
+        psygp_update(&gb, x, y);
+    }
+    rc = psygp_fit(&ga);
+    CHECK(rc == 0, "four evaluations do not converge this fit (returned %d)", rc);
+    CHECK(psygp_fit_delta(&ga) > 0.0, "the budgeted fit moved the objective by %g",
+          psygp_fit_delta(&ga));
+    while (rc == 0 && ++rounds < 200) {
+        rc = psygp_fit(&ga);
+        if (psygp_fit_delta(&ga) < 1e-7) break;
+    }
+    CHECK(rc >= 0, "a repeated fit failed: %s", psygp_strerror(rc));
+    rc = psygp_fit(&gb);
+    CHECK(rc == 1, "one fit with a budget of 400 converged (returned %d)", rc);
+    la = psygp_log_marginal(&ga);
+    lb = psygp_log_marginal(&gb);
+    CHECK(fabs(la - lb) < 1e-5, "repeated fits reach %.6f, one long fit %.6f", la, lb);
+    printf("  a 4-evaluation fit repeated %d times reaches log marginal %.6f,\n"
+           "  one fit of up to 400 evaluations to tolerance 1e-6 %.6f\n",
+           rounds + 1, la, lb);
+    psygp_close(&ga);
+    psygp_close(&gb);
+}
+
+/* --- regression: a floor that swallows the mean (csf6) ------------------- */
+
+/* The first 30 trials of replication 4 of the 6-D contrast sensitivity problem
+ * in tests/compare/methods_compare.py (Sobol stimuli, responses from its seeded
+ * stream), with guess = 0.5. Without a prior on the mean, the first fit (trial
+ * 10, five yes) sends the mean to its bound, where p is the floor everywhere,
+ * the log marginal is exactly 10 ln 0.5 and the gradient in the mean vanishes;
+ * v0.4.1 stayed there for all 300 trials. The mean prior of v0.5.0 is what
+ * keeps it out: the test runs both, so the mechanism stays documented. */
+static const double csf6_rep4[30][7] = {
+    { -1.2766851712949574, -0.96831516036763787, 7.7132341824471951, 5.4078615987673402, 1.9480876373127103, 0.45676186680793762, 0 },
+    { -0.070414334535598755, -0.1850840044207871, 11.233065500855446, 0.73709239112213254, 7.8522888738662004, 8.5433981753885746, 1 },
+    { -0.37912975950166583, -1.1581477909348905, 4.7950835525989532, 4.9327587159350514, 6.5891689984127879, 5.6521382182836533, 0 },
+    { -0.87494994979351759, -0.74698125896975398, 16.255717556923628, 3.1033528414554894, 3.4922555424273014, 2.5669422931969166, 0 },
+    { -0.94977311231195927, -1.3380071274004877, 14.800013843923807, 2.2973774624988437, 4.7801763797178864, 1.4997863862663507, 1 },
+    { -0.70311243692412972, -0.55403783870860934, 6.2507878616452217, 4.1265789554454386, 7.3140470068901777, 9.6634560357779264, 1 },
+    { -0.34752122405916452, -0.77746636653319001, 17.708302848041058, 1.5433653285726905, 9.4213911136612296, 7.3983318451792002, 1 },
+    { -1.3983796848915517, -0.36557312356308103, 1.2379962392151356, 6.2139421650208533, 2.9541469141840935, 4.2338334303349257, 0 },
+    { -1.4105143952183425, -1.254501226823777, 19.616173300892115, 4.3655000049620867, 8.4859298076480627, 3.304549315944314, 0 },
+    { -0.21892792638391256, -0.63752411445602775, 1.7494169250130653, 2.534515134524554, 1.4551063040271401, 5.2197058033198118, 1 },
+    { -0.62065950455144048, -1.0719813820905983, 12.87489976733923, 6.7940532248467207, 3.8435652107000351, 8.1091337744146585, 1 },
+    { -1.1017981879413128, -0.071220962796360254, 5.7611884362995625, 2.1248660641722381, 5.8160194670781493, 1.1961984913796186, 1 },
+    { -0.8159481855109334, -0.88480634288862348, 2.8797345422208309, 1.3060961663722992, 6.8226532731205225, 4.7382918000221252, 1 },
+    { -0.55458309268578887, -0.26856738561764359, 15.756354257464409, 5.9750789939425886, 5.4121605129912496, 6.5740504302084446, 1 },
+    { -0.10597287677228451, -1.4526598225347698, 9.6113371849060059, 3.3533841781318188, 2.1804215125739574, 8.8397858291864395, 1 },
+    { -1.1715386160649359, -0.45262609189376235, 11.754252444952726, 5.1841767258010805, 9.7732063783332705, 2.0036359317600727, 1 },
+    { -1.1861754627898335, -1.4790091523900628, 2.1822295151650906, 1.3921318626962602, 3.6344077838584781, 6.5432037506252527, 1 },
+    { -0.18510826444253325, -0.41452229674905539, 19.26651157438755, 6.4731229804456234, 6.1658010892570019, 4.6299592684954405, 1 },
+    { -0.48723476193845272, -0.91700498946011066, 5.3285272419452667, 2.4547493844293058, 8.2734949560835958, 2.3634716216474771, 1 },
+    { -0.78957005823031068, -0.22459415718913078, 13.224715273827314, 3.8739302009344101, 1.8081658873707056, 9.2783090751618147, 1 },
+    { -1.0403089332394302, -1.1100508477538824, 15.323691908270121, 4.6799613940529525, 3.0959902321919799, 5.4037314653396606, 0 },
+    { -0.58842099364846945, -0.044837303459644318, 3.2295512035489082, 3.2609725128859282, 8.9982634633779526, 3.5672819055616856, 1 },
+    { -0.23942444147542119, -1.2984172375872731, 12.187063805758953, 5.6667942772619426, 7.734944031573832, 0.67708022892475128, 1 },
+    { -1.483791422098875, -0.60526825021952391, 9.2616766877472401, 0.58600788004696369, 4.6404950227588415, 7.5125484354794025, 1 },
+    { -1.3310310635715723, -0.83901915326714516, 10.176474843174219, 3.6060311892069876, 5.6744164749979973, 9.7131852805614471, 1 },
+    { -0.32114209095016122, -0.31579778529703617, 8.6866739764809608, 5.026806547306478, 4.2663838705047965, 1.6282988525927067, 1 },
+    { -0.71774957422167063, -1.4054063698276877, 17.312159202992916, 1.0469139949418604, 1.0344496052712202, 3.8929568976163864, 0 },
+    { -1.0289095058105886, -0.49839020613580942, 3.8214875943958759, 6.1263138158246875, 8.625302174128592, 6.9799119420349598, 1 },
+    { -0.89544617431238294, -1.2079803524538875, 7.3072283528745174, 6.9451394793577492, 9.6319124437868595, 8.3392688725143671, 0 },
+    { -0.45240578055381775, -0.68548569548875093, 13.826419040560722, 1.865931642241776, 2.6029997793957591, 0.17507041804492474, 1 }
+};
+
+static void test_regression_csf6(void) {
+    static const double lo[6] = { -1.5, -1.5, 0.0, 0.5, 1.0, 0.0 };
+    static const double hi[6] = { 0.0, 0.0, 20.0, 7.0, 10.0, 10.0 };
+    printf("regression: a 0.5 floor and the mean (csf6 replication 4):\n");
+    for (int prior = 1; prior >= 0; prior--) {
+        psygp_desc d;
+        psygp_gp g;
+        memset(&d, 0, sizeof(d));
+        d.n_dims = 6;
+        for (int i = 0; i < 6; i++) { d.lo[i] = lo[i]; d.hi[i] = hi[i]; }
+        d.target_p = 0.75;
+        d.n_candidates = 1000;
+        d.n_init = 10;
+        d.fit = true;
+        d.fit_every = 20;
+        d.stop_trials = 300;
+        d.max_trials = 300;
+        d.guess = 0.5;
+        d.no_hyper_prior = !prior;
+        CHECK(psygp_open(&g, &d), "csf6 open: %s", psygp_error(&g));
+        for (int n = 0; n < 30; n++) {
+            psygp_update(&g, csf6_rep4[n], (int)csf6_rep4[n][6]);
+            if (n + 1 == 10 || n + 1 == 30) {
+                psygp_hyper h;
+                double pmin = 1.0, pmax = 0.0, flat = (n + 1) * log(0.5);
+                psygp_get_hyper(&g, &h);
+                for (int j = 0; j < 200; j++) {
+                    double c[6], p;
+                    psygp_candidate(&g, j, c);
+                    p = psygp_predict_p(&g, c);
+                    if (p < pmin) pmin = p;
+                    if (p > pmax) pmax = p;
+                }
+                if (prior) {
+                    /* At trial 10 the floor is the likelihood's own maximum
+                     * (five of ten yes at a 0.5 floor), so only the prior
+                     * keeps the model off it; by trial 30 the data leave it. */
+                    CHECK(h.mean > -2.0 && pmax - pmin > 0.03 &&
+                          (n + 1 == 10 || psygp_log_marginal(&g) > flat + 0.5),
+                          "trial %d: the mean %.3f, p %.3f to %.3f, log marginal %.3f (floor %.3f)",
+                          n + 1, h.mean, pmin, pmax, psygp_log_marginal(&g), flat);
+                } else if (n + 1 == 10) {
+                    CHECK(pmax - pmin < 0.01 && fabs(psygp_log_marginal(&g) - flat) < 0.01,
+                          "without the prior the stuck state did not form (mean %.3f)", h.mean);
+                }
+                printf("  %s trial %2d: mean %6.3f, p %.3f to %.3f, log marginal %7.3f (floor %7.3f)\n",
+                       prior ? "prior   " : "no prior", n + 1, h.mean, pmin, pmax,
+                       psygp_log_marginal(&g), flat);
+            }
+        }
+        psygp_close(&g);
+    }
+}
+
+/* --- conjugate-gradient fits (desc.fit_pcg) ---------------------------- */
+
+/* The same trials through two handles, one fitting by factorizations and one
+ * with desc.fit_pcg, each fitted to convergence: the two fits have to reach
+ * the same hyperparameters, log marginal and predictions to well inside the
+ * fit's own tolerance. */
+/* p, or under PAIRWISE (which has no p at a point) the utility's mean. */
+static double fit_pcg_q(const psygp_gp* g, const double* x) {
+    double mu = 0.0, sd;
+    if (g->desc.lik != PSYGP_LIK_PAIRWISE) return psygp_predict_p(g, x);
+    psygp_predict_f(g, x, 0, &mu, &sd);
+    return mu;
+}
+
+static void test_fit_pcg(void) {
+    static const char* const names[4] = { "BERNOULLI", "ORDINAL", "PAIRWISE", "psychometric" };
+    printf("desc.fit_pcg:\n");
+    for (int c = 0; c < 4; c++) {
+        psygp_desc d;
+        psygp_gp ga, gb;
+        psygp_hyper ha, hb;
+        double dh = 0.0, dp = 0.0, dl;
+        int n = c == 3 ? 120 : 150, ra = 0, rb = 0;
+        memset(&d, 0, sizeof(d));
+        d.n_dims = 2;
+        d.lo[0] = 0.0; d.hi[0] = 1.0; d.lo[1] = 0.0; d.hi[1] = 1.0;
+        d.intensity_dim = 1;
+        d.lik = c == 1 ? PSYGP_LIK_ORDINAL : c == 2 ? PSYGP_LIK_PAIRWISE : PSYGP_LIK_BERNOULLI;
+        d.n_outcomes = c == 1 ? 3 : 0;
+        d.model = c == 3 ? PSYGP_MODEL_PSYCHOMETRIC : PSYGP_MODEL_GP;
+        d.acq = c == 2 ? PSYGP_ACQ_BALD : PSYGP_ACQ_LSE;
+        d.target_p = 0.6;
+        d.grid[0] = 9; d.grid[1] = 9;
+        d.stop_trials = n;
+        d.fit_max_evals = 400;
+        d.fit_tol = 1e-7;
+        CHECK(psygp_open(&ga, &d), "fit_pcg open: %s", psygp_error(&ga));
+        d.fit_pcg = true;
+        CHECK(psygp_open(&gb, &d), "fit_pcg open: %s", psygp_error(&gb));
+        rng_state = 0x243F6A8885A308D3ull + 0xFC6ull * (uint64_t)(c + 1);
+        for (int i = 0; i < n; i++) {
+            double x[2], x2[2], f;
+            int y;
+            x[0] = rng_u(); x[1] = rng_u();
+            x2[0] = rng_u(); x2[1] = rng_u();
+            f = 5.0 * (x[1] - 0.4 - 0.3 * x[0] * x[0]);
+            if (c == 2) {
+                f = 2.0 * (sin(4.0 * x[0]) + x[1] - sin(4.0 * x2[0]) - x2[1]);
+                y = rng_u() < 0.5 * erfc(-f / sqrt(2.0)) ? 1 : 0;
+                psygp_update_pair(&ga, x, x2, y);
+                psygp_update_pair(&gb, x, x2, y);
+            } else {
+                double u = rng_u(), p = 0.5 * erfc(-f / sqrt(2.0));
+                y = c == 1 ? (u < p * p ? 2 : u < p ? 1 : 0) : (u < p ? 1 : 0);
+                psygp_update(&ga, x, y);
+                psygp_update(&gb, x, y);
+            }
+        }
+        {
+            /* One stepped fit in lockstep: after every step, rejected ones
+             * included, the two handles have to stand at the same point, so
+             * the state a rejection restores is checked, not only where the
+             * fit ends. */
+            int sa = 1, sb = 1, steps = 0;
+            while (sa > 0 && sb > 0 && steps < 200) {
+                double pt[2] = { 0.3, 0.6 };
+                sa = psygp_fit_step(&ga);
+                sb = psygp_fit_step(&gb);
+                steps++;
+                track(&dp, fabs(fit_pcg_q(&ga, pt) - fit_pcg_q(&gb, pt)));
+            }
+            CHECK(sa == sb, "%s: the stepped fits ended apart (%d, %d) after %d steps",
+                  names[c], sa, sb, steps);
+        }
+        for (int r = 0; r < 50 && (ra = psygp_fit(&ga)) == 0; r++) { }
+        for (int r = 0; r < 50 && (rb = psygp_fit(&gb)) == 0; r++) { }
+        CHECK(ra == 1 && rb == 1, "%s: fits ended %d and %d", names[c], ra, rb);
+        memset(&ha, 0, sizeof(ha));
+        memset(&hb, 0, sizeof(hb));
+        psygp_get_hyper(&ga, &ha);
+        psygp_get_hyper(&gb, &hb);
+        for (int i = 0; i < 2; i++) {
+            track(&dh, fabs(log(ha.lengthscale[i] / hb.lengthscale[i])));
+            if (c == 3) track(&dh, fabs(log(ha.lengthscale_g[i] / hb.lengthscale_g[i])));
+        }
+        track(&dh, fabs(log(ha.outputscale / hb.outputscale)));
+        track(&dh, fabs(ha.mean - hb.mean));
+        dl = fabs(psygp_log_marginal(&ga) - psygp_log_marginal(&gb));
+        for (int j = 0; j < psygp_n_candidates(&ga); j++) {
+            double x[2];
+            psygp_candidate(&ga, j, x);
+            track(&dp, fabs(fit_pcg_q(&ga, x) - fit_pcg_q(&gb, x)));
+        }
+        CHECK(dl < (real_is_double ? 1e-6 : 1e-4) && dh < 1e-3 && dp < 1e-4,
+              "%s: fit_pcg against factoring: log marginal %.2e, hyperparameters %.2e, p %.2e",
+              names[c], dl, dh, dp);
+        printf("  %-12s against factoring: log marginal %.1e, hyperparameters %.1e (log), "
+               "p %.1e%s\n", names[c], dl, dh, dp,
+               c == 3 ? "" : "");
+        psygp_close(&ga);
+        psygp_close(&gb);
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("psy_gp.h tests\n");
@@ -2517,6 +4435,17 @@ int main(void) {
     test_fit();
     test_fit_every_and_rng();
     test_psychometric();
+    test_regressions();
+    test_regression_csf6();
+    test_priors();
+    test_optimize();
+    test_pairwise();
+    test_mixed();
+    test_monotone();
+    test_pcg();
+    test_snapshot();
+    test_fit_budget();
+    test_fit_pcg();
 #ifdef PSYGP_ASYNC
     printf("async layer (PSYGP_ASYNC):\n");
     test_async();

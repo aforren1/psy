@@ -11,9 +11,21 @@ never reused, so a handle kept past its `close` always raises
 |---|---|---|
 | `psy_parallel.c` | [psy_parallel.h](../../psy_parallel.h) | [example_parallel.m](example_parallel.m) |
 | `psy_serial.c` | [psy_serial.h](../../psy_serial.h) | [example_serial.m](example_serial.m) |
+| `psy_stair.c` | [psy_stair.h](../../psy_stair.h) | [example_stair.m](example_stair.m) |
+| `psy_quest.c` | [psy_quest.h](../../psy_quest.h) | [example_quest.m](example_quest.m) |
+| `psy_gp.c` | [psy_gp.h](../../psy_gp.h) | [example_gp.m](example_gp.m) |
+| `psy_trials.c` | [psy_trials.h](../../psy_trials.h) | [example_trials.m](example_trials.m) |
 
-Both headers build on the shared [psy_rt.h](../../psy_rt.h), so both MEX
-functions compile it too.
+The two transport headers build on the shared [psy_rt.h](../../psy_rt.h), so
+both MEX functions compile it too. `psy_quest.c` and `psy_gp.c` define
+`PSYQ_ASYNC` and `PSYGP_ASYNC`, so they also compile `psy_rt.h`, for the
+async inference thread. `psy_stair.c` and `psy_trials.c` compile nothing but
+their header. The four adaptive-method sources also include
+`psy_mex_util.h`, a binding-internal header with the handle table and the
+argument helpers; a copy of one of those sources needs that file beside it.
+
+[test_mex.m](test_mex.m) runs the key checks of the four adaptive modules in
+MATLAB or Octave and prints `PASS`.
 
 ## Build
 
@@ -38,7 +50,8 @@ Win32 threads and needs no thread library. `psy_serial` needs `setupapi` and
 `-lsetupapi -ladvapi32` there: the header's `#pragma comment(lib)` reaches
 MSVC only, so a MinGW toolchain (MinGW Octave, MATLAB's MinGW-w64 add-on)
 needs the libraries on the command line. `mex` accepts that spelling on both
-toolchains.
+toolchains. The adaptive-method sources need no library but the thread
+library, which `psy_quest.c` and `psy_gp.c` use on Linux/macOS.
 
 ## psy_parallel
 
@@ -245,3 +258,483 @@ not MEX.
 Device naming, USB latency, DTR-driven board resets and what a serial trigger
 is worth in timing terms are documented in the header:
 [psy_serial.h](../../psy_serial.h).
+
+## Adaptive methods: common rules
+
+`psy_stair`, `psy_quest`, `psy_gp` and `psy_trials` share these rules.
+
+- **Descs are structs.** `open` takes one 1x1 struct whose fields are the
+  C desc's fields, with the same names. A missing field, or `[]`, is the
+  library default, as a zero is in C. An unknown field name raises
+  `psy_<name>:arg`, so a typo cannot leave a default in force. An enum field
+  is a string, and case does not matter: `'log'`, `'gumbel'`, `'eavc'`.
+- **Indices are 1-based.** Stimuli, parameter axes, candidates, conditions,
+  factors, levels, tracks, trials and reversals are numbered from 1. Where C
+  uses -1 for "none", the binding uses 0. `rep` and `block` follow the same
+  rule: 0 is no repetition, or a practice trial.
+- **Outcomes are values.** A response keeps the header's numbering: 1 is
+  correct or yes, 0 is incorrect or no, and 0..K-1 in general.
+  `psy_trials` keeps -1 (no valid response) and -2 (re-queued).
+- **Histories are structs of columns.** `history` returns one struct with
+  one column per field of the C trial record. `struct2table(history)` makes
+  a MATLAB table from it.
+- **Snapshots are bytes.** `save` returns a `uint8` row vector. The
+  module command `load(bytes, desc)` returns a new handle. See
+  [How to save and resume a session](#how-to-save-and-resume-a-session).
+- **Generators.** `desc.rng` is a function handle that returns a uniform
+  number in [0, 1), or an integer seed (a `uint64`, or a double below
+  2^53). A seed drives a splitmix64 generator that the module keeps, the
+  same generator as `psytr_splitmix()`. `rng_state` reads and writes its
+  state. A seed never calls the interpreter, so the async layers accept it.
+- **Errors.** Every header code becomes an error identifier
+  `psy_<name>:<code>`: `arg`, `closed`, `full`, `memory`, and per module
+  `order` (trials), `nocross` and `numeric` (gp), `busy` and `timeout`
+  (quest, gp). The binding adds `handle` (a closed or unknown handle),
+  `usage` (a bad command or argument count), `open` and `load` (the header
+  refused the desc or the snapshot; the message is the header's),
+  `callback` (a MATLAB callback returned the wrong shape) and `async` (the
+  async thread did not start). An error in a MATLAB callback keeps the
+  callback's own identifier.
+- **Cleanup.** `close` frees a handle. `clear psy_<name>`, `clear mex` and
+  interpreter exit free every open handle and stop every async thread.
+
+### Explanation: MATLAB callbacks and the header
+
+A header calls a callback (a `pf_batch`, an `rng`, a track's done test)
+from inside its own loops, and it cannot stop there. A MEX error at that
+point would leave the handle half updated. So the binding traps every
+callback error, gives the header a neutral value for the rest of that call,
+and raises the error when the header call has returned. The handle stays
+consistent and usable.
+
+In MATLAB the trap is `mexCallMATLABWithTrap`. Octave's version of that
+function replaces the callback's error with `Octave:MEX`. So under Octave
+the binding runs the callback inside `cellfun` with an `ErrorHandler`, which
+keeps the original identifier and message.
+
+A callback must not call the handle that it runs under. That raises
+`psy_<name>:busy`.
+
+## psy_stair
+
+```matlab
+h = psy_stair('open', struct('start', 0.5, 'n_down', 3, 'step_type', 'log', ...
+              'steps', [0.3 0.15 0.075], 'min', 0.001, 'max', 1, 'stop_reversals', 10));
+while ~psy_stair('done', h)
+    x = psy_stair('next', h);                  % the proposed level
+    psy_stair('update', h, x, run_trial(x));   % the level shown, and 1 or 0
+end
+thr = psy_stair('estimate', h, 'reversals');
+psy_stair('close', h);
+```
+
+Desc fields: `start`, `rule` (`'updown'`, `'asa'`), `n_up`, `n_down`,
+`step_type` (`'lin'`, `'log'`, `'db'`), `steps` (a vector of up to 16: the
+schedule), `step_down_scale`, `target_p`, `min`, `max`, `use_limits`,
+`harder_is_up`, `initial_rule`, `stop_reversals`, `stop_trials`,
+`stop_at_limit`, `est_reversals`, `est_trials`. The manual of
+[psy_stair.h](../../psy_stair.h) gives the semantics.
+
+| Command | Returns | Notes |
+|---|---|---|
+| `'open', desc` | handle | |
+| `'next', h` | double | the proposed level; the same until `update` |
+| `'update', h, level, response` | event mask (optional) | bit 1 step, bit 2 reversal, bit 4 done |
+| `'done', h` | logical | |
+| `'stop_reason', h` | string | `'none'`, `'reversals'`, `'trials'`, `'limit'`, `'full'` |
+| `'estimate', h [, how]` | double | `how`: `'reversals'` (default), `'trials'`, `'median_rev'`, `'last'`; NaN when the window is empty |
+| `'estimate_count', h [, how]` | double | the number of values the estimate averages |
+| `'n_trials', h`, `'n_reversals', h` | double | |
+| `'history', h` | struct of n x 1 columns | `proposed`, `shown`, `response`, `reversal`, `direction`, `step_index` (1-based into `steps`) |
+| `'reversal_level', h [, i]` | double or column | the level of reversal `i`, or of every recorded reversal |
+| `'reversal_trial', h [, i]` | double or column | the 1-based trial of reversal `i`, or of every one |
+| `'close', h` | none | |
+| `'weighted_scale', p` | double | `(1 - p) / p` |
+| `'convergence_p', n_up, n_down [, scale]` | double | NaN when both counts are above 1 |
+| `'simulate_response', p, u` | 0 or 1 | 1 when `u < p` |
+| `'version'`, `'strerror', code` | string | |
+
+## psy_quest
+
+```matlab
+d = struct();
+d.stim  = {{-3, 0, 31}};                       % one axis: a linspace
+d.param = {{-3, 0, 61}, {0.5, 6, 12}, 0.5, 0.02};
+d.stop_trials = 60;
+h = psy_quest('open', d);
+while ~psy_quest('done', h)
+    [i, x] = psy_quest('next', h);             % the grid index and its value
+    psy_quest('update', h, i, run_trial(10 ^ x));
+end
+est = psy_quest('estimate', h, 'mean');
+psy_quest('close', h);
+```
+
+An axis is a numeric vector of explicit values (a scalar is a fixed
+parameter), or a cell `{lo, hi, n}` for a linspace. `stim` and `param` are
+cell arrays with one axis each; a bare numeric vector is one axis. So one
+linspace stimulus axis is `{{lo, hi, n}}`.
+
+Desc fields: `stim`, `param`, `prior` (a cell with one weight vector per
+parameter axis, `[]` for uniform), `nuisance` (a 0/1 vector, one entry per
+parameter axis), `joint_prior` (P weights in the shape that `posterior`
+returns), `pf` (`'gumbel'`, `'weibull'`, `'logistic'`, `'normal'`,
+`'hypsec'`, `'custom'`), `pf_batch`, `n_outcomes`, `select` (`'entropy'`,
+`'quantile'`, `'mean'`, `'mode'`), `select_param` (1-based),
+`select_quantile`, `tiebreak` (`'lowest'`, `'nearest'`, `'alternate'`,
+`'random'`), `tie_tolerance`, `rng`, `subset_size`, `stop_trials`,
+`stop_entropy`, `stop_sd`, `stop_sd_param` (1-based), `no_table`. The
+binding does not expose `desc.memory`.
+
+For Psi-marginal, give the nuisance axes a few points and flag them:
+
+```matlab
+d.param = {{-3, 0, 61}, {0.5, 6, 12}, 0.5, [0 0.02 0.04 0.06]};
+d.nuisance = [0 0 0 1];
+```
+
+For QUEST, use a Gaussian prior on the threshold and quantile placement:
+
+```matlab
+d.param = {{-3, 0, 61}, 3.5, 0.5, 0.01};
+d.prior = {psy_quest('prior_normal', {-3, 0, 61}, -1.5, 0.5), [], [], []};
+d.select = 'quantile';
+```
+
+### A custom model: pf_batch
+
+`pf_batch` is a function handle `p = f(stim, P)`. `stim` is a 1 x n_stim
+row. `P` is a P x n_param matrix with one parameter point per row. The
+function returns a P x K matrix: one row per row of `P`, and each row sums
+to 1 within 1e-6.
+
+```matlab
+d.pf_batch = @(s, P) [1 - pc(s(1), P), pc(s(1), P)];   % K = 2
+```
+
+The header calls it once per stimulus at `open` (S calls), and once for
+each off-grid evaluation: `update_values`, `p`, `p_values` and `simulate`.
+The rows of `P` are the header's walk of the grid, which is permuted when a
+nuisance axis is not last, so treat them as a list of points. The binding
+converts the grid's matrix once and uses it again. `pf_batch` is slow only
+under `no_table`: then the header calls it for every stimulus on every
+`next`, which moves the whole table through the interpreter on each trial.
+Do not do that. When `pf_batch` is set, `pf` is `'custom'` and `n_outcomes`
+defaults to 2. The binding does not expose the per-cell `pf_fn`.
+
+### Commands
+
+| Command | Returns | Notes |
+|---|---|---|
+| `'open', desc` | handle | builds the table: S*P evaluations |
+| `'next', h` | `[i, stim]` | the 1-based stimulus index and its values |
+| `'next_subset', h, indices` | `[i, stim]` | only the stimuli in `indices` |
+| `'expected_entropy', h [, indices]` | column | bits; every stimulus when `indices` is not given |
+| `'update', h, i, outcome` | none | |
+| `'update_values', h, stim, outcome` | none | a stimulus off the grid; recorded with index 0 |
+| `'done', h`, `'stop_reason', h` | logical, string | `'none'`, `'trials'`, `'entropy'`, `'sd'`, `'full'` |
+| `'estimate', h [, how]` | row, one value per parameter | `'mean'` (default), `'mode'`, `'median'` |
+| `'quantile', h, axis, p`, `'sd', h, axis` | double | the marginal of one parameter |
+| `'marginal', h, axis` | column | |
+| `'posterior', h` | n_1 x n_2 x ... array | element `(i1, i2, ...)` is the mass at those axis indices, in the caller's axis order |
+| `'entropy', h` | double | bits, over the axes that are not nuisance |
+| `'p', h, i, params`, `'p_values', h, stim, params` | row of K | the model at any parameter values |
+| `'simulate', h, i, params, u` | outcome | `u` in [0, 1) from your generator |
+| `'stim_value', h, i [, axis]`, `'stim_values', h, i` | double, row | |
+| `'stim_index', h, subs`, `'stim_nearest', h, values` | index | |
+| `'param_value', h, t [, axis]`, `'param_values', h, t`, `'param_index', h, subs` | | the same for the parameter grid |
+| `'n_stim', h`, `'n_param', h`, `'n_outcomes', h` | double | S, P, K |
+| `'stim_shape', h`, `'param_shape', h` | row | points per axis |
+| `'n_trials', h`, `'history', h` | double, struct | `stim` (n x n_stim), `stim_index`, `proposed_index`, `outcome` |
+| `'save', h` | `uint8` row | |
+| `'load', bytes, desc` | handle | rebuilds the table: the cost of one `open` |
+| `'rng_state', h [, state]` | `uint64` | seed generators only |
+| `'close', h` | none | stops a running async session first |
+| `'memory_size', desc` | double | arena bytes; 0 for a desc that `open` refuses; calls no callback |
+| `'prior_normal', axis, mean, sd` | row | Gaussian weights over the points of an axis |
+| `'version'`, `'strerror', code` | string | |
+
+Async commands (see
+[How to run the inference on a thread](#how-to-run-the-inference-on-a-thread)):
+
+| Command | Returns | Notes |
+|---|---|---|
+| `'async_start', h [, opts]` | none | `opts`: `estimator`, `below_normal`, `pin_cpu`, `queue_depth` |
+| `'async_submit', h, i, outcome` | seq | `psy_quest:busy` when the queue is full |
+| `'async_submit_values', h, stim, outcome` | seq | refused with a MATLAB `pf_batch` |
+| `'async_poll', h` | snapshot struct | `seq`, `proposed` (1-based), `stim`, `update_rc`, `n_trials`, `done`, `stop`, `estimate`, `entropy`, `sd` (of parameter 1) |
+| `'async_wait', h, seq [, timeout_s]` | snapshot struct | the default timeout is 1 s; `psy_quest:timeout` |
+| `'async_pending', h` | double | queued responses; takes the queue mutex |
+| `'async_policy', h` | string | `'normal'`, `'below_normal'`, `'none'` |
+| `'async_running', h` | logical | |
+| `'async_stop', h` | none | drains the queue and joins the thread |
+
+## psy_gp
+
+```matlab
+d = struct('lo', [0 -3], 'hi', [1.5 0], 'intensity_dim', 2, 'acq', 'eavc', ...
+           'target_p', 0.75, 'grid', [15 25], 'n_init', 10, ...
+           'fit', true, 'fit_every', 10, 'stop_trials', 150);
+h = psy_gp('open', d);
+while ~psy_gp('done', h)
+    x = psy_gp('next', h);                     % 1 x n_dims
+    psy_gp('update', h, x, run_trial(x));      % the stimulus shown
+end
+[thr, lo, hi] = psy_gp('threshold', h, 0.7);   % at log10 SF 0.7
+psy_gp('close', h);
+```
+
+The desc fields are those of `psygp_desc`. `n_dims` is `numel(lo)`.
+
+| Field | Value |
+|---|---|
+| `lo`, `hi` | vectors, one entry per dimension |
+| `intensity_dim` | 1-based; the default is 1 |
+| `lik` | `'bernoulli'` (default), `'ordinal'`, `'categorical'`, `'gaussian'`, `'pairwise'` |
+| `model`, `kernel`, `link` | `'gp'` or `'psychometric'`; `'rbf'` or `'semip'`; `'probit'` or `'logit'` |
+| `n_outcomes`, `target_outcome` | K; the outcome value that the level set is about |
+| `guess`, `lapse`, `target_p`, `target_value`, `acq_beta` | doubles |
+| `hyper`, `hyper_min`, `hyper_max` | structs with `lengthscale` (vector), `outputscale`, `mean`, `lengthscale_b`, `outputscale_b`, `cutpoint` (vector), `noise_sd`, `lengthscale_g`, `outputscale_g`, `mean_g`; a missing field is 0 |
+| `priors` | a struct with `lengthscale`, `outputscale`, `outputscale_b`, `outputscale_g`, `mean`, `mean_g`, `noise_sd`; each is `[center sd]`, `[center sd ceiling]` or a struct with those fields |
+| `fit`, `fit_every`, `fit_max_evals`, `fit_tol`, `fit_pcg`, `no_hyper_prior`, `refit_every`, `jitter`, `pcg_threshold` | fit and solver settings |
+| `acq` | `'lse'` (default), `'eavc'`, `'localmi'`, `'balv'`, `'bald'`, `'random'`, `'ucb'`, `'ei'`, `'thompson'` |
+| `minimize` | logical |
+| `n_init`, `rng` | Halton trials first; a generator |
+| `candidates` | an M x n_dims matrix; the binding keeps a copy |
+| `n_candidates`, `grid` | a Halton set of M points; or points per dimension |
+| `refine_steps` | golden-section refinement of the grid winner |
+| `dim_kind`, `dim_levels` | a cell of `'continuous'`, `'integer'`, `'categorical'`; level counts |
+| `monotone_dims` | a vector of 1-based dimensions |
+| `stop_trials`, `stop_threshold_sd`, `stop_context`, `max_trials` | stop rules and the trial ceiling |
+
+The binding does not expose `desc.memory`.
+
+| Command | Returns | Notes |
+|---|---|---|
+| `'next', h` | `[x, i]` | `i` is the 1-based candidate, 0 for a Halton, rng or refined point |
+| `'next_subset', h, indices` | `[x, i]` | skips the init phase |
+| `'acq_score', h [, indices]` | column | NaN in the init phase; every candidate when `indices` is not given |
+| `'update', h, x, outcome`, `'update_real', h, x, y` | rc (optional) | see the note on `numeric` below |
+| `'next_pair', h` | `[x1, x2]` | `'pairwise'` |
+| `'update_pair', h, x1, x2, outcome` | rc (optional) | 1 when `x1` was preferred |
+| `'predict_pair', h, x1, x2` | double | P(`x1` is preferred) |
+| `'done', h`, `'stop_reason', h` | logical, string | `'none'`, `'trials'`, `'threshold_sd'`, `'full'`. `done` runs a threshold search when `stop_threshold_sd` is set |
+| `'predict_f', h, x [, latent]` | `[mu, sd]` | `latent` is 1-based: a categorical class, or 1 = threshold and 2 = log slope under `'psychometric'` |
+| `'predict_p', h, x`, `'predict_p_var', h, x` | double | the target quantity and its variance |
+| `'predict_outcomes', h, x` | row of K | |
+| `'predict_p_many', h, X` | column | `X` is n x n_dims, one point per row |
+| `'predict_f_many', h, X [, latent]` | `[mu, sd]` columns | |
+| `'threshold', h, ctx [, target]` | `[x, lo, hi]` | `ctx` has n_dims - 1 values; leave it out for 1-D; `psy_gp:nocross` |
+| `'threshold_multi_cross', h` | logical | |
+| `'argmax', h` | `[x, value, i]` | |
+| `'fit', h` | logical | true when the fit converged |
+| `'fit_step', h` | logical | true while another step helps |
+| `'fit_delta', h`, `'refit', h`, `'log_marginal', h` | | |
+| `'get_hyper', h`, `'get_priors', h` | struct | |
+| `'n_candidates', h`, `'candidate', h [, i]` | double, row or M x n_dims | |
+| `'n_trials', h`, `'n_dims', h` | double | |
+| `'history', h` | struct | `x` (n x n_dims), `y`, `proposed`, `init`, and `x2` under `'pairwise'` |
+| `'save', h`, `'load', bytes, desc` | `uint8` row, handle | |
+| `'rng_state', h [, state]` | `uint64` | seed generators only |
+| `'close', h` | none | |
+| `'simulate_outcome', p, u` | outcome | the smallest k with cumulative p > u |
+| `'memory_size', desc`, `'version'`, `'strerror', code` | | |
+
+`update` records the trial also when the Cholesky fails
+(`PSYGP_ERR_NUMERIC`), and the previous posterior stays in force. With an
+output (`rc = psy_gp('update', ...)`) the binding returns that code, -6.
+Without an output it raises `psy_gp:numeric`, so the failure cannot pass
+unnoticed.
+
+The async commands are those of `psy_quest`, with these differences.
+`async_start` takes the `opts` fields `context` (n_dims - 1 values),
+`target`, `fit_in_idle`, `below_normal` and `pin_cpu`. The submits are
+`async_submit(h, x, outcome)` and `async_submit_real(h, x, y)`. The
+snapshot has `seq`, `x`, `proposed`, `update_rc`, `n_trials`, `done`,
+`stop`, `threshold`, `threshold_lo`, `threshold_hi`, `threshold_rc`,
+`multi_cross`, `hyper`, `log_marginal`, `numeric` and `fitting`.
+`async_start` refuses a `'pairwise'` GP.
+
+## psy_trials
+
+```matlab
+d = struct('reps', 20, 'order', 'constrained', 'rng', uint64(20260923));
+d.factors = {{'orientation', 2}, {'contrast', 5}};
+d.constraints = psy_trials('max_run', 'orientation', 'any', 3);
+h = psy_trials('open', d);
+ti = psy_trials('next', h);
+while ~isempty(ti)
+    psy_trials('update', h, run_trial(ti.levels));   % levels: 1-based, per factor
+    ti = psy_trials('next', h);
+end
+psy_trials('close', h);
+```
+
+Desc fields: `n_conditions`, `factors` (a cell of `{name, n_levels}` pairs,
+or an n x 2 cell), `reps`, `cond_reps`, `order` (`'sequential'`,
+`'random'`, `'full_random'`, `'constrained'`), `constraints`, `max_swaps`,
+`tracks`, `track_weights`, `interleave` (`'random'`, `'round_robin'`),
+`track_rate`, `block_size`, `constraints_span_blocks`, `n_practice`,
+`n_warmup`, `warmup_conditions` (1-based), `requeue_gap`, `rng`,
+`record_size`.
+
+**Constraints** come from module commands. Put them in `desc.constraints`
+as a struct array (`[c1 c2]`) or as a cell. A factor is a 1-based index, a
+factor name, or `'condition'` for the condition row. A level is 1-based, or
+`'any'`.
+
+| Command | Constraint |
+|---|---|
+| `'max_run', factor, level, n` | at most `n` consecutive trials with that level |
+| `'max_in_window', factor, level, window, n` | at most `n` in any `window` consecutive trials |
+| `'min_gap', factor, level, gap` | at least `gap` other trials between two |
+| `'no_transition', factor, from, to` | `from` is never directly followed by `to` |
+| `'first_not', factor, level` | the first main trial does not have that level |
+
+**Tracks.** A track is `{'stair', h}`, `{'quest', h}` or `{'gp', h}`, a
+handle of one of the other modules, or a function handle that returns true
+when the track is done. The header asks each live track whether it is done
+from inside `next` and `done`. The binding answers with
+`psy_stair('done', h)` (or quest, gp). A closed track handle raises that
+module's error, for example `psy_stair:handle`, from `next`.
+
+Why a call through the interpreter: the modules are separate shared
+libraries, each with its own handle table, so `psy_trials` cannot read the
+table of `psy_stair` in C. A shared table needs symbols exported across MEX
+files, and neither MATLAB nor Octave supports that portably. The call is
+safe, because the done test runs on the interpreter thread, inside the call
+that the script made. It costs one MEX call per live track per trial.
+
+**Records.** With `record_size` > 0 the binding owns a buffer of
+`record_size` x 4096 bytes. `update(h, outcome, rec)` copies the raw bytes of
+any numeric array of at most `record_size` bytes, and fills the rest with
+zeros. `record(h, i)` returns them as `uint8`, and `typecast` gets the value
+back:
+
+```matlab
+psy_trials('update', h, r, level);                       % a double: 8 bytes
+level = typecast(psy_trials('record', h, i), 'double');
+```
+
+| Command | Returns | Notes |
+|---|---|---|
+| `'open', desc` | handle | an impossible design fails here with `psy_trials:open` |
+| `'next', h` | struct, or `[]` when done | `index`, `condition` (0 for a track trial), `track` (0 for a condition trial), `rep`, `block` (0 for practice), `levels` (1-based, per factor), `first_in_block`, `after_break`, `practice`, `warmup`, `requeued`. The same trial until `update` or `requeue` |
+| `'update', h, outcome [, record]` | none | `outcome` >= 0, or -1 for no valid response |
+| `'requeue', h` | none | instead of `update`: schedule the condition again |
+| `'mark_break', h` | none | a break was taken |
+| `'done', h` | logical | asks the tracks |
+| `'level', h, c, f`, `'levels', h, c` | double, row | 1-based |
+| `'condition_from_levels', h, levels` | double | |
+| `'condition_at', h, slot`, `'schedule', h`, `'n_scheduled', h` | | the schedule, for preloading stimuli |
+| `'n_valid', h, c`, `'count', h, c [, outcome]`, `'proportion', h, c [, outcome]` | double | tallies; `outcome` defaults to 1 |
+| `'history', h` | struct of columns | `condition`, `track`, `rep`, `block`, `outcome`, `flags`, and the logicals `practice`, `requeued`, `done`, `warmup`, `after_break`, `first_in_block`, `violation` |
+| `'record', h, i` | `uint8` row | |
+| `'format_header', h`, `'format_row', h, i`, `'format_meta', h` | string with a newline | the header's CSV, in the header's own numbering (0-based, -1 for none) |
+| `'save', h`, `'load', bytes, desc` | `uint8` row, handle | |
+| `'restore', h, outcomes [, records]` | none | replay; `records` is an n x record_size `uint8` matrix |
+| `'rng_state', h [, state]` | `uint64` | seed generators only |
+| `'n_conditions'`, `'n_factors'`, `'n_run'`, `'n_done'`, `'swaps'`, `'record_size'` (each with `h`) | double | |
+| `'close', h` | none | |
+| `'splitmix', state` | `[u, state]` | one step of the seed generator |
+| `'version'`, `'strerror', code` | string | |
+
+## How to save and resume a session
+
+1. Save the session. With an integer-seed `rng`, also save the generator
+   state:
+
+   ```matlab
+   snap = psy_quest('save', h);
+   state = psy_quest('rng_state', h);          % only with an integer-seed rng
+   save('session.mat', 'snap', 'state', 'desc');
+   ```
+
+2. Later, load it with the same desc. Put the saved generator state in
+   `desc.rng`:
+
+   ```matlab
+   load('session.mat');
+   desc.rng = state;                           % only with an integer-seed rng
+   h = psy_quest('load', snap, desc);
+   ```
+
+The resumed session makes the same proposals and has the same posterior as
+the session that was not interrupted. This is also true when a proposal was
+pending at the save. The desc must agree with the snapshot on every number.
+A mismatch raises `psy_quest:load` with the header's message, which names
+the first field that differs. The same steps apply to `psy_gp` and
+`psy_trials`. With a function-handle generator, save and restore its state
+yourself.
+
+A `psy_trials` session with tracks also needs the state of each track.
+`psy_stair` has no snapshot: open each staircase again with its desc, and
+replay its `history` (`shown`, `response`) through `update`. A staircase is
+deterministic, so the replay restores it exactly. `psy_quest` and `psy_gp`
+tracks have their own `save`.
+
+With an async session, stop it first (`async_stop`), then save.
+
+## How to run the inference on a thread
+
+`psy_quest` and `psy_gp` can run the update and the selection (and for gp,
+the threshold search) on a C thread. The frame loop then only polls.
+
+1. Open the handle as usual, then start the thread:
+
+   ```matlab
+   h = psy_gp('open', desc);
+   psy_gp('async_start', h, struct('below_normal', true));
+   snap = psy_gp('async_poll', h);              % seq 0: the first stimulus
+   ```
+
+2. For each trial, submit the response. Then poll once per frame until the
+   snapshot includes it:
+
+   ```matlab
+   while ~snap.done
+       y = run_trial_frames(snap.x);
+       seq = psy_gp('async_submit', h, snap.x, y);
+       snap = psy_gp('async_poll', h);
+       while snap.seq < seq
+           draw_one_frame();                    % Screen('Flip', ...) and so on
+           snap = psy_gp('async_poll', h);
+       end
+   end
+   ```
+
+3. Stop the thread. The handle is yours again:
+
+   ```matlab
+   psy_gp('async_stop', h);
+   [thr, lo, hi] = psy_gp('threshold', h, 0.5);
+   ```
+
+Between `async_start` and `async_stop` the thread owns the handle, and every
+other command on it raises `psy_<name>:busy`. Read the snapshot instead.
+`async_poll` is one atomic load and a struct copy. `async_wait(h, seq,
+timeout_s)` blocks for up to `timeout_s` seconds (default 1) and then raises
+`psy_<name>:timeout`. Nothing in the interpreter runs while it blocks, not
+even Ctrl-C, so keep the timeout short. `async_submit` raises
+`psy_<name>:busy` when the queue is full. Nothing was queued, so submit the
+same response again on the next frame.
+
+The thread is C and never calls the interpreter. So `async_start` refuses a
+handle whose `rng` is a function handle (use an integer seed), and
+`psy_quest` also refuses a MATLAB `pf_batch` under `no_table`.
+`async_submit_values` refuses a MATLAB `pf_batch`. A MATLAB `pf_batch` with
+a table is permitted, because the table is built before the thread starts.
+
+## Verification
+
+[tests/compare/compare_quest_mquestplus.m](../../tests/compare/compare_quest_mquestplus.m)
+runs `psy_quest` and mQUESTPlus on the examples of Watson (2017) figures 2,
+3 and 4 and on the mQUESTPlus marginalization demo. It compares the
+selection and the posterior on every trial.
+[tests/compare/compare_stair_palamedes.m](../../tests/compare/compare_stair_palamedes.m)
+replays fixed response sequences through `psy_stair` and Palamedes
+`PAL_AMUD`, and runs `psy_quest` beside `PAL_AMPM` (Psi and Psi-marginal).
+Both scripts print a table and raise an error on a disagreement beyond
+tolerance. Neither reference is in this repository: mQUESTPlus is on GitHub
+(BrainardLab/mQUESTPlus), and Palamedes is at palamedestoolbox.org, whose
+terms do not permit redistribution.

@@ -10,12 +10,13 @@ C++17 and carries its own documentation in its top comment.
 
 | Header | Purpose | Platforms | Status |
 |---|---|---|---|
-| [psy_rt.h](psy_rt.h) | The shared base: monotonic clock, deadline waits, thread elevation, a one-shot deadline worker, and a background pump for inference between trials. The transport headers and the async layers of the adaptive headers use it. | Windows, Linux, macOS | v0.3.1. Pump built and run on Windows and Linux, ThreadSanitizer clean including a wait-versus-stop hammer; the deadline worker as before: Windows measured with [rt_jitter](examples/rt_jitter.c); Linux built and run under WSL2, worker clean under ThreadSanitizer; CI compiles the macOS backend as soon as this is pushed. No test host grants CAP_SYS_NICE, so the SCHED_DEADLINE, SCHED_FIFO and Mach time-constraint rungs are unexercised. |
+| [psy_rt.h](psy_rt.h) | The shared base: monotonic clock, deadline waits, thread elevation, a one-shot deadline worker, and a background pump for inference between trials. The transport headers and the async layers of the adaptive headers use it. | Windows, Linux, macOS, WebAssembly (Emscripten, no scheduling ladder) | v0.4.0. Pump built and run on Windows, Linux and under node (Emscripten), ThreadSanitizer clean including a wait-versus-stop hammer; the deadline worker as before: Windows measured with [rt_jitter](examples/rt_jitter.c); Linux built and run under WSL2, worker clean under ThreadSanitizer; CI compiles the macOS backend as soon as this is pushed. No test host grants CAP_SYS_NICE, so the SCHED_DEADLINE, SCHED_FIFO and Mach time-constraint rungs are unexercised. |
 | [psy_parallel.h](psy_parallel.h) | Parallel port (LPT) trigger output and line input, blocking and async pulses. | Windows, Linux | v0.3, on psy_rt.h. Linux tested; Windows backend compiled but not run on hardware. |
 | [psy_serial.h](psy_serial.h) | Serial port (RS-232, USB-serial, USB-CDC) byte I/O for trigger and response boxes, blocking and async pulses. | Windows, Linux, macOS | v0.4, on psy_rt.h. Linux tested against a virtual port pair; the Windows and macOS backends compile in CI but have never run on a device. [Design notes](docs/psy_serial.md). |
+| [psy_trials.h](psy_trials.h) | Trial sequencing above the adaptive methods: conditions and repetitions (constant stimuli), sequential, random and constrained-random orders, interleaved adaptive tracks, blocks, practice and catch trials, re-queues, tallies, a replayable history. No heap, no I/O. | any | v0.1.0. Order properties over hundreds of seeds, every constraint rule checked by an independent checker, save/load and restore bit for bit; gcc and MSVC, sanitizer clean. Sequential order identical to PsychoPy's TrialHandler and the random orders' block properties matched over 100 seeds ([tests/compare/](tests/compare/)). [Design notes](docs/psy_trials.md). |
 | [psy_stair.h](psy_stair.h) | Adaptive staircases: transformed and weighted up/down, accelerated stochastic approximation. No heap, no threads. | any | v0.1.1. Hand-derived tracks and a simulated observer in [tests/adapt/](tests/adapt/); gcc and MSVC, sanitizer clean; replays PsychoPy's StairHandler trial for trial ([tests/compare/](tests/compare/)). [Design notes](docs/psy_adapt.md). |
-| [psy_quest.h](psy_quest.h) | QUEST+ on a grid, with QUEST, Psi and Psi-marginal as configurations; built-in psychometric functions, per-cell and batch callbacks for custom models (quick CSF); optional async layer on psy_rt.h. | any | v0.4.1. 13000+ checks against an independent reference; a Psi-marginal selection in about 1 ms; gcc and MSVC, sanitizer and ThreadSanitizer clean; identical selections to questplus on 180 of 180 trials ([tests/compare/](tests/compare/)). Not yet compared with mQUESTPlus. [Design notes](docs/psy_adapt.md). |
-| [psy_gp.h](psy_gp.h) | Gaussian-process adaptive estimation (the AEPsych subset and Keeley et al.'s psychometric model): Laplace GP with binary, ordinal, categorical or continuous outcomes, RBF and semiparametric kernels, a two-latent threshold-and-slope model, look-ahead level-set and global acquisitions on a candidate set, priors on the hyperparameters; optional async layer on psy_rt.h. | any | v0.4.0. Adds the two-latent psychometric model (threshold and log-slope as GPs over context, every acquisition), which cuts the audiogram field error 3 to 6x and beats an informed staircase on threshold in three of four benchmark cells. Numerics checked against dense references; the Owen et al. 2021 audiometric benchmark reproduced by [gp_audiometric](examples/gp_audiometric.c) and run beside AEPsych on one response stream ([tests/compare/](tests/compare/)); gcc and MSVC, sanitizer clean. [Design notes](docs/psy_adapt.md). |
+| [psy_quest.h](psy_quest.h) | QUEST+ on a grid, with QUEST, Psi and Psi-marginal as configurations; built-in psychometric functions, per-cell and batch callbacks for custom models (quick CSF); optional async layer on psy_rt.h. | any | v0.5.0. Snapshots the size of the posterior, byte-identical between gcc and MSVC; 14000+ checks against an independent reference; a Psi-marginal selection in about 1 ms; gcc and MSVC, sanitizer and ThreadSanitizer clean; identical selections to questplus on 180 of 180 trials and to Watson's own QUEST+ notebook on all 17 of its saved runs ([tests/compare/](tests/compare/)). [Design notes](docs/psy_adapt.md). |
+| [psy_gp.h](psy_gp.h) | Gaussian-process adaptive estimation (the AEPsych feature set and Keeley et al.'s psychometric model): Laplace GP with binary, ordinal, categorical, pairwise or continuous outcomes, RBF and semiparametric kernels, a two-latent threshold-and-slope model, integer and categorical dimensions, look-ahead level-set and global acquisitions on a candidate set, priors on the hyperparameters; optional async layer on psy_rt.h. | any | v0.14.0. Two-latent psychometric model, optimization and pairwise acquisitions, mixed parameters, monotonic projection, conjugate-gradient updates past 512 trials and, opt-in, in the fits; runtime priors; snapshots. Numerics checked against dense references; the Owen et al. 2021 audiometric benchmark reproduced by [gp_audiometric](examples/gp_audiometric.c) and run beside AEPsych on one response stream ([tests/compare/](tests/compare/)); gcc and MSVC, sanitizer clean. [Design notes](docs/psy_adapt.md). |
 
 ## Quick start
 
@@ -85,7 +86,7 @@ CMakeLists.txt            builds examples and compile checks; registers librarie
   for parallel, `psys_`/`PSYS_` for serial, `psyrt_`/`PSYRT_` for the
   real-time timing primitives in `psy_rt.h`, `psyst_`/`PSYST_` for
   staircases, `psyq_`/`PSYQ_` for QUEST+, `psygp_`/`PSYGP_` for the
-  Gaussian-process methods. One letter while it stays
+  Gaussian-process methods, `psytr_`/`PSYTR_` for trial sequencing. One letter while it stays
   unique; a later `psy_screen.h` picks something like `psyscr_`. The
   implementation macro is `PSY_<NAME>_IMPLEMENTATION`. Private symbols use a
   double underscore (`psyp__now_ns`).
@@ -144,14 +145,18 @@ what puts a header under test.
   extension. They share the `psy` namespace (PEP 420, no `__init__.py`), so
   `pip install psy-parallel psy-serial` gives `import psy.parallel` and
   `import psy.serial`, and either installs alone. The adaptive headers have
-  the same: `psy-stair`, `psy-quest` and `psy-gp` give `psy.stair`,
-  `psy.quest` and `psy.gp`, with an `Async` class in the last two that
-  runs inference on a C thread the interpreter never sees. `tests/compare/`
+  the same: `psy-stair`, `psy-quest`, `psy-gp` and `psy-trials` give
+  `psy.stair`, `psy.quest`, `psy.gp` and `psy.trials`, with an `Async`
+  class in quest and gp that runs inference on a C thread the interpreter
+  never sees, and `psy.trials` taking any of the three as a track. `tests/compare/`
   runs them beside PsychoPy, questplus and AEPsych on one response stream. CI builds the wheels with
   cibuildwheel on Linux, Windows, and (serial only) macOS.
 - **MATLAB / Octave**: [bindings/mex/](bindings/mex/), one MEX function per
-  library (`psy_parallel`, `psy_serial`) with ppdev-mex-style command
-  dispatch. Each one compiles the transport header plus `psy_rt.h`.
+  library (`psy_parallel`, `psy_serial`, `psy_stair`, `psy_quest`,
+  `psy_gp`, `psy_trials`) with ppdev-mex-style command dispatch, built and
+  tested in MATLAB R2023a and Octave 10. `tests/compare/` runs `psy_quest`
+  beside mQUESTPlus and Palamedes' PAL_AMPM, and `psy_stair` beside
+  PAL_AMUD, on one response stream.
 
 ## License
 

@@ -679,11 +679,16 @@ fail:
 
 /* --- lifecycle -------------------------------------------------------- */
 
-static int Quest_init(PyObject* self, PyObject* args, PyObject* kwds) {
+static int q_open_enter(QuestObject* o);
+
+/* Open (data == NULL) or load a snapshot into `self` from the desc in
+ * args/kwds. Both build the table, so both call a Python model. */
+static int q_setup(PyObject* self, PyObject* args, PyObject* kwds, const char* data,
+                   size_t len) {
     QuestObject* o = QO(self);
     q_build b;
     bool ok;
-    int may_cb, i;
+    int may_cb;
 
     if (q_enter(o) < 0) return -1;
     o->busy = 0;
@@ -707,10 +712,10 @@ static int Quest_init(PyObject* self, PyObject* args, PyObject* kwds) {
     may_cb = o->pf_obj != NULL;
     o->busy = 1;
     if (may_cb) {
-        ok = psyq_open(&o->q, &b.d);
+        ok = data ? psyq_load(&o->q, &b.d, data, len) : psyq_open(&o->q, &b.d);
     } else {
         Py_BEGIN_ALLOW_THREADS
-        ok = psyq_open(&o->q, &b.d);
+        ok = data ? psyq_load(&o->q, &b.d, data, len) : psyq_open(&o->q, &b.d);
         Py_END_ALLOW_THREADS
     }
     q_build_free(&b);
@@ -720,11 +725,57 @@ static int Quest_init(PyObject* self, PyObject* args, PyObject* kwds) {
     }
     if (!ok) {
         const char* msg = psyq_error(&o->q);
-        PyObject* exc = strstr(msg, psyq_strerror(PSYQ_ERR_MEMORY)) ? QOutOfMemory : QArgumentError;
+        /* A load that fails on a desc or snapshot mismatch is Error, as in
+         * psy.trials; an open that fails is a bad desc. */
+        PyObject* exc = strstr(msg, psyq_strerror(PSYQ_ERR_MEMORY)) ? QOutOfMemory
+                      : data ? QError : QArgumentError;
         PyErr_SetString(exc, msg);
         return -1;
     }
     return 0;
+}
+
+static int Quest_init(PyObject* self, PyObject* args, PyObject* kwds) {
+    return q_setup(self, args, kwds, NULL, 0);
+}
+
+static PyObject* Quest_save(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    QuestObject* o = QO(self);
+    size_t n;
+    char* buf;
+    int rc;
+    PyObject* r;
+    if (q_open_enter(o) < 0) return NULL;
+    o->busy = 0;
+    n = psyq_save_size(&o->q);
+    buf = (char*)PyMem_Malloc(n > 0 ? n : 1);
+    if (!buf) return PyErr_NoMemory();
+    rc = psyq_save(&o->q, buf, n);
+    if (rc < 0) { PyMem_Free(buf); return q_fail(rc); }
+    r = PyBytes_FromStringAndSize(buf, rc);
+    PyMem_Free(buf);
+    return r;
+}
+
+/* Quest.load(data, stim, params, **desc): a new Quest resumed from save(). */
+static PyObject* Quest_load(PyObject* cls, PyObject* args, PyObject* kwds) {
+    PyObject *bytes, *self, *rest;
+    Py_ssize_t na = PyTuple_Size(args);
+    int rc;
+    if (na < 1) {
+        PyErr_SetString(PyExc_TypeError, "load(data, stim, params, **desc) needs the snapshot bytes");
+        return NULL;
+    }
+    bytes = PyBytes_FromObject(PyTuple_GetItem(args, 0));
+    if (!bytes) return NULL;
+    rest = PyTuple_GetSlice(args, 1, na);
+    self = rest ? PyObject_CallMethod(cls, "__new__", "O", cls) : NULL;
+    if (!self) { Py_XDECREF(rest); Py_DECREF(bytes); return NULL; }
+    rc = q_setup(self, rest, kwds, PyBytes_AsString(bytes), (size_t)PyBytes_Size(bytes));
+    Py_DECREF(rest);
+    Py_DECREF(bytes);
+    if (rc < 0) { Py_DECREF(self); return NULL; }
+    return self;
 }
 
 static void Quest_dealloc(PyObject* self) {
@@ -1321,6 +1372,14 @@ static PyMethodDef Quest_methods[] = {
     { "history", Quest_history, METH_NOARGS,
       "history() -> list[Trial]: Trial(stim, stim_index, proposed_index, outcome) "
       "named tuples, oldest first." },
+    { "save", Quest_save, METH_NOARGS,
+      "save() -> bytes: a snapshot of the posterior, history, pending proposal, "
+      "tie and stop state. The table is not in it; load() rebuilds it." },
+    { "load", (PyCFunction)(void (*)(void))Quest_load, METH_VARARGS | METH_KEYWORDS | METH_CLASS,
+      "Quest.load(data, stim, params, **desc) -> Quest: resume from save(). The "
+      "desc must match on every number except the priors, and re-supplies the "
+      "model callable and rng; put your generator's state back yourself. A "
+      "mismatch raises Error naming the first field that differs." },
     { "close", Quest_close, METH_NOARGS,
       "close(): free the arena. Idempotent; the Quest is a context manager." },
     { "__enter__", Quest_enter, METH_NOARGS, NULL },
@@ -1367,6 +1426,7 @@ typedef struct {
     int estimator;
     int below_normal;
     int pin_cpu;
+    int queue_depth;
     int stopping;           /* stop() has released the GIL                 */
     int in_wait;            /* wait() calls inside the C wait right now; a
                              * restart would reset the snapshot they are
@@ -1416,12 +1476,17 @@ static void Async_dealloc(PyObject* self) {
 }
 
 static int Async_init(PyObject* self, PyObject* args, PyObject* kwds) {
-    static char* kw[] = { "quest", "estimator", "below_normal", "pin_cpu", NULL };
+    static char* kw[] = { "quest", "estimator", "below_normal", "pin_cpu", "queue_depth", NULL };
     AsyncObject* ao = AO(self);
     PyObject* quest;
-    int estimator = PSYQ_EST_MEAN, below = 0, pin = 0, r;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|ipi", kw, &quest, &estimator, &below, &pin))
+    int estimator = PSYQ_EST_MEAN, below = 0, pin = 0, depth = 0, r;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|ipii", kw, &quest, &estimator, &below, &pin,
+                                     &depth))
         return -1;
+    if (depth < 0 || depth > PSYQ_ASYNC_QUEUE) {
+        PyErr_Format(QArgumentError, "queue_depth must be 0..%d", PSYQ_ASYNC_QUEUE);
+        return -1;
+    }
     r = PyObject_IsInstance(quest, QQuestType);
     if (r < 0) return -1;
     if (!r) { PyErr_SetString(PyExc_TypeError, "quest must be a psy.quest.Quest"); return -1; }
@@ -1439,6 +1504,7 @@ static int Async_init(PyObject* self, PyObject* args, PyObject* kwds) {
     ao->estimator = estimator;
     ao->below_normal = below;
     ao->pin_cpu = pin;
+    ao->queue_depth = depth;
     return 0;
 }
 
@@ -1479,6 +1545,7 @@ static PyObject* Async_start(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     d.estimator = (psyq_estimator)ao->estimator;
     d.below_normal = ao->below_normal ? true : false;
     d.pin_cpu = ao->pin_cpu;
+    d.queue_depth = ao->queue_depth;
     qo->owned = 1;
     /* start() runs one psyq_next() here; nothing in it can call Python. */
     if (!psyq_async_start(&ao->a, &d)) {
@@ -1671,9 +1738,11 @@ static PyMethodDef Async_methods[] = {
 
 static PyType_Slot Async_slots[] = {
     { Py_tp_doc, (void*)
-      "Async(quest, estimator=EST_MEAN, below_normal=False, pin_cpu=0)\n\n"
+      "Async(quest, estimator=EST_MEAN, below_normal=False, pin_cpu=0, queue_depth=0)\n\n"
       "psyq_async: a background C thread that owns `quest` between start() and "
       "stop(), applies submitted responses and publishes a Snapshot after each. "
+      "queue_depth caps how many responses may wait (0 = ASYNC_QUEUE; 1 keeps "
+      "the trial loop in lockstep with the inference). "
       "A context manager: `with Async(q) as a:` starts and stops it." },
     { Py_tp_new, (void*)PyType_GenericNew },
     { Py_tp_init, (void*)Async_init },

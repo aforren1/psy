@@ -38,7 +38,9 @@
  * linear-additive model, and five more (semip2-lse, -balv, -bald, -eavc and
  * -localmi) on PSYGP_MODEL_PSYCHOMETRIC, Keeley et al. 2023's semiparametric
  * model in its own form: a threshold GP and a log-slope GP over frequency and
- * a probit in intensity.
+ * a probit in intensity. lse-mono, eavc-mono and bald-mono are lse, eavc and
+ * bald with desc.monotone_dims set along the intensity, the posterior mean
+ * projected to rise with level (MONOTONIC PROJECTION in psy_gp.h).
  *
  * THE METRICS, as the paper defines them
  * On a 30 x 30 grid over the box, (a) the mean absolute error of the model's
@@ -93,8 +95,9 @@
  *         the no-argument configuration: metabolic+sensory, beta 2, 3
  *         replications, every method, metrics every 10 trials, no CSV, and a
  *         100-trial session rather than 150, and every method but
- *         semip2-eavc. About 10 s at -O2 on one core of an x86-64 desktop
- *         under WSL2, so CI can run it inside 20 s.
+ *         semip2-eavc, semip2-localmi and the -mono rows. About 8 s at -O2 on
+ *         one idle core of an x86-64 desktop under WSL2, and under 20 s
+ *         with the machine busy, so CI can run it inside 20 s.
  *     gp_audiometric all 2 20 all out.csv
  *         all four phenotypes at beta = 2, 20 replications, every method,
  *         per-trial curves to out.csv.
@@ -493,27 +496,31 @@ typedef struct method {
     psygp_acq    acq;
     psygp_kernel kernel;
     psygp_model  model;
+    int          monotone;   /* desc.monotone_dims along the intensity */
 } method;
 
 /* semip2-* is PSYGP_MODEL_PSYCHOMETRIC, Keeley et al. 2023's semiparametric
  * model in its own form: a threshold GP and a log-slope GP over frequency, and a
  * probit in intensity. */
 static const method methods[] = {
-    { "lse",        0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
-    { "eavc",       0, PSYGP_ACQ_EAVC,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
-    { "localmi",    0, PSYGP_ACQ_LOCALMI, PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
-    { "balv",       0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
-    { "bald",       0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
-    { "random",     0, PSYGP_ACQ_RANDOM,  PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP },
-    { "semip-lse",  0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP },
-    { "semip-balv", 0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP },
-    { "semip-bald", 0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP },
-    { "semip2-lse", 0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC },
-    { "semip2-balv",0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC },
-    { "semip2-bald",0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC },
-    { "semip2-eavc",0, PSYGP_ACQ_EAVC,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC },
-    { "semip2-localmi",0, PSYGP_ACQ_LOCALMI, PSYGP_KERNEL_RBF, PSYGP_MODEL_PSYCHOMETRIC },
-    { "stair",      1, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP }
+    { "lse",        0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 0 },
+    { "eavc",       0, PSYGP_ACQ_EAVC,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 0 },
+    { "localmi",    0, PSYGP_ACQ_LOCALMI, PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 0 },
+    { "balv",       0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 0 },
+    { "bald",       0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 0 },
+    { "random",     0, PSYGP_ACQ_RANDOM,  PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 0 },
+    { "semip-lse",  0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP, 0 },
+    { "semip-balv", 0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP, 0 },
+    { "semip-bald", 0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_SEMIP, PSYGP_MODEL_GP, 0 },
+    { "semip2-lse", 0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC, 0 },
+    { "semip2-balv",0, PSYGP_ACQ_BALV,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC, 0 },
+    { "semip2-bald",0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC, 0 },
+    { "semip2-eavc",0, PSYGP_ACQ_EAVC,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_PSYCHOMETRIC, 0 },
+    { "semip2-localmi",0, PSYGP_ACQ_LOCALMI, PSYGP_KERNEL_RBF, PSYGP_MODEL_PSYCHOMETRIC, 0 },
+    { "lse-mono",   0, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 1 },
+    { "eavc-mono",  0, PSYGP_ACQ_EAVC,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 1 },
+    { "bald-mono",  0, PSYGP_ACQ_BALD,    PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 1 },
+    { "stair",      1, PSYGP_ACQ_LSE,     PSYGP_KERNEL_RBF,   PSYGP_MODEL_GP, 0 }
 };
 #define NMETHOD ((int)(sizeof(methods) / sizeof(methods[0])))
 
@@ -643,6 +650,7 @@ static int run_gp(const field* fd, const method* m, int rep, const config* cfg,
     d.intensity_dim = 1;
     d.kernel = m->kernel;
     d.acq = m->acq;
+    if (m->monotone) d.monotone_dims = 1u << 1;
     d.target_p = TARGET_P;
     d.grid[0] = GRID_C;
     d.grid[1] = GRID_I;
@@ -978,11 +986,16 @@ int main(int argc, char** argv) {
         cfg.fit_every = (int)strtol(argv[6], NULL, 10);
         if (cfg.fit_every < 0) { usage(); return 2; }
     }
-    /* Every method, except that the CI configuration leaves out semip2-eavc:
-     * at about 20 ms a trial it is 6 of the 20 seconds CI allows on its own. */
+    /* Every method, except that the CI configuration leaves out the
+     * psychometric model's two look-ahead methods: semip2-eavc alone is about
+     * 6 of the 20 seconds CI allows, and tests/adapt/psy_gp_test.c already
+     * runs both look-ahead paths of that model. The -mono rows are left out
+     * for the same reason, and the test runs the projection too. */
     if (n_use == 0)
         for (i = 0; i < NMETHOD; i++) {
-            if (argc == 1 && !strcmp(methods[i].name, "semip2-eavc")) continue;
+            if (argc == 1 && (!strcmp(methods[i].name, "semip2-eavc") ||
+                              !strcmp(methods[i].name, "semip2-localmi") ||
+                              methods[i].monotone)) continue;
             use[n_use++] = i;
         }
     if (pheno < 0) { pheno = 0; n_pheno = NPHENO; }

@@ -503,7 +503,10 @@ typedef struct { const char* name; int value; } gp_name;
 static const gp_name lik_names[] = {
     { "bernoulli", PSYGP_LIK_BERNOULLI }, { "ordinal", PSYGP_LIK_ORDINAL },
     { "categorical", PSYGP_LIK_CATEGORICAL }, { "gaussian", PSYGP_LIK_GAUSSIAN },
-    { NULL, 0 } };
+    { "pairwise", PSYGP_LIK_PAIRWISE }, { NULL, 0 } };
+static const gp_name dim_kind_names[] = {
+    { "continuous", PSYGP_DIM_CONTINUOUS }, { "integer", PSYGP_DIM_INTEGER },
+    { "categorical", PSYGP_DIM_CATEGORICAL }, { NULL, 0 } };
 static const gp_name kernel_names[] = {
     { "rbf", PSYGP_KERNEL_RBF }, { "semip", PSYGP_KERNEL_SEMIP }, { NULL, 0 } };
 static const gp_name link_names[] = {
@@ -514,7 +517,9 @@ static const gp_name model_names[] = {
 static const gp_name acq_names[] = {
     { "lse", PSYGP_ACQ_LSE }, { "eavc", PSYGP_ACQ_EAVC },
     { "localmi", PSYGP_ACQ_LOCALMI }, { "balv", PSYGP_ACQ_BALV },
-    { "bald", PSYGP_ACQ_BALD }, { "random", PSYGP_ACQ_RANDOM }, { NULL, 0 } };
+    { "bald", PSYGP_ACQ_BALD }, { "random", PSYGP_ACQ_RANDOM },
+    { "ucb", PSYGP_ACQ_UCB }, { "ei", PSYGP_ACQ_EI },
+    { "thompson", PSYGP_ACQ_THOMPSON }, { NULL, 0 } };
 
 /* An enum field as the module constant (an int) or its lower-case name. */
 static int gp_enum(PyObject* v, const gp_name* names, const char* field, int* out) {
@@ -541,6 +546,182 @@ static int gp_enum(PyObject* v, const gp_name* names, const char* field, int* ou
         }
         PyErr_Format(PyExc_ValueError, "unknown %s %ld", field, n);
         return -1;
+    }
+}
+
+/* --- priors ------------------------------------------------------------------ */
+
+static const char* const prior_keys[] = {
+    "lengthscale", "outputscale", "outputscale_b", "outputscale_g", "mean",
+    "mean_g", "noise_sd", NULL
+};
+
+static psygp_prior* gp_prior_slot(psygp_priors* p, int i) {
+    switch (i) {
+        case 0: return &p->lengthscale;
+        case 1: return &p->outputscale;
+        case 2: return &p->outputscale_b;
+        case 3: return &p->outputscale_g;
+        case 4: return &p->mean;
+        case 5: return &p->mean_g;
+        default: return &p->noise_sd;
+    }
+}
+
+/* One prior: a dict {center, sd, ceiling}, a (center, sd[, ceiling])
+ * sequence, or an object with those attributes. A missing field stays 0, the
+ * measured default; a negative sd turns the prior off, as in C. */
+static int gp_parse_prior(PyObject* v, psygp_prior* out, const char* name) {
+    static const char* const f[] = { "center", "sd", "ceiling" };
+    double* dst[3];
+    int i;
+    dst[0] = &out->center; dst[1] = &out->sd; dst[2] = &out->ceiling;
+    memset(out, 0, sizeof(*out));
+    if (v == Py_None) return 0;
+    if (PyDict_Check(v)) {
+        Py_ssize_t pos = 0;
+        PyObject *k, *x;
+        while (PyDict_Next(v, &pos, &k, &x)) {
+            int found = 0;
+            for (i = 0; i < 3; i++) {
+                if (PyUnicode_Check(k) && PyUnicode_CompareWithASCIIString(k, f[i]) == 0) {
+                    if (x != Py_None && gp_as_double(x, dst[i]) < 0) return -1;
+                    found = 1;
+                }
+            }
+            if (!found) {
+                PyErr_Format(PyExc_TypeError, "priors.%s has an unknown field %R", name, k);
+                return -1;
+            }
+        }
+        return 0;
+    }
+    if (PyList_Check(v) || PyTuple_Check(v)) {
+        double tmp[3] = { 0.0, 0.0, 0.0 };
+        Py_ssize_t n = gp_small_doubles(v, tmp, 3, name);
+        if (n < 0) return -1;
+        if (n < 2) {
+            PyErr_Format(PyExc_ValueError, "priors.%s needs (center, sd[, ceiling])", name);
+            return -1;
+        }
+        out->center = tmp[0]; out->sd = tmp[1]; out->ceiling = tmp[2];
+        return 0;
+    }
+    for (i = 0; i < 3; i++) {
+        PyObject* x = PyObject_GetAttrString(v, f[i]);
+        int rc;
+        if (!x) { PyErr_Clear(); continue; }
+        rc = x == Py_None ? 0 : gp_as_double(x, dst[i]);
+        Py_DECREF(x);
+        if (rc < 0) return -1;
+    }
+    return 0;
+}
+
+/* desc.priors: a dict of the seven priors, or an object with them as
+ * attributes (psy.gp.Priors). */
+static int gp_parse_priors(PyObject* obj, psygp_priors* p) {
+    int i;
+    memset(p, 0, sizeof(*p));
+    if (obj == Py_None) return 0;
+    if (PyDict_Check(obj)) {
+        Py_ssize_t pos = 0;
+        PyObject *k, *v;
+        while (PyDict_Next(obj, &pos, &k, &v)) {
+            int found = 0;
+            for (i = 0; prior_keys[i]; i++) {
+                if (PyUnicode_Check(k) && PyUnicode_CompareWithASCIIString(k, prior_keys[i]) == 0) {
+                    if (gp_parse_prior(v, gp_prior_slot(p, i), prior_keys[i]) < 0) return -1;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                PyErr_Format(PyExc_TypeError, "priors has an unknown field %R", k);
+                return -1;
+            }
+        }
+        return 0;
+    }
+    for (i = 0; prior_keys[i]; i++) {
+        PyObject* v = PyObject_GetAttrString(obj, prior_keys[i]);
+        int rc;
+        if (!v) { PyErr_Clear(); continue; }
+        rc = gp_parse_prior(v, gp_prior_slot(p, i), prior_keys[i]);
+        Py_DECREF(v);
+        if (rc < 0) return -1;
+    }
+    return 0;
+}
+
+static PyObject* gp_priors_dict(const psygp_priors* p) {
+    PyObject* d = PyDict_New();
+    int i;
+    if (!d) return NULL;
+    for (i = 0; prior_keys[i]; i++) {
+        psygp_prior* q = gp_prior_slot((psygp_priors*)p, i);
+        PyObject* e = Py_BuildValue("{s:d,s:d,s:d}", "center", q->center,
+                                    "sd", q->sd, "ceiling", q->ceiling);
+        if (!e || PyDict_SetItemString(d, prior_keys[i], e) < 0) {
+            Py_XDECREF(e);
+            Py_DECREF(d);
+            return NULL;
+        }
+        Py_DECREF(e);
+    }
+    return d;
+}
+
+/* desc.dim_kind: one kind per dimension, each a DIM_* constant or its name. */
+static int gp_parse_dim_kind(PyObject* v, psygp_dim_kind* out) {
+    PyObject* list = PySequence_List(v);
+    Py_ssize_t n, i;
+    if (!list) return -1;
+    n = PyList_Size(list);
+    if (n > PSYGP_MAX_DIMS) {
+        Py_DECREF(list);
+        PyErr_Format(PyExc_ValueError, "dim_kind has %zd entries, at most %d", n, PSYGP_MAX_DIMS);
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        int k;
+        if (gp_enum(PyList_GetItem(list, i), dim_kind_names, "dim_kind", &k) < 0) {
+            Py_DECREF(list);
+            return -1;
+        }
+        out[i] = (psygp_dim_kind)k;
+    }
+    Py_DECREF(list);
+    return 0;
+}
+
+/* desc.monotone_dims: the C bit mask as an int, or a sequence of dimension
+ * indices. */
+static int gp_parse_mask(PyObject* v, unsigned* out) {
+    if (PyLong_Check(v)) {
+        long m = PyLong_AsLong(v);
+        if (m == -1 && PyErr_Occurred()) return -1;
+        if (m < 0 || m >= (1L << PSYGP_MAX_DIMS)) {
+            PyErr_Format(PyExc_ValueError, "monotone_dims mask %ld is outside 0..%ld",
+                         m, (1L << PSYGP_MAX_DIMS) - 1);
+            return -1;
+        }
+        *out = (unsigned)m;
+        return 0;
+    }
+    {
+        int dims[PSYGP_MAX_DIMS];
+        Py_ssize_t n = gp_small_ints(v, dims, PSYGP_MAX_DIMS, "monotone_dims"), i;
+        if (n < 0) return -1;
+        *out = 0u;
+        for (i = 0; i < n; i++) {
+            if (dims[i] >= PSYGP_MAX_DIMS) {
+                PyErr_Format(PyExc_ValueError, "monotone_dims names dimension %d", dims[i]);
+                return -1;
+            }
+            *out |= 1u << dims[i];
+        }
+        return 0;
     }
 }
 
@@ -622,6 +803,15 @@ static int gp_parse_desc(PyObject* kw, psygp_desc* d, double** cand, PyObject** 
         else if (KEY("max_trials"))     rc = gp_int(v, &d->max_trials);
         else if (KEY("refine_steps"))   rc = gp_int(v, &d->refine_steps);
         else if (KEY("model"))          { rc = gp_enum(v, model_names, "model", &tmp); d->model = (psygp_model)tmp; }
+        else if (KEY("priors"))         rc = gp_parse_priors(v, &d->priors);
+        else if (KEY("minimize"))       rc = gp_bool(v, &d->minimize);
+        else if (KEY("dim_kind"))       rc = gp_parse_dim_kind(v, d->dim_kind);
+        else if (KEY("dim_levels"))     rc = gp_small_ints(v, d->dim_levels, PSYGP_MAX_DIMS, "dim_levels") < 0 ? -1 : 0;
+        else if (KEY("monotone_dims"))  rc = gp_parse_mask(v, &d->monotone_dims);
+        else if (KEY("pcg_threshold"))  rc = gp_int(v, &d->pcg_threshold);
+        else if (KEY("fit_max_evals"))  rc = gp_int(v, &d->fit_max_evals);
+        else if (KEY("fit_tol"))        rc = gp_as_double(v, &d->fit_tol);
+        else if (KEY("fit_pcg"))        rc = gp_bool(v, &d->fit_pcg);
         else {
             PyErr_Format(PyExc_TypeError, "GP() got an unexpected keyword %R", k);
             return -1;
@@ -709,15 +899,13 @@ static void gp_release(GPObject* o) {
     Py_CLEAR(o->rng);
 }
 
-static int GP_init(PyObject* self, PyObject* args, PyObject* kwds) {
-    GPObject* o = AS_GP(self);
+/* Open (snap == NULL) or resume from a snapshot. One path for both, so the
+ * rng trampoline and the candidate copy are set up the same way. */
+static int gp_setup(GPObject* o, PyObject* kwds, const void* snap, size_t len) {
     psygp_desc d;
     double* cand;
     PyObject* rng;
-    if (args && PyTuple_Size(args) > 0) {
-        PyErr_SetString(PyExc_TypeError, "GP() takes keyword arguments only: GP(**desc)");
-        return -1;
-    }
+    bool ok;
     if (o->owned || o->busy) {
         gp_fail_msg(GpBusy, "GP is in use and cannot be re-initialized");
         return -1;
@@ -731,12 +919,69 @@ static int GP_init(PyObject* self, PyObject* args, PyObject* kwds) {
         d.rng_ctx = o;
     }
     o->cand = cand;
-    if (!psygp_open(&o->g, &d)) {
+    if (snap) {
+        /* The load rebuilds every matrix from the image, with no refit. */
+        o->busy = 1;
+        Py_BEGIN_ALLOW_THREADS
+        ok = psygp_load(&o->g, &d, snap, len);
+        Py_END_ALLOW_THREADS
+        o->busy = 0;
+    } else {
+        ok = psygp_open(&o->g, &d);
+    }
+    if (!ok) {
         PyErr_SetString(GpError, psygp_error(&o->g));
         gp_release(o);
         return -1;
     }
     return 0;
+}
+
+static int GP_init(PyObject* self, PyObject* args, PyObject* kwds) {
+    if (args && PyTuple_Size(args) > 0) {
+        PyErr_SetString(PyExc_TypeError, "GP() takes keyword arguments only: GP(**desc)");
+        return -1;
+    }
+    return gp_setup(AS_GP(self), kwds, NULL, 0);
+}
+
+static PyObject* GP_save(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    GPObject* o = AS_GP(self);
+    size_t n;
+    PyObject* b;
+    int rc;
+    if (gp_ready(o) < 0) return NULL;
+    n = psygp_save_size(&o->g);
+    if (n == 0) return gp_fail(PSYGP_ERR_CLOSED, "save");
+    b = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)n);
+    if (!b) return NULL;
+    rc = psygp_save(&o->g, PyBytes_AsString(b), n);
+    if (rc < 0) { Py_DECREF(b); return gp_fail(rc, "save"); }
+    return b;
+}
+
+/* GP.load(data, **desc): a new GP resumed from save(). */
+static PyObject* GP_load(PyObject* cls, PyObject* args, PyObject* kwds) {
+    PyObject *bytes, *self, *empty;
+    if (PyTuple_Size(args) != 1) {
+        PyErr_SetString(PyExc_TypeError, "GP.load(data, **desc) takes the snapshot bytes "
+                                         "and the desc as keywords");
+        return NULL;
+    }
+    bytes = PyBytes_FromObject(PyTuple_GetItem(args, 0));
+    if (!bytes) return NULL;
+    empty = PyTuple_New(0);
+    self = empty ? PyType_GenericNew((PyTypeObject*)cls, empty, NULL) : NULL;
+    Py_XDECREF(empty);
+    if (!self) { Py_DECREF(bytes); return NULL; }
+    if (gp_setup(AS_GP(self), kwds, PyBytes_AsString(bytes),
+                 (size_t)PyBytes_Size(bytes)) < 0) {
+        Py_DECREF(bytes);
+        Py_DECREF(self);
+        return NULL;
+    }
+    Py_DECREF(bytes);
+    return self;
 }
 
 static int GP_traverse(PyObject* self, visitproc visit, void* arg) {
@@ -1006,7 +1251,88 @@ static PyObject* GP_fit(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     if (gp_ready(o) < 0) return NULL;
     GP_CALL(o, rc = psygp_fit(&o->g));
     if (rc < 0) return gp_fail(rc, "fit");
+    return PyLong_FromLong(rc);   /* 1 converged, 0 budget or guard */
+}
+
+static PyObject* GP_fit_delta(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    if (gp_ready(AS_GP(self)) < 0) return NULL;
+    return PyFloat_FromDouble(psygp_fit_delta(&AS_GP(self)->g));
+}
+
+static PyObject* GP_argmax(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    GPObject* o = AS_GP(self);
+    double x[PSYGP_MAX_DIMS], v = 0.0;
+    PyObject* xl;
+    int rc;
+    if (gp_ready(o) < 0) return NULL;
+    GP_CALL(o, rc = psygp_argmax(&o->g, x, &v));
+    if (rc < -1) return gp_fail(rc, "argmax");
+    xl = gp_list(x, o->g.desc.n_dims);
+    if (!xl) return NULL;
+    return Py_BuildValue("(Nd)", xl, v);
+}
+
+static PyObject* GP_get_priors(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    psygp_priors p;
+    int rc;
+    if (gp_ready(AS_GP(self)) < 0) return NULL;
+    memset(&p, 0, sizeof(p));
+    rc = psygp_get_priors(&AS_GP(self)->g, &p);
+    if (rc < 0) return gp_fail(rc, "get_priors");
+    return gp_priors_dict(&p);
+}
+
+/* --- pairwise ---------------------------------------------------------------- */
+
+static PyObject* GP_next_pair(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    GPObject* o = AS_GP(self);
+    double x1[PSYGP_MAX_DIMS], x2[PSYGP_MAX_DIMS];
+    PyObject *a, *b;
+    int rc;
+    if (gp_ready(o) < 0) return NULL;
+    if (o->rng) {
+        /* THOMPSON draws from the Python generator inside the selection */
+        o->busy = 1;
+        rc = psygp_next_pair(&o->g, x1, x2);
+        o->busy = 0;
+        if (PyErr_Occurred()) return NULL;
+    } else {
+        GP_CALL(o, rc = psygp_next_pair(&o->g, x1, x2));
+    }
+    if (rc < 0) return gp_fail(rc, "next_pair");
+    a = gp_list(x1, o->g.desc.n_dims);
+    b = a ? gp_list(x2, o->g.desc.n_dims) : NULL;
+    if (!b) { Py_XDECREF(a); return NULL; }
+    return Py_BuildValue("(NN)", a, b);
+}
+
+static PyObject* GP_update_pair(PyObject* self, PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "x1", "x2", "outcome", NULL };
+    GPObject* o = AS_GP(self);
+    PyObject *xo1, *xo2, *yo;
+    double x1[PSYGP_MAX_DIMS], x2[PSYGP_MAX_DIMS];
+    int outcome, rc;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO", kw, &xo1, &xo2, &yo)) return NULL;
+    if (gp_ready(o) < 0) return NULL;
+    if (gp_point(xo1, o->g.desc.n_dims, x1, "x1") < 0) return NULL;
+    if (gp_point(xo2, o->g.desc.n_dims, x2, "x2") < 0) return NULL;
+    if (gp_int(yo, &outcome) < 0) return NULL;
+    GP_CALL(o, rc = psygp_update_pair(&o->g, x1, x2, outcome));
+    if (rc < 0) return gp_fail(rc, "update_pair");
     Py_RETURN_NONE;
+}
+
+static PyObject* GP_predict_pair(PyObject* self, PyObject* args) {
+    GPObject* o = AS_GP(self);
+    PyObject *xo1, *xo2;
+    double x1[PSYGP_MAX_DIMS], x2[PSYGP_MAX_DIMS], p;
+    if (!PyArg_ParseTuple(args, "OO", &xo1, &xo2)) return NULL;
+    if (gp_ready(o) < 0) return NULL;
+    if (gp_point(xo1, o->g.desc.n_dims, x1, "x1") < 0) return NULL;
+    if (gp_point(xo2, o->g.desc.n_dims, x2, "x2") < 0) return NULL;
+    p = psygp_predict_pair(&o->g, x1, x2);
+    if (p != p) return gp_fail(PSYGP_ERR_ARG, "predict_pair");
+    return PyFloat_FromDouble(p);
 }
 
 static PyObject* GP_fit_step(PyObject* self, PyObject* Py_UNUSED(ignored)) {
@@ -1066,6 +1392,16 @@ static PyObject* GP_history(PyObject* self, PyObject* Py_UNUSED(ignored)) {
                           "proposed", h[i].proposed ? Py_True : Py_False,
                           "init", h[i].init ? Py_True : Py_False);
         if (!d) { Py_DECREF(list); return NULL; }
+        if (o->g.desc.lik == PSYGP_LIK_PAIRWISE) {
+            PyObject* x2 = gp_list(h[i].x2, o->g.desc.n_dims);
+            if (!x2 || PyDict_SetItemString(d, "x2", x2) < 0) {
+                Py_XDECREF(x2);
+                Py_DECREF(d);
+                Py_DECREF(list);
+                return NULL;
+            }
+            Py_DECREF(x2);
+        }
         PyList_SetItem(list, i, d);   /* steals d */
     }
     return list;
@@ -1219,7 +1555,9 @@ static PyMethodDef GP_methods[] = {
       "n_dims - 1 coordinates). lo and hi are the crossings of the "
       "mu +- 1.96 sd latent curves. Raises NoCross." },
     { "fit", GP_fit, METH_NOARGS,
-      "fit(): fit the free hyperparameters. Tens of refits; releases the GIL." },
+      "fit() -> int: fit the free hyperparameters. 1 when it converged, 0 when "
+      "the evaluation budget (fit_max_evals) or a guard stopped it; call again "
+      "to continue. Tens of refits; releases the GIL." },
     { "fit_step", GP_fit_step, METH_NOARGS,
       "fit_step() -> bool: one step of the fit; True while another would "
       "help. Releases the GIL." },
@@ -1231,6 +1569,33 @@ static PyMethodDef GP_methods[] = {
     { "history", GP_history, METH_NOARGS,
       "history() -> list[dict]: every trial as {'x', 'y', 'proposed', 'init'}." },
     { "close", GP_close, METH_NOARGS, "close(): free the handle (idempotent)." },
+    { "fit_delta", GP_fit_delta, METH_NOARGS,
+      "fit_delta() -> float: the change of the fit objective (log marginal plus "
+      "log prior) over the last whole fit, 0 when a guard undid it. Repeat fit() "
+      "until this is small to converge a fit the budget stops." },
+    { "argmax", GP_argmax, METH_NOARGS,
+      "argmax() -> (x, value): the stimulus where the posterior mean of the "
+      "target quantity is highest (lowest under minimize), and that mean. "
+      "Releases the GIL." },
+    { "get_priors", GP_get_priors, METH_NOARGS,
+      "get_priors() -> dict: the weak priors in force, defaults filled in; a "
+      "prior that is off has sd -1." },
+    { "next_pair", GP_next_pair, METH_NOARGS,
+      "next_pair() -> (x1, x2): LIK_PAIRWISE's next comparison. Releases the "
+      "GIL unless rng is set." },
+    { "update_pair", (PyCFunction)(void (*)(void))GP_update_pair, METH_VARARGS | METH_KEYWORDS,
+      "update_pair(x1, x2, outcome): record a comparison; outcome 1 if x1 was "
+      "preferred, 0 if x2. Releases the GIL." },
+    { "predict_pair", GP_predict_pair, METH_VARARGS,
+      "predict_pair(x1, x2) -> float: P(x1 is preferred to x2)." },
+    { "save", GP_save, METH_NOARGS,
+      "save() -> bytes: a snapshot of the whole session, pending proposal "
+      "included; GP.load() resumes it bit for bit without replay. The rng "
+      "state is not in it." },
+    { "load", (PyCFunction)(void (*)(void))GP_load, METH_VARARGS | METH_KEYWORDS | METH_CLASS,
+      "GP.load(data, **desc) -> GP: resume from save(). The desc must agree "
+      "with the snapshot on every number and re-supplies rng and candidates; "
+      "put your generator's state back yourself. A mismatch raises Error." },
     { "memory_size", (PyCFunction)(void (*)(void))gp_memory_size,
       METH_VARARGS | METH_KEYWORDS | METH_STATIC,
       "memory_size(**desc) -> int: bytes GP(**desc) allocates at open. "
@@ -1250,7 +1615,9 @@ static PyType_Slot GP_slots[] = {
                         "no_hyper_prior, refit_every, hyper_min, hyper_max, jitter, "
                         "acq, target_p, target_value, target_outcome, acq_beta, "
                         "n_init, rng, candidates, n_candidates, grid, stop_trials, "
-                        "stop_threshold_sd, stop_context, max_trials, refine_steps, model. An omitted "
+                        "stop_threshold_sd, stop_context, max_trials, refine_steps, model, priors, "
+                        "minimize, dim_kind, dim_levels, monotone_dims, pcg_threshold, "
+                        "fit_max_evals, fit_tol, fit_pcg. An omitted "
                         "or zero field takes the library default." },
     { Py_tp_new, (void*)PyType_GenericNew },
     { Py_tp_init, (void*)GP_init },
@@ -1361,6 +1728,9 @@ static PyObject* Async_start(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     if (o->gp->owned) return gp_fail_msg(GpBusy, "this GP is already owned by a running Async");
     if (o->waiters) return gp_fail_msg(GpBusy, "a wait() is still blocked on this Async");
     if (gp_ready(o->gp) < 0) return NULL;
+    if (o->gp->g.desc.lik == PSYGP_LIK_PAIRWISE)
+        return gp_fail_msg(PyExc_ValueError,
+                           "Async submits single stimuli; LIK_PAIRWISE is not supported");
     if (o->gp->rng)
         return gp_fail_msg(PyExc_ValueError,
                            "Async cannot drive a GP whose rng is a Python callable: "
@@ -1665,6 +2035,13 @@ PyMODINIT_FUNC PyInit_gp(void) {
                            "Async.wait() ran out of time.");
     if (!GpTimeout) goto fail;
 
+    if (!gp_namespace_type(m, "Priors",
+        "Priors(lengthscale=..., outputscale=..., outputscale_b=..., "
+        "outputscale_g=..., mean=..., mean_g=..., noise_sd=...): the weak "
+        "hyperparameter priors for GP(priors=...). Each is a dict {center, sd, "
+        "ceiling} or a (center, sd[, ceiling]) tuple; 0 or missing is the "
+        "measured default and a negative sd turns that prior off. A dict of "
+        "the same keys works too.")) goto fail;
     HyperType = gp_namespace_type(m, "Hyper",
         "Hyper(lengthscale=[...], outputscale=0, mean=0, lengthscale_b=[...], "
         "outputscale_b=0, cutpoint=[...], noise_sd=0, lengthscale_g=[...], "
@@ -1688,6 +2065,10 @@ PyMODINIT_FUNC PyInit_gp(void) {
     C("LIK_ORDINAL", PSYGP_LIK_ORDINAL);
     C("LIK_CATEGORICAL", PSYGP_LIK_CATEGORICAL);
     C("LIK_GAUSSIAN", PSYGP_LIK_GAUSSIAN);
+    C("LIK_PAIRWISE", PSYGP_LIK_PAIRWISE);
+    C("DIM_CONTINUOUS", PSYGP_DIM_CONTINUOUS);
+    C("DIM_INTEGER", PSYGP_DIM_INTEGER);
+    C("DIM_CATEGORICAL", PSYGP_DIM_CATEGORICAL);
     C("MODEL_GP", PSYGP_MODEL_GP);
     C("MODEL_PSYCHOMETRIC", PSYGP_MODEL_PSYCHOMETRIC);
     C("KERNEL_RBF", PSYGP_KERNEL_RBF);
@@ -1700,6 +2081,9 @@ PyMODINIT_FUNC PyInit_gp(void) {
     C("ACQ_BALV", PSYGP_ACQ_BALV);
     C("ACQ_BALD", PSYGP_ACQ_BALD);
     C("ACQ_RANDOM", PSYGP_ACQ_RANDOM);
+    C("ACQ_UCB", PSYGP_ACQ_UCB);
+    C("ACQ_EI", PSYGP_ACQ_EI);
+    C("ACQ_THOMPSON", PSYGP_ACQ_THOMPSON);
     C("STOP_NONE", PSYGP_STOP_NONE);
     C("STOP_TRIALS", PSYGP_STOP_TRIALS);
     C("STOP_THRESHOLD_SD", PSYGP_STOP_THRESHOLD_SD);

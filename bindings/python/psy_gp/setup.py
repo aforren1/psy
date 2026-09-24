@@ -22,6 +22,18 @@ if sys.platform != "win32":
     extra_link_args.append("-pthread")
     libraries.append("m")
 
+# PSYGP_MAX_TRIALS sizes the handle's history and caps desc.max_trials, so a
+# session or a data set longer than 512 trials needs a build with a larger
+# value: PSY_GP_MAX_TRIALS=1024 pip install . The matrices are allocated per
+# handle from desc.max_trials, so the cap costs nothing until it is used.
+max_trials_env = os.environ.get("PSY_GP_MAX_TRIALS", "512").strip()
+try:
+    MAX_TRIALS = int(max_trials_env)
+except ValueError:
+    sys.exit(f"PSY_GP_MAX_TRIALS must be an integer, not {max_trials_env!r}")
+if not 16 <= MAX_TRIALS <= 65536:
+    sys.exit(f"PSY_GP_MAX_TRIALS must be in 16..65536, not {MAX_TRIALS}")
+
 # Target the CPython 3.8+ stable ABI (Limited API): one .abi3.so works across
 # Python versions. The macro must match Py_LIMITED_API in the C source.
 PY_LIMITED = 0x03080000
@@ -35,7 +47,8 @@ ext = Extension(
     include_dirs=[HEADER_DIR],  # for "psy_gp.h" and the "psy_rt.h" it includes
     # PSYGP_ASYNC compiles the async layer (and psy_rt.h's pump) in; the binding
     # always ships it, because a Python trial loop is where it pays.
-    define_macros=[("Py_LIMITED_API", hex(PY_LIMITED)), ("PSYGP_ASYNC", "1")],
+    define_macros=[("Py_LIMITED_API", hex(PY_LIMITED)), ("PSYGP_ASYNC", "1"),
+                   ("PSYGP_MAX_TRIALS", str(MAX_TRIALS))],
     py_limited_api=True,
     libraries=libraries,
     extra_compile_args=extra_compile_args,
@@ -54,5 +67,9 @@ setup(
     # the psy/ directory (kept for in-place builds) or tests/ as a package.
     packages=[],
     # Build a cp38-abi3 wheel rather than a version-specific one.
-    options={"bdist_wheel": {"py_limited_api": "cp38"}},
+    # build_ext decides whether to recompile by file dates alone, so an object
+    # left in build/ from another PSY_GP_MAX_TRIALS (or another header) would
+    # be linked as is. One C file is cheap to compile; always compile it.
+    options={"bdist_wheel": {"py_limited_api": "cp38"},
+             "build_ext": {"force": True}},
 )

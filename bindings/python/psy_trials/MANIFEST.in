@@ -1,0 +1,16 @@
+# An sdist must carry everything the build needs. setup.py compiles
+# psy_trials.h straight into the extension, and the header lives at the
+# repository root, which an sdist cannot reach, so stage a copy next to
+# setup.py first:
+#
+#     cp ../../../psy_trials.h .
+#     uv build --sdist
+#
+# The staged copy is gitignored; setup.py prefers the repository root when it
+# is present, so a copy cannot shadow a newer header in a development tree.
+include psy_trials.h
+# setup.py names the extension source by absolute path, which sdist does not
+# pick up on its own.
+include psy_trials_ext.c
+include example.py
+recursive-include tests *.py

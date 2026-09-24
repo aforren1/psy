@@ -39,7 +39,7 @@ option(PSY_BUILD_LOOPBACK "Build the loopback tests in tests/loopback/ (needs ha
 # program registered with ctest too, and one with PSY_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
 # PSY<X>_ASYNC defined, which is the opt-in layer that pulls in psy_rt.h.
-set(PSY_LIBS rt parallel serial stair quest gp)
+set(PSY_LIBS rt parallel serial stair quest gp trials)
 
 set(PSY_PREFIX_rt          PSYRT)
 set(PSY_PLATFORMS_rt       Windows Linux Darwin)
@@ -68,6 +68,11 @@ set(PSY_PREFIX_gp          PSYGP)
 set(PSY_PLATFORMS_gp       Windows Linux Darwin)
 set(PSY_THREADS_gp         OFF)
 set(PSY_ASYNC_gp           ON)
+
+# The trial sequencer includes nothing at all, not even psy_rt.h.
+set(PSY_PREFIX_trials      PSYTR)
+set(PSY_PLATFORMS_trials   Windows Linux Darwin)
+set(PSY_THREADS_trials     OFF)
 
 if(MSVC)
     set(PSY_WARNINGS /W4 /WX)

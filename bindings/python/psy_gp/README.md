@@ -50,6 +50,27 @@ uv build --sdist                    # or: python -m build --sdist
 The two copies are gitignored. When the repository root is present, its
 headers win, so a stale copy cannot shadow a newer header.
 
+### How to allow more than 512 trials
+
+The trial ceiling, `psy.gp.MAX_TRIALS`, is fixed when the extension is
+compiled. Set `PSY_GP_MAX_TRIALS` at build time to raise it:
+
+```sh
+PSY_GP_MAX_TRIALS=1024 uv pip install ./bindings/python/psy_gp
+python -c "import psy.gp; print(psy.gp.MAX_TRIALS)"     # 1024
+```
+
+The ceiling itself costs about 80 bytes per trial in every `GP` object, for
+the inline history. The matrices are allocated per handle from `max_trials`,
+so they cost only when a run asks for that many trials. At
+`max_trials=1024`, `memory_size()` measured about 26 MB for the GP model with
+LSE, 33 MB with EAVC, 35 MB for the psychometric model, and 52 MB for a
+three-class categorical model (two dimensions, 512 candidates). The matrices
+grow as the square of `max_trials`. The time per exact refit grows as its
+cube, so a long run needs `refit_every` or `fit_step()`. Use the same value
+wherever the wheel is built; `pip` does not see the variable in a cached
+wheel.
+
 On Linux and macOS the build links `-pthread` (for the async thread) and
 `libm`. Windows needs no extra libraries.
 
@@ -106,6 +127,34 @@ posterior mean of m + f* exp(-g) in closed form, with a band of +-1.96
 posterior sd. A stationary GP needs one lengthscale for the whole intensity
 axis, so it cannot hold a rise that is narrow against the box.
 
+## How to find the best stimulus instead of a threshold
+
+```python
+gp = pg.GP(lo=[0, 0], hi=[1, 1], lik="gaussian", acq="ucb", grid=[21, 21],
+           n_init=8, fit=True, fit_every=10, stop_trials=40)
+while not gp.done:
+    _, x = gp.next()
+    gp.update_real(x, rating(x))
+x_best, value = gp.argmax()
+```
+
+`acq="thompson"` needs `rng=` (for example `numpy.random.default_rng(1).random`).
+For "which of the two did you prefer" trials, use `lik="pairwise"` with
+`acq="bald"` or `"thompson"`, `x1, x2 = gp.next_pair()` and
+`gp.update_pair(x1, x2, 1 if first_preferred else 0)`. `argmax()` then gives
+the favorite stimulus.
+
+## How to resume a session
+
+```python
+data = gp.save()                     # bytes; store it with your data
+gp = pg.GP.load(data, **desc)        # the same desc; the session continues
+```
+
+The resumed session proposes, updates and estimates exactly as the
+uninterrupted one would. Save and restore your generator's state yourself if
+you set `rng`.
+
 ## How to plot the field
 
 `predict_p_many()` evaluates the model at many points in one blocked pass.
@@ -151,6 +200,8 @@ This is the way to run a 30 ms EAVC selection under a PsychoPy frame loop.
 The loop keeps drawing while the thread computes. When the proposal is late,
 the loop shows one more frame of the same screen; it does not block.
 
+`Async` refuses a `"pairwise"` GP, because it submits single stimuli.
+
 `submit()` raises `psy.gp.Busy` when the queue (`ASYNC_QUEUE`, 8 responses)
 is full. Nothing was copied, so keep the response and try again on the next
 frame. `wait(seq, timeout_s)` is the blocking form for the end of an interval;
@@ -167,10 +218,11 @@ See [example.py](example.py) for both loops on a simulated observer.
 | `GP(**desc)` | open a run; the keywords are the `psygp_desc` fields below |
 | `Async(gp, context=None, target=0, fit_in_idle=False, below_normal=False, pin_cpu=0)` | the inference thread for `gp` |
 | `Hyper(**fields)` | a namespace of hyperparameter fields for `hyper=`, `hyper_min=`, `hyper_max=`; a dict works too |
+| `Priors(**fields)` | a namespace of the weak priors for `priors=`; a dict works too |
 | `Snapshot` | the type of what `Async.poll()` and `Async.wait()` return |
 | `simulate_outcome(p, u) -> int` | the smallest k with cumulative `p` > `u` (`u` in [0, 1) from your generator) |
 | `memory_size(**desc) -> int` | bytes `GP(**desc)` allocates at open; raises `Error` with the validation message on a bad desc |
-| `__version__` | the version of the compiled `psy_gp.h` (`psygp_version()`), for example `"0.2.1"`; log it with your data |
+| `__version__` | the version of the compiled `psy_gp.h` (`psygp_version()`), for example `"0.14.0"`; log it with your data |
 
 ### GP keywords
 
@@ -181,18 +233,22 @@ default. `n_dims` comes from `len(lo)` unless you give it.
 |---|---|---|
 | `lo`, `hi` | sequence of floats | the box, one entry per dimension |
 | `intensity_dim` | int | the dimension that thresholds run along (default 0) |
-| `lik` | `LIK_*` or name | `"bernoulli"` (default), `"ordinal"`, `"categorical"`, `"gaussian"` |
+| `lik` | `LIK_*` or name | `"bernoulli"` (default), `"ordinal"`, `"categorical"`, `"gaussian"`, `"pairwise"` (a trial compares two stimuli; use `next_pair()` and `update_pair()`) |
 | `n_outcomes` | int | K, for ordinal and categorical |
-| `model` | `MODEL_*` or name | `"gp"` (default): one GP over the box. `"psychometric"`: a threshold GP m(c) and a log-slope GP g(c) over the context, f = exp(g) (x - m). Bernoulli or ordinal and the RBF kernel only; every acquisition works (EAVC and LOCALMI since psy_gp.h 0.4.0) |
+| `model` | `MODEL_*` or name | `"gp"` (default): one GP over the box. `"psychometric"`: a threshold GP m(c) and a log-slope GP g(c) over the context, f = exp(g) (x - m). Bernoulli or ordinal and the RBF kernel only; every acquisition but `"thompson"` works |
 | `kernel` | `KERNEL_*` or name | `"rbf"` (default) or `"semip"` |
 | `link` | `LINK_*` or name | `"probit"` (default) or `"logit"` |
 | `guess`, `lapse` | float | floor and ceiling of p; fixed, never fitted |
 | `hyper`, `hyper_min`, `hyper_max` | dict or `Hyper` | fixed values and fit bounds; zero means default or fit |
 | `fit`, `fit_every` | bool, int | fit the free hyperparameters every `fit_every` trials after the init phase |
 | `no_hyper_prior` | bool | fit type-II maximum likelihood instead of the weak priors |
+| `priors` | dict or `Priors` | the weak priors, by name: `lengthscale`, `outputscale`, `outputscale_b`, `outputscale_g`, `mean`, `mean_g`, `noise_sd`. Each is `{center, sd, ceiling}` or a `(center, sd[, ceiling])` tuple. 0 or missing is the measured default; a negative `sd` turns that prior off. `get_priors()` shows what is in force |
+| `fit_max_evals`, `fit_tol` | int, float | one fit's objective evaluations (0 = 40) and its gradient tolerance (0 = 1e-8) |
+| `fit_pcg` | bool | conjugate-gradient Newton steps inside hyperparameter fits and the psychometric mode search, one factorization per search. Off by default because results differ from the default path at tolerance level; ignored under `"gaussian"` and `"categorical"`. Measured by the header on 6-D, 500 trials: a GP fit 6.9 to 3.4 s, a psychometric fit 168 to 43 s |
 | `refit_every` | int | rank-one updates between exact Newton refits |
 | `jitter` | float | kernel diagonal jitter (default 1e-6) |
-| `acq` | `ACQ_*` or name | `"lse"` (default), `"eavc"`, `"localmi"`, `"balv"`, `"bald"`, `"random"` |
+| `acq` | `ACQ_*` or name | level set: `"lse"` (default), `"eavc"`, `"localmi"`; field: `"balv"`, `"bald"`; `"random"`; optimization: `"ucb"`, `"ei"`, `"thompson"` (needs `rng`; GP model only) |
+| `minimize` | bool | the optimization acquisitions and `argmax()` minimize the target quantity |
 | `target_p`, `target_value`, `target_outcome` | float, float, int | the level set; the level-set acquisitions need one |
 | `acq_beta` | float | LSE straddle width (default 1.96) |
 | `n_init` | int | Halton trials before the acquisition runs |
@@ -200,7 +256,10 @@ default. `n_dims` comes from `len(lo)` unless you give it.
 | `candidates` | buffer or sequence of points | an explicit M x n_dims candidate set; the binding keeps a copy |
 | `n_candidates`, `grid` | int, sequence of ints | a Halton set of M points, or a product grid |
 | `stop_trials`, `stop_threshold_sd`, `stop_context` | int, float, sequence | stop rules; one is required |
-| `max_trials` | int | the hard ceiling and the size of the allocation (at most `MAX_TRIALS`, 512) |
+| `max_trials` | int | the hard ceiling and the size of the allocation (at most `MAX_TRIALS`, 512 unless the build raised it) |
+| `dim_kind`, `dim_levels` | sequences | per dimension `DIM_CONTINUOUS` (default), `DIM_INTEGER` or `DIM_CATEGORICAL` (or the lower-case names), and a categorical dimension's level count. A categorical dimension's box is `[0, levels - 1]`; the intensity dimension stays continuous |
+| `monotone_dims` | int mask or sequence of ints | project the posterior mean to increase along these dimensions (AEPsych's monotonic projection); GP model, one latent only |
+| `pcg_threshold` | int | above this many trials an update solves by preconditioned conjugate gradients; 0 = 512, negative = never |
 | `refine_steps` | int, 0 to 32 | rounds of golden-section refinement of the grid winner between its neighbors; 0 (default) keeps proposals on the grid. A refined proposal returns index -1. EAVC refines on the LSE straddle, because its score has no value off the grid |
 
 A caller-owned memory buffer (`desc.memory`) is not exposed.
@@ -221,12 +280,20 @@ A caller-owned memory buffer (`desc.memory`) is not exposed.
 | `predict_p_many(xs) -> memoryview` | `predict_p` at n points, format `'d'` |
 | `predict_f_many(xs, k=0) -> (memoryview, memoryview)` | `predict_f` at n points |
 | `threshold(ctx=None, target=0) -> (x, lo, hi)` | where `predict_p` crosses `target` along the intensity dimension at context `ctx` (the other `n_dims - 1` coordinates); raises `NoCross` |
-| `fit()` | fit the free hyperparameters (tens of refits) |
+| `fit() -> int` | fit the free hyperparameters: 1 when it converged, 0 when `fit_max_evals` or a guard stopped it (call again to continue); raises only on an error |
+| `fit_delta() -> float` | the fit objective's change over the last whole fit; repeat `fit()` until it is small |
+| `argmax() -> (x, value)` | where the posterior mean of the target quantity is highest (lowest under `minimize`), and that mean |
+| `get_priors() -> dict` | the priors in force, defaults filled in; one that is off has `sd` -1 |
+| `next_pair() -> (x1, x2)` | `"pairwise"`: the next comparison |
+| `update_pair(x1, x2, outcome)` | `"pairwise"`: 1 if `x1` was preferred, 0 if `x2` |
+| `predict_pair(x1, x2) -> float` | `"pairwise"`: P(`x1` is preferred to `x2`) |
+| `save() -> bytes` | a snapshot of the whole session, pending proposal included (not the `rng` state) |
+| `GP.load(data, **desc) -> GP` | resume from `save()`, bit for bit, without replay. The desc must agree with the snapshot on every number and re-supplies `rng` and `candidates` |
 | `fit_step() -> bool` | one step of that fit; `True` while another step helps |
 | `refit()` | the exact refit that `refit_every` skips |
 | `hyper() -> dict` | `lengthscale`, `outputscale`, `mean`, `lengthscale_b`, `outputscale_b`, `cutpoint`, `noise_sd`, `lengthscale_g`, `outputscale_g`, `mean_g`; under `model="psychometric"` the first three belong to the threshold GP and the `_g` fields to the log-slope GP |
 | `candidate(i) -> list` | candidate `i` |
-| `history() -> list[dict]` | every trial as `{'x', 'y', 'proposed', 'init'}` |
+| `history() -> list[dict]` | every trial as `{'x', 'y', 'proposed', 'init'}`, plus `'x2'` under `"pairwise"` |
 | `close()` | free the handle; `GP` is also a context manager |
 
 Read-only properties: `done`, `stop_reason` (`STOP_*`), `log_marginal`,
@@ -269,7 +336,7 @@ arguments raise `TypeError` or `ValueError`.
 
 Constants mirror the header: `LIK_*`, `KERNEL_*`, `LINK_*`, `ACQ_*`,
 `STOP_*`, `OK`, `ERR_*`, `POLICY_*`, `MAX_DIMS`, `MAX_OUTCOMES`,
-`MAX_TRIALS`, `QUAD_N`, `ASYNC_QUEUE`, `MODEL_*`.
+`MAX_TRIALS`, `QUAD_N`, `ASYNC_QUEUE`, `MODEL_*`, `DIM_*`.
 
 ## Explanation
 

@@ -97,7 +97,7 @@ static void quest_desc(psyq_desc* d, int trials, double* prior) {
 int main(int argc, char** argv) {
     int trials = (argc > 1) ? atoi(argv[1]) : 60;
     uint64_t seed = (argc > 2) ? strtoull(argv[2], NULL, 0) : 0x5EEDF00Dull;
-    double truth[4], prior[61];
+    double truth[4], prior[61] = {0};
     psyq_desc dp, dq;
     static psyq_quest psi, quest;   /* the handle carries the history inline */
     int t;

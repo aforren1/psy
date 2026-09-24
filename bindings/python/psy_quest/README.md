@@ -149,6 +149,31 @@ blocking form for the end of an interval. `submit` raises `Busy` when the
 queue (`ASYNC_QUEUE` responses) is full: nothing was queued, so retry on the
 next frame. See [example.py](example.py).
 
+## How to save and resume a session
+
+```python
+import random
+
+gen = random.Random(seed)
+q = pq.Quest(stim, params, rng=gen.random, subset_size=8, stop_trials=100)
+...
+snap, gen_state = q.save(), gen.getstate()     # write both to disk
+...
+gen = random.Random()
+gen.setstate(gen_state)
+q = pq.Quest.load(snap, stim, params, rng=gen.random, subset_size=8, stop_trials=100)
+```
+
+The resumed session makes the same proposals, and has the same posterior
+bytes and estimates, as the session that was not interrupted. That is also
+true when a proposal was pending at the save. `load` takes the same desc as
+the saved session. It must match on every number except the priors (the
+saved posterior replaces them). It also re-supplies what a snapshot cannot
+carry: the model callable and the `rng`. A mismatch raises `Error` with the
+header's message, which names the first field that differs. The generator is
+yours: save its state beside the snapshot and restore it before the next
+`next()`. With an `Async`, save after `stop()`.
+
 ## Reference
 
 ### `Quest(stim, params, **desc)`
@@ -192,6 +217,8 @@ calls no callback.
 | `stim_shape`, `param_shape` | points per axis |
 | `n_trials`, `history()` | a list of `Trial(stim, stim_index, proposed_index, outcome)` named tuples |
 | `releases_gil` | a dict: which calls release the GIL for this configuration |
+| `save()` | a snapshot as bytes: the posterior, the history, the pending proposal, the tie and stop state. The table is not in it. |
+| `Quest.load(data, stim, params, **desc)` | a classmethod: a new Quest resumed from `save()`. The table is rebuilt, so this costs one construction. |
 | `close()`, `is_open` | free the arena; `Quest` is a context manager |
 
 `__version__` is `psyq_version()` from the compiled header, and the tests
@@ -203,7 +230,11 @@ view that copy without a second copy. The Limited API before 3.11 has no
 buffer slot for a type, so a zero-copy view of the live posterior is a later
 item.
 
-### `Async(quest, estimator=EST_MEAN, below_normal=False, pin_cpu=0)`
+### `Async(quest, estimator=EST_MEAN, below_normal=False, pin_cpu=0, queue_depth=0)`
+
+`queue_depth` is how many responses may wait for the thread: 0 means
+`ASYNC_QUEUE`, and 1 keeps the trial loop in lockstep with the inference.
+When the queue is at that depth, `submit` raises `Busy`.
 
 | Method or property | Returns |
 |---|---|

@@ -1,4 +1,4 @@
-/* psy_quest.h - v0.4.1 - public domain single-header Bayesian adaptive library
+/* psy_quest.h - v0.5.2 - public domain single-header Bayesian adaptive library
  *
  *   Parametric Bayesian adaptive estimation on a grid: QUEST+ (Watson 2017),
  *   which contains QUEST (Watson & Pelli 1983), the Psi method (Kontsevich
@@ -20,6 +20,36 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.5.2 - documentation only: STATUS records the comparisons against
+ *          mQUESTPlus, Palamedes' PAL_AMPM and Watson's own notebook runs,
+ *          which are now done. No code changed.
+ *   v0.5.1 - builds clean on gcc 16 (MinGW, -O3) and current clang, which
+ *          CI found and this machine's compilers do not. No behavior change,
+ *          and the default build's arithmetic is bit for bit v0.5.0. gcc 16
+ *          constant-propagated a test's deliberately bad arguments (axis 9,
+ *          a three-element parameter array for a three-parameter model) into
+ *          paths that open()'s invariants make impossible, and with
+ *          -Werror=aggressive-loop-optimizations and -Werror=array-bounds it
+ *          refused them. Neither was an over-read at run time. The header now
+ *          makes the invariants visible instead of assuming them: every axis a
+ *          caller passes is checked against the array it will index as well as
+ *          against the handle, every loop over the stimulus or parameter axes
+ *          is bounded by the array it indexes, and every array a caller hands
+ *          in or gets back is copied once, exactly n_stim / n_param / K
+ *          elements, to or from a local of the compile-time maximum, so no
+ *          caller's array is ever indexed past what the handle says it holds on
+ *          any path an optimizer can build. The test initializes every array
+ *          a header call fills and fills its deliberately bad desc with 0xA5
+ *          instead of leaving it uninitialized.
+ *   v0.5.0 - snapshots: psyq_save_size(), psyq_save() and psyq_load(), in the
+ *          shape of psy_trials.h's psytr_save / psytr_load. A session saved
+ *          at any trial resumes without replay and continues bit for bit as
+ *          the uninterrupted one would have, which the test checks at four
+ *          cut points in five configurations. And psyq_async_desc.queue_depth:
+ *          how far the trial loop may run ahead of the inference is now a
+ *          session's choice, under PSYQ_ASYNC_QUEUE as the capacity, where it
+ *          used to be the macro itself. That was the one compile-time knob a
+ *          binding could not reach; see BUILDING for the ones that stay.
  *   v0.4.1 - two small things a binding asked for: version macros
  *          (PSYQ_VERSION_MAJOR / MINOR / PATCH / STRING) and psyq_version(),
  *          so a program can log which header it was built from, and
@@ -115,9 +145,9 @@
  *            - RETURN VALUES AND ERRORS now lists every desc open() refuses.
  *   v0.0 - specification. Declarations and the manual, no implementation.
  *
- *   STATUS: v0.4.1. Implemented and tested against an independent
+ *   STATUS: v0.5.2. Implemented and tested against an independent
  *   double-precision reference written from the definitions in
- *   tests/adapt/psy_quest_test.c: 13348 checks over the posterior update, the
+ *   tests/adapt/psy_quest_test.c: 14770 checks over the posterior update, the
  *   expected-entropy selection (joint and marginalized over nuisance axes),
  *   every built-in psychometric function, every placement rule, every
  *   tiebreak rule, every stop criterion, every estimator, a three-outcome
@@ -137,15 +167,25 @@
  *   the rounding of the tabulated cell entropy to float, nothing else, and is
  *   below the table's own error. A 20-replication simulated Psi run of 100 trials
  *   recovers a threshold of -1.72 log10 units with a mean absolute error of
- *   0.032 and a bias of -0.003.
+ *   0.032 and a bias of -0.003. A snapshot taken at trials 0, 1, 7 and 23 of a
+ *   24-trial run, both between an update and the next selection and between a
+ *   selection and its update, resumes to the uninterrupted run BIT FOR BIT
+ *   (proposals, posterior, history, estimates, entropy, and the caller's
+ *   generator state) in five configurations: joint, a nuisance axis last and
+ *   in the middle, pf_batch, and a random subset with random ties; and a load
+ *   refuses, with the field named and the handle left closed, a desc that
+ *   differs in any compared number, the other callback kind, a wrong magic or
+ *   format, a truncated or trailing snapshot, and corrupt counters, posterior
+ *   or history.
  *
  *   The async layer has its own block in that test, built and run both ways:
- *   13348 checks without PSYQ_ASYNC and 13689 with it, the extra ones covering
+ *   14770 checks without PSYQ_ASYNC and 15121 with it, the extra ones covering
  *   an async run against a bit-for-bit synchronous replay, the initial
  *   proposal at seq 0, a poll that is never ahead of what was submitted nor
  *   behind a previous poll, a queue driven until it returns PSYQ_ERR_BUSY with
  *   the replay still matching afterwards, a stop that drains, an off-grid
- *   submit, and every call on a zeroed or stopped handle.
+ *   submit, every call on a zeroed or stopped handle, and queue_depth 1
+ *   pushing back on a second submit.
  *
  *   Clean under gcc 11.4 -fsanitize=address,undefined, and with PSYQ_ASYNC
  *   also under -fsanitize=thread. Compiles and runs warning-free as C99, C11
@@ -158,11 +198,27 @@
  *   The cost numbers under MEMORY, COST AND THREADS, including the two
  *   lower-precision variants under PRECISION that were measured and then
  *   removed, come from examples/quest_bench.c on one x86-64 laptop, and they
- *   are the only measurement of cost there is. NOT yet verified: the cell-by-cell
- *   comparison against mQUESTPlus and Psychtoolbox Quest on the published
- *   examples, which docs/psy_adapt.md sets out and which needs the bindings;
- *   any platform but x86-64 (the header has no intrinsics, so vectorization
- *   elsewhere is the compiler's business, but it is untested on ARM).
+ *   are the only measurement of cost there is.
+ *
+ *   Compared cell by cell against the reference implementations, through the
+ *   MEX binding in MATLAB R2023a (tests/compare/compare_quest_mquestplus.m).
+ *   Against mQUESTPlus, which drives each run so that both are updated with
+ *   the stimulus it chose, on the paper's figure 2 threshold (32 trials),
+ *   figure 3 threshold, slope and lapse (200), figure 4's normal through
+ *   desc.pf_batch on qpPFNormal (128), and a marginalized case with the
+ *   nuisance axis in the middle (64): no selection differs. 32 selections are
+ *   ties within 6.9e-10 bits, which this header resolves to the lowest index
+ *   under desc.tie_tolerance where mQUESTPlus takes the strict argmin, and in
+ *   all of them the two picked the same stimulus. The posteriors agree within
+ *   4.3e-7, which is the float table (LAYOUT). Against Palamedes' PAL_AMPM,
+ *   Psi and Psi-marginal: identical selections over 60 trials each, posteriors
+ *   within 5.7e-8. And Watson's own QUEST+ notebook runs replay identically, 17
+ *   of 17 (tests/compare/methods_compare.py --replay).
+ *
+ *   NOT yet verified: Psychtoolbox's Quest, the one reference implementation
+ *   not compared; any platform but x86-64 (the header has no intrinsics, so
+ *   vectorization elsewhere is the compiler's business, but it is untested on
+ *   ARM).
  *
  *   ---------------------------------------------------------------------
  *   USAGE
@@ -740,6 +796,87 @@
  *   not done yet; see docs/psy_adapt.md.
  *
  *   ---------------------------------------------------------------------
+ *   SNAPSHOTS
+ *   ---------------------------------------------------------------------
+ *   A session can be saved at any trial and resumed later, after a crash or a
+ *   break, WITHOUT replaying it:
+ *
+ *       size_t n = psyq_save_size(&q);
+ *       psyq_save(&q, buf, n);                    // write buf to disk
+ *       ...
+ *       psyq_load(&q, &desc, buf, n);             // q resumes where it was
+ *
+ *   What is saved: the posterior, the history, the pending proposal (a
+ *   psyq_next() that was answered by no psyq_update() yet is not made again,
+ *   so it draws nothing from desc.rng), the tie state (PSYQ_TIE_NEAREST's last
+ *   stimulus and PSYQ_TIE_ALTERNATE's parity), the stop state, and the desc's
+ *   numbers. What is not: the likelihood table, which is a function of the
+ *   desc and is rebuilt at load, and anything behind a pointer.
+ *
+ *   psyq_load() is psyq_open() and then a restore. It takes a desc because a
+ *   snapshot cannot carry what the desc points at: the axis arrays, the
+ *   callbacks and their contexts, desc.rng and its context, desc.memory. That
+ *   desc must agree with the snapshot on every number the resumed session
+ *   depends on: every axis's points (as open() resolved them, so a linspace
+ *   and the same values as an explicit array agree), the nuisance flags, the
+ *   psychometric function and whether a custom one is pf_fn or pf_batch, the
+ *   outcome count, the selection rule and its parameter and quantile, the
+ *   tiebreak and its tolerance, whether there is a generator, the subset
+ *   size, the stop criteria and no_table. A mismatch fails the load and names
+ *   the first field that differs. The priors are the exception, and on
+ *   purpose: open() consumes them into the posterior and keeps no copy, and
+ *   the posterior in the snapshot replaces what they would have produced, so
+ *   no difference in them could change the resumed session.
+ *
+ *   The GENERATOR is the caller's, as everywhere in this header: save its
+ *   state beside the snapshot and put it back before the next psyq_next().
+ *   With that, a resumed session is the uninterrupted one bit for bit: same
+ *   proposals, same posterior, same history, same generator state at the end.
+ *   tests/adapt/psy_quest_test.c checks exactly that, cutting a 24-trial run
+ *   at trials 0, 1, 7 and 23, both between an update and the next selection
+ *   and between a selection and its update, in five configurations: joint,
+ *   a nuisance axis last, a nuisance axis in the middle (which the header
+ *   stores permuted), pf_batch, and a random subset with random ties through
+ *   desc.rng.
+ *
+ *   COST, measured on the Psi-marginal grid of MEMORY, COST AND THREADS: a
+ *   snapshot after 100 trials is 149 KB, nearly all of it the posterior (P
+ *   doubles; the history is 9 bytes plus 8 per stimulus dimension a trial).
+ *   psyq_save() took under a millisecond. psyq_load() took what psyq_open()
+ *   takes, 24 to 38 ms against 26 to 30 ms for the open, because both are the
+ *   table rebuild: S*P evaluations of the model. That is the trade: the
+ *   snapshot is the size of the posterior instead of the size of the table,
+ *   and a resume pays one open. Under desc.no_table there is no table and a
+ *   load is a millisecond.
+ *
+ *   LAYOUT, format 1. Every integer is little-endian two's complement, written
+ *   and read one byte at a time, so a snapshot moves between compilers and
+ *   platforms; an f64 is the IEEE 754 bit pattern as a u64.
+ *     magic     4 bytes "PSYQ", then u32 format (1)
+ *     desc      i32 n_stim; per stimulus axis i32 n and n f64 points;
+ *               i32 n_param; per parameter axis i32 n, u8 nuisance and n
+ *               f64 points; i32 pf, u8 model kind (0 built-in, 1 pf_fn,
+ *               2 pf_batch), i32 K, i32 select, i32 select_param, f64
+ *               select_quantile, i32 tiebreak, f64 tie_tolerance, u8 has
+ *               rng, i32 subset_size, i32 stop_trials, f64 stop_entropy,
+ *               f64 stop_sd, i32 stop_sd_param, u8 no_table, i32 S, i32 P.
+ *               Defaults are written as used (select_quantile 0 as 0.5,
+ *               tie_tolerance 0 as 1e-9, subset_size clamped to S).
+ *     state     i32 n_trials, proposed, last_shown, tie_parity, stop
+ *     posterior P f64 in the CALLER'S axis order (LAYOUT), not renormalized
+ *     history   n_trials x (n_stim f64 stim, i32 stim_index, i32
+ *               proposed_index, u8 outcome)
+ *   Every number is range-checked as it is read, and the posterior is checked
+ *   for finite, non-negative mass, so a wrong, truncated or corrupt snapshot
+ *   fails the load with a message instead of indexing outside the handle, and
+ *   a failed load leaves the handle closed. The format number changes when
+ *   this layout does.
+ *
+ *   Under PSYQ_ASYNC the handle belongs to the thread between start and stop,
+ *   so save after psyq_async_stop(), and start a new async session on the
+ *   handle psyq_load() rebuilt.
+ *
+ *   ---------------------------------------------------------------------
  *   ASYNC (PSYQ_ASYNC)
  *   ---------------------------------------------------------------------
  *   Everything above runs on the thread that calls it, and FRAME BUDGET says
@@ -802,6 +939,12 @@
  *   there is no "nothing published yet" state to handle: the alternatives were
  *   a sentinel or a flag, and having start() publish is simpler than either.
  *
+ *   THE QUEUE's capacity is PSYQ_ASYNC_QUEUE, which sizes the handle; how
+ *   much of it a session uses is psyq_async_desc.queue_depth (0 for all of
+ *   it). That is a policy, how far the trial loop may run ahead of the
+ *   inference, and 1 keeps the two in lockstep: a second response submitted
+ *   before the first is finished comes back PSYQ_ERR_BUSY.
+ *
  *   A FULL QUEUE is PSYQ_ERR_BUSY, nothing was copied, and the caller still
  *   owns the response: retry it on the next frame. A queue that grew instead
  *   would trade a visible error for an invisible unbounded latency. With the
@@ -835,8 +978,23 @@
  *   PSY_RT_IMPLEMENTATION or implemented a transport header; either order
  *   gives exactly one copy. PSYQ_ASYNC together with PSYRT_NO_THREADS is a
  *   #error: the layer IS a thread, so there is nothing sensible to compile.
- *   Define PSYQ_ASYNC_QUEUE (8) to resize the response queue, which sizes the
- *   psyq_async handle.
+ *   Define PSYQ_ASYNC_QUEUE (8) to resize the response queue's capacity,
+ *   which sizes the psyq_async handle; the depth a session uses is
+ *   psyq_async_desc.queue_depth.
+ *
+ *   Every macro in this header either sizes a handle (PSYQ_MAX_STIM_DIMS,
+ *   PSYQ_MAX_PARAMS, PSYQ_MAX_OUTCOMES, PSYQ_MAX_TRIALS, PSYQ_ASYNC_QUEUE),
+ *   selects a build (PSYQ_ASYNC, PSYQ_API, PSYQ_MALLOC / PSYQ_FREE), or names
+ *   a version. Nothing a session might tune is a macro, because a binding
+ *   compiles the header once for every script that uses it: what a session
+ *   chooses is a desc field, with zero as the default. Two constants look like
+ *   knobs and are deliberately not. The sum-to-1 check on a custom model's
+ *   outcomes (1e-9 for pf_fn, 1e-6 for pf_batch) is a precondition, not a
+ *   preference: the decomposed selection score assumes each cell's outcomes
+ *   sum to 1, so a looser check would let a biased selection through
+ *   silently; normalize the model instead. And the random subset's 64 retries
+ *   before it falls back to a linear probe only bound a loop against a
+ *   degenerate generator, and change nothing a working one produces.
  *
  *   Nothing to link but libm. The per-trial sweeps are written as
  *   contiguous dot products with four independent accumulators, which is
@@ -867,9 +1025,9 @@
 /* The version of this header, for a log line or a compile-time check. The
  * string is the three numbers, and the test asserts that it stays so. */
 #define PSYQ_VERSION_MAJOR  0
-#define PSYQ_VERSION_MINOR  4
-#define PSYQ_VERSION_PATCH  1
-#define PSYQ_VERSION_STRING "0.4.1"
+#define PSYQ_VERSION_MINOR  5
+#define PSYQ_VERSION_PATCH  2
+#define PSYQ_VERSION_STRING "0.5.2"
 
 /* The one optional dependency, and it comes FIRST: psy_rt.h sets a
  * feature-test macro for the Linux clock calls and can only do that before the
@@ -1240,6 +1398,21 @@ PSYQ_API int psyq_simulate(const psyq_quest* q, int index, const double* params,
 PSYQ_API int               psyq_n_trials(const psyq_quest* q);
 PSYQ_API const psyq_trial* psyq_history(const psyq_quest* q, int* n);
 
+/* --- snapshot ---------------------------------------------------------- */
+
+/* Save a session and resume it later without replaying it. psyq_save_size()
+ * is the bytes psyq_save() writes (0 on a handle that is not open);
+ * psyq_save() writes them and returns the count, or PSYQ_ERR_ARG when `cap`
+ * is too small, or PSYQ_ERR_CLOSED. psyq_load() opens `q` from `desc` exactly
+ * as psyq_open() would, checks that the desc agrees with the snapshot, and
+ * then puts the posterior, the history, the pending proposal and the tie
+ * state back, so the next psyq_next() is the one the saved session would have
+ * made. On any failure it returns false, leaves `q` closed, and says why in
+ * psyq_error(). SNAPSHOTS in the manual gives the layout and the rules. */
+PSYQ_API size_t psyq_save_size(const psyq_quest* q);
+PSYQ_API int    psyq_save(const psyq_quest* q, void* buf, size_t cap);
+PSYQ_API bool   psyq_load(psyq_quest* q, const psyq_desc* desc, const void* buf, size_t len);
+
 /* --- async ------------------------------------------------------------- *
  *  Compiled only under PSYQ_ASYNC. See ASYNC in the manual.
  * ----------------------------------------------------------------------- */
@@ -1292,6 +1465,12 @@ typedef struct psyq_async_desc {
     bool           below_normal; /* run the thread below normal priority     */
     int            pin_cpu;    /* logical CPU to pin it to; 0 = no pinning,
                                 * as psyrt_pump_desc.pin_cpu                */
+    int            queue_depth; /* responses this session may have queued,
+                                * 1..PSYQ_ASYNC_QUEUE; 0 = PSYQ_ASYNC_QUEUE.
+                                * The macro is a capacity (it sizes the
+                                * handle); this is a policy: how far the
+                                * trial loop may run ahead of the inference.
+                                * 1 keeps them in lockstep.                  */
 } psyq_async_desc;
 
 /* One trial's response on its way to the thread. Opaque; sized here because
@@ -1767,43 +1946,78 @@ static size_t psyq__plan(const psyq__sizes* z, unsigned char* base, psyq_quest* 
  *  three places: the prior at open, psyq_posterior(), and the mode.
  * ======================================================================= */
 
+/* The counts, clamped to the arrays they index. open() already guarantees
+ * n_stim <= PSYQ_MAX_STIM_DIMS, n_param <= PSYQ_MAX_PARAMS and K <=
+ * PSYQ_MAX_OUTCOMES, so at run time these are the counts themselves. They exist
+ * for the optimizer, which cannot see what open() checked: without a bound it
+ * can hand a constant from a caller's call site (a deliberately bad axis in a
+ * test, a three-element array for a three-parameter model) into a path that
+ * open()'s invariants make impossible, and then warn, or with
+ * -Werror=aggressive-loop-optimizations refuse, on the impossible path. gcc 16
+ * did exactly that. Every loop and index below that touches a fixed-size array
+ * is bounded by one of these, or by the array's size directly. */
+static int psyq__ns(const psyq_quest* q) {
+    int n = q->desc.n_stim;
+    return (n < 0) ? 0 : (n > PSYQ_MAX_STIM_DIMS ? PSYQ_MAX_STIM_DIMS : n);
+}
+
+static int psyq__np(const psyq_quest* q) {
+    int n = q->desc.n_param;
+    return (n < 0) ? 0 : (n > PSYQ_MAX_PARAMS ? PSYQ_MAX_PARAMS : n);
+}
+
+static int psyq__nk(const psyq_quest* q) {
+    int n = q->K;
+    return (n < 0) ? 0 : (n > PSYQ_MAX_OUTCOMES ? PSYQ_MAX_OUTCOMES : n);
+}
+
+/* A caller's axis argument, checked against the handle AND the array it will
+ * index, so the out-of-range path is provably dead. */
+static bool psyq__stim_axis_ok(const psyq_quest* q, int axis) {
+    return axis >= 0 && axis < psyq__ns(q);
+}
+
+static bool psyq__param_axis_ok(const psyq_quest* q, int axis) {
+    return axis >= 0 && axis < psyq__np(q);
+}
+
 static const double* psyq__stim_axis(const psyq_quest* q, int axis) {
     const double* p = q->stim_values;
     int j;
-    for (j = 0; j < axis; j++) p += q->n_stim_axis[j];
+    for (j = 0; j < axis && j < PSYQ_MAX_STIM_DIMS; j++) p += q->n_stim_axis[j];
     return p;
 }
 
 static const double* psyq__param_axis(const psyq_quest* q, int axis) {
     const double* p = q->param_values;
     int j;
-    for (j = 0; j < axis; j++) p += q->n_param_axis[j];
+    for (j = 0; j < axis && j < PSYQ_MAX_PARAMS; j++) p += q->n_param_axis[j];
     return p;
 }
 
 /* Stride of an axis in LAYOUT order (last axis fastest). */
 static int psyq__stim_stride(const psyq_quest* q, int axis) {
-    int j, s = 1;
-    for (j = axis + 1; j < q->desc.n_stim; j++) s *= q->n_stim_axis[j];
+    int j, s = 1, n = psyq__ns(q);
+    for (j = axis + 1; j < n; j++) s *= q->n_stim_axis[j];
     return s;
 }
 
 static int psyq__param_stride(const psyq_quest* q, int axis) {
-    int j, s = 1;
-    for (j = axis + 1; j < q->desc.n_param; j++) s *= q->n_param_axis[j];
+    int j, s = 1, n = psyq__np(q);
+    for (j = axis + 1; j < n; j++) s *= q->n_param_axis[j];
     return s;
 }
 
 /* The same for the internal order, where the posterior lives. */
 static int psyq__int_stride(const psyq_quest* q, int axis) {
-    int j, s = 1;
-    for (j = axis + 1; j < q->desc.n_param; j++) s *= q->n_param_int[j];
+    int j, s = 1, n = psyq__np(q);
+    for (j = axis + 1; j < n; j++) s *= q->n_param_int[j];
     return s;
 }
 
 static void psyq__stim_vec(const psyq_quest* q, int index, double* out) {
     int j, t = index;
-    for (j = q->desc.n_stim - 1; j >= 0; j--) {
+    for (j = psyq__ns(q) - 1; j >= 0; j--) {
         int n = q->n_stim_axis[j];
         out[j] = psyq__stim_axis(q, j)[t % n];
         t /= n;
@@ -1812,7 +2026,7 @@ static void psyq__stim_vec(const psyq_quest* q, int index, double* out) {
 
 static void psyq__param_vec(const psyq_quest* q, int index, double* out) {
     int j, t = index;
-    for (j = q->desc.n_param - 1; j >= 0; j--) {
+    for (j = psyq__np(q) - 1; j >= 0; j--) {
         int n = q->n_param_axis[j];
         out[j] = psyq__param_axis(q, j)[t % n];
         t /= n;
@@ -1822,7 +2036,7 @@ static void psyq__param_vec(const psyq_quest* q, int index, double* out) {
 /* An INTERNAL parameter index to the caller's parameter vector. */
 static void psyq__param_vec_int(const psyq_quest* q, int index, double* out) {
     int j, t = index;
-    for (j = q->desc.n_param - 1; j >= 0; j--) {
+    for (j = psyq__np(q) - 1; j >= 0; j--) {
         int n = q->n_param_int[j];
         out[q->perm[j]] = psyq__param_axis(q, q->perm[j])[t % n];
         t /= n;
@@ -1832,7 +2046,7 @@ static void psyq__param_vec_int(const psyq_quest* q, int index, double* out) {
 /* Internal order to public order, P values. */
 static void psyq__to_public(const psyq_quest* q, const double* src, double* dst) {
     int idx[PSYQ_MAX_PARAMS], pub_stride[PSYQ_MAX_PARAMS];
-    int np = q->desc.n_param, j, t, pub = 0;
+    int np = psyq__np(q), j, t, pub = 0;
     for (j = 0; j < np; j++) pub_stride[j] = psyq__param_stride(q, j);
     memset(idx, 0, sizeof(idx));
     for (t = 0; t < q->P; t++) {
@@ -1905,7 +2119,7 @@ static void psyq__lik_at(const psyq_quest* q, const double* stim, double* out) {
     const double* axv[PSYQ_MAX_PARAMS];
     int idx[PSYQ_MAX_PARAMS];
     double pv[PSYQ_MAX_PARAMS];
-    int np = q->desc.n_param, P = q->P, j, t;
+    int np = psyq__np(q), P = q->P, j, t;
     if (q->desc.pf_batch) {
         /* One call for the whole parameter grid at this stimulus, then the
          * transpose from the callback's cell-major order into the header's
@@ -1965,8 +2179,10 @@ static double psyq__h_post(const psyq_quest* q) {
 /* Marginal of one PUBLIC parameter axis. */
 static void psyq__marginal_axis(const psyq_quest* q, int axis, double* out) {
     const double* post = q->posterior;
-    int j = q->inv_perm[axis];
-    int n = q->n_param_int[j];
+    int j, n;
+    if (!psyq__param_axis_ok(q, axis)) return;   /* callers pass valid axes */
+    j = q->inv_perm[axis];
+    n = q->n_param_int[j];
     int stride = psyq__int_stride(q, j);
     int i, b;
     size_t t = 0, P = (size_t)q->P;
@@ -2096,10 +2312,12 @@ static double psyq__score_entropy(const psyq_quest* q, int s) {
  * units of stimulus axis 0. */
 static double psyq__placement(const psyq_quest* q) {
     int axis = q->desc.select_param;
-    int n = q->n_param_axis[axis];
+    int n;
     const double* v = psyq__param_axis(q, axis);
     double* m = q->marginal_scratch;
     int i;
+    if (!psyq__param_axis_ok(q, axis)) return 0.0;   /* open() validated it */
+    n = q->n_param_axis[axis];
     psyq__marginal_axis(q, axis, m);
     if (q->desc.select == PSYQ_SELECT_MEAN) {
         double s = 0.0;
@@ -2553,43 +2771,53 @@ PSYQ_API int psyq_n_outcomes(const psyq_quest* q) { return (q && q->open) ? q->K
 
 PSYQ_API double psyq_stim_value(const psyq_quest* q, int index, int axis) {
     if (!q || !q->open || index < 0 || index >= q->S) return PSYQ__NAN;
-    if (axis < 0 || axis >= q->desc.n_stim) return PSYQ__NAN;
+    if (!psyq__stim_axis_ok(q, axis)) return PSYQ__NAN;
     return psyq__stim_axis(q, axis)[(index / psyq__stim_stride(q, axis)) % q->n_stim_axis[axis]];
 }
 
 PSYQ_API int psyq_stim_values(const psyq_quest* q, int index, double* out) {
+    double sv[PSYQ_MAX_STIM_DIMS];
+    int n;
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
     if (index < 0 || index >= q->S || !out) return PSYQ_ERR_ARG;
-    psyq__stim_vec(q, index, out);
-    return q->desc.n_stim;
+    n = psyq__ns(q);
+    psyq__stim_vec(q, index, sv);
+    memcpy(out, sv, (size_t)n * sizeof(double));
+    return n;
 }
 
 PSYQ_API int psyq_stim_index(const psyq_quest* q, const int* sub) {
-    int i, flat = 0;
+    int sb[PSYQ_MAX_STIM_DIMS];
+    int i, n, flat = 0;
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
     if (!sub) return PSYQ_ERR_ARG;
-    for (i = 0; i < q->desc.n_stim; i++) {
-        if (sub[i] < 0 || sub[i] >= q->n_stim_axis[i]) return PSYQ_ERR_ARG;
-        flat = flat * q->n_stim_axis[i] + sub[i];
+    n = psyq__ns(q);
+    memcpy(sb, sub, (size_t)n * sizeof(int));
+    for (i = 0; i < n; i++) {
+        if (sb[i] < 0 || sb[i] >= q->n_stim_axis[i]) return PSYQ_ERR_ARG;
+        flat = flat * q->n_stim_axis[i] + sb[i];
     }
     return flat;
 }
 
 PSYQ_API int psyq_stim_nearest(const psyq_quest* q, const double* stim) {
-    int i, j, flat = 0;
+    double sv[PSYQ_MAX_STIM_DIMS];
+    int i, j, ns, flat = 0;
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
     if (!stim) return PSYQ_ERR_ARG;
-    for (i = 0; i < q->desc.n_stim; i++) {
+    ns = psyq__ns(q);
+    memcpy(sv, stim, (size_t)ns * sizeof(double));
+    for (i = 0; i < ns; i++) {
         const double* v = psyq__stim_axis(q, i);
         int n = q->n_stim_axis[i], best = 0;
         double bd;
-        if (!psyq__finite(stim[i])) return PSYQ_ERR_ARG;
-        bd = fabs(v[0] - stim[i]);
+        if (!psyq__finite(sv[i])) return PSYQ_ERR_ARG;
+        bd = fabs(v[0] - sv[i]);
         for (j = 1; j < n; j++) {
-            double d = fabs(v[j] - stim[i]);
+            double d = fabs(v[j] - sv[i]);
             if (d < bd) { bd = d; best = j; }
         }
         flat = flat * n + best;
@@ -2599,26 +2827,33 @@ PSYQ_API int psyq_stim_nearest(const psyq_quest* q, const double* stim) {
 
 PSYQ_API double psyq_param_value(const psyq_quest* q, int index, int axis) {
     if (!q || !q->open || index < 0 || index >= q->P) return PSYQ__NAN;
-    if (axis < 0 || axis >= q->desc.n_param) return PSYQ__NAN;
+    if (!psyq__param_axis_ok(q, axis)) return PSYQ__NAN;
     return psyq__param_axis(q, axis)[(index / psyq__param_stride(q, axis)) % q->n_param_axis[axis]];
 }
 
 PSYQ_API int psyq_param_values(const psyq_quest* q, int index, double* out) {
+    double pv[PSYQ_MAX_PARAMS];
+    int n;
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
     if (index < 0 || index >= q->P || !out) return PSYQ_ERR_ARG;
-    psyq__param_vec(q, index, out);
-    return q->desc.n_param;
+    n = psyq__np(q);
+    psyq__param_vec(q, index, pv);
+    memcpy(out, pv, (size_t)n * sizeof(double));
+    return n;
 }
 
 PSYQ_API int psyq_param_index(const psyq_quest* q, const int* sub) {
-    int i, flat = 0;
+    int sb[PSYQ_MAX_PARAMS];
+    int i, n, flat = 0;
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
     if (!sub) return PSYQ_ERR_ARG;
-    for (i = 0; i < q->desc.n_param; i++) {
-        if (sub[i] < 0 || sub[i] >= q->n_param_axis[i]) return PSYQ_ERR_ARG;
-        flat = flat * q->n_param_axis[i] + sub[i];
+    n = psyq__np(q);
+    memcpy(sb, sub, (size_t)n * sizeof(int));
+    for (i = 0; i < n; i++) {
+        if (sb[i] < 0 || sb[i] >= q->n_param_axis[i]) return PSYQ_ERR_ARG;
+        flat = flat * q->n_param_axis[i] + sb[i];
     }
     return flat;
 }
@@ -2626,7 +2861,7 @@ PSYQ_API int psyq_param_index(const psyq_quest* q, const int* sub) {
 PSYQ_API int psyq_stim_axis_n(const psyq_quest* q, int axis) {
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
-    if (axis < 0 || axis >= q->desc.n_stim) return PSYQ_ERR_ARG;
+    if (!psyq__stim_axis_ok(q, axis)) return PSYQ_ERR_ARG;
     return q->n_stim_axis[axis];
 }
 
@@ -2635,7 +2870,7 @@ PSYQ_API int psyq_stim_axis_n(const psyq_quest* q, int axis) {
 PSYQ_API int psyq_param_axis_n(const psyq_quest* q, int axis) {
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
-    if (axis < 0 || axis >= q->desc.n_param) return PSYQ_ERR_ARG;
+    if (!psyq__param_axis_ok(q, axis)) return PSYQ_ERR_ARG;
     return q->n_param_axis[axis];
 }
 
@@ -2681,10 +2916,12 @@ static int psyq__apply(psyq_quest* q, const float* row, const double* lik) {
     return PSYQ_OK;
 }
 
+/* `stim` is always a local of PSYQ_MAX_STIM_DIMS here, never a caller's
+ * array, so reading all of it is in bounds by construction. */
 static void psyq__record(psyq_quest* q, const double* stim, int stim_index, int outcome) {
     psyq_trial* tr = &q->history[q->n_trials++];
-    int i;
-    for (i = 0; i < PSYQ_MAX_STIM_DIMS; i++) tr->stim[i] = (i < q->desc.n_stim) ? stim[i] : 0.0;
+    int i, n = psyq__ns(q);
+    for (i = 0; i < PSYQ_MAX_STIM_DIMS; i++) tr->stim[i] = (i < n) ? stim[i] : 0.0;
     tr->stim_index = stim_index;
     tr->proposed_index = q->proposed;
     tr->outcome = (uint8_t)outcome;
@@ -2714,16 +2951,20 @@ PSYQ_API int psyq_update(psyq_quest* q, int index, int outcome) {
 }
 
 PSYQ_API int psyq_update_values(psyq_quest* q, const double* stim, int outcome) {
-    int i, rc;
+    double sv[PSYQ_MAX_STIM_DIMS];
+    int i, n, rc;
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
     if (!stim || outcome < 0 || outcome >= q->K) return PSYQ_ERR_ARG;
-    for (i = 0; i < q->desc.n_stim; i++) if (!psyq__finite(stim[i])) return PSYQ_ERR_ARG;
+    n = psyq__ns(q);
+    for (i = 0; i < PSYQ_MAX_STIM_DIMS; i++) sv[i] = 0.0;
+    memcpy(sv, stim, (size_t)n * sizeof(double));
+    for (i = 0; i < n; i++) if (!psyq__finite(sv[i])) return PSYQ_ERR_ARG;
     if (q->n_trials >= PSYQ_MAX_TRIALS) return PSYQ_ERR_FULL;
-    psyq__lik_at(q, stim, q->scratch);
+    psyq__lik_at(q, sv, q->scratch);
     rc = psyq__apply(q, NULL, q->scratch + (size_t)outcome * (size_t)q->P);
     if (rc != PSYQ_OK) return rc;
-    psyq__record(q, stim, -1, outcome);
+    psyq__record(q, sv, -1, outcome);
     return PSYQ_OK;
 }
 
@@ -2736,35 +2977,40 @@ PSYQ_API psyq_stop psyq_stop_reason(const psyq_quest* q) {
 }
 
 PSYQ_API int psyq_estimate(const psyq_quest* q, psyq_estimator how, double* out) {
-    int i;
+    double est[PSYQ_MAX_PARAMS];
+    int i, np;
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
     if (!out) return PSYQ_ERR_ARG;
+    np = psyq__np(q);
+    for (i = 0; i < PSYQ_MAX_PARAMS; i++) est[i] = 0.0;
     switch (how) {
     case PSYQ_EST_MODE: {
         int best = 0;
         for (i = 1; i < q->P; i++) if (q->posterior[i] > q->posterior[best]) best = i;
-        psyq__param_vec_int(q, best, out);
-        return PSYQ_OK;
+        psyq__param_vec_int(q, best, est);
+        break;
     }
     case PSYQ_EST_MEDIAN:
-        for (i = 0; i < q->desc.n_param; i++) out[i] = psyq_quantile(q, i, 0.5);
-        return PSYQ_OK;
+        for (i = 0; i < np; i++) est[i] = psyq_quantile(q, i, 0.5);
+        break;
     case PSYQ_EST_MEAN: {
-        for (i = 0; i < q->desc.n_param; i++) {
+        for (i = 0; i < np; i++) {
             const double* v = psyq__param_axis(q, i);
             double* m = q->marginal_scratch;
             double s = 0.0;
             int j;
             psyq__marginal_axis(q, i, m);
             for (j = 0; j < q->n_param_axis[i]; j++) s += (double)m[j] * v[j];
-            out[i] = s;
+            est[i] = s;
         }
-        return PSYQ_OK;
+        break;
     }
     default:
         return PSYQ_ERR_ARG;
     }
+    memcpy(out, est, (size_t)np * sizeof(double));
+    return PSYQ_OK;
 }
 
 PSYQ_API double psyq_quantile(const psyq_quest* q, int axis, double p) {
@@ -2773,7 +3019,7 @@ PSYQ_API double psyq_quantile(const psyq_quest* q, int axis, double p) {
     double c = 0.0;
     int i, n;
     if (!q || !q->open) return PSYQ__NAN;
-    if (axis < 0 || axis >= q->desc.n_param) return PSYQ__NAN;
+    if (!psyq__param_axis_ok(q, axis)) return PSYQ__NAN;
     if (!(p > 0.0) || !(p < 1.0)) return PSYQ__NAN;
     n = q->n_param_axis[axis];
     v = psyq__param_axis(q, axis);
@@ -2792,7 +3038,7 @@ PSYQ_API double psyq_sd(const psyq_quest* q, int axis) {
     double s = 0.0, s2 = 0.0, var;
     int i, n;
     if (!q || !q->open) return PSYQ__NAN;
-    if (axis < 0 || axis >= q->desc.n_param) return PSYQ__NAN;
+    if (!psyq__param_axis_ok(q, axis)) return PSYQ__NAN;
     n = q->n_param_axis[axis];
     v = psyq__param_axis(q, axis);
     m = q->marginal_scratch;
@@ -2805,7 +3051,7 @@ PSYQ_API double psyq_sd(const psyq_quest* q, int axis) {
 PSYQ_API int psyq_marginal(const psyq_quest* q, int axis, double* out) {
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
-    if (axis < 0 || axis >= q->desc.n_param || !out) return PSYQ_ERR_ARG;
+    if (!psyq__param_axis_ok(q, axis) || !out) return PSYQ_ERR_ARG;
     psyq__marginal_axis(q, axis, out);
     return q->n_param_axis[axis];
 }
@@ -2836,14 +3082,29 @@ PSYQ_API int psyq_p(const psyq_quest* q, int index, const double* params, double
     return psyq_p_values(q, sv, params, p_out);
 }
 
+/* The built-in functions read params[0..3], which is in bounds for them
+ * because open() gives a built-in exactly four parameters; a custom model is
+ * handed n_param values and reads its own. An optimizer cannot know that the
+ * built-in branch is dead for a three-parameter custom model, so the caller's
+ * arrays are copied, n_stim and n_param elements, into locals of the maximum
+ * size, and the model only ever sees those. */
 PSYQ_API int psyq_p_values(const psyq_quest* q, const double* stim, const double* params, double* p_out) {
-    int i;
+    double sv[PSYQ_MAX_STIM_DIMS], pv[PSYQ_MAX_PARAMS], p[PSYQ_MAX_OUTCOMES];
+    int i, ns, np, nk;
     if (!q) return PSYQ_ERR_ARG;
     if (!q->open) return PSYQ_ERR_CLOSED;
     if (!stim || !params || !p_out) return PSYQ_ERR_ARG;
-    for (i = 0; i < q->desc.n_stim; i++)  if (!psyq__finite(stim[i]))   return PSYQ_ERR_ARG;
-    for (i = 0; i < q->desc.n_param; i++) if (!psyq__finite(params[i])) return PSYQ_ERR_ARG;
-    psyq__eval(q, stim, params, p_out);
+    ns = psyq__ns(q);
+    np = psyq__np(q);
+    nk = psyq__nk(q);
+    for (i = 0; i < PSYQ_MAX_STIM_DIMS; i++) sv[i] = 0.0;
+    for (i = 0; i < PSYQ_MAX_PARAMS; i++)    pv[i] = 0.0;
+    memcpy(sv, stim, (size_t)ns * sizeof(double));
+    memcpy(pv, params, (size_t)np * sizeof(double));
+    for (i = 0; i < ns; i++) if (!psyq__finite(sv[i])) return PSYQ_ERR_ARG;
+    for (i = 0; i < np; i++) if (!psyq__finite(pv[i])) return PSYQ_ERR_ARG;
+    psyq__eval(q, sv, pv, p);
+    memcpy(p_out, p, (size_t)nk * sizeof(double));
     return PSYQ_OK;
 }
 
@@ -2856,7 +3117,7 @@ PSYQ_API int psyq_simulate(const psyq_quest* q, int index, const double* params,
     if (!psyq__finite(u) || u < 0.0 || u >= 1.0) return PSYQ_ERR_ARG;
     rc = psyq_p(q, index, params, p);
     if (rc != PSYQ_OK) return rc;
-    for (k = 0; k < q->K; k++) {
+    for (k = 0; k < psyq__nk(q); k++) {
         c += p[k];
         if (c > u) return k;
     }
@@ -2872,6 +3133,299 @@ PSYQ_API int psyq_n_trials(const psyq_quest* q) {
 PSYQ_API const psyq_trial* psyq_history(const psyq_quest* q, int* n) {
     if (n) *n = (q && q->open) ? q->n_trials : 0;
     return (q && q->open) ? q->history : NULL;
+}
+
+/* ======================================================================= *
+ *  SNAPSHOT
+ *
+ *  In the shape of psy_trials.h's psytr_save / psytr_load: versioned,
+ *  little-endian, written and read one byte at a time so a snapshot moves
+ *  between compilers and platforms. One writer does three jobs (count, write,
+ *  compare), which is how psyq_load() checks the desc against the snapshot
+ *  without a second description of the layout that could drift from the first.
+ * ======================================================================= */
+
+#define PSYQ__SNAP_FORMAT 1u
+
+typedef struct psyq__w {
+    unsigned char*       out;
+    const unsigned char* cmp;
+    size_t               pos;
+    size_t               cap;
+    const char*          diff;   /* compare: the first field that differs */
+} psyq__w;
+
+static void psyq__put(psyq__w* w, uint64_t v, int nbytes, const char* name) {
+    int i;
+    unsigned char b;
+    for (i = 0; i < nbytes; i++) {
+        b = (unsigned char)((v >> (8 * i)) & 0xffu);
+        if (w->out) {
+            if (w->pos < w->cap) w->out[w->pos] = b;
+        } else if (w->cmp && !w->diff) {
+            if (w->pos >= w->cap || w->cmp[w->pos] != b) w->diff = name;
+        }
+        w->pos++;
+    }
+}
+
+static void psyq__put_i32(psyq__w* w, int v, const char* name) {
+    psyq__put(w, (uint64_t)(uint32_t)v, 4, name);
+}
+
+static void psyq__put_f64(psyq__w* w, double v, const char* name) {
+    uint64_t u;
+    memcpy(&u, &v, sizeof(u));
+    psyq__put(w, u, 8, name);
+}
+
+/* The desc as the handle resolved it: defaults written as used, axes as the
+ * values open() computed, whichever way they were given. The priors are NOT
+ * here. open() consumes them into the posterior and keeps no copy, and the
+ * posterior in the snapshot replaces whatever they would have produced, so
+ * there is nothing a mismatch could change. */
+static void psyq__put_desc(psyq__w* w, const psyq_quest* q) {
+    const psyq_desc* d = &q->desc;
+    int i, j, kind;
+    psyq__put_i32(w, d->n_stim, "n_stim");
+    for (i = 0; i < d->n_stim; i++) {
+        const double* v = psyq__stim_axis(q, i);
+        psyq__put_i32(w, q->n_stim_axis[i], "stim[].n");
+        for (j = 0; j < q->n_stim_axis[i]; j++) psyq__put_f64(w, v[j], "stim[].values");
+    }
+    psyq__put_i32(w, d->n_param, "n_param");
+    for (i = 0; i < d->n_param; i++) {
+        const double* v = psyq__param_axis(q, i);
+        psyq__put_i32(w, q->n_param_axis[i], "param[].n");
+        psyq__put(w, d->param[i].nuisance ? 1u : 0u, 1, "param[].nuisance");
+        for (j = 0; j < q->n_param_axis[i]; j++) psyq__put_f64(w, v[j], "param[].values");
+    }
+    /* Which kind of model, since a pointer cannot be compared across runs:
+     * a built-in, a per-cell callback, or a batch one. The last two fill the
+     * same table but differ in precision off the grid. */
+    kind = (d->pf != PSYQ_PF_CUSTOM) ? 0 : (d->pf_batch ? 2 : 1);
+    psyq__put_i32(w, (int)d->pf, "pf");
+    psyq__put(w, (uint64_t)kind, 1, "pf_fn/pf_batch");
+    psyq__put_i32(w, q->K, "n_outcomes");
+    psyq__put_i32(w, (int)d->select, "select");
+    psyq__put_i32(w, d->select_param, "select_param");
+    psyq__put_f64(w, d->select_quantile, "select_quantile");
+    psyq__put_i32(w, (int)d->tiebreak, "tiebreak");
+    psyq__put_f64(w, d->tie_tolerance, "tie_tolerance");
+    psyq__put(w, d->rng ? 1u : 0u, 1, "rng");
+    psyq__put_i32(w, d->subset_size, "subset_size");
+    psyq__put_i32(w, d->stop_trials, "stop_trials");
+    psyq__put_f64(w, d->stop_entropy, "stop_entropy");
+    psyq__put_f64(w, d->stop_sd, "stop_sd");
+    psyq__put_i32(w, d->stop_sd_param, "stop_sd_param");
+    psyq__put(w, d->no_table ? 1u : 0u, 1, "no_table");
+    psyq__put_i32(w, q->S, "S");
+    psyq__put_i32(w, q->P, "P");
+}
+
+static void psyq__put_all(psyq__w* w, const psyq_quest* q) {
+    const double* post;
+    int i, j;
+    psyq__put(w, 'P', 1, "magic");
+    psyq__put(w, 'S', 1, "magic");
+    psyq__put(w, 'Y', 1, "magic");
+    psyq__put(w, 'Q', 1, "magic");
+    psyq__put(w, PSYQ__SNAP_FORMAT, 4, "format");
+    psyq__put_desc(w, q);
+    psyq__put_i32(w, q->n_trials, "n_trials");
+    psyq__put_i32(w, q->proposed, "proposed");
+    psyq__put_i32(w, q->last_shown, "last_shown");
+    psyq__put_i32(w, q->tie_parity, "tie_parity");
+    psyq__put_i32(w, (int)q->stop, "stop");
+    /* The posterior in the CALLER'S axis order, so a snapshot does not depend
+     * on how this version of the header lays its posterior out inside. */
+    post = psyq_posterior(q);
+    for (i = 0; i < q->P; i++) psyq__put_f64(w, post[i], "posterior");
+    for (i = 0; i < q->n_trials; i++) {
+        const psyq_trial* h = &q->history[i];
+        for (j = 0; j < psyq__ns(q); j++) psyq__put_f64(w, h->stim[j], "history.stim");
+        psyq__put_i32(w, h->stim_index, "history.stim_index");
+        psyq__put_i32(w, h->proposed_index, "history.proposed_index");
+        psyq__put(w, h->outcome, 1, "history.outcome");
+    }
+}
+
+PSYQ_API size_t psyq_save_size(const psyq_quest* q) {
+    psyq__w w;
+    if (!q || !q->open) return 0;
+    memset(&w, 0, sizeof(w));
+    psyq__put_all(&w, q);
+    return w.pos;
+}
+
+PSYQ_API int psyq_save(const psyq_quest* q, void* buf, size_t cap) {
+    psyq__w w;
+    size_t need;
+    if (!q) return PSYQ_ERR_ARG;
+    if (!q->open) return PSYQ_ERR_CLOSED;
+    need = psyq_save_size(q);
+    if (!buf || cap < need || need > 0x7fffffffu) return PSYQ_ERR_ARG;
+    memset(&w, 0, sizeof(w));
+    w.out = (unsigned char*)buf;
+    w.cap = cap;
+    psyq__put_all(&w, q);
+    return (int)w.pos;
+}
+
+typedef struct psyq__r {
+    const unsigned char* in;
+    size_t               pos;
+    size_t               len;
+    bool                 bad;
+} psyq__r;
+
+static uint64_t psyq__get(psyq__r* r, int nbytes) {
+    uint64_t v = 0;
+    int i;
+    if (r->bad || r->len - r->pos < (size_t)nbytes) {
+        r->bad = true;
+        return 0;
+    }
+    for (i = 0; i < nbytes; i++) v |= (uint64_t)r->in[r->pos + (size_t)i] << (8 * i);
+    r->pos += (size_t)nbytes;
+    return v;
+}
+
+static int psyq__get_i32(psyq__r* r) { return (int)(int32_t)(uint32_t)psyq__get(r, 4); }
+
+static double psyq__get_f64(psyq__r* r) {
+    uint64_t u = psyq__get(r, 8);
+    double v;
+    memcpy(&v, &u, sizeof(v));
+    return v;
+}
+
+/* Public order to the internal one, P values: the inverse of
+ * psyq__to_public, walked with the same odometer. */
+static void psyq__from_public(const psyq_quest* q, const double* src, double* dst) {
+    int idx[PSYQ_MAX_PARAMS], pub_stride[PSYQ_MAX_PARAMS];
+    int np = psyq__np(q), j, t, pub = 0;
+    for (j = 0; j < np; j++) pub_stride[j] = psyq__param_stride(q, j);
+    memset(idx, 0, sizeof(idx));
+    for (t = 0; t < q->P; t++) {
+        dst[t] = src[pub];
+        for (j = np - 1; j >= 0; j--) {
+            if (++idx[j] < q->n_param_int[j]) { pub += pub_stride[q->perm[j]]; break; }
+            idx[j] = 0;
+            pub -= (q->n_param_int[j] - 1) * pub_stride[q->perm[j]];
+        }
+    }
+}
+
+/* Leave the handle closed and say why: a load either resumes the session or
+ * leaves nothing half-restored behind. */
+static bool psyq__load_fail(psyq_quest* q, const char* why) {
+    char msg[sizeof(q->error)];
+    snprintf(msg, sizeof(msg), "psy_quest: psyq_load: %s", why);
+    psyq_close(q);
+    memcpy(q->error, msg, sizeof(msg));
+    return false;
+}
+
+PSYQ_API bool psyq_load(psyq_quest* q, const psyq_desc* desc, const void* buf, size_t len) {
+    const unsigned char* in = (const unsigned char*)buf;
+    psyq__w w;
+    psyq__r r;
+    double* post_in;
+    double sum = 0.0;
+    int i, j, v;
+
+    if (!q) return false;
+    /* The cheap checks first: the open that follows rebuilds the table. */
+    if (!in || len < 8 || in[0] != 'P' || in[1] != 'S' || in[2] != 'Y' || in[3] != 'Q') {
+        memset(q->error, 0, sizeof(q->error));
+        snprintf(q->error, sizeof(q->error), "psy_quest: psyq_load: not a psy_quest snapshot");
+        q->open = false;
+        return false;
+    }
+    memset(&r, 0, sizeof(r));
+    r.in = in;
+    r.len = len;
+    r.pos = 4;
+    if ((uint32_t)psyq__get(&r, 4) != PSYQ__SNAP_FORMAT) {
+        memset(q->error, 0, sizeof(q->error));
+        snprintf(q->error, sizeof(q->error),
+                 "psy_quest: psyq_load: snapshot format is not %u", PSYQ__SNAP_FORMAT);
+        q->open = false;
+        return false;
+    }
+
+    /* A full open, table and all: the table is a function of the desc and is
+     * rebuilt rather than stored. That is S*P evaluations of the model, the
+     * same as psyq_open(), and the price of a snapshot that is the size of the
+     * posterior instead of the size of the table. */
+    if (!psyq_open(q, desc)) return false;
+
+    memset(&w, 0, sizeof(w));
+    w.cmp = in;
+    w.cap = len;
+    w.pos = 8;
+    psyq__put_desc(&w, q);
+    if (w.diff) {
+        char why[128];
+        snprintf(why, sizeof(why), "desc.%s does not match the snapshot", w.diff);
+        return psyq__load_fail(q, why);
+    }
+    r.pos = w.pos;
+
+    q->n_trials   = psyq__get_i32(&r);
+    q->proposed   = psyq__get_i32(&r);
+    q->last_shown = psyq__get_i32(&r);
+    q->tie_parity = psyq__get_i32(&r);
+    v             = psyq__get_i32(&r);
+    if (r.bad || q->n_trials < 0 || q->n_trials > PSYQ_MAX_TRIALS ||
+        q->proposed < -1 || q->proposed >= q->S ||
+        q->last_shown < -1 || q->last_shown >= q->S ||
+        (q->tie_parity != 0 && q->tie_parity != 1) ||
+        v < (int)PSYQ_STOP_NONE || v > (int)PSYQ_STOP_FULL)
+        return psyq__load_fail(q, "the snapshot's counters are corrupt or truncated");
+    q->stop = (psyq_stop)v;
+
+    /* The posterior comes in the caller's order: straight into place when the
+     * two orders agree, through the permutation buffer when they do not. It
+     * is NOT renormalized, because the resumed session has to be the saved
+     * one bit for bit. */
+    post_in = q->permuted ? q->post_public : q->posterior;
+    for (i = 0; i < q->P; i++) {
+        double x = psyq__get_f64(&r);
+        if (!psyq__finite(x) || x < 0.0) r.bad = true;
+        post_in[i] = x;
+        sum += x;
+    }
+    if (r.bad || !(sum > 0.0))
+        return psyq__load_fail(q, "the snapshot's posterior is corrupt or truncated");
+    if (q->permuted) psyq__from_public(q, q->post_public, q->posterior);
+    q->cache[1] = 0.0;   /* the posterior's entropy is recomputed on demand */
+
+    for (i = 0; i < q->n_trials; i++) {
+        psyq_trial* h = &q->history[i];
+        for (j = 0; j < PSYQ_MAX_STIM_DIMS; j++) h->stim[j] = 0.0;
+        for (j = 0; j < psyq__ns(q); j++) {
+            h->stim[j] = psyq__get_f64(&r);
+            if (!psyq__finite(h->stim[j])) r.bad = true;
+        }
+        h->stim_index = psyq__get_i32(&r);
+        h->proposed_index = psyq__get_i32(&r);
+        v = (int)psyq__get(&r, 1);
+        if (h->stim_index < -1 || h->stim_index >= q->S ||
+            h->proposed_index < -1 || h->proposed_index >= q->S || v >= q->K)
+            r.bad = true;
+        h->outcome = (uint8_t)v;
+    }
+    if (r.bad) return psyq__load_fail(q, "the snapshot's history is corrupt or truncated");
+    if (r.pos != r.len) {
+        char why[96];
+        snprintf(why, sizeof(why), "%lu bytes after the snapshot's end",
+                 (unsigned long)(r.len - r.pos));
+        return psyq__load_fail(q, why);
+    }
+    q->error[0] = '\0';
+    return true;
 }
 
 /* ======================================================================= *
@@ -2948,6 +3502,12 @@ PSYQ_API bool psyq_async_start(psyq_async* a, const psyq_async_desc* desc) {
         snprintf(a->error, sizeof(a->error), "psy_quest: desc.estimator is out of range");
         return false;
     }
+    if (desc->queue_depth < 0 || desc->queue_depth > PSYQ_ASYNC_QUEUE) {
+        snprintf(a->error, sizeof(a->error),
+                 "psy_quest: desc.queue_depth = %d, need 0..%d (PSYQ_ASYNC_QUEUE)",
+                 desc->queue_depth, PSYQ_ASYNC_QUEUE);
+        return false;
+    }
     a->quest = desc->quest;
     a->estimator = desc->estimator;
     memset(&a->snap, 0, sizeof(a->snap));
@@ -2960,7 +3520,7 @@ PSYQ_API bool psyq_async_start(psyq_async* a, const psyq_async_desc* desc) {
 
     memset(&pd, 0, sizeof(pd));
     pd.msg_size = sizeof(psyq_async_msg);
-    pd.capacity = (uint32_t)PSYQ_ASYNC_QUEUE;
+    pd.capacity = (uint32_t)(desc->queue_depth ? desc->queue_depth : PSYQ_ASYNC_QUEUE);
     pd.ring = a->ring;
     pd.on_msg = psyq__async_on_msg;
     pd.on_idle = NULL;      /* QUEST+ has nothing to do between trials */
@@ -3010,12 +3570,10 @@ PSYQ_API int psyq_async_submit_values(psyq_async* a, const double* stim, int out
     if (!a || !a->quest || !stim) return PSYQ_ERR_ARG;
     if (!a->running) return PSYQ_ERR_CLOSED;
     if (outcome < 0 || outcome >= a->quest->K) return PSYQ_ERR_ARG;
-    n = a->quest->desc.n_stim;
+    n = psyq__ns(a->quest);
     for (i = 0; i < PSYQ_MAX_STIM_DIMS; i++) m.stim[i] = 0.0;
-    for (i = 0; i < n; i++) {
-        if (!psyq__finite(stim[i])) return PSYQ_ERR_ARG;
-        m.stim[i] = stim[i];
-    }
+    memcpy(m.stim, stim, (size_t)n * sizeof(double));
+    for (i = 0; i < n; i++) if (!psyq__finite(m.stim[i])) return PSYQ_ERR_ARG;
     m.stim_index = -1;
     m.outcome = outcome;
     return psyq__async_send(a, &m);

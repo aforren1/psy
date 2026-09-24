@@ -101,7 +101,7 @@ static void qcsf_pf_batch(void* ctx, const double* stims, int S,
     for (s = 0; s < S; s++) {
         const double* stim = stims + (size_t)s * 2;
         for (i = 0; i < P; i++) {
-            double p[2];
+            double p[2] = {0};
             qcsf_pf(ctx, stim, params + (size_t)i * 4, p);
             out[((size_t)s * (size_t)P + (size_t)i) * 2 + 0] = (float)p[0];
             out[((size_t)s * (size_t)P + (size_t)i) * 2 + 1] = (float)p[1];
@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
     psyq_desc d, dcell;
     static psyq_quest q;
     static psyq_quest qcell;
-    double truth[4], est[4];
+    double truth[4], est[4] = {0};
     size_t bytes, bytes_cell;
     double worst = 0.0;
     int t, i;

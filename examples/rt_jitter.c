@@ -18,7 +18,14 @@
  * Build (from the repository root):
  *     cc -O2 -pthread -I. -o rt_jitter examples/rt_jitter.c   # Linux / macOS
  *     cl /O2 /I. examples\rt_jitter.c                         # Windows (MSVC)
+ *     emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -I. \
+ *          -o rt_jitter.js examples/rt_jitter.c && node rt_jitter.js   # wasm
  * or:  cmake -B build && cmake --build build
+ *
+ * Under Emscripten the policy is always NORMAL (there is no ladder; the
+ * psy_rt: line says platform=wasm), and without -pthread every wait is a
+ * busy-wait and the worker section reports that it could not start. See
+ * WEBASSEMBLY in psy_rt.h.
  *
  * Usage: rt_jitter [iterations] [period_us]
  *     rt_jitter             # 200 waits of 2 ms per spin window

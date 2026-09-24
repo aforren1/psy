@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     psyq_desc d;
     psyq_async_desc ad;
     psyq_snapshot snap;
-    double truth[4], est[4];
+    double truth[4], est[4] = {0};
     int trials = (argc > 1) ? (int)strtol(argv[1], NULL, 0) : 60;
     int per_trial = (argc > 2) ? (int)strtol(argv[2], NULL, 0) : 30;
     uint64_t period_ns = 16000000ull;

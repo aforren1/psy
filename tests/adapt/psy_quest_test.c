@@ -47,6 +47,26 @@ static int g_checks = 0;
         }                                                                     \
     } while (0)
 
+/* psyq_posterior() and psyq_history() return NULL on a handle that is not
+ * open. The test indexes what they return, so it goes through these: a NULL
+ * is a failed check and a zeroed stand-in, never a dereference. */
+static double     g_null_post[65536];
+static psyq_trial g_null_hist[PSYQ_MAX_TRIALS];
+
+/* Failures only, not checks: these run inside other checks' arithmetic, and
+ * counting them would inflate the total without testing anything new. */
+static const double* post_of(const psyq_quest* q) {
+    const double* p = psyq_posterior(q);
+    if (!p) { fputs("FAIL: psyq_posterior returned NULL\n", stderr); g_fail++; }
+    return p ? p : g_null_post;
+}
+
+static const psyq_trial* hist_of(const psyq_quest* q, int* n) {
+    const psyq_trial* h = psyq_history(q, n);
+    if (!h) { fputs("FAIL: psyq_history returned NULL\n", stderr); g_fail++; }
+    return h ? h : g_null_hist;
+}
+
 /* ======================================================================= *
  *  A deterministic generator, so a whole run replays from a seed.
  * ======================================================================= */
@@ -118,7 +138,7 @@ static void ref_prior(double* post) {
 }
 
 static void ref_update(double* post, int s, int k) {
-    double w[RP], sum = 0.0;
+    double w[RP] = {0}, sum = 0.0;
     int t;
     for (t = 0; t < RP; t++) { w[t] = post[t] * ref_lik(s, t, k); sum += w[t]; }
     for (t = 0; t < RP; t++) post[t] = w[t] / sum;
@@ -131,7 +151,7 @@ static double ref_expected_entropy(const double* post, int s) {
     double e = 0.0;
     int k, t;
     for (k = 0; k < 2; k++) {
-        double w[RP], pk = 0.0, h = 0.0;
+        double w[RP] = {0}, pk = 0.0, h = 0.0;
         for (t = 0; t < RP; t++) { w[t] = post[t] * ref_lik(s, t, k); pk += w[t]; }
         if (pk <= 0.0) continue;
         for (t = 0; t < RP; t++) {
@@ -177,7 +197,7 @@ static psyq_quest g_q2;
 
 static void test_reference(bool no_table) {
     psyq_desc d;
-    double post[RP];
+    double post[RP] = {0};
     double tol = no_table ? 1e-12 : 1e-6;
     int i, t, s;
 
@@ -189,7 +209,7 @@ static void test_reference(bool no_table) {
     ref_prior(post);
 
     for (i = 0; i <= REF_SEQ_N; i++) {
-        const double* hp = psyq_posterior(&g_q);
+        const double* hp = post_of(&g_q);
         double gap_best = 0.0, gap_second = 0.0;
         int arg;
         for (t = 0; t < RP; t++)
@@ -226,7 +246,7 @@ static void test_reference(bool no_table) {
     /* The history records both what was proposed and what was shown. */
     {
         int n = -1;
-        const psyq_trial* h = psyq_history(&g_q, &n);
+        const psyq_trial* h = hist_of(&g_q, &n);
         CHECK(n == REF_SEQ_N, "history holds %d trials", n);
         CHECK(psyq_n_trials(&g_q) == REF_SEQ_N, "n_trials = %d", psyq_n_trials(&g_q));
         for (i = 0; i < n; i++) {
@@ -241,7 +261,7 @@ static void test_reference(bool no_table) {
 }
 
 /* The two storage paths must agree to float precision, and the estimators
- * must agree with what the caller can compute from psyq_posterior(). */
+ * must agree with what the caller can compute from post_of(). */
 static void test_no_table_matches(void) {
     psyq_desc a, b;
     int i;
@@ -256,7 +276,7 @@ static void test_no_table_matches(void) {
         psyq_update(&g_q2, ref_seq_s[i], ref_seq_k[i]);
     }
     for (i = 0; i < RP; i++)
-        CLOSE(psyq_posterior(&g_q)[i], psyq_posterior(&g_q2)[i], 1e-6,
+        CLOSE(post_of(&g_q)[i], post_of(&g_q2)[i], 1e-6,
               "table vs no_table posterior cell %d", i);
     CHECK(g_q.table != NULL, "the table path has no table");
     CHECK(g_q2.table == NULL, "no_table kept a table");
@@ -268,7 +288,7 @@ static void test_no_table_matches(void) {
  * same posterior as the indexed update. */
 static void test_update_values(void) {
     psyq_desc d;
-    double sv[1];
+    double sv[1] = {0};
     int i;
     ref_desc(&d, false);
     CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
@@ -279,11 +299,11 @@ static void test_update_values(void) {
         CHECK(psyq_update_values(&g_q2, sv, ref_seq_k[i]) == PSYQ_OK, "update_values %d", i);
     }
     for (i = 0; i < RP; i++)
-        CLOSE(psyq_posterior(&g_q)[i], psyq_posterior(&g_q2)[i], 1e-6,
+        CLOSE(post_of(&g_q)[i], post_of(&g_q2)[i], 1e-6,
               "on-grid update_values disagrees at cell %d", i);
     {
         int n = -1;
-        const psyq_trial* h = psyq_history(&g_q2, &n);
+        const psyq_trial* h = hist_of(&g_q2, &n);
         CHECK(h[0].stim_index == -1, "update_values recorded a grid index");
         CLOSE(h[0].stim[0], ref_x[ref_seq_s[0]], 0.0, "update_values stimulus value");
     }
@@ -372,7 +392,7 @@ static void test_pfs(void) {
     static const psyq_pf pfs[] = { PSYQ_PF_GUMBEL, PSYQ_PF_WEIBULL, PSYQ_PF_LOGISTIC,
                                    PSYQ_PF_NORMAL, PSYQ_PF_HYPSEC };
     static const double xs[] = { 0.25, 0.9, 1.0, 1.6, 3.0 };
-    double par[4];
+    double par[4] = {0};
     int ip, ix;
     for (ip = 0; ip < 5; ip++) {
         psyq_desc d;
@@ -407,14 +427,14 @@ static void test_pfs(void) {
         /* A few anchors that do not depend on the formula being read back. */
         if (pfs[ip] == PSYQ_PF_NORMAL || pfs[ip] == PSYQ_PF_LOGISTIC ||
             pfs[ip] == PSYQ_PF_HYPSEC) {
-            double p[2], st[1];
+            double p[2] = {0}, st[1] = {0};
             st[0] = par[0];
             CHECK(psyq_p_values(&g_q, st, par, p) == PSYQ_OK, "psyq_p_values");
             CLOSE(p[1], par[2] + 0.5 * (1.0 - par[2] - par[3]), 1e-12,
                   "pf %d is not at half height at x = alpha", ip);
         }
         if (pfs[ip] == PSYQ_PF_WEIBULL) {
-            double p[2], st[1];
+            double p[2] = {0}, st[1] = {0};
             st[0] = par[0];
             CHECK(psyq_p_values(&g_q, st, par, p) == PSYQ_OK, "psyq_p_values");
             CLOSE(p[1], par[2] + (1.0 - par[2] - par[3]) * (1.0 - exp(-1.0)), 1e-12,
@@ -461,10 +481,10 @@ static void test_nuisance(void) {
     CHECK(psyq_n_param(&g_q) == NP, "P = %d, want %d", psyq_n_param(&g_q), NP);
 
     for (i = 0; i < 4; i++) {
-        const double* post = psyq_posterior(&g_q);
+        const double* post = post_of(&g_q);
         /* Marginal over the nuisance axis: the lapse is the last axis, so it
          * is the fastest index and the marginal sums blocks of NL. */
-        double marg[RA * RB], h = 0.0;
+        double marg[RA * RB] = {0}, h = 0.0;
         int m;
         for (m = 0; m < RA * RB; m++) {
             double sum = 0.0;
@@ -478,7 +498,7 @@ static void test_nuisance(void) {
             /* Expected entropy of the MARGINAL posterior, by the definition. */
             double e = 0.0;
             for (k = 0; k < 2; k++) {
-                double w[RA * RB * 3], pk = 0.0, hk = 0.0, mk[RA * RB];
+                double w[RA * RB * 3] = {0}, pk = 0.0, hk = 0.0, mk[RA * RB] = {0};
                 int mm, b;
                 for (t = 0; t < NP; t++) {
                     double pp = ref_p1_lam(ref_x[s], ref_alpha[t / (NB * NL)],
@@ -549,7 +569,7 @@ static void test_placement(void) {
         d.select_quantile = (rules[ir] == PSYQ_SELECT_QUANTILE) ? 0.5 : 0.0;
         CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
         for (i = 0; i < REF_SEQ_N; i++) {
-            double marg[RA], target = 0.0, c = 0.0;
+            double marg[RA] = {0}, target = 0.0, c = 0.0;
             int a;
             CHECK(psyq_marginal(&g_q, 0, marg) == RA, "psyq_marginal");
             switch (rules[ir]) {
@@ -577,7 +597,7 @@ static void test_placement(void) {
         /* The quantile rule and the median estimator must agree on the same
          * marginal. */
         if (rules[ir] == PSYQ_SELECT_QUANTILE) {
-            double est[4];
+            double est[4] = {0};
             CHECK(psyq_estimate(&g_q, PSYQ_EST_MEDIAN, est) == PSYQ_OK, "estimate");
             CLOSE(est[0], psyq_quantile(&g_q, 0, 0.5), 0.0, "median vs quantile");
         }
@@ -688,7 +708,7 @@ static void test_subset(void) {
     seq_rng r;
     int global, chosen, i;
     double best;
-    int explicit_set[2];
+    int explicit_set[2] = {0};
 
     ref_desc(&d, false);
     CHECK(psyq_open(&g_q2, &d), "open: %s", psyq_error(&g_q2));
@@ -810,13 +830,13 @@ static void test_stopping(void) {
 static void test_estimates(void) {
     psyq_desc d;
     const double* post;
-    double est[4], marg[RA], m0 = 0.0, m2 = 0.0, c = 0.0;
+    double est[4] = {0}, marg[RA] = {0}, m0 = 0.0, m2 = 0.0, c = 0.0;
     int i, best, want_median = 0;
 
     ref_desc(&d, false);
     CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
     for (i = 0; i < REF_SEQ_N; i++) psyq_update(&g_q, ref_seq_s[i], ref_seq_k[i]);
-    post = psyq_posterior(&g_q);
+    post = post_of(&g_q);
 
     CHECK(psyq_marginal(&g_q, 0, marg) == RA, "psyq_marginal returned the wrong count");
     {
@@ -880,9 +900,9 @@ static void test_three_outcomes(void) {
     static const double sig[3] = { 0.4, 0.8, 1.6 };
     static const double crit[2] = { 0.3, 0.9 };
     psyq_desc d;
-    double post[4 * 3 * 2];
-    double p[3], par[3], sv[1];
-    int i, t, k, counts[3];
+    double post[4 * 3 * 2] = {0};
+    double p[3] = {0}, par[3] = {0}, sv[1] = {0};
+    int i, t, k, counts[3] = {0};
 
     memset(&d, 0, sizeof(d));
     d.pf = PSYQ_PF_CUSTOM;
@@ -905,7 +925,7 @@ static void test_three_outcomes(void) {
         int outcome = i % 3;
         double sum = 0.0;
         for (t = 0; t < 24; t++) {
-            double pr[3];
+            double pr[3] = {0};
             sv[0] = psyq_stim_value(&g_q, s, 0);
             par[0] = pse[t / 6]; par[1] = sig[(t / 2) % 3]; par[2] = crit[t % 2];
             three_pf(NULL, sv, par, pr);
@@ -915,7 +935,7 @@ static void test_three_outcomes(void) {
         for (t = 0; t < 24; t++) post[t] /= sum;
         CHECK(psyq_update(&g_q, s, outcome) == PSYQ_OK, "update %d", i);
         for (t = 0; t < 24; t++)
-            CLOSE(psyq_posterior(&g_q)[t], post[t], 1e-6, "K=3 posterior cell %d, trial %d", t, i);
+            CLOSE(post_of(&g_q)[t], post[t], 1e-6, "K=3 posterior cell %d, trial %d", t, i);
     }
     CHECK(psyq_update(&g_q, 0, 3) == PSYQ_ERR_ARG, "outcome K was accepted");
 
@@ -975,7 +995,11 @@ static void test_rejections(void) {
 
     CHECK(!psyq_open(&g_q, NULL), "open accepted a null desc");
     CHECK(psyq_error(&g_q)[0] != '\0', "a null desc left no message");
-    CHECK(!psyq_open(NULL, &d) , "open accepted a null handle");
+    /* A null handle must be refused before the desc is read at all. The desc
+     * is deliberately garbage to show that, and garbage on purpose: an
+     * uninitialized struct would be undefined behavior (clang says so). */
+    memset(&d, 0xA5, sizeof(d));
+    CHECK(!psyq_open(NULL, &d), "open accepted a null handle");
     CHECK(psyq_memory_size(NULL) == 0, "memory_size of a null desc");
 
     ref_desc(&d, false); d.n_stim = 0;                    reject(&d, "n_stim = 0");
@@ -1055,8 +1079,8 @@ static void test_rejections(void) {
 
 static void test_grids(void) {
     psyq_desc d;
-    int sub[2], flat, i;
-    double sv[2];
+    int sub[2] = {0}, flat, i;
+    double sv[2] = {0};
 
     memset(&d, 0, sizeof(d));
     d.pf = PSYQ_PF_GUMBEL;
@@ -1083,8 +1107,8 @@ static void test_grids(void) {
     CHECK(psyq_stim_nearest(&g_q, sv) == 1 * 4 + 1, "stim_nearest = %d",
           psyq_stim_nearest(&g_q, sv));
     for (i = 0; i < 12; i++) {
-        double v[2];
-        int s2[2];
+        double v[2] = {0};
+        int s2[2] = {0};
         psyq_stim_values(&g_q, i, v);
         s2[0] = i / 4; s2[1] = i % 4;
         CHECK(psyq_stim_index(&g_q, s2) == i, "round trip at %d", i);
@@ -1095,8 +1119,8 @@ static void test_grids(void) {
     CHECK(psyq_stim_value(&g_q, 99, 0) != psyq_stim_value(&g_q, 99, 0), "value of a bad index");
     CHECK(psyq_stim_value(&g_q, 0, 9) != psyq_stim_value(&g_q, 0, 9), "value on a bad axis");
     {
-        int p4[4];
-        double pv[4];
+        int p4[4] = {0};
+        double pv[4] = {0};
         p4[0] = 1; p4[1] = 2; p4[2] = 0; p4[3] = 0;
         flat = psyq_param_index(&g_q, p4);
         CHECK(flat == (1 * RB + 2), "param_index = %d", flat);
@@ -1113,7 +1137,7 @@ static void test_grids(void) {
     /* A prior built by psyq_prior_normal is a Gaussian on the axis. */
     {
         psyq_axis ax = psyq_values(ref_alpha, RA);
-        double w[RA], sum = 0.0;
+        double w[RA] = {0}, sum = 0.0;
         psyq_desc pd;
         CHECK(psyq_prior_normal(&ax, -1.0, 0.5, w), "prior_normal failed");
         for (i = 0; i < RA; i++) {
@@ -1127,7 +1151,7 @@ static void test_grids(void) {
         CHECK(psyq_open(&g_q, &pd), "open with a prior: %s", psyq_error(&g_q));
         for (i = 0; i < RA; i++) sum += w[i];
         {
-            double marg[RA];
+            double marg[RA] = {0};
             psyq_marginal(&g_q, 0, marg);
             for (i = 0; i < RA; i++)
                 CLOSE(marg[i], w[i] / sum, 1e-12, "the prior is not installed at cell %d", i);
@@ -1146,7 +1170,7 @@ static void test_grids(void) {
 static void test_simulated_run(void) {
     psyq_desc d;
     static double alpha_grid[41], beta_grid[15];
-    double truth[4];
+    double truth[4] = {0};
     double a_err = 0.0, a_bias = 0.0, b_err = 0.0, b_bias = 0.0, sd_sum = 0.0;
     int i, rep;
 
@@ -1173,7 +1197,7 @@ static void test_simulated_run(void) {
      * block is a function of the seed below and nothing else. */
     sm_seed(0x5EEDF00Dull);
     for (rep = 0; rep < SIM_REPS; rep++) {
-        double est[4];
+        double est[4] = {0};
         CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
         while (!psyq_done(&g_q)) {
             int s = psyq_next(&g_q);
@@ -1230,7 +1254,7 @@ static void impossible_pf(void* ctx, const double* stim, const double* params, d
 static void test_extras(void) {
     psyq_desc d;
     static double jp[RP];
-    double marg[RA], sum = 0.0;
+    double marg[RA] = {0}, sum = 0.0;
     int i;
 
     /* A joint prior that does not factor: put all the mass on two cells. */
@@ -1242,7 +1266,7 @@ static void test_extras(void) {
     CHECK(psyq_open(&g_q, &d), "open with a joint prior: %s", psyq_error(&g_q));
     for (i = 0; i < RP; i++) {
         double want = (i == 1) ? (2.0 / 3.0) : ((i == RP - 1) ? (1.0 / 3.0) : 0.0);
-        CLOSE(psyq_posterior(&g_q)[i], want, 1e-15, "joint prior cell %d", i);
+        CLOSE(post_of(&g_q)[i], want, 1e-15, "joint prior cell %d", i);
     }
     CLOSE(psyq_entropy(&g_q), -(2.0 / 3.0) * log(2.0 / 3.0) / log(2.0)
                               - (1.0 / 3.0) * log(1.0 / 3.0) / log(2.0), 1e-12,
@@ -1268,11 +1292,11 @@ static void test_extras(void) {
     CHECK(psyq_update(&g_q, 0, 0) == PSYQ_ERR_ARG, "an impossible outcome was accepted");
     CHECK(psyq_n_trials(&g_q) == 0, "an impossible outcome was recorded");
     for (i = 0; i < RA; i++)
-        CLOSE(psyq_posterior(&g_q)[i], 1.0 / RA, 1e-15,
+        CLOSE(post_of(&g_q)[i], 1.0 / RA, 1e-15,
               "an impossible outcome disturbed the posterior at %d", i);
     CHECK(psyq_update(&g_q, 0, 1) == PSYQ_OK, "the possible outcome was refused");
     {   /* Uninformative: every cell has the same likelihood, so nothing moves. */
-        double sv[1];
+        double sv[1] = {0};
         sv[0] = ref_x[0];
         CHECK(psyq_update_values(&g_q, sv, 0) == PSYQ_ERR_ARG,
               "an impossible off-grid outcome was accepted");
@@ -1281,7 +1305,7 @@ static void test_extras(void) {
 
     /* TIE_NEAREST inside a caller's subset resolves within the subset. */
     {
-        int list[3];
+        int list[3] = {0};
         flat_desc(&d);
         d.tiebreak = PSYQ_TIE_NEAREST;
         CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
@@ -1298,7 +1322,7 @@ static void test_extras(void) {
     ref_desc(&d, false);
     CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
     {
-        double par[4], p[2], sv[1];
+        double par[4] = {0}, p[2] = {0}, sv[1] = {0};
         par[0] = -1.234; par[1] = 2.345; par[2] = REF_GAMMA; par[3] = REF_LAMBDA;
         CHECK(psyq_p(&g_q, 3, par, p) == PSYQ_OK, "psyq_p off the parameter grid");
         CLOSE(p[1], ref_p1(ref_x[3], par[0], par[1]), 1e-12, "psyq_p off-grid value");
@@ -1327,7 +1351,7 @@ static void test_extras(void) {
 
 static void test_decomposition(void) {
     psyq_desc d;
-    double post[RP];
+    double post[RP] = {0};
     double worst_table = 0.0, worst_lik = 0.0;
     int i, s, t, k;
 
@@ -1342,11 +1366,11 @@ static void test_decomposition(void) {
                                 + (size_t)s * (size_t)g_q.rows * (size_t)RP;
             double direct = 0.0, got, diff;
             for (k = 0; k < 2; k++) {
-                double w[RP], pk = 0.0, h = 0.0;
+                double w[RP] = {0}, pk = 0.0, h = 0.0;
                 for (t = 0; t < RP; t++) {
                     /* Read the table exactly as the header stores it, so what
                      * is left over is the decomposition and nothing else. */
-                    w[t] = psyq_posterior(&g_q)[t]
+                    w[t] = post_of(&g_q)[t]
                            * (double)base[(size_t)k * RP + (size_t)t];
                     pk += w[t];
                 }
@@ -1377,12 +1401,12 @@ static void test_decomposition(void) {
     CHECK(g_q.rows == 2, "no_table kept an entropy row");
     for (i = 0; i <= REF_SEQ_N; i++) {
         double hpost = 0.0;
-        const double* hp = psyq_posterior(&g_q);
+        const double* hp = post_of(&g_q);
         for (t = 0; t < RP; t++) if (hp[t] > 0.0) hpost -= hp[t] * log(hp[t]) / log(2.0);
         for (s = 0; s < RS; s++) {
             /* The decomposition, written out here. */
             double hy = 0.0, hcond = 0.0, got, diff;
-            double pk[2];
+            double pk[2] = {0};
             for (k = 0; k < 2; k++) {
                 pk[k] = 0.0;
                 for (t = 0; t < RP; t++) pk[k] += hp[t] * ref_lik(s, t, k);
@@ -1435,7 +1459,7 @@ static double pn_lik(int s, int t, int k) {
 
 static void test_permuted_nuisance(bool no_table) {
     psyq_desc d;
-    double post[PNP];
+    double post[PNP] = {0};
     double tol = no_table ? 1e-12 : 1e-6;
     int i, t, s, k, m;
 
@@ -1460,9 +1484,9 @@ static void test_permuted_nuisance(bool no_table) {
 
     for (t = 0; t < PNP; t++) post[t] = 1.0 / (double)PNP;
     for (i = 0; i <= REF_SEQ_N; i++) {
-        const double* hp = psyq_posterior(&g_q);
-        double marg[PNA * PNL], h = 0.0;
-        /* psyq_posterior() must come back in the CALLER's axis order. */
+        const double* hp = post_of(&g_q);
+        double marg[PNA * PNL] = {0}, h = 0.0;
+        /* post_of() must come back in the CALLER's axis order. */
         for (t = 0; t < PNP; t++)
             CLOSE(hp[t], post[t], tol, "permuted posterior cell %d after %d trials", t, i);
         /* Marginal over the nuisance axis, in public terms. */
@@ -1478,7 +1502,7 @@ static void test_permuted_nuisance(bool no_table) {
 
         /* Single-axis marginals and the estimators, all in public terms. */
         {
-            double ma[RA], mb[RB], ml[PNL], est[4], mean_a = 0.0, mean_b = 0.0;
+            double ma[RA] = {0}, mb[RB] = {0}, ml[PNL] = {0}, est[4] = {0}, mean_a = 0.0, mean_b = 0.0;
             int ia, ib, il, best = 0;
             CHECK(psyq_marginal(&g_q, 0, ma) == RA, "marginal 0");
             CHECK(psyq_marginal(&g_q, 1, mb) == RB, "marginal 1");
@@ -1529,7 +1553,7 @@ static void test_permuted_nuisance(bool no_table) {
         for (s = 0; s < RS; s++) {
             double e = 0.0;
             for (k = 0; k < 2; k++) {
-                double w[PNP], pk = 0.0, hk = 0.0, mk[PNA * PNL];
+                double w[PNP] = {0}, pk = 0.0, hk = 0.0, mk[PNA * PNL] = {0};
                 int ia, ib, il;
                 for (t = 0; t < PNP; t++) { w[t] = post[t] * pn_lik(s, t, k); pk += w[t]; }
                 for (m = 0; m < PNA * PNL; m++) {
@@ -1587,7 +1611,7 @@ static void pair_pf_batch(void* ctx, const double* stims, int S,
     int s, i, k;
     for (s = 0; s < S; s++) {
         for (i = 0; i < P; i++) {
-            double p[2];
+            double p[2] = {0};
             pair_pf(ctx, stims + (size_t)s, params + (size_t)i * 4, p);
             for (k = 0; k < 2; k++)
                 out[((size_t)s * (size_t)P + (size_t)i) * 2 + (size_t)k] = (float)p[k];
@@ -1601,7 +1625,7 @@ static void three_pf_batch(void* ctx, const double* stims, int S,
     int s, i, k;
     for (s = 0; s < S; s++) {
         for (i = 0; i < P; i++) {
-            double p[3];
+            double p[3] = {0};
             three_pf(ctx, stims + (size_t)s, params + (size_t)i * 3, p);
             for (k = 0; k < 3; k++)
                 out[((size_t)s * (size_t)P + (size_t)i) * 3 + (size_t)k] = (float)p[k];
@@ -1677,7 +1701,7 @@ static void test_batch_pf(void) {
             psyq_update(&g_q, a, ref_seq_k[i]);
             psyq_update(&g_q2, b, ref_seq_k[i]);
         }
-        CHECK(memcmp(psyq_posterior(&g_q), psyq_posterior(&g_q2),
+        CHECK(memcmp(post_of(&g_q), post_of(&g_q2),
                      (size_t)g_q.P * sizeof(double)) == 0,
               "pass %d: the posteriors differ", pass);
         CLOSE(psyq_entropy(&g_q), psyq_entropy(&g_q2), 0.0, "pass %d: entropy", pass);
@@ -1686,8 +1710,8 @@ static void test_batch_pf(void) {
          * and every parameter point, but its likelihoods come back as floats,
          * so this one agrees to float precision and not exactly. */
         {
-            double sv[1];
-            double e1[4], e2[4];
+            double sv[1] = {0};
+            double e1[4] = {0}, e2[4] = {0};
             sv[0] = 0.5 * (ref_x[1] + ref_x[2]);
             CHECK(psyq_update_values(&g_q, sv, 1) == PSYQ_OK, "per-cell off-grid update");
             CHECK(psyq_update_values(&g_q2, sv, 1) == PSYQ_OK, "batch off-grid update");
@@ -1699,7 +1723,7 @@ static void test_batch_pf(void) {
 
         /* One cell through the public model calls, also float-rounded. */
         {
-            double par[4], p1[2], p2[2], sv[1];
+            double par[4] = {0}, p1[2] = {0}, p2[2] = {0}, sv[1] = {0};
             par[0] = -1.1; par[1] = 2.2; par[2] = 0.5; par[3] = 0.03;
             sv[0] = -0.75;
             CHECK(psyq_p_values(&g_q, sv, par, p1) == PSYQ_OK, "psyq_p_values per-cell");
@@ -1727,7 +1751,7 @@ static void test_batch_pf(void) {
         psyq_update(&g_q2, b, ref_seq_k[i]);
     }
     for (i = 0; i < psyq_n_param(&g_q); i++)
-        CLOSE(psyq_posterior(&g_q)[i], psyq_posterior(&g_q2)[i], 1e-6,
+        CLOSE(post_of(&g_q)[i], post_of(&g_q2)[i], 1e-6,
               "no_table batch posterior cell %d", i);
     psyq_close(&g_q);
     psyq_close(&g_q2);
@@ -1762,7 +1786,7 @@ static void test_batch_pf(void) {
             psyq_update(&g_q, a, i % 3);
             psyq_update(&g_q2, b, i % 3);
         }
-        CHECK(memcmp(psyq_posterior(&g_q), psyq_posterior(&g_q2),
+        CHECK(memcmp(post_of(&g_q), post_of(&g_q2),
                      (size_t)g_q.P * sizeof(double)) == 0, "the K=3 posteriors differ");
         psyq_close(&g_q);
         psyq_close(&g_q2);
@@ -1828,7 +1852,7 @@ static void test_batch_pf(void) {
         CHECK(g_q.desc.pf_batch == NULL, "the stray pf_batch was kept");
         CHECK(g_q.param_matrix == NULL, "the stray pf_batch took memory");
         {
-            double par[4], p[2];
+            double par[4] = {0}, p[2] = {0};
             par[0] = -1.5; par[1] = 3.0; par[2] = REF_GAMMA; par[3] = REF_LAMBDA;
             CHECK(psyq_p(&g_q, 2, par, p) == PSYQ_OK, "psyq_p");
             CLOSE(p[1], ref_p1(ref_x[2], par[0], par[1]), 1e-12,
@@ -1891,7 +1915,7 @@ static void test_async_matches(void) {
     psyq_desc d;
     psyq_async_desc ad;
     psyq_snapshot snap;
-    int outcomes[12], proposals[12];
+    int outcomes[12] = {0}, proposals[12] = {0};
     int i, seq, rc;
 
     async_desc_of(&d, false);
@@ -1918,7 +1942,7 @@ static void test_async_matches(void) {
         outcomes[i] = (i * 5 + 1) % 3 ? 1 : 0;
         seq = psyq_async_submit(&g_async, proposals[i], outcomes[i]);
         CHECK(seq == i + 1, "submit %d returned %d", i, seq);
-        rc = psyq_async_wait(&g_async, (uint32_t)seq, 5000000000ull, &snap);
+        rc = psyq_async_wait(&g_async, (uint32_t)seq, 30000000000ull, &snap);
         CHECK(rc >= seq, "wait for seq %d returned %d", seq, rc);
         CHECK(snap.seq == (uint32_t)seq, "snapshot seq %u after waiting for %d",
               snap.seq, seq);
@@ -1942,12 +1966,12 @@ static void test_async_matches(void) {
               i, s, proposals[i]);
         CHECK(psyq_update(&g_q2, s, outcomes[i]) == PSYQ_OK, "sync update %d", i);
     }
-    CHECK(memcmp(psyq_posterior(&g_q), psyq_posterior(&g_q2),
+    CHECK(memcmp(post_of(&g_q), post_of(&g_q2),
                  (size_t)psyq_n_param(&g_q) * sizeof(double)) == 0,
           "the async posterior is not bit for bit the synchronous one");
     CHECK(psyq_next(&g_q) == psyq_next(&g_q2), "the next proposals differ");
     {
-        double ea[4], eb[4];
+        double ea[4] = {0}, eb[4] = {0};
         psyq_estimate(&g_q, PSYQ_EST_MEAN, ea);
         psyq_estimate(&g_q2, PSYQ_EST_MEAN, eb);
         for (i = 0; i < 4; i++)
@@ -1968,7 +1992,7 @@ static void test_async_queue(void) {
     psyq_desc d;
     psyq_async_desc ad;
     psyq_snapshot snap;
-    int acc_stim[256], acc_out[256];
+    int acc_stim[256] = {0}, acc_out[256] = {0};
     int i, n_acc = 0, busy = 0, last_seq = 0, rc, prev;
 
     async_axes();
@@ -1993,7 +2017,11 @@ static void test_async_queue(void) {
             /* A full queue must not have consumed the response: the caller
              * keeps it and retries, which is what the next iteration does with
              * the same i, so nothing is lost. Give the thread a moment. */
-            rc = psyq_async_wait(&g_async, (uint32_t)(last_seq), 2000000000ull, &snap);
+            /* Generous on purpose: this is a correctness test, and under
+             * ThreadSanitizer with the thread below normal priority a drain of
+             * the whole queue has been measured past two seconds. A hang would
+             * still show as a timeout. */
+            rc = psyq_async_wait(&g_async, (uint32_t)(last_seq), 30000000000ull, &snap);
             CHECK(rc >= 0, "wait after a full queue returned %d", rc);
             i--;
             continue;
@@ -2029,7 +2057,7 @@ static void test_async_queue(void) {
     CHECK(psyq_open(&g_q2, &d), "replay open: %s", psyq_error(&g_q2));
     for (i = 0; i < n_acc; i++)
         CHECK(psyq_update(&g_q2, acc_stim[i], acc_out[i]) == PSYQ_OK, "replay update %d", i);
-    CHECK(memcmp(psyq_posterior(&g_q), psyq_posterior(&g_q2),
+    CHECK(memcmp(post_of(&g_q), post_of(&g_q2),
                  (size_t)psyq_n_param(&g_q) * sizeof(double)) == 0,
           "the drained async posterior is not the replay's");
     psyq_close(&g_q);
@@ -2041,7 +2069,7 @@ static void test_async_edges(void) {
     psyq_desc d;
     psyq_async_desc ad;
     psyq_snapshot snap;
-    double sv[1];
+    double sv[1] = {0};
     int i, seq, rc;
 
     /* Every call on a zeroed handle. */
@@ -2085,7 +2113,7 @@ static void test_async_edges(void) {
     sv[0] = 0.5 * (ref_x[1] + ref_x[2]);
     seq = psyq_async_submit_values(&g_async, sv, 1);
     CHECK(seq > 0, "submit_values returned %d", seq);
-    rc = psyq_async_wait(&g_async, (uint32_t)seq, 5000000000ull, &snap);
+    rc = psyq_async_wait(&g_async, (uint32_t)seq, 30000000000ull, &snap);
     CHECK(rc == seq, "wait returned %d for seq %d", rc, seq);
     CHECK(snap.n_trials == 1, "n_trials after an off-grid submit = %d", snap.n_trials);
     /* PSYQ_EST_MODE was asked for, so the snapshot carries grid points. */
@@ -2100,7 +2128,7 @@ static void test_async_edges(void) {
           "poll after stop should still hand back the last snapshot");
     {
         int n = -1;
-        const psyq_trial* h = psyq_history(&g_q, &n);
+        const psyq_trial* h = hist_of(&g_q, &n);
         CHECK(n == 1, "history after the async off-grid trial = %d", n);
         CHECK(h[0].stim_index == -1, "the off-grid trial kept a grid index");
         CLOSE(h[0].stim[0], sv[0], 0.0, "the off-grid stimulus value");
@@ -2112,7 +2140,373 @@ static void test_async_edges(void) {
     CHECK(strcmp(psyq_strerror(PSYQ_ERR_TIMEOUT), "timed out") == 0, "strerror TIMEOUT");
 }
 
+/* queue_depth is the session's policy under the PSYQ_ASYNC_QUEUE capacity. */
+static void test_async_depth(void) {
+    psyq_desc d;
+    psyq_async_desc ad;
+    psyq_snapshot snap;
+    int i, busy = 0, accepted = 0, last = 0, rc;
+
+    async_axes();
+    async_desc_of(&d, true);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    memset(&g_async, 0, sizeof(g_async));
+    memset(&ad, 0, sizeof(ad));
+    ad.quest = &g_q;
+    ad.queue_depth = PSYQ_ASYNC_QUEUE + 1;
+    CHECK(!psyq_async_start(&g_async, &ad), "start accepted a depth past the capacity");
+    CHECK(strstr(psyq_async_error(&g_async), "queue_depth") != NULL,
+          "message: %s", psyq_async_error(&g_async));
+    ad.queue_depth = -1;
+    CHECK(!psyq_async_start(&g_async, &ad), "start accepted a negative depth");
+
+    /* Depth 1: lockstep. On a grid that takes about a millisecond per trial, a
+     * second submit right behind the first finds the only slot taken. */
+    ad.queue_depth = 1;
+    CHECK(psyq_async_start(&g_async, &ad), "start: %s", psyq_async_error(&g_async));
+    for (i = 0; i < 6; i++) {
+        rc = psyq_async_submit(&g_async, (i * 5) % 31, i % 2);
+        if (rc == PSYQ_ERR_BUSY) { busy++; continue; }
+        CHECK(rc > 0, "submit returned %d", rc);
+        if (rc > 0) { accepted++; last = rc; }
+        CHECK(psyq_async_pending(&g_async) <= 1, "depth 1 queued %d",
+              psyq_async_pending(&g_async));
+    }
+    CHECK(busy > 0, "depth 1 never pushed back in 6 back-to-back submits");
+    rc = psyq_async_wait(&g_async, (uint32_t)last, 30000000000ull, &snap);
+    CHECK(rc == last, "wait returned %d, want %d", rc, last);
+    psyq_async_stop(&g_async);
+    CHECK(psyq_n_trials(&g_q) == accepted, "applied %d of %d accepted",
+          psyq_n_trials(&g_q), accepted);
+    psyq_close(&g_q);
+}
+
 #endif /* PSYQ_ASYNC */
+
+/* ======================================================================= *
+ *  SNAPSHOTS
+ *
+ *  A session saved at trial c and resumed must be the uninterrupted session,
+ *  bit for bit: same proposals, same posterior, same history. Every
+ *  configuration is cut at several points, and twice at each: once between
+ *  an update and the next selection, and once between a selection and its
+ *  update, where the proposal cache is live and the header's generator has
+ *  already been drawn from. Both generators are the caller's, so the test
+ *  saves their states beside the snapshot exactly as a caller must.
+ * ======================================================================= */
+
+#define SNAP_N 24
+
+static double sm_next(uint64_t* st) {
+    uint64_t z = (*st += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z = z ^ (z >> 31);
+    return (double)(z >> 11) * (1.0 / 9007199254740992.0);
+}
+
+static double snap_rng_fn(void* ctx) { return sm_next((uint64_t*)ctx); }
+
+static const char* snap_name(int config) {
+    switch (config) {
+    case 0:  return "joint";
+    case 1:  return "nuisance in the middle (permuted)";
+    case 2:  return "nuisance last";
+    case 3:  return "pf_batch, permuted";
+    default: return "subset and random ties, through desc.rng";
+    }
+}
+
+/* `rng` is where desc.rng_ctx points: the caller's generator state. */
+static void snap_desc(psyq_desc* d, int config, uint64_t* rng) {
+    switch (config) {
+    case 0:
+        ref_desc(d, false);
+        break;
+    case 1: case 2:
+        memset(d, 0, sizeof(*d));
+        d->pf = PSYQ_PF_GUMBEL;
+        d->stim[0] = psyq_values(ref_x, RS);
+        d->n_stim = 1;
+        d->param[0] = psyq_values(ref_alpha, RA);
+        d->param[1] = psyq_values(ref_beta, RB);
+        d->param[2] = psyq_fixed(REF_GAMMA);
+        d->param[3] = psyq_values(pn_lapse, PNL);
+        if (config == 1) d->param[1].nuisance = true;
+        else             d->param[3].nuisance = true;
+        d->n_param = 4;
+        break;
+    case 3:
+        pair_desc(d, true, false, true);
+        break;
+    default:
+        ref_desc(d, false);
+        d->subset_size = 3;
+        d->tiebreak = PSYQ_TIE_RANDOM;
+        d->rng = snap_rng_fn;
+        d->rng_ctx = rng;
+        break;
+    }
+    d->stop_trials = 1000;
+}
+
+/* Trials [from, to). With `leave_pending`, the last one is selected but not
+ * answered, so the save sees a live proposal. */
+static void snap_drive(psyq_quest* q, int from, int to, bool leave_pending,
+                       uint64_t* obs, int* props) {
+    static const double truth[4] = { -1.3, 2.5, 0.5, 0.03 };
+    int i;
+    for (i = from; i < to; i++) {
+        int s = psyq_next(q), k;
+        props[i] = s;
+        if (leave_pending && i == to - 1) return;
+        k = psyq_simulate(q, s, truth, sm_next(obs));
+        psyq_update(q, s, k);
+    }
+}
+
+static bool snap_same_history(const psyq_quest* a, const psyq_quest* b) {
+    int na = -1, nb = -2, i, j;
+    const psyq_trial* ha = hist_of(a, &na);
+    const psyq_trial* hb = hist_of(b, &nb);
+    if (na != nb) return false;
+    for (i = 0; i < na; i++) {
+        if (ha[i].stim_index != hb[i].stim_index ||
+            ha[i].proposed_index != hb[i].proposed_index ||
+            ha[i].outcome != hb[i].outcome)
+            return false;
+        for (j = 0; j < PSYQ_MAX_STIM_DIMS; j++)
+            if (memcmp(&ha[i].stim[j], &hb[i].stim[j], sizeof(double)) != 0) return false;
+    }
+    return true;
+}
+
+static void test_snapshot_resume(void) {
+    static const int cuts[] = { 0, 1, 7, SNAP_N - 1 };
+    int config, ci, phase;
+    for (config = 0; config < 5; config++) {
+        psyq_desc d;
+        uint64_t rng0 = 0x1234ABCDull, obs0 = 0x9876FEDCull, rng, obs, rng_final;
+        int ref_props[SNAP_N] = {0};
+        double ref_est[4] = {0};
+
+        /* The uninterrupted run. */
+        rng = rng0; obs = obs0;
+        snap_desc(&d, config, &rng);
+        CHECK(psyq_open(&g_q2, &d), "%s: open: %s", snap_name(config), psyq_error(&g_q2));
+        snap_drive(&g_q2, 0, SNAP_N, false, &obs, ref_props);
+        psyq_estimate(&g_q2, PSYQ_EST_MEAN, ref_est);
+        rng_final = rng;   /* `rng` is reused by the cut runs below */
+
+        for (ci = 0; ci < (int)(sizeof(cuts) / sizeof(cuts[0])); ci++) {
+            for (phase = 0; phase < 2; phase++) {
+                int c = cuts[ci], props[SNAP_N] = {0}, rc, i;
+                bool pending = (phase == 1);
+                size_t n;
+                unsigned char* buf;
+                uint64_t rng_saved, obs_saved, rng_resumed;
+                double est[4] = {0};
+                if (pending && c == 0) continue;   /* nothing selected yet */
+
+                /* Run to the cut and save, beside the two generator states. */
+                rng = rng0; obs = obs0;
+                snap_desc(&d, config, &rng);
+                CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+                snap_drive(&g_q, 0, c, pending, &obs, props);
+                n = psyq_save_size(&g_q);
+                CHECK(n > 0, "save_size is 0");
+                buf = (unsigned char*)malloc(n + 1);
+                if (!buf) { psyq_close(&g_q); continue; }
+                rc = psyq_save(&g_q, buf, n);
+                CHECK(rc == (int)n, "%s cut %d: save wrote %d of %lu bytes",
+                      snap_name(config), c, rc, (unsigned long)n);
+                CHECK(psyq_save(&g_q, buf, n - 1) == PSYQ_ERR_ARG, "save into a short buffer");
+                rng_saved = rng; obs_saved = obs;
+                psyq_close(&g_q);
+
+                /* Resume in a fresh handle, with the generator restored into a
+                 * DIFFERENT variable: the snapshot does not carry it. */
+                rng_resumed = rng_saved;
+                snap_desc(&d, config, &rng_resumed);
+                memset(&g_q, 0, sizeof(g_q));
+                CHECK(psyq_load(&g_q, &d, buf, n), "%s cut %d phase %d: load: %s",
+                      snap_name(config), c, phase, psyq_error(&g_q));
+                CHECK(psyq_n_trials(&g_q) == (pending ? c - 1 : c),
+                      "%s cut %d: n_trials %d after load", snap_name(config), c,
+                      psyq_n_trials(&g_q));
+                obs = obs_saved;
+                snap_drive(&g_q, pending ? c - 1 : c, SNAP_N, false, &obs, props);
+
+                for (i = 0; i < SNAP_N; i++)
+                    CHECK(props[i] == ref_props[i],
+                          "%s cut %d phase %d: proposal %d is %d, uninterrupted %d",
+                          snap_name(config), c, phase, i, props[i], ref_props[i]);
+                {
+                    /* Named and checked, so the size can never be a negative
+                     * error code turned into a huge size_t. */
+                    int np = psyq_n_param(&g_q);
+                    CHECK(np > 0 && np == psyq_n_param(&g_q2), "P after load = %d", np);
+                    if (np > 0)
+                        CHECK(memcmp(post_of(&g_q), post_of(&g_q2),
+                                     (size_t)np * sizeof(double)) == 0,
+                              "%s cut %d phase %d: the resumed posterior is not bit for bit",
+                              snap_name(config), c, phase);
+                }
+                CHECK(snap_same_history(&g_q, &g_q2), "%s cut %d phase %d: history differs",
+                      snap_name(config), c, phase);
+                psyq_estimate(&g_q, PSYQ_EST_MEAN, est);
+                for (i = 0; i < 4; i++)
+                    CLOSE(est[i], ref_est[i], 0.0, "%s cut %d: estimate %d",
+                          snap_name(config), c, i);
+                CLOSE(psyq_entropy(&g_q), psyq_entropy(&g_q2), 0.0, "%s cut %d: entropy",
+                      snap_name(config), c);
+                if (config == 4)
+                    CHECK(rng_resumed == rng_final, "cut %d phase %d: the header's generator "
+                          "did not end where the uninterrupted run's did", c, phase);
+                psyq_close(&g_q);
+                free(buf);
+            }
+        }
+        psyq_close(&g_q2);
+    }
+}
+
+/* A save after the stop has fired resumes as stopped. */
+static void test_snapshot_stopped(void) {
+    psyq_desc d;
+    unsigned char buf[4096];
+    int props[SNAP_N] = {0}, n;
+    uint64_t obs = 7;
+    ref_desc(&d, false);
+    d.stop_trials = 5;
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    snap_drive(&g_q, 0, 5, false, &obs, props);
+    CHECK(psyq_done(&g_q), "not done after 5 of 5");
+    n = psyq_save(&g_q, buf, sizeof(buf));
+    CHECK(n > 0, "save returned %d", n);
+    psyq_close(&g_q);
+    CHECK(psyq_load(&g_q, &d, buf, (size_t)n), "load: %s", psyq_error(&g_q));
+    CHECK(psyq_done(&g_q), "a stopped session resumed as running");
+    CHECK(psyq_stop_reason(&g_q) == PSYQ_STOP_TRIALS, "stop reason %d",
+          (int)psyq_stop_reason(&g_q));
+    psyq_close(&g_q);
+}
+
+static void snap_reject(const psyq_desc* d, const unsigned char* buf, size_t len,
+                        const char* want, const char* what) {
+    bool ok;
+    memset(&g_q, 0, sizeof(g_q));
+    ok = psyq_load(&g_q, d, buf, len);
+    CHECK(!ok, "load accepted %s", what);
+    CHECK(!psyq_is_open(&g_q), "a failed load (%s) left the handle open", what);
+    CHECK(strstr(psyq_error(&g_q), want) != NULL, "%s: message \"%s\" lacks \"%s\"",
+          what, psyq_error(&g_q), want);
+    if (ok) psyq_close(&g_q);
+}
+
+static void test_snapshot_rejects(void) {
+    psyq_desc d, e;
+    unsigned char* buf;
+    unsigned char* bad;
+    int props[SNAP_N] = {0}, n, i;
+    size_t off_counters, off_post;
+    uint64_t obs = 11;
+    static double alpha2[RA];
+
+    ref_desc(&d, false);
+    CHECK(psyq_open(&g_q, &d), "open: %s", psyq_error(&g_q));
+    snap_drive(&g_q, 0, 6, false, &obs, props);
+    n = (int)psyq_save_size(&g_q);
+    buf = (unsigned char*)malloc((size_t)n + 1);
+    bad = (unsigned char*)malloc((size_t)n + 1);
+    if (!buf || !bad) { free(buf); free(bad); psyq_close(&g_q); return; }
+    CHECK(psyq_save(&g_q, buf, (size_t)n) == n, "save");
+    /* Where the counters and the posterior start, from the layout: the
+     * history is n_trials x (n_stim f64, two i32, one u8). */
+    off_post = (size_t)n - (size_t)psyq_n_trials(&g_q) * (8 * 1 + 4 + 4 + 1)
+               - (size_t)psyq_n_param(&g_q) * 8;
+    off_counters = off_post - 5 * 4;
+    psyq_close(&g_q);
+    CHECK(psyq_save(&g_q, buf, (size_t)n) == PSYQ_ERR_CLOSED, "save on a closed handle");
+    CHECK(psyq_save_size(&g_q) == 0, "save_size on a closed handle");
+
+    /* A load into the caller's buffer works like any other open. */
+    {
+        size_t need = psyq_memory_size(&d);
+        void* mem = malloc(need);
+        if (mem) {
+            e = d;
+            e.memory = mem;
+            e.memory_size = need;
+            CHECK(psyq_load(&g_q, &e, buf, (size_t)n), "load into desc.memory: %s",
+                  psyq_error(&g_q));
+            CHECK(!g_q.mem_owned, "the load took its own memory");
+            psyq_close(&g_q);
+            free(mem);
+        }
+    }
+
+    snap_reject(&d, NULL, 0, "not a psy_quest snapshot", "a null snapshot");
+    memcpy(bad, buf, (size_t)n); bad[0] = 'X';
+    snap_reject(&d, bad, (size_t)n, "not a psy_quest snapshot", "a wrong magic");
+    memcpy(bad, buf, (size_t)n); bad[4] = 2;
+    snap_reject(&d, bad, (size_t)n, "format", "a wrong format");
+    snap_reject(&d, buf, (size_t)n - 1, "corrupt or truncated", "a truncated snapshot");
+    snap_reject(&d, buf, 12, "does not match", "a snapshot cut inside its desc");
+    memcpy(bad, buf, (size_t)n); bad[n] = 0;
+    snap_reject(&d, bad, (size_t)n + 1, "after the snapshot's end", "a trailing byte");
+
+    /* Descs that disagree with the snapshot, each named. */
+    e = d; e.tie_tolerance = 1e-6;
+    snap_reject(&e, buf, (size_t)n, "tie_tolerance", "a different tie_tolerance");
+    for (i = 0; i < RA; i++) alpha2[i] = ref_alpha[i];
+    alpha2[2] += 1e-12;
+    e = d; e.param[0] = psyq_values(alpha2, RA);
+    snap_reject(&e, buf, (size_t)n, "param[].values", "a grid point off by 1e-12");
+    e = d; e.param[1].nuisance = true;
+    snap_reject(&e, buf, (size_t)n, "param[].nuisance", "a different nuisance flag");
+    e = d; e.stop_trials = 999;
+    snap_reject(&e, buf, (size_t)n, "stop_trials", "a different stop_trials");
+    e = d; e.select = PSYQ_SELECT_MEAN;
+    snap_reject(&e, buf, (size_t)n, "select", "a different selection rule");
+    e = d; e.no_table = true;
+    snap_reject(&e, buf, (size_t)n, "no_table", "no_table switched on");
+
+    /* The same model through the other callback is still a different desc:
+     * the two differ in precision off the grid. */
+    {
+        unsigned char* b2;
+        int n2;
+        pair_desc(&e, false, false, false);
+        CHECK(psyq_open(&g_q, &e), "open: %s", psyq_error(&g_q));
+        n2 = (int)psyq_save_size(&g_q);
+        b2 = (unsigned char*)malloc((size_t)n2);
+        if (b2) {
+            CHECK(psyq_save(&g_q, b2, (size_t)n2) == n2, "save");
+            psyq_close(&g_q);
+            e.pf_fn = NULL;
+            e.pf_batch = pair_pf_batch;
+            snap_reject(&e, b2, (size_t)n2, "pf_fn/pf_batch", "a pf_fn snapshot loaded as pf_batch");
+            free(b2);
+        } else {
+            psyq_close(&g_q);
+        }
+    }
+
+    /* Numbers inside the state that cannot be right. */
+    memcpy(bad, buf, (size_t)n);
+    bad[off_counters] = 0xff; bad[off_counters + 1] = 0xff;
+    bad[off_counters + 2] = 0xff; bad[off_counters + 3] = 0x7f;
+    snap_reject(&d, bad, (size_t)n, "counters are corrupt", "n_trials of 2^31 - 1");
+    memcpy(bad, buf, (size_t)n);
+    for (i = 0; i < 8; i++) bad[off_post + (size_t)i] = 0xff;   /* a NaN */
+    snap_reject(&d, bad, (size_t)n, "posterior is corrupt", "a NaN in the posterior");
+    memcpy(bad, buf, (size_t)n);
+    bad[n - 1] = 0xff;                                  /* the last outcome */
+    snap_reject(&d, bad, (size_t)n, "history is corrupt", "an outcome of 255");
+    free(buf);
+    free(bad);
+}
 
 /* The version macros agree with each other and with the implementation, and
  * the axis sizes come back as the desc stated them, in the caller's order even
@@ -2129,7 +2523,7 @@ static void test_version_and_axis_n(void) {
           "psyq_version() %s, macro %s", psyq_version(), PSYQ_VERSION_STRING);
     /* Pinned, and compared at run time: a constant condition is MSVC's C4127,
      * and the string from the implementation is the thing worth pinning. */
-    CHECK(strcmp(psyq_version(), "0.4.1") == 0, "version %s, want 0.4.1", psyq_version());
+    CHECK(strcmp(psyq_version(), "0.5.2") == 0, "version %s, want 0.5.2", psyq_version());
 
     memset(&d, 0, sizeof(d));
     d.pf = PSYQ_PF_GUMBEL;
@@ -2190,10 +2584,14 @@ int main(void) {
     test_permuted_nuisance(true);
     test_batch_pf();
     test_version_and_axis_n();
+    test_snapshot_resume();
+    test_snapshot_stopped();
+    test_snapshot_rejects();
 #ifdef PSYQ_ASYNC
     test_async_matches();
     test_async_queue();
     test_async_edges();
+    test_async_depth();
 #endif
     test_simulated_run();
 

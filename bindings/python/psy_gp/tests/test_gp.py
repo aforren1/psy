@@ -493,3 +493,199 @@ def test_psychometric_model():
     # test's tolerance, rather than a per-context bound one seed can break.
     assert sum(errs) / len(errs) < 0.08
     assert not g.threshold_multi_cross
+
+
+def test_max_trials_is_the_compiled_ceiling():
+    # MAX_TRIALS is PSYGP_MAX_TRIALS as compiled (PSY_GP_MAX_TRIALS at build
+    # time). max_trials = 0 means that ceiling, and one more is refused.
+    base = dict(lo=[0, 0], hi=[1, 1], n_candidates=64, target_p=0.75,
+                stop_trials=5)
+    assert pg.MAX_TRIALS >= 16
+    assert (pg.memory_size(max_trials=0, **base)
+            == pg.memory_size(max_trials=pg.MAX_TRIALS, **base))
+    assert (pg.memory_size(max_trials=pg.MAX_TRIALS, **base)
+            > pg.memory_size(max_trials=pg.MAX_TRIALS - 1, **base))
+    with pytest.raises(pg.Error):
+        pg.memory_size(max_trials=pg.MAX_TRIALS + 1, **base)
+    g = pg.GP(max_trials=pg.MAX_TRIALS, **base)
+    assert g.is_open
+
+
+# --- v0.5.0 .. v0.13.1: optimization, pairwise, kinds, priors, snapshots ---
+
+def bump(x, cx=0.3, cy=0.7, w=0.12):
+    return math.exp(-((x[0] - cx) ** 2 + (x[1] - cy) ** 2) / (2.0 * w * w))
+
+
+@pytest.mark.parametrize("minimize", [False, True])
+def test_ucb_finds_the_maximum_of_a_bump(minimize):
+    u = random.Random(31)
+    sign = -1.0 if minimize else 1.0
+    g = pg.GP(lo=[0.0, 0.0], hi=[1.0, 1.0], lik="gaussian", acq="ucb",
+              minimize=minimize, grid=[21, 21], n_init=8, fit=True,
+              fit_every=10, stop_trials=40)
+    while not g.done:
+        _, x = g.next()
+        g.update_real(x, sign * bump(x) + 0.02 * (u.random() - 0.5))
+    x, v = g.argmax()
+    assert math.hypot(x[0] - 0.3, x[1] - 0.7) < 0.05
+    assert abs(v - sign * 1.0) < 0.15
+
+
+def test_ei_and_thompson_run():
+    for acq, extra in (("ei", {}), ("thompson", {"rng": random.Random(4).random})):
+        u = random.Random(32)
+        g = pg.GP(lo=[0.0, 0.0], hi=[1.0, 1.0], lik="gaussian", acq=acq,
+                  grid=[15, 15], n_init=8, fit=True, fit_every=10,
+                  stop_trials=30, **extra)
+        while not g.done:
+            _, x = g.next()
+            g.update_real(x, bump(x) + 0.02 * (u.random() - 0.5))
+        x, v = g.argmax()
+        assert math.hypot(x[0] - 0.3, x[1] - 0.7) < 0.1, acq
+    with pytest.raises(pg.Error):     # THOMPSON needs a generator
+        pg.GP(lo=[0], hi=[1], lik="gaussian", acq="thompson", stop_trials=5)
+
+
+def test_pairwise_session():
+    u = random.Random(33)
+    g = pg.GP(lo=[0.0, 0.0], hi=[1.0, 1.0], lik="pairwise", acq="bald",
+              grid=[15, 15], n_init=8, fit=True, fit_every=10, stop_trials=80)
+    while not g.done:
+        x1, x2 = g.next_pair()
+        p = phi(2.0 * (3.0 * bump(x1) - 3.0 * bump(x2)))
+        g.update_pair(x1, x2, 1 if u.random() < p else 0)
+    x, _ = g.argmax()
+    assert math.hypot(x[0] - 0.3, x[1] - 0.7) < 0.15
+    h = g.history()
+    assert len(h) == 80 and all(len(t["x2"]) == 2 for t in h)
+    a, b = [0.3, 0.7], [0.9, 0.1]
+    assert g.predict_pair(a, b) > 0.8
+    assert abs(g.predict_pair(a, b) + g.predict_pair(b, a) - 1.0) < 1e-9
+    with pytest.raises(pg.Error):
+        g.next()                     # a comparison needs next_pair()
+    with pytest.raises(ValueError):
+        pg.Async(g).start()
+
+
+def test_categorical_dimension():
+    thr = {0: 0.3, 1: 0.6, 2: 0.45}   # an unordered context: level 1 is far
+    u = random.Random(34)
+    g = pg.GP(lo=[0.0, 0.0], hi=[2.0, 1.0], intensity_dim=1,
+              dim_kind=["categorical", pg.DIM_CONTINUOUS], dim_levels=[3, 0],
+              target_p=0.75, grid=[3, 21], n_init=8, fit=True, fit_every=10,
+              refine_steps=2, stop_trials=90)
+    while not g.done:
+        _, x = g.next()
+        assert x[0] in (0.0, 1.0, 2.0)
+        p = phi(10.0 * (x[1] - thr[int(x[0])]))
+        g.update(x, pg.simulate_outcome([1 - p, p], u.random()))
+    for level, t50 in thr.items():
+        est, lo, hi = g.threshold([level])
+        assert abs(est - (t50 + 0.67449 / 10.0)) < 0.1, level
+    with pytest.raises(pg.Error):     # the box of a categorical dimension is 0..levels-1
+        pg.GP(lo=[0.0, 0.0], hi=[3.0, 1.0], intensity_dim=1,
+              dim_kind=["categorical", "continuous"], dim_levels=[3, 0],
+              target_p=0.75, stop_trials=5)
+
+
+def snapshot_desc():
+    return dict(lo=[0.0, 0.0], hi=[1.0, 1.0], intensity_dim=1, acq="eavc",
+                target_p=0.75, grid=[9, 17], n_init=6, fit=True, fit_every=10,
+                refine_steps=2, stop_trials=40)
+
+
+def snapshot_run(cut=None):
+    u = random.Random(35)
+    g = pg.GP(**snapshot_desc())
+    proposals = []
+    while not g.done:
+        _, x = g.next()
+        if cut is not None and g.n_trials == cut:
+            # cut with the proposal pending: the resumed GP hands it out again
+            g = pg.GP.load(g.save(), **snapshot_desc())
+            _, again = g.next()
+            assert again == x
+        proposals.append(x)
+        p = phi(8.0 * (x[1] - (0.3 + 0.3 * x[0])))
+        g.update(x, pg.simulate_outcome([1 - p, p], u.random()))
+    return proposals, g.save(), g
+
+
+def test_snapshot_resume_matches_uninterrupted_run():
+    ref_props, ref_bytes, ref = snapshot_run()
+    for cut in (7, 20, 33):
+        props, final, g = snapshot_run(cut)
+        assert props == ref_props, cut
+        assert final == ref_bytes, cut          # byte for byte
+        assert g.threshold([0.5]) == ref.threshold([0.5])
+    snap = ref.save()
+    with pytest.raises(pg.Error):               # the desc must agree
+        pg.GP.load(snap, **dict(snapshot_desc(), target_p=0.7))
+    with pytest.raises(pg.Error):               # a truncated image is refused
+        pg.GP.load(snap[:-3], **snapshot_desc())
+
+
+def test_fit_return_values_and_delta():
+    g = pg.GP(lo=[0.0, 0.0], hi=[1.0, 1.0], target_p=0.75, n_candidates=64,
+              stop_trials=60, fit_max_evals=2)
+    assert g.fit() == 1                         # nothing to fit yet
+    u = random.Random(36)
+    for _ in range(60):
+        x = [u.random(), u.random()]
+        p = phi(8.0 * (x[1] - 0.5))
+        g.update(x, pg.simulate_outcome([1 - p, p], u.random()))
+    assert g.fit() == 0                         # two evaluations do not converge
+    assert g.fit_delta() > 0.0
+    rounds, rc = 0, 0
+    while rc != 1 and rounds < 200:
+        rc = g.fit()
+        rounds += 1
+    assert rc == 1 and rounds > 1
+    assert abs(g.fit_delta()) < 1e-3
+
+
+def test_priors_and_other_desc_fields():
+    base = dict(lo=[0.0, 0.0], hi=[1.0, 1.0], target_p=0.75, stop_trials=5)
+    d = pg.GP(**base).get_priors()
+    assert set(d) == {"lengthscale", "outputscale", "outputscale_b",
+                      "outputscale_g", "mean", "mean_g", "noise_sd"}
+    assert d["outputscale"]["center"] == 1.0 and d["outputscale"]["sd"] > 0.0
+    got = pg.GP(priors={"outputscale": (2.0, 0.5)}, **base).get_priors()
+    assert got["outputscale"]["center"] == 2.0 and got["outputscale"]["sd"] == 0.5
+    obj = pg.Priors(mean={"center": 0.5, "sd": 0.3})
+    assert pg.GP(priors=obj, **base).get_priors()["mean"]["center"] == 0.5
+    off = pg.GP(no_hyper_prior=True, **base).get_priors()
+    assert off["lengthscale"]["sd"] == -1.0
+    with pytest.raises(TypeError):
+        pg.GP(priors={"bogus": (1, 1)}, **base)
+
+    # monotone_dims: a mask or a list of dimensions, the same thing
+    a = pg.GP(monotone_dims=[1], intensity_dim=1, grid=[5, 9], **base)
+    b = pg.GP(monotone_dims=2, intensity_dim=1, grid=[5, 9], **base)
+    for x, y in (([0.2, 0.3], 0), ([0.8, 0.9], 1), ([0.5, 0.5], 1)):
+        a.update(x, y)
+        b.update(x, y)
+    assert a.predict_p_many(grid_points(5)).tolist() == b.predict_p_many(grid_points(5)).tolist()
+    with pytest.raises(pg.Error):     # the psychometric model is monotone already
+        pg.GP(monotone_dims=[1], intensity_dim=1, model="psychometric", **base)
+    pg.GP(pcg_threshold=-1, fit_tol=1e-6, **base)
+    pg.GP(pcg_threshold=64, **base)
+
+
+@pytest.mark.parametrize("model", ["gp", "psychometric"])
+def test_fit_pcg_reaches_the_same_fit(model):
+    def session(pcg):
+        u = random.Random(37)
+        g = pg.GP(lo=[0.0, 0.0], hi=[1.0, 1.0], intensity_dim=1, target_p=0.75,
+                  model=model, grid=[9, 17], n_init=8, fit=True, fit_every=0,
+                  stop_trials=60, fit_pcg=pcg)
+        for _ in range(60):
+            x = [u.random(), u.random()]
+            p = phi(8.0 * (x[1] - (0.3 + 0.3 * x[0])))
+            g.update(x, pg.simulate_outcome([1 - p, p], u.random()))
+        for _ in range(50):          # converge through the evaluation budget
+            if g.fit() == 1:
+                break
+        return g.log_marginal
+    assert abs(session(True) - session(False)) < 1e-6
