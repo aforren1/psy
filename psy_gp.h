@@ -1,4 +1,4 @@
-/* psy_gp.h - v0.14.0 - public domain single-header Gaussian-process adaptive library
+/* psy_gp.h - v0.14.1 - public domain single-header Gaussian-process adaptive library
  *
  *   Nonparametric and semiparametric Bayesian adaptive psychophysics: a
  *   Gaussian-process model over a multidimensional stimulus space with
@@ -22,6 +22,17 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.14.1 - two fixes. (1) A desc.memory buffer that was not 8-byte
+ *          aligned: psygp_open() aligned the base, but every later call laid
+ *          its scratch out from the unaligned address, so the quadrature
+ *          weights and every scratch vector read a few bytes off what open()
+ *          had written (the macOS CI failure: outcome probabilities summing
+ *          to 8e280, in the build whose static test buffer landed on an odd
+ *          address). malloc'd handles were never affected. (2)
+ *          psygp_threshold()'s band read an unset edge when neither shifted
+ *          curve crossed; the band is now the whole box there, which is what
+ *          the unset read produced in practice. Results with malloc'd or
+ *          aligned memory are v0.14.0's to the bit.
  *   v0.14.0 - desc.fit_pcg (a new field at the end of psygp_desc, off by
  *          default): conjugate-gradient Newton steps in a fit's evaluations
  *          and in the psychometric model's mode search, rejected line-search
@@ -173,7 +184,7 @@
  *          gradient under CATEGORICAL is central differences, not analytic.
  *   v0.0 - specification. Declarations and the manual, no implementation.
  *
- *   STATUS: v0.14.0. Implemented and checked by tests/adapt/psy_gp_test.c,
+ *   STATUS: v0.14.1. Implemented and checked by tests/adapt/psy_gp_test.c,
  *   which builds and passes as C11, C99 and C++17 under gcc with -Wall
  *   -Wextra -Wpedantic -Wshadow -Werror, with and without PSYGP_ASYNC, as
  *   MSVC's default C dialect with /W4 /WX both ways, and is clean under
@@ -2207,8 +2218,8 @@
  * string is the three numbers, and the test asserts that it stays so. */
 #define PSYGP_VERSION_MAJOR  0
 #define PSYGP_VERSION_MINOR  14
-#define PSYGP_VERSION_PATCH  0
-#define PSYGP_VERSION_STRING "0.14.0"
+#define PSYGP_VERSION_PATCH  1
+#define PSYGP_VERSION_STRING "0.14.1"
 
 /* The one optional dependency, and it comes FIRST: psy_rt.h sets a
  * feature-test macro for the Linux clock calls and can only do that before the
@@ -3571,8 +3582,22 @@ static size_t psygp__layout(const psygp_desc* d, int Nmax, int M, int K,
 
 /* The scratch pointers of an open handle. Recomputed rather than stored: the
  * walk is a few dozen adds and the handle stays the size the manual says. */
+static unsigned char* psygp__base(void* mem) {
+    unsigned char* base = (unsigned char*)mem;
+    size_t rem = (size_t)((uintptr_t)base % sizeof(double));
+    if (rem) base += sizeof(double) - rem;
+    return base;
+}
+
 static void psygp__scr_of(const psygp_gp* g, psygp__scr* s) {
-    psygp__layout(&g->desc, g->N_max, g->M, g->K, (unsigned char*)g->mem, NULL, s);
+    /* From the aligned base psygp_open() laid the arena out from. Before
+     * v0.14.1 this used desc.memory as given, so a caller's buffer that was
+     * not 8-byte aligned put the scratch a few bytes off the blocks open()
+     * had initialized: the quadrature weights read as garbage (a sum of
+     * probabilities of 8e280 on a macOS build whose static buffer landed on
+     * an odd address). malloc's blocks are aligned, so only desc.memory
+     * could see it. */
+    psygp__layout(&g->desc, g->N_max, g->M, g->K, psygp__base(g->mem), NULL, s);
 }
 
 /* --- desc validation ---------------------------------------------------- */
@@ -7866,11 +7891,7 @@ PSYGP_API bool psygp_open(psygp_gp* g, const psygp_desc* desc) {
     }
     g->mem_size = need;
     /* Align the base, which is why psygp_memory_size() asks for the slack. */
-    base = (unsigned char*)g->mem;
-    {
-        size_t rem = (size_t)((uintptr_t)base % sizeof(double));
-        if (rem) base += sizeof(double) - rem;
-    }
+    base = psygp__base(g->mem);
     psygp__layout(desc, Nmax, M, K, base, g, &s);
     memset(base, 0, need - (size_t)(base - (unsigned char*)g->mem));
     psygp__hyper_defaults(g);
@@ -8516,8 +8537,17 @@ PSYGP_API int psygp_threshold(const psygp_gp* g, const double* ctx, double targe
          * sign of the slope, so they are sorted rather than assumed. */
         ha = psygp__cross(g, &s, pt, target, 1.96, &a, &ca, s.t1, s.t2);
         hb = psygp__cross(g, &s, pt, target, -1.96, &b, &cb, s.t1, s.t2);
-        if (!ha) a = (b > v) ? g->desc.lo[id] : g->desc.hi[id];
-        if (!hb) b = (a > v) ? g->desc.lo[id] : g->desc.hi[id];
+        /* A shifted curve that never meets the level puts that edge at the
+         * box's end on the far side of the other edge; when neither meets it
+         * the band is the whole box. (Before v0.14.1 the both-missing case
+         * read an unset edge: whatever was on the stack.) */
+        if (!ha && !hb) {
+            a = g->desc.lo[id];
+            b = g->desc.hi[id];
+        } else {
+            if (!ha) a = (b > v) ? g->desc.lo[id] : g->desc.hi[id];
+            if (!hb) b = (a > v) ? g->desc.lo[id] : g->desc.hi[id];
+        }
         if (lo) *lo = a < b ? a : b;
         if (hi) *hi = a < b ? b : a;
     }

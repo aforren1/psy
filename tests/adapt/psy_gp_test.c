@@ -137,8 +137,8 @@ static void test_version(void) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%d.%d.%d", PSYGP_VERSION_MAJOR,
              PSYGP_VERSION_MINOR, PSYGP_VERSION_PATCH);
-    CHECK(strcmp(psygp_version(), "0.14.0") == 0,
-          "psygp_version() is %s, expected 0.14.0", psygp_version());
+    CHECK(strcmp(psygp_version(), "0.14.1") == 0,
+          "psygp_version() is %s, expected 0.14.1", psygp_version());
     CHECK(strcmp(psygp_version(), PSYGP_VERSION_STRING) == 0,
           "psygp_version() %s disagrees with PSYGP_VERSION_STRING %s",
           psygp_version(), PSYGP_VERSION_STRING);
@@ -182,11 +182,11 @@ static void test_chol(void) {
     /* The triangular inverse and its square, used by the hyper gradient. */
     {
         psygp_real C[9];
-        double P[9];
+        double P[9] = { 0.0 };
         for (int i = 0; i < 9; i++) C[i] = (psygp_real)A[i];
         psygp__chol(C, 3, 3);
         {
-            double tmp[3];
+            double tmp[3] = { 0.0 };
             psygp__tri_inv(C, 3, 3, tmp);
             psygp__tri_sqr(C, 3, 3, tmp);
         }
@@ -204,7 +204,7 @@ static void test_chol(void) {
 static void test_kernel(int kernel) {
     psygp_desc d;
     psygp_gp g;
-    double X[16 * 3];
+    double X[16 * 3] = { 0.0 };
     psygp_real G[16 * 16];
     int n = 16, nd = 3;
     rng_state = 0x243F6A8885A308D3ull + 0x11ull;
@@ -235,7 +235,7 @@ static void test_kernel(int kernel) {
 /* --- 3: Gauss-Hermite nodes --------------------------------------------- */
 
 static void test_quad(void) {
-    double x[PSYGP_QUAD_N], w[PSYGP_QUAD_N];
+    double x[PSYGP_QUAD_N] = { 0.0 }, w[PSYGP_QUAD_N] = { 0.0 };
     double want[7] = { 1.0, 0.0, 1.0, 0.0, 3.0, 0.0, 15.0 };
     psygp__gh_init(x, w, PSYGP_QUAD_N);
     for (int k = 0; k <= 6; k++) {
@@ -253,7 +253,7 @@ static void test_gaussian_exact(void) {
     psygp_desc d;
     psygp_gp g;
     int n = 9, nd = 2;
-    double xs[9 * 2], ys[9];
+    double xs[9 * 2] = { 0.0 }, ys[9] = { 0.0 };
     double Ky[81], ks[9], mu, sd, mref, vref, kxx;
     double probe[2] = { 0.31, -0.22 };
     rng_state = 0x243F6A8885A308D3ull + 0x22ull;
@@ -423,7 +423,7 @@ static void test_gradient(psygp_lik lik, psygp_kernel kernel, const char* name) 
     psygp_desc d;
     psygp_gp g;
     psygp__param p[PSYGP__NTHETA];
-    double th[PSYGP__NTHETA], ga[PSYGP__NTHETA], gn[PSYGP__NTHETA];
+    double th[PSYGP__NTHETA] = { 0.0 }, ga[PSYGP__NTHETA] = { 0.0 }, gn[PSYGP__NTHETA] = { 0.0 };
     double v0, vp, vm;
     int np, n = 12, nd = 2;
     rng_state = 0x243F6A8885A308D3ull + 0x33ull;
@@ -444,7 +444,7 @@ static void test_gradient(psygp_lik lik, psygp_kernel kernel, const char* name) 
     d.stop_trials = n;
     CHECK(psygp_open(&g, &d), "open %s: %s", name, psygp_error(&g));
     for (int i = 0; i < n; i++) {
-        double x[2];
+        double x[2] = { 0.0 };
         x[0] = -1.0 + 2.0 * rng_u();
         x[1] = -2.0 + 4.0 * rng_u();
         if (lik == PSYGP_LIK_GAUSSIAN) {
@@ -494,7 +494,7 @@ static void test_lookahead(void) {
     double xs[7] = { -0.85, -0.6, -0.2, 0.05, 0.4, 0.7, 0.9 };
     int ys[7] = { 0, 0, 1, 0, 1, 1, 1 };
     double A[64], cw, cov_ab, cov_aj, cov_jb, cov_jj, want, got;
-    double ca[1], cb[1], cj[1];
+    double ca[1] = { 0.0 }, cb[1] = { 0.0 }, cj[1] = { 0.0 };
     psygp__scr s;
     memset(&d, 0, sizeof(d));
     d.n_dims = 1;
@@ -550,7 +550,7 @@ static void test_lookahead(void) {
          * (n + 1)-th site of precision cw. */
         int m = n + 1;
         double kia[8], kib[8], v[8], acc = 0.0;
-        double xall[8];
+        double xall[8] = { 0.0 };
         for (int i = 0; i < n; i++) xall[i] = xs[i];
         xall[n] = cj[0];
         for (int i = 0; i < m; i++)
@@ -686,7 +686,7 @@ static void test_open_reject(void) {
 #define OBS_THR75 (OBS_X50 + 0.67448975019608171 / OBS_SLOPE)
 
 static int observe(double x) {
-    double p[2];
+    double p[2] = { 0.0 };
     p[1] = 0.5 * erfc(-(OBS_SLOPE * (x - OBS_X50)) / sqrt(2.0));
     p[0] = 1.0 - p[1];
     return psygp_simulate_outcome(p, 2, rng_u());
@@ -719,7 +719,7 @@ static double run_observer(psygp_acq acq, int trials, const char* name, int rep)
         return 1e9;
     }
     while (!psygp_done(&g)) {
-        double x[1];
+        double x[1] = { 0.0 };
         int idx = psygp_next(&g, x);
         CHECK(idx >= -1, "%s next returned %d", name, idx);
         rc = psygp_update(&g, x, observe(x[0]));
@@ -770,7 +770,7 @@ static void test_gaussian_field(void) {
     d.stop_trials = 60;
     CHECK(psygp_open(&g, &d), "open GAUSSIAN field: %s", psygp_error(&g));
     while (!psygp_done(&g)) {
-        double x[1];
+        double x[1] = { 0.0 };
         psygp_next(&g, x);
         CHECK(psygp_update_real(&g, x, sin(4.0 * x[0]) + 0.05 * (rng_u() - 0.5))
               == PSYGP_OK, "gaussian field update");
@@ -942,7 +942,7 @@ static void test_fit(void) {
     d.stop_trials = 30;
     CHECK(psygp_open(&g, &d), "open fit: %s", psygp_error(&g));
     while (!psygp_done(&g)) {
-        double x[1];
+        double x[1] = { 0.0 };
         psygp_next(&g, x);
         CHECK(psygp_update(&g, x, observe(x[0])) == PSYGP_OK, "fit update");
     }
@@ -958,6 +958,7 @@ static void test_fit(void) {
     CHECK(fabs(after - before) > 1e-6, "the fit did not move the log marginal");
     {
         psygp_hyper h;
+        memset(&h, 0, sizeof(h));
         memset(&h, 0, sizeof(h));
         CHECK(psygp_get_hyper(&g, &h) == PSYGP_OK, "get_hyper");
         CHECK(h.lengthscale[0] > 0.0 && h.outputscale > 0.0,
@@ -988,7 +989,7 @@ static void test_fit_every_and_rng(void) {
     d.stop_trials = 40;
     CHECK(psygp_open(&g, &d), "open fit_every: %s", psygp_error(&g));
     while (!psygp_done(&g)) {
-        double x[2];
+        double x[2] = { 0.0 };
         int idx = psygp_next(&g, x);
         int rc;
         CHECK(idx >= -1 && idx < psygp_n_candidates(&g), "next index %d", idx);
@@ -1006,7 +1007,7 @@ static void test_fit_every_and_rng(void) {
      * has fired, which does not stop the loop functions from working. */
     {
         int sub[3] = { 4, 9, 17 };
-        double x[2];
+        double x[2] = { 0.0 };
         int idx;
         idx = psygp_next_subset(&g, sub, 3, x);
         CHECK(idx == 4 || idx == 9 || idx == 17, "next_subset returned %d", idx);
@@ -1049,7 +1050,7 @@ static double afc_slope = 8.0, afc_x50 = 0.40;
 #define AFC_THR75 (0.40 + 0.052248 / 8.0)
 
 static int observe_afc(double x) {
-    double p[2];
+    double p[2] = { 0.0 };
     p[1] = 0.5 + 0.48 * 0.5 * erfc(-(afc_slope * (x - afc_x50)) / sqrt(2.0));
     p[0] = 1.0 - p[1];
     return psygp_simulate_outcome(p, 2, rng_u());
@@ -1084,7 +1085,7 @@ static void test_2afc(void) {
         d.stop_trials = 120;
         CHECK(psygp_open(&g, &d), "open 2afc: %s", psygp_error(&g));
         while (!psygp_done(&g)) {
-            double x[1];
+            double x[1] = { 0.0 };
             psygp_next(&g, x);
             CHECK(psygp_update(&g, x, observe_afc(x[0])) == PSYGP_OK, "2afc update");
         }
@@ -1113,7 +1114,7 @@ static void test_2afc(void) {
 static void test_loop_rules(void) {
     psygp_desc d;
     psygp_gp g;
-    double x1[1], x2[1];
+    double x1[1] = { 0.0 }, x2[1] = { 0.0 };
     int i1, i2, n;
     const psygp_trial* h;
     memset(&d, 0, sizeof(d));
@@ -1194,13 +1195,13 @@ static void test_configurations(void) {
     CHECK(psygp_open(&g, &d), "open configurations: %s", psygp_error(&g));
     CHECK(psygp_n_candidates(&g) == 11, "candidate count");
     {
-        double c[1];
+        double c[1] = { 0.0 };
         CHECK(psygp_candidate(&g, 7, c) == PSYGP_OK, "psygp_candidate");
         CLOSE(c[0], 0.7, 1e-15, "the caller's candidate list is what is used");
         CHECK(psygp_candidate(&g, 11, c) == PSYGP_ERR_ARG, "candidate index");
     }
     while (!psygp_done(&g)) {
-        double x[1];
+        double x[1] = { 0.0 };
         int idx = psygp_next(&g, x);
         CHECK(idx == -1, "RANDOM proposed candidate %d, not a free point", idx);
         CHECK(x[0] >= 0.0 && x[0] <= 1.0, "a point outside the box");
@@ -1236,7 +1237,7 @@ static void test_configurations(void) {
     d.stop_trials = 24;
     CHECK(psygp_open(&g, &d), "open ordinal outcomes: %s", psygp_error(&g));
     while (!psygp_done(&g)) {
-        double x[1];
+        double x[1] = { 0.0 };
         psygp_next(&g, x);
         CHECK(psygp_update(&g, x, (int)(rng_u() * 4.0)) == PSYGP_OK,
               "ordinal outcome update");
@@ -1260,7 +1261,7 @@ static void test_configurations(void) {
 static void test_fit_step(void) {
     psygp_desc d;
     psygp_gp ga, gb;
-    double ys[40];
+    double ys[40] = { 0.0 };
     int n = 40, steps = 0, rc;
     rng_state = 0x243F6A8885A308D3ull + 0xaaull;
     memset(&d, 0, sizeof(d));
@@ -1273,7 +1274,7 @@ static void test_fit_step(void) {
     CHECK(psygp_open(&ga, &d), "open fit_step a: %s", psygp_error(&ga));
     CHECK(psygp_open(&gb, &d), "open fit_step b: %s", psygp_error(&gb));
     for (int i = 0; i < n; i++) {
-        double x[1];
+        double x[1] = { 0.0 };
         psygp_next(&ga, x);
         ys[i] = (double)observe(x[0]);
         CHECK(psygp_update(&ga, x, (int)ys[i]) == PSYGP_OK, "fit_step update a");
@@ -1292,6 +1293,8 @@ static void test_fit_step(void) {
           "stepped and whole fits disagree");
     {
         psygp_hyper ha, hb;
+        memset(&ha, 0, sizeof(ha));
+        memset(&hb, 0, sizeof(hb));
         memset(&ha, 0, sizeof(ha));
         memset(&hb, 0, sizeof(hb));
         psygp_get_hyper(&ga, &ha);
@@ -1327,7 +1330,7 @@ static void test_refit_every(void) {
     d.refit_every = 5;
     CHECK(psygp_open(&gb, &d), "open refit b: %s", psygp_error(&gb));
     for (int i = 0; i < n; i++) {
-        double x[1];
+        double x[1] = { 0.0 };
         psygp_next(&ga, x);          /* one stimulus stream for both handles */
         ys[i] = (double)observe(x[0]);
         CHECK(psygp_update(&ga, x, (int)ys[i]) == PSYGP_OK, "refit update a");
@@ -1382,7 +1385,7 @@ static void test_predict_many(void) {
     d.stop_trials = 40;
     CHECK(psygp_open(&g, &d), "open predict_many: %s", psygp_error(&g));
     while (!psygp_done(&g)) {
-        double x[2];
+        double x[2] = { 0.0 };
         psygp_next(&g, x);
         CHECK(psygp_update(&g, x, observe(x[1])) == PSYGP_OK, "many update");
     }
@@ -1480,7 +1483,7 @@ static void refine_session(psygp_acq acq, psygp_lik lik, const char* name) {
     }
     psygp__scr_of(&g, &s);
     while (!psygp_done(&g)) {
-        double x[1];
+        double x[1] = { 0.0 };
         int idx, out;
         bool init = psygp_n_trials(&g) < d.n_init;
         idx = psygp_next(&g, x);
@@ -1522,7 +1525,7 @@ static void refine_session(psygp_acq acq, psygp_lik lik, const char* name) {
             }
         }
         if (lik == PSYGP_LIK_CATEGORICAL) {
-            double p[3];
+            double p[3] = { 0.0 };
             p[0] = 0.3; p[1] = 0.5 * erfc(-(6.0 * (x[0] - 0.5)) / sqrt(2.0)) * 0.7;
             p[2] = 1.0 - p[0] - p[1];
             out = psygp_simulate_outcome(p, 3, rng_u());
@@ -1611,7 +1614,7 @@ static void ps_moments_n(const psygp_gp* g, const psygp__scr* s, double xint,
 static void ps_moments_brute(const psygp_gp* g, double xint, const psygp__mg* o,
                              double* eq, double* vq) {
     const int nv = 20000;
-    double gx[80], gw[80];
+    double gx[80] = { 0.0 }, gw[80] = { 0.0 };
     double cm = o->cmg / o->vg, sm = sqrt(o->vm - o->cmg * o->cmg / o->vg);
     double h = 18.0 / nv, e1 = 0.0, e2 = 0.0;
     psygp__gh_init(gx, gw, 80);
@@ -1695,7 +1698,7 @@ static void test_psychometric_math(psygp_link link, const char* name) {
     if (!psygp_open(&g, &d)) { CHECK(0, "open %s: %s", name, psygp_error(&g)); return; }
     /* Trials spread over the box, the responses from the observer. */
     for (int i = 0; i < NT; i++) {
-        double x[2], p[2];
+        double x[2] = { 0.0 }, p[2] = { 0.0 };
         x[0] = rng_u();
         x[1] = ps_thr50(x[0]) + 12.0 * (rng_u() - 0.5);
         p[1] = ps_ptrue(x); p[0] = 1.0 - p[1];
@@ -1773,9 +1776,10 @@ static void test_psychometric_math(psygp_link link, const char* name) {
     }
     tinv(S, n2);                                  /* S = Sigma */
     for (int t0 = 0; t0 < 5; t0++) {
-        double x[2], km[NT], kg[NT], am[2 * NT], ag[2 * NT];
+        double x[2] = { 0.0 }, km[NT] = { 0.0 }, kg[NT] = { 0.0 }, am[2 * NT] = { 0.0 }, ag[2 * NT] = { 0.0 };
         double c_mm = 0.0, c_gg = 0.0, c_mg = 0.0, mm, mg;
         psygp__mg o;
+        memset(&o, 0, sizeof(o));
         x[0] = 0.1 + 0.2 * t0; x[1] = 50.0;
         psygp__ps_post(&g, &s, x, &o);
         for (int i = 0; i < n; i++) {
@@ -1869,11 +1873,14 @@ static void test_psychometric_math(psygp_link link, const char* name) {
      * against a dense Gaussian update of their joint 4 x 4 covariance. */
     {
         double xa[2] = { 0.3, 0.0 }, xb[2] = { 0.7, 50.0 };
-        double ama[2 * NT], aga[2 * NT], amb[2 * NT], agb[2 * NT];
+        double ama[2 * NT] = { 0.0 }, aga[2 * NT] = { 0.0 }, amb[2 * NT] = { 0.0 }, agb[2 * NT] = { 0.0 };
         double mua[2], mub[2], ca[3], cb[3], C[4][4], cab[2][2], dcab[2][2];
         double v1a[NT], v2a[NT], J[2], d1, w, c, h[4], Ch[4], hCh = 0.0, vb[2];
         double worst_x = 0.0, worst_u = 0.0;
         psygp__mg oa, ob, ob2;
+        memset(&oa, 0, sizeof(oa));
+        memset(&ob, 0, sizeof(ob));
+        memset(&ob2, 0, sizeof(ob2));
         ps_dense_point(&g, n, A, S, hm, hg, xa, ama, aga, mua, ca);
         ps_dense_point(&g, n, A, S, hm, hg, xb, amb, agb, mub, cb);
         psygp__ps_post(&g, &s, xa, &oa);
@@ -2059,7 +2066,7 @@ static void ps_session(psygp_acq acq, psygp_model model, int rep, int trials,
     d.stop_trials = trials;
     if (!psygp_open(&g, &d)) { CHECK(0, "open session: %s", psygp_error(&g)); return; }
     while (!psygp_done(&g)) {
-        double x[2], p[2];
+        double x[2] = { 0.0 }, p[2] = { 0.0 };
         int rc;
         psygp_next(&g, x);
         p[1] = ps_ptrue(x); p[0] = 1.0 - p[1];
@@ -2143,7 +2150,7 @@ static void test_psychometric(void) {
         d.fit = true; d.fit_every = 15; d.stop_trials = 45;
         CHECK(psygp_open(&g, &d), "open 2AFC: %s", psygp_error(&g));
         while (!psygp_done(&g)) {
-            double x[2], p[2];
+            double x[2] = { 0.0 }, p[2] = { 0.0 };
             psygp_next(&g, x);
             p[1] = 0.5 + 0.48 * ps_ptrue(x); p[0] = 1.0 - p[1];
             if (psygp_update(&g, x, psygp_simulate_outcome(p, 2, rng_u())) != PSYGP_OK) bad++;
@@ -2176,7 +2183,7 @@ static void test_psychometric(void) {
         d.stop_trials = 30;
         CHECK(psygp_open(&g, &d), "open LOCALMI: %s", psygp_error(&g));
         while (!psygp_done(&g)) {
-            double x[2], p[2];
+            double x[2] = { 0.0 }, p[2] = { 0.0 };
             psygp_next(&g, x);
             if (psygp_n_trials(&g) >= d.n_init) {
                 psygp__scr s;
@@ -2677,6 +2684,7 @@ static void test_regress_lengthscale(void) {
     psygp_desc d;
     psygp_gp g;
     psygp_hyper h;
+    memset(&h, 0, sizeof(h));
     audiogram_desc(&d, PSYGP_MODEL_GP, PSYGP_ACQ_LSE);
     CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
     replay(&g, rep_met05_4_x, rep_met05_4_y, 145, "metabolic beta 0.5, rep 4");
@@ -2705,6 +2713,7 @@ static void test_regress_novel(void) {
         psygp_desc d;
         psygp_gp g;
         psygp_hyper h;
+        memset(&h, 0, sizeof(h));
         rng_state = 0x243F6A8885A308D3ull + 0xD15Cull + (uint64_t)r * 0x1000193ull;
         memset(&d, 0, sizeof(d));
         d.n_dims = 2;
@@ -2715,7 +2724,7 @@ static void test_regress_novel(void) {
         d.target_p = 0.75; d.stop_trials = 150; d.acq = PSYGP_ACQ_EAVC;
         CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
         while (!psygp_done(&g)) {
-            double x[2], p[2];
+            double x[2] = { 0.0 }, p[2] = { 0.0 };
             psygp_next(&g, x);
             p[1] = nd_p(x); p[0] = 1.0 - p[1];
             psygp_update(&g, x, psygp_simulate_outcome(p, 2, rng_u()));
@@ -2762,7 +2771,7 @@ static double priors_run(const psygp_priors* pr, bool no_prior, psygp_hyper* h) 
     rng_state = 0x243F6A8885A308D3ull + 0x5050ull;
     if (!psygp_open(&g, &d)) { CHECK(0, "open: %s", psygp_error(&g)); return 0.0; }
     while (!psygp_done(&g)) {
-        double x[2], p2[2];
+        double x[2] = { 0.0 }, p2[2] = { 0.0 };
         psygp_next(&g, x);
         p2[1] = ps_ptrue(x); p2[0] = 1.0 - p2[1];
         psygp_update(&g, x, psygp_simulate_outcome(p2, 2, rng_u()));
@@ -2778,7 +2787,12 @@ static void test_priors(void) {
     psygp_desc d;
     psygp_gp g;
     psygp_priors pr, pr2;
+    memset(&pr, 0, sizeof(pr));
+    memset(&pr2, 0, sizeof(pr2));
     psygp_hyper h0, h1, h2;
+    memset(&h0, 0, sizeof(h0));
+    memset(&h1, 0, sizeof(h1));
+    memset(&h2, 0, sizeof(h2));
     double lm0, lm1, lm2;
     printf("desc.priors:\n");
     ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
@@ -2854,7 +2868,7 @@ static double opt_session(psygp_acq acq, psygp_lik lik, bool minimize, int trial
             if (u1 < 1e-300) u1 = 1e-300;
             rc = psygp_update_real(&g, xn, fv + 0.1 * sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2));
         } else {
-            double p[2];
+            double p[2] = { 0.0 };
             p[1] = 0.5 * erfc(-(2.0 * fv) / sqrt(2.0)); p[0] = 1.0 - p[1];
             rc = psygp_update(&g, xn, psygp_simulate_outcome(p, 2, rng_u()));
         }
@@ -2955,7 +2969,7 @@ static void pair_desc(psygp_desc* d, psygp_acq acq) {
 /* A preference observer with the bump of the optimization test as its
  * utility: x1 is preferred with probability Phi(2 (u(x1) - u(x2))). */
 static int prefer(const double* x1, const double* x2) {
-    double p[2];
+    double p[2] = { 0.0 };
     p[1] = 0.5 * erfc(-(2.0 * (bump(x1) - bump(x2))) / sqrt(2.0));
     p[0] = 1.0 - p[1];
     return psygp_simulate_outcome(p, 2, rng_u());
@@ -2977,7 +2991,7 @@ static void test_pairwise_math(void) {
     d.jitter = 1e-8;
     CHECK(psygp_open(&g, &d), "open pairwise: %s", psygp_error(&g));
     for (int i = 0; i < NT; i++) {
-        double x1[2], x2[2];
+        double x1[2] = { 0.0 }, x2[2] = { 0.0 };
         x1[0] = rng_u(); x1[1] = rng_u(); x2[0] = rng_u(); x2[1] = rng_u();
         CHECK(psygp_update_pair(&g, x1, x2, prefer(x1, x2)) == PSYGP_OK, "update_pair %d", i);
     }
@@ -3075,7 +3089,7 @@ static void test_pairwise_math(void) {
         rng_state = 0x243F6A8885A308D3ull + 0xFA18ull;
         CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
         for (int i = 0; i < 30; i++) {
-            double x1[2], x2[2];
+            double x1[2] = { 0.0 }, x2[2] = { 0.0 };
             x1[0] = rng_u(); x1[1] = rng_u(); x2[0] = rng_u(); x2[1] = rng_u();
             psygp_update_pair(&g, x1, x2, prefer(x1, x2));
         }
@@ -3106,7 +3120,7 @@ static void test_pairwise(void) {
     static const char* const names[3] = { "BALD", "BALV", "Thompson" };
     psygp_desc d;
     psygp_gp g;
-    double x[2];
+    double x[2] = { 0.0 };
     printf("PSYGP_LIK_PAIRWISE:\n");
     pair_desc(&d, PSYGP_ACQ_LSE); d.stop_trials = 10;
     CHECK(!psygp_open(&g, &d), "open accepted LSE with PAIRWISE");
@@ -3129,7 +3143,7 @@ static void test_pairwise(void) {
             d.stop_trials = 60;
             CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
             while (!psygp_done(&g)) {
-                double x1[2], x2[2];
+                double x1[2] = { 0.0 }, x2[2] = { 0.0 };
                 CHECK(psygp_next_pair(&g, x1, x2) == PSYGP_OK, "next_pair");
                 CHECK(psygp_update_pair(&g, x1, x2, prefer(x1, x2)) == PSYGP_OK, "update_pair");
             }
@@ -3182,7 +3196,7 @@ static void async_reference(psygp_gp* g, psygp_desc* d) {
     d->stop_trials = ASYNC_TRIALS;
     CHECK(psygp_open(g, d), "open async reference: %s", psygp_error(g));
     for (int i = 0; i < ASYNC_TRIALS; i++) {
-        double x[1];
+        double x[1] = { 0.0 };
         psygp_next(g, x);
         async_x[i] = x[0];
         async_y[i] = observe(x[0]);
@@ -3198,6 +3212,7 @@ static void test_async(void) {
     psygp_gp ref, g;
     psygp_async a;
     psygp_snapshot s;
+    memset(&s, 0, sizeof(s));
     int n = 0, nref = 0;
     const psygp_trial *href, *hasync;
     async_reference(&ref, &d);
@@ -3265,6 +3280,7 @@ static void test_async_fit_in_idle(void) {
     psygp_async a;
     psygp_async_desc ad;
     psygp_snapshot s;
+    memset(&s, 0, sizeof(s));
     double lm_first = 0.0, lm_last = 0.0;
     int idle_gain = 0;
     rng_state = 0x243F6A8885A308D3ull + 0xef00ull;
@@ -3348,7 +3364,7 @@ static void test_async_queue(void) {
     ad.gp = &g;
     CHECK(psygp_async_start(&a, &ad), "queue start: %s", psygp_async_error(&a));
     for (int i = 0; i < 200 && busy < 3; i++) {
-        double x[1];
+        double x[1] = { 0.0 };
         int rc;
         x[0] = 0.01 + 0.98 * ((double)(i % 17) / 17.0);
         rc = psygp_async_submit(&a, x, i & 1);
@@ -3441,7 +3457,7 @@ static double mixed_session(bool kinds, psygp_model model, int stream) {
         return -1.0;
     }
     while (!psygp_done(&g)) {
-        double x[3];
+        double x[3] = { 0.0 };
         psygp_next(&g, x);
         if (kinds && (x[1] != floor(x[1]) || x[2] != floor(x[2]))) bad++;
         psygp_update(&g, x, mixed_observer(x));
@@ -3517,7 +3533,7 @@ static void test_mixed(void) {
     {
         int bad = 0, seen[3] = { 0, 0, 0 };
         for (int j = 0; j < psygp_n_candidates(&g); j++) {
-            double c[3];
+            double c[3] = { 0.0 };
             psygp_candidate(&g, j, c);
             if (c[1] != floor(c[1]) || c[2] != floor(c[2]) || c[1] < 0.0 || c[1] > 2.0 ||
                 c[2] < 0.0 || c[2] > 4.0) bad++;
@@ -3542,7 +3558,7 @@ static void test_mixed(void) {
         CHECK(psygp_open(&g, &d), "mixed gradient open: %s", psygp_error(&g));
         if (arm == 2) g.ps_tol = real_is_double ? 1e-13 : 1e-6;
         for (int i = 0; i < 60; i++) {
-            double x[3];
+            double x[3] = { 0.0 };
             x[0] = rng_u();
             x[1] = floor(rng_u() * 3.0);
             x[2] = floor(rng_u() * 5.0);
@@ -3636,7 +3652,7 @@ static void test_monotone(void) {
         rng_state = 0x243F6A8885A308D3ull + 0x6D6Full + (uint64_t)grid;
         CHECK(psygp_open(&g, &d), "mono open: %s", psygp_error(&g));
         for (int i = 0; i < 60; i++) {
-            double x[2];
+            double x[2] = { 0.0 };
             x[0] = rng_u();
             x[1] = 0.3 + 0.5 * rng_u();
             psygp_update(&g, x, mono_observer(x));
@@ -3668,7 +3684,7 @@ static void test_monotone(void) {
         /* 2. The level-set acquisition's candidate means are the same
          * projection, on the grid by a running maximum. */
         {
-            double x[2];
+            double x[2] = { 0.0 };
             psygp_next(&g, x);
             for (int j = 0; j < g.M; j++) {
                 double mu, sd;
@@ -3707,7 +3723,7 @@ static void test_monotone(void) {
                 }
             }
             if (psygp_threshold(&g, &ctx, 0.0, &thr, NULL, NULL) == PSYGP_OK) {
-                double pt[2];
+                double pt[2] = { 0.0 };
                 pt[0] = ctx; pt[1] = thr;
                 track(&worst_t, fabs(psygp_predict_p(&g, pt) - 0.6));
             }
@@ -3717,13 +3733,13 @@ static void test_monotone(void) {
         rng_state = 0x243F6A8885A308D3ull + 0x6D6Full + (uint64_t)grid;
         CHECK(psygp_open(&g, &d), "mono open: %s", psygp_error(&g));
         for (int i = 0; i < 60; i++) {
-            double x[2];
+            double x[2] = { 0.0 };
             x[0] = rng_u();
             x[1] = 0.3 + 0.5 * rng_u();
             psygp_update(&g, x, mono_observer(x));
         }
         for (int c = 0; c < 5; c++) {
-            double xs[2 * 101], p[101];
+            double xs[2 * 101] = { 0.0 }, p[101] = { 0.0 };
             for (int k = 0; k <= 100; k++) { xs[2 * k] = 0.25 * c; xs[2 * k + 1] = 0.01 * k; }
             for (int k = 0; k <= 100; k++) {
                 double sd;
@@ -3770,7 +3786,7 @@ static void test_monotone(void) {
             rng_state = 0x243F6A8885A308D3ull + 0x77ull * (uint64_t)(a + 1);
             CHECK(psygp_open(&g, &d), "mono session open: %s", psygp_error(&g));
             while (!psygp_done(&g)) {
-                double x[2];
+                double x[2] = { 0.0 };
                 if (psygp_next(&g, x) < -1) break;
                 if (psygp_update(&g, x, mono_observer(x)) != PSYGP_OK) break;
                 n++;
@@ -4100,7 +4116,7 @@ static void test_snapshot(void) {
         snap_lse(&d);
         CHECK(psygp_open(&g, &d), "snapshot open");
         for (int n = 0; n < 10; n++) {
-            double x[2];
+            double x[2] = { 0.0 };
             psygp_next(&g, x);
             psygp_update(&g, x, x[1] > 0.5);
         }
@@ -4242,6 +4258,7 @@ static void test_regression_csf6(void) {
             psygp_update(&g, csf6_rep4[n], (int)csf6_rep4[n][6]);
             if (n + 1 == 10 || n + 1 == 30) {
                 psygp_hyper h;
+                memset(&h, 0, sizeof(h));
                 double pmin = 1.0, pmax = 0.0, flat = (n + 1) * log(0.5);
                 psygp_get_hyper(&g, &h);
                 for (int j = 0; j < 200; j++) {
@@ -4293,6 +4310,8 @@ static void test_fit_pcg(void) {
         psygp_desc d;
         psygp_gp ga, gb;
         psygp_hyper ha, hb;
+        memset(&ha, 0, sizeof(ha));
+        memset(&hb, 0, sizeof(hb));
         double dh = 0.0, dp = 0.0, dl;
         int n = c == 3 ? 120 : 150, ra = 0, rb = 0;
         memset(&d, 0, sizeof(d));
@@ -4361,7 +4380,7 @@ static void test_fit_pcg(void) {
         track(&dh, fabs(ha.mean - hb.mean));
         dl = fabs(psygp_log_marginal(&ga) - psygp_log_marginal(&gb));
         for (int j = 0; j < psygp_n_candidates(&ga); j++) {
-            double x[2];
+            double x[2] = { 0.0 };
             psygp_candidate(&ga, j, x);
             track(&dp, fabs(fit_pcg_q(&ga, x) - fit_pcg_q(&gb, x)));
         }
@@ -4376,6 +4395,81 @@ static void test_fit_pcg(void) {
     }
 }
 
+/* --- caller memory at any alignment ------------------------------------- */
+
+/* desc.memory need not be 8-byte aligned: psygp_open() aligns the base and
+ * psygp_memory_size() asks for the slack. Before v0.14.1 the scratch pointers
+ * of every later call were laid out from the unaligned address, so a buffer
+ * on an odd address read the quadrature weights a few bytes off (on a macOS
+ * build: outcome probabilities summing to 8e280). The same session through a
+ * malloc'd handle and through a static buffer at each offset 0..7 has to agree
+ * to the bit, and predict_outcomes() has to write every one of its K slots. */
+static void test_memory_alignment(void) {
+    static unsigned char buf[(1 << 20) + 16];
+    static const psygp_lik liks[3] = { PSYGP_LIK_BERNOULLI, PSYGP_LIK_ORDINAL,
+                                       PSYGP_LIK_CATEGORICAL };
+    int bad = 0, unwritten = 0;
+    printf("caller memory at every alignment:\n");
+    for (int l = 0; l < 3; l++) {
+        double ref_lm = 0.0, ref_p[PSYGP_MAX_OUTCOMES] = { 0.0 }, ref_x[40] = { 0.0 };
+        int K = l == 0 ? 2 : l == 1 ? 4 : 3;
+        for (int off = -1; off < 8; off++) {
+            psygp_desc d;
+            psygp_gp g;
+            double p[PSYGP_MAX_OUTCOMES + 1], xq[1] = { 0.45 }, sum = 0.0;
+            memset(&d, 0, sizeof(d));
+            d.n_dims = 1;
+            d.lo[0] = 0.0; d.hi[0] = 1.0;
+            d.lik = liks[l];
+            d.n_outcomes = l == 0 ? 0 : K;
+            d.link = PSYGP_LINK_LOGIT;
+            d.target_p = 0.6;
+            d.grid[0] = 11;
+            d.n_init = 4;
+            d.fit = true;
+            d.fit_every = 10;
+            d.stop_trials = 40;
+            d.max_trials = 40;
+            if (off >= 0) {
+                CHECK(psygp_memory_size(&d) + 8 <= sizeof(buf), "alignment buffer too small");
+                d.memory = buf + off;
+                d.memory_size = sizeof(buf) - 8;
+            }
+            CHECK(psygp_open(&g, &d), "alignment open: %s", psygp_error(&g));
+            rng_state = 0x243F6A8885A308D3ull + 0xA116ull * (uint64_t)(l + 1);
+            for (int i = 0; i < 40; i++) {
+                double x[1] = { 0.0 };
+                psygp_next(&g, x);
+                if (off < 0) ref_x[i] = x[0];
+                else if (x[0] != ref_x[i]) bad++;
+                psygp_update(&g, x, (int)(rng_u() * (double)K));
+            }
+            /* NaN in every slot, and one past the end, so a slot the call
+             * leaves unwritten shows. */
+            for (int k = 0; k <= PSYGP_MAX_OUTCOMES; k++) p[k] = (double)NAN;
+            CHECK(psygp_predict_outcomes(&g, xq, p) == PSYGP_OK, "alignment predict_outcomes");
+            for (int k = 0; k < K; k++) {
+                if (!(p[k] == p[k])) unwritten++;
+                sum += p[k];
+            }
+            if (p[K] == p[K]) unwritten++;   /* written past K */
+            CLOSE(sum, 1.0, 1e-12, "lik %d offset %d: outcome probabilities sum to 1", l, off);
+            if (off < 0) {
+                ref_lm = psygp_log_marginal(&g);
+                memcpy(ref_p, p, sizeof(ref_p));
+            } else {
+                if (psygp_log_marginal(&g) != ref_lm) bad++;
+                if (memcmp(ref_p, p, (size_t)K * sizeof(double)) != 0) bad++;
+            }
+            psygp_close(&g);
+        }
+    }
+    CHECK(bad == 0, "%d differences between malloc'd and caller memory at some offset", bad);
+    CHECK(unwritten == 0, "predict_outcomes left %d slots unwritten or wrote past K", unwritten);
+    printf("  BERNOULLI, ORDINAL (4), CATEGORICAL (3): malloc and offsets 0..7 agree to the bit,\n"
+           "  every outcome slot written (%d differences, %d unwritten)\n", bad, unwritten);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("psy_gp.h tests\n");
@@ -4386,6 +4480,7 @@ int main(void) {
     test_kernel(PSYGP_KERNEL_RBF);
     test_kernel(PSYGP_KERNEL_SEMIP);
     test_memory();
+    test_memory_alignment();
     test_open_reject();
     test_simulate_outcome();
     if (real_is_double) test_numeric_failure();

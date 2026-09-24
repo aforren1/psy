@@ -107,6 +107,9 @@ int main(int argc, char** argv) {
     int trial, ready_next_frame = 0, ready_by_interval = 0, busy = 0;
     int worst_frames = 0, frame = 0, done_trials = 0;
 
+    /* psyq_async_poll() and psyq_async_wait() fill the snapshot only when they
+     * succeed; start it zeroed so a read after a failure is defined. */
+    memset(&snap, 0, sizeof(snap));
     if (trials < 1) trials = 1;
     if (trials > MAX_TRIALS) trials = MAX_TRIALS;
     if (per_trial < 1) per_trial = 1;

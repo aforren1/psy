@@ -467,8 +467,12 @@ static int t_build(TrialsObject* o, PyObject* args, PyObject* kwds, psytr_desc* 
             PyErr_SetString(TArgumentError, "record_size is too large");
             return -1;
         }
-        o->records = (unsigned char*)PyMem_Calloc(PSYTR_MAX_TRIALS, (size_t)record_size);
+        /* Not PyMem_Calloc: it is in the stable ABI from 3.7, but 3.8 and
+         * 3.9 declare it only in cpython/pymem.h, which Py_LIMITED_API
+         * leaves out; PyMem_RawCalloc is Limited API only from 3.13. */
+        o->records = (unsigned char*)PyMem_Malloc((size_t)PSYTR_MAX_TRIALS * (size_t)record_size);
         if (!o->records) { PyErr_NoMemory(); return -1; }
+        memset(o->records, 0, (size_t)PSYTR_MAX_TRIALS * (size_t)record_size);
         o->record_size = (size_t)record_size;
         d->records = o->records;
         d->record_size = (size_t)record_size;

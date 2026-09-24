@@ -1873,6 +1873,15 @@ static void test_batch_pf(void) {
  * ======================================================================= */
 #ifdef PSYQ_ASYNC
 
+/* Zeroed starting points for the structs the async calls fill. psyq_async_poll()
+ * and psyq_async_wait() write a snapshot only when they succeed, and gcc 16 at
+ * -O3 cannot see that the checks read it only then, so every local starts as a
+ * copy of these and a read on a failure path reads zeros, never an
+ * indeterminate value. Static and without an initializer, which zeroes them in
+ * C and in C++ alike (a const one would need an initializer in C++). */
+static psyq_snapshot   g_snap_zero;
+static psyq_async_desc g_ad_zero;
+
 /* A grid big enough that one update plus one selection takes a while (about a
  * millisecond here), so the queue-full and not-ready-yet cases can actually be
  * reached from a submit loop. */
@@ -1913,8 +1922,8 @@ static psyq_async g_async;
 /* An async run against a synchronous replay of the same responses. */
 static void test_async_matches(void) {
     psyq_desc d;
-    psyq_async_desc ad;
-    psyq_snapshot snap;
+    psyq_async_desc ad = g_ad_zero;
+    psyq_snapshot snap = g_snap_zero;
     int outcomes[12] = {0}, proposals[12] = {0};
     int i, seq, rc;
 
@@ -1990,8 +1999,8 @@ static void test_async_matches(void) {
  * thread is finished still answers with the previous seq, and a stop drains. */
 static void test_async_queue(void) {
     psyq_desc d;
-    psyq_async_desc ad;
-    psyq_snapshot snap;
+    psyq_async_desc ad = g_ad_zero;
+    psyq_snapshot snap = g_snap_zero;
     int acc_stim[256] = {0}, acc_out[256] = {0};
     int i, n_acc = 0, busy = 0, last_seq = 0, rc, prev;
 
@@ -2067,8 +2076,8 @@ static void test_async_queue(void) {
 /* Off-grid submits, and the calls that should refuse. */
 static void test_async_edges(void) {
     psyq_desc d;
-    psyq_async_desc ad;
-    psyq_snapshot snap;
+    psyq_async_desc ad = g_ad_zero;
+    psyq_snapshot snap = g_snap_zero;
     double sv[1] = {0};
     int i, seq, rc;
 
@@ -2143,8 +2152,8 @@ static void test_async_edges(void) {
 /* queue_depth is the session's policy under the PSYQ_ASYNC_QUEUE capacity. */
 static void test_async_depth(void) {
     psyq_desc d;
-    psyq_async_desc ad;
-    psyq_snapshot snap;
+    psyq_async_desc ad = g_ad_zero;
+    psyq_snapshot snap = g_snap_zero;
     int i, busy = 0, accepted = 0, last = 0, rc;
 
     async_axes();
