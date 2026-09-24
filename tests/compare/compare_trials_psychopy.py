@@ -2,8 +2,8 @@
 """Run psy.trials and PsychoPy's TrialHandler / TrialHandlerExt on the same
 condition lists and check the properties each order promises, on both.
 
-Not part of CI: PsychoPy is a heavy install. This is the comparison
-docs/psy_trials.md and the psy_trials.h STATUS block ask for.
+Not part of CI: PsychoPy is a heavy install. This is the comparison that
+docs/psy_trials.md and the psy_trials.h STATUS block report.
 
     uv pip install ./bindings/python/psy_trials numpy psychopy
     python tests/compare/compare_trials_psychopy.py

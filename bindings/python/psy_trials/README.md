@@ -211,4 +211,9 @@ reproduce a run bit for bit.
 checks the orders against `psychopy.data.TrialHandler` and
 `TrialHandlerExt` over 100 seeds. The two use different generators, so the
 random orders are compared by the properties each promises. Sequential
-orders must be identical.
+orders are identical. Under `random`, each repetition is one block that
+holds every condition once, on both sides. Under `fullRandom`, weighted or
+not, the counts per condition are exact on both sides. The weighted
+sequential orders differ by design: PsychoPy runs a row's copies back to
+back, and this header cycles the rows. The script reports that difference
+and does not fail on it.

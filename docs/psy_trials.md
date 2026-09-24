@@ -1,15 +1,16 @@
 # psy_trials.h design
 
-Status: **v0.1.0, implemented.** Registered in `CMakeLists.txt`, with
-`tests/adapt/psy_trials_test.c` under ctest and two examples in CI; gcc
-and MSVC clean, sanitizer clean. The Python binding `psy.trials` exists, and
-`tests/compare/compare_trials_psychopy.py` checks it against PsychoPy's
-TrialHandler: identical sequential order, and the block properties of the
-random orders over 100 seeds per design; weighted sequential order differs
-by design (PsychoPy runs a row's copies back to back, this header cycles
-the rows) and the script reports rather than fails it. This page records why the API looks the way
-it does and what the implementation changed; the header says what it
-does.
+Status: **v0.1.1, implemented and compared.** Registered in
+`CMakeLists.txt`, with `tests/adapt/psy_trials_test.c` under ctest and two
+examples in CI; gcc and MSVC clean, sanitizer clean. The Python binding
+`psy.trials` and the MEX function `psy_trials` exist, and
+`tests/compare/compare_trials_psychopy.py` checks the binding against
+PsychoPy's TrialHandler: identical sequential order, and the block
+properties of the random orders over 100 seeds per design. The weighted
+sequential order differs by design (PsychoPy runs a row's copies back to
+back, this header cycles the rows), and the script reports that and does
+not fail on it. This page records why the API looks the way it does and
+what the implementation changed; the header says what it does.
 
 ## Goals
 
@@ -157,8 +158,9 @@ how every analysis pipeline already works.
 ### Fixed capacity, inline
 
 `PSYTR_MAX_TRIALS` (4096) and `PSYTR_MAX_CONDITIONS` (1024) size the
-handle at compile time, 87 KB at the defaults (19 bytes per trial). A session of more than 4096 trials
-is two handles. The caller's per-trial record is the one variable-size
+handle at compile time: 19 bytes per trial, 91480 bytes (89 KB) at the
+defaults on x86-64. A session of more than 4096 trials is two handles.
+The caller's per-trial record is the one variable-size
 thing and lives in a buffer the caller provides, sized by
 `record_size x PSYTR_MAX_TRIALS`, so nothing allocates.
 
@@ -166,35 +168,45 @@ thing and lives in a buffer the caller provides, sized by
 
 PsychoPy shuffles with NumPy's generator. The orders cannot match trial
 for trial unless this header reproduces NumPy's Mersenne Twister and its
-shuffle, which it will not. The v0.1 test therefore checks properties
+shuffle, which it will not. The comparison therefore checks properties
 against PsychoPy: under `random`, every condition once per repetition
 block and the blocks in order; under `fullRandom`, every condition exactly
 `nReps` times; under `sequential`, the identical order. The constraint
 rules are checked directly on generated orders, and the failure path is
 checked with a design known to be impossible.
 
-## Verification plan for v0.1
+## Verification
 
-- Compile checks as C99, C11, C++17, warnings as errors, and MSVC /W4 /WX.
-- `tests/adapt/psy_trials_test.c`: the factorial index round trip; each
-  order's properties over many seeds; each constraint rule holding on
-  every generated order and the repair's failure message on an impossible
-  set; tracks interleaved with `track_rate` at 0, 0.5 and 1, with fake
-  tracks that finish at set counts, checking the mix and that a finished
-  track is never picked; practice flagged and untallied; re-queue with and
-  without a gap; warmup trials at every later block from the named
-  list, flagged and untallied; `psytr_mark_break` ending a run for the
-  constraints and flagging the next trial; tallies against a hand count;
-  `psytr_restore` reproducing a run's schedule and history bit for bit;
-  `psytr_save` then `psytr_load` into a fresh handle continuing
-  identically, and refusing a desc whose numbers differ; every rejected
-  desc; the format functions against fixed strings.
+The header's STATUS block has the numbers. In summary:
+
+- Compile checks as C99, C11 and C++17 with warnings as errors, and MSVC
+  /W4 /WX in its default C dialect and as C++17.
+- `tests/adapt/psy_trials_test.c`, at `PSYTR_MAX_TRIALS` 256 and at the
+  default 4096: the factorial index round trip; each order's properties
+  over 400 seeds; each constraint rule holding on every repaired order of
+  eight designs x 200 seeds, by a checker written separately from the
+  header's, and the repair's failure message on an impossible set; tracks
+  interleaved with `track_rate` at 0 (rejected with conditions), 0.5 and
+  1, checking the mix and that a finished track is never picked; practice
+  and warmup flagged and untallied; re-queues with and without a gap, and
+  760 random re-queues under a no-repeat rule with no unflagged violation;
+  `psytr_mark_break` ending a run; tallies against a hand count;
+  `psytr_restore` reproducing a run bit for bit, with and without tracks;
+  `psytr_save` at 42 cut points then `psytr_load` into a garbage-filled
+  handle, identical to the uninterrupted run, snapshot bytes included;
+  every load refusal and every rejected desc; the format functions against
+  fixed strings.
 - `examples/trials_mocs.c` (constant stimuli with a constraint, printing
   the proportions and a CSV) and `examples/trials_interleave.c` (three
   psy_stair.h staircases and a catch condition, the second USAGE example
   run for real, printing which track each trial went to). Both exit 0
-  with no hardware.
-- A Python binding, `psy.trials`, in the shape of the others, and a
-  `tests/compare/compare_trials_psychopy.py` that checks the order
-  properties above against `psychopy.data.TrialHandler` on the same
-  condition lists.
+  with no hardware, and print the same bytes under gcc and MSVC.
+- `tests/compare/compare_trials_psychopy.py` runs `psy.trials` beside
+  `psychopy.data.TrialHandler` and `TrialHandlerExt` on the same condition
+  lists over 100 seeds: SEQUENTIAL is identical to PsychoPy's order, RANDOM
+  holds each condition once per repetition block on both sides, and
+  FULL_RANDOM, weighted or not, gives exact counts on both sides.
+
+Not done: a run on macOS or on big-endian hardware, and a load of a
+snapshot written by another compiler. The snapshot's portability is by
+construction, not by test.

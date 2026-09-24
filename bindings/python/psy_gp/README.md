@@ -60,9 +60,9 @@ PSY_GP_MAX_TRIALS=1024 uv pip install ./bindings/python/psy_gp
 python -c "import psy.gp; print(psy.gp.MAX_TRIALS)"     # 1024
 ```
 
-The ceiling itself costs about 80 bytes per trial in every `GP` object, for
-the inline history. The matrices are allocated per handle from `max_trials`,
-so they cost only when a run asks for that many trials. At
+The ceiling itself costs nothing in a `GP` object: the history and the
+matrices are allocated per handle from `max_trials` (the history is 144
+bytes a trial), so they cost only when a run asks for that many trials. At
 `max_trials=1024`, `memory_size()` measured about 26 MB for the GP model with
 LSE, 33 MB with EAVC, 35 MB for the psychometric model, and 52 MB for a
 three-class categorical model (two dimensions, 512 candidates). The matrices

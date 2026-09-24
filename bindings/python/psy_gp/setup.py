@@ -22,10 +22,11 @@ if sys.platform != "win32":
     extra_link_args.append("-pthread")
     libraries.append("m")
 
-# PSYGP_MAX_TRIALS sizes the handle's history and caps desc.max_trials, so a
-# session or a data set longer than 512 trials needs a build with a larger
-# value: PSY_GP_MAX_TRIALS=1024 pip install . The matrices are allocated per
-# handle from desc.max_trials, so the cap costs nothing until it is used.
+# PSYGP_MAX_TRIALS caps desc.max_trials, so a session or a data set longer
+# than 512 trials needs a build with a larger value:
+# PSY_GP_MAX_TRIALS=1024 pip install . The history and the matrices are
+# allocated per handle from desc.max_trials, so the cap costs nothing until
+# it is used.
 max_trials_env = os.environ.get("PSY_GP_MAX_TRIALS", "512").strip()
 try:
     MAX_TRIALS = int(max_trials_env)

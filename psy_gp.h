@@ -16,8 +16,8 @@
  *   include psy_rt.h, unless PSYGP_ASYNC asks for the optional thread that
  *   runs the inference off the frame loop; see ASYNC.
  *
- *   Targets every platform the compiler does. C++17, C11, or the pre-C11 C
- *   dialect MSVC compiles with by default.
+ *   Targets every platform the compiler does. C99 is the floor: it builds as
+ *   C99, C11 and C++17, and in the C dialect MSVC compiles by default.
  *
  *   ---------------------------------------------------------------------
  *   CHANGELOG
@@ -293,7 +293,8 @@
  *   trials.
  *   On examples/gp_audiometric.c, 20 replications, trial 150: field MAE(p) /
  *   band MAE(p) / threshold error in dB, the worst replication's threshold
- *   error, and ms per trial with fits every 20 trials:
+ *   error, and ms per trial with fits every 20 trials. semip2 is this model,
+ *   PSYGP_MODEL_PSYCHOMETRIC, under the example's name for it:
  *
  *                      metabolic, beta 2              metabolic, beta 0.5
  *     RBF LSE       .077 .213 1.98 +- .32 3.9  3   .083 .298 2.49 +- .32 4.9  3
@@ -413,15 +414,38 @@
  *     2.51, but MAE(p) from 0.086 to 0.092, and five replications get worse
  *     (three by 1 to 1.5 dB), which is why the projection stays opt-in.
  *
- *   NOT verified: nothing is compared against AEPsych yet, so the
- *   agreement claim of docs/psy_adapt.md is still a plan, and the Laplace
- *   band's 95% coverage is unmeasured. The categorical one-against-the-rest
- *   acquisitions have no Monte Carlo check. The timings come from one run on
- *   one idle x86-64 desktop and vary by tens of percent between runs of the
- *   same binary, so the frame-budget trial counts are an order of magnitude and
- *   not a specification (examples/gp_bench.c prints its own numbers;
- *   MEMORY, COST AND THREADS quotes them), and the async layer's late counts
- *   are a property of that machine and that grid, not of the header. No
+ *   COMPARED with AEPsych 0.8.0 through the Python binding, in one process
+ *   on one response stream (tests/compare/compare_gp_aepsych.py): the
+ *   metabolic phenotype of examples/gp_audiometric.c at beta 2, 10
+ *   replications, both libraries given the same Sobol init points. AEPsych
+ *   runs its variational GP and its own LSE, EAVC and BALV, optimized over
+ *   the box. Threshold error at trial 150, this header's GP model against
+ *   AEPsych: EAVC 2.09 against 2.23 dB (inside the replication error), BALV
+ *   4.45 against 7.10, LSE 2.06 against 1.29. The LSE gap is the 11 x 21
+ *   candidate grid: with refine_steps = 2 LSE reaches 1.44 +- 0.16 dB and
+ *   EAVC 1.44 +- 0.28 (CANDIDATES). The field error MAE(p) is about half of
+ *   AEPsych's for every acquisition at 100 and 150 trials. The psychometric
+ *   model with EAVC reaches 1.26 +- 0.09 dB and a field error of 0.012,
+ *   against AEPsych's best of 1.29 dB and 0.18. Fitted from scratch to the
+ *   same trials, with AEPsych's output scale fitted (a ScaleKernel) instead
+ *   of fixed at 1, the two GP models agree: the fields differ by 0.016 and
+ *   the threshold curves by 0.14 dB. The cost per trial is 6 to 13 ms here
+ *   against 4 to 8 s for AEPsych, which refits every trial; both ran on one
+ *   loaded machine, so the ratio is an order of magnitude, not a number.
+ *   On human data (tests/compare/compare_gp_csfdata.py: Letham et al.
+ *   2022's 1001-trial 6-D contrast sensitivity set, 5-fold
+ *   cross-validation) the held-out log loss is 0.537 to 0.541 for both
+ *   models here, 0.529 for AEPsych and 0.543 for logistic regression, all
+ *   inside the fold noise. docs/psy_adapt.md,
+ *   "Verification", and docs/adapt_comparison.md have the details.
+ *
+ *   NOT verified: the Laplace band's 95% coverage is unmeasured, and the
+ *   categorical one-against-the-rest acquisitions have no Monte Carlo check.
+ *   The timings vary by tens of percent between runs of the same binary, so
+ *   the frame-budget trial counts are an order of magnitude and not a
+ *   specification (examples/gp_bench.c prints its own numbers; MEMORY, COST
+ *   AND THREADS quotes them), and the async layer's late counts are a
+ *   property of that machine and that grid, not of the header. No
  *   platform other than x86-64 has been built or run. The async layer has run
  *   on Linux (pthreads) and on Windows (MSVC, native threads, and the OS
  *   granted the below-normal drop); psy_rt.h's macOS path is untested here.
@@ -446,18 +470,19 @@
  *       #define PSY_GP_IMPLEMENTATION
  *       #include "psy_gp.h"
  *
- *       psygp_desc d = {0};
- *       d.n_dims        = 2;
- *       d.lo[0] = 0.0;  d.hi[0] = 1.5;      // log10 spatial frequency
- *       d.lo[1] = -3.0; d.hi[1] = 0.0;      // log10 contrast: intensity
- *       d.intensity_dim = 1;
- *       d.kernel        = PSYGP_KERNEL_SEMIP;  // linear in contrast
- *       d.acq           = PSYGP_ACQ_EAVC;      // look-ahead level set
- *       d.target_p      = 0.75;
- *       d.n_init        = 10;                // Halton trials first
- *       d.fit           = true;              // fit the hyperparameters
- *       d.fit_every     = 10;
- *       d.stop_trials   = 150;
+ *       psygp_desc d = {                    // unset fields are 0: defaults
+ *           .n_dims        = 2,
+ *           .lo            = { 0.0, -3.0 },  // log10 spatial frequency,
+ *           .hi            = { 1.5,  0.0 },  // log10 contrast (intensity)
+ *           .intensity_dim = 1,
+ *           .kernel        = PSYGP_KERNEL_SEMIP, // linear in contrast
+ *           .fit           = true,           // fit the hyperparameters
+ *           .fit_every     = 10,
+ *           .acq           = PSYGP_ACQ_EAVC,     // look-ahead level set
+ *           .target_p      = 0.75,
+ *           .n_init        = 10,             // Halton trials first
+ *           .stop_trials   = 150,
+ *       };
  *
  *       psygp_gp g;
  *       if (!psygp_open(&g, &d)) { fputs(psygp_error(&g), stderr); return 1; }
@@ -709,9 +734,10 @@
  *       per Newton step on an N x N matrix, N being the trial count, and
  *       needs no optimizer. For a probit likelihood on a few hundred
  *       binary trials the two agree to within the noise of the trials
- *       themselves; docs/psy_adapt.md has the comparison plan and the
- *       caveats (Laplace underestimates the variance where the posterior
- *       is skewed, i.e. early and at the edges).
+ *       themselves: fitted to the same trials, the two models' fields
+ *       differ by 0.016 (STATUS). Laplace underestimates the variance where
+ *       the posterior is skewed, that is, early and at the edges;
+ *       docs/psy_adapt.md has the caveats.
  *     - The next stimulus is chosen from a CANDIDATE SET, a grid or a
  *       Halton set over the box, not by optimizing the acquisition with
  *       gradients. Every candidate is scored, the best wins; a grid of a
@@ -1439,7 +1465,7 @@
  *     observation cannot move across the level. Together they took the scoring
  *     loop at M = 256 from 6 to 16 ms down to 3.5 to 3.9 ms, and a whole EAVC
  *     psygp_next() from 15 to 9 ms at N = 100 and from 101 to 28 ms at
- *     N = 400, measured as CPU time on the machine of the FRAME BUDGET table.
+ *     N = 400, measured as CPU time on one x86-64 desktop core under WSL2.
  *     What is left is the algorithm rather than the implementation: the M x M
  *     covariance costs M^2 N / 2 and the prediction M N^2 / 2, so halving M
  *     is what halves the first and quarters nothing else.
@@ -1662,8 +1688,9 @@
  *   with LSE and 10.53 MB with EAVC; N = 200, M = 512 with LSE is 1.14 MB;
  *   a 3-class categorical at N = M = 512 with LSE is 12.63 MB; Bernoulli at
  *   N = 2048, M = 256 with LSE is 97.9 MB (MB here are 2^20 bytes). The
- *   history is in the block, N * 144 bytes, so the handle itself is 2.5 KB
- *   whatever PSYGP_MAX_TRIALS is. Nothing allocates after open.
+ *   history is in the block, N * 144 bytes, so the handle itself is 2904
+ *   bytes on x86-64 whatever PSYGP_MAX_TRIALS is. Nothing allocates after
+ *   open.
  *
  *   Per update: a Laplace refit warm-started from the last mode, typically
  *   2 to 4 Newton steps, each an N x N Cholesky (N^3 / 3 flops) plus two
@@ -1678,7 +1705,7 @@
  *   On a large data set a converged fit is minutes: on 500 trials of the 6-D
  *   contrast sensitivity data (HYPERPARAMETERS), about 33 s for the GP model
  *   and 541 s for the psychometric model on the loaded machine that ran
- *   tests/compare/compare_gp_csfdata.py, and 8.7 s and about 210 s (updates
+ *   tests/compare/compare_gp_csfdata.py, and 6.9 s and about 200 s (updates
  *   included) for the same protocol on a quiet one. desc.fit_pcg (below)
  *   takes them to 3.4 s and 57 s. At PSYGP_MAX_TRIALS 1024 the GP model's
  *   block is about 25 MB, and an 800-trial fit costs about 4 times the
@@ -1834,24 +1861,25 @@
  *   A trial's psygp_next() plus psygp_update() should fit in one display
  *   frame, 16 ms, so an experiment can call them between trials with no
  *   thread and no pacing. examples/gp_bench.c measures exactly that and
- *   prints the largest trial count that stays inside it. On one x86-64
- *   desktop core under WSL2, gcc -O2, Bernoulli probit RBF over a 2-D box
- *   with M = 256 candidates, next + update, median of a ten-trial window, in
- *   ms, from one run on an otherwise idle machine:
+ *   prints the largest trial count that stays inside it. Measured on v0.14.0
+ *   on one x86-64 laptop core (an i7-1360P under WSL2, load average under 1),
+ *   gcc 11.4 -O2, Bernoulli probit RBF over a 2-D box with M = 256
+ *   candidates, next + update, median of a ten-trial window, in ms:
  *
  *     N     LSE      LSE no      EAVC     EAVC no
  *           exact    refit       exact    refit
- *     50     0.55     0.30        4.8      6.9
- *     100    1.6      0.81        7.3      7.7
- *     200    6.7      3.2        16.3     13.2
- *     400   43.8     14.4        49.0     25.7
+ *     50     0.34     0.24        3.2      3.3
+ *     100    1.2      0.70        4.8      4.5
+ *     200    4.9      2.4         9.1      7.7
+ *     400   21.1      8.6        30.0     15.0
  *
- *   and the largest N whose next + update still fits the frame:
+ *   and the largest N whose next + update still fits the frame, from that
+ *   run and a second one a minute later:
  *
- *     LSE, exact refit every trial      311
+ *     LSE, exact refit every trial      347 and 348
  *     LSE, no refit inside the loop     past 400
- *     EAVC, exact refit every trial     216
- *     EAVC, no refit inside the loop    265
+ *     EAVC, exact refit every trial     285 and 299
+ *     EAVC, no refit inside the loop    past 400
  *
  *   Past 400 trials the frame is gone for an exact update whatever the
  *   solver: with conjugate-gradient Newton steps (desc.pcg_threshold) an
@@ -1864,16 +1892,17 @@
  *   arithmetic.
  *
  *   A hyperparameter fit does not fit a frame at any useful N, which is what
- *   psygp_fit_step() is for: on the same machine at N = 400 one step is 43 to
- *   74 ms and a whole fit is 40 steps, 1.8 to 2.3 s, so a fit spread one step
+ *   psygp_fit_step() is for: on the same machine at N = 400 one step is 28 to
+ *   37 ms and a whole fit is 40 steps, 1.0 to 1.2 s, so a fit spread one step
  *   to a trial costs a session 40 trials of latency instead of one trial of
- *   two seconds.
+ *   a second.
  *
  *   ("no refit" is refit_every past the session length.) Read those as an
  *   order of magnitude, not as a specification: the run-to-run spread is tens
  *   of percent even quiet, the largest-N figures moved between 180 and 380 over
- *   runs of the same binary on a loaded machine, and anything else running
- *   inflates all of them. Measure your own configuration with gp_bench.
+ *   runs of the same binary on a loaded machine (v0.1, an x86-64 desktop),
+ *   and anything else running inflates all of them. Measure your own
+ *   configuration with gp_bench.
  *
  *   What to do when
  *   a configuration does not fit: fewer candidates (next is linear in M,
@@ -1964,8 +1993,9 @@
  *   two places randomness helps (ties, random acquisition). examples/gp_sim.c
  *   runs the LSE, EAVC and BALV configurations against a 2-D observer with
  *   a known threshold curve and prints the error of psygp_threshold() per
- *   trial; that is the harness the comparison with AEPsych will run on, through
- *   the Python binding, in one process, on one response stream.
+ *   trial. tests/compare/compare_gp_aepsych.py runs the comparison with
+ *   AEPsych on the same kind of observer, through the Python binding, in one
+ *   process, on one response stream; STATUS has its result.
  *   tests/adapt/psy_gp_test.c is the self-checking test the STATUS block
  *   quotes; examples/gp_bench.c is where the cost numbers come from.
  *
@@ -2043,12 +2073,15 @@
  *       #define PSY_GP_IMPLEMENTATION
  *       #include "psy_gp.h"             // brings psy_rt.h with it
  *
- *       psygp_gp g;  psygp_async a;  psygp_async_desc ad = {0};
+ *       psygp_gp g;
  *       psygp_open(&g, &desc);          // as usual, on this thread
- *       ad.gp          = &g;
- *       ad.fit_in_idle = true;          // the fit lives in the gaps
- *       ad.below_normal = true;         // never above the frame loop
- *       ad.context[0]  = 0.5;           // where the snapshot's threshold is
+ *       psygp_async a;
+ *       psygp_async_desc ad = {
+ *           .gp           = &g,
+ *           .context      = { 0.5 },    // where the snapshot's threshold is
+ *           .fit_in_idle  = true,       // the fit lives in the gaps
+ *           .below_normal = true,       // never above the frame loop
+ *       };
  *       if (!psygp_async_start(&a, &ad)) die(psygp_async_error(&a));
  *
  *       psygp_snapshot s;
@@ -2129,12 +2162,12 @@
  *   an async session means replaying the history through psygp_update() with
  *   fit_in_idle off.)
  *
- *   COST. The handle is 6160 bytes on x86-64 at the default ceilings: mostly
+ *   COST. The handle is 6240 bytes on x86-64 at the default ceilings: mostly
  *   psyrt_pump's inline ring, which this layer does not use
  *   (PSYRT_PUMP_INLINE_BYTES can be set to 1 if nothing else in the program
- *   needs it), plus 80 bytes a queued response and a 360-byte snapshot.
+ *   needs it), plus 80 bytes a queued response and a 440-byte snapshot.
  *   A submit is a mutex, an 80-byte copy and a condition-variable signal. A
- *   poll is an atomic load and a 360-byte copy under a lock nothing else holds
+ *   poll is an atomic load and a 440-byte copy under a lock nothing else holds
  *   for long. Nothing allocates, at start or after.
  *
  *   ---------------------------------------------------------------------

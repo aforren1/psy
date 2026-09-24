@@ -11,8 +11,8 @@
  *
  *   Targets Windows, Linux and macOS, and WebAssembly through Emscripten
  *   (node, or a browser worker) with the scheduling ladder collapsed; see
- *   WEBASSEMBLY. C++17, C11, or the pre-C11 C dialect MSVC compiles with by
- *   default. Nothing but the OS.
+ *   WEBASSEMBLY. C99 is the floor: it builds as C99, C11 and C++17, and in
+ *   the C dialect MSVC compiles by default. Nothing but the OS.
  *
  *   ---------------------------------------------------------------------
  *   CHANGELOG
@@ -129,8 +129,8 @@
  *   obtained. Only PSYRT_POLICY_TIME_CRITICAL (Windows) and
  *   PSYRT_POLICY_NORMAL have run. Treat the real-time rungs as written, not
  *   as tested, and check what psyrt_describe() reports on your rig.
- *   No number in this header is a measurement. Every latency statement is a
- *   bound or a pointer at rt_jitter.
+ *   Outside this STATUS block, no number in this header is a measurement.
+ *   Every latency statement is a bound or a pointer at rt_jitter.
  *
  *   ---------------------------------------------------------------------
  *   USAGE
@@ -431,13 +431,13 @@
  *   constraint into a contract the code can check, and it makes background
  *   fitting free: on_idle runs one fit step whenever nothing is queued.
  *
- *       psyrt_pump_desc d;
- *       memset(&d, 0, sizeof d);
- *       d.msg_size = sizeof(trial_result);
- *       d.capacity = 8;
- *       d.on_msg   = infer;            // runs on the pump thread
- *       d.on_idle  = fit_one_step;     // optional; true = call me again
- *       d.ctx      = &model;
+ *       psyrt_pump_desc d = {          // unset fields are 0: the defaults
+ *           .msg_size = sizeof(trial_result),
+ *           .capacity = 8,
+ *           .on_msg   = infer,         // runs on the pump thread
+ *           .on_idle  = fit_one_step,  // optional; true = call me again
+ *           .ctx      = &model,
+ *       };
  *       if (!psyrt_pump_start(&pump, &d)) die(psyrt_pump_error(&pump));
  *
  *       int seq = psyrt_pump_submit(&pump, &result);   // < 0 is an error

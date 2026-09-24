@@ -2,8 +2,8 @@
 """Replay fixed response sequences through psy.stair and PsychoPy's
 StairHandler and report the first trial at which their proposals differ.
 
-Not part of CI: PsychoPy is a heavy install. This is the acceptance test that
-docs/psy_adapt.md ("Verification plan") sets for psy_stair.h.
+Not part of CI: PsychoPy is a heavy install. This is the acceptance test for
+psy_stair.h that docs/psy_adapt.md ("Verification") reports.
 
     uv pip install ./bindings/python/psy_stair numpy psychopy
     python tests/compare/compare_stair_psychopy.py

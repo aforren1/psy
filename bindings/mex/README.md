@@ -735,6 +735,21 @@ selection and the posterior on every trial.
 replays fixed response sequences through `psy_stair` and Palamedes
 `PAL_AMUD`, and runs `psy_quest` beside `PAL_AMPM` (Psi and Psi-marginal).
 Both scripts print a table and raise an error on a disagreement beyond
-tolerance. Neither reference is in this repository: mQUESTPlus is on GitHub
+tolerance. The results in MATLAB R2023a:
+
+- mQUESTPlus: 0 of 424 selections differ. 32 selections are ties within
+  6.9e-10 bits, and in each of them both picked the same stimulus. The
+  posteriors agree within 4.3e-7, which is the float likelihood table of
+  `psy_quest.h`.
+- `PAL_AMPM`: identical selections over 60 trials each for Psi and
+  Psi-marginal, and posteriors within 5.7e-8.
+- `PAL_AMUD`: eight configurations are identical, level for level and
+  reversal for reversal. Two differences are Palamedes' design choices,
+  and the `psy_stair.h` manual states both: `PAL_AMUD` keeps the
+  opposite-direction counter when a response causes no step, and a step
+  that a caller changes after the reversing update applies one trial later
+  than a schedule does.
+
+Neither reference is in this repository: mQUESTPlus is on GitHub
 (BrainardLab/mQUESTPlus), and Palamedes is at palamedestoolbox.org, whose
 terms do not permit redistribution.

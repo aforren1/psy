@@ -35,6 +35,8 @@ option(PSY_BUILD_LOOPBACK "Build the loopback tests in tests/loopback/ (needs ha
 # which the include path above resolves from the repository root, so the
 # compiler's own header dependencies rebuild every target after a psy_rt.h
 # edit. rt comes first so its compile checks run before its dependents'.
+# The list has three groups: the transports (rt, parallel, serial), the
+# adaptive methods (stair, quest, gp) and the trial sequencer (trials).
 # A header with a tests/adapt/psy_<name>_test.c gets that self-checking
 # program registered with ctest too, and one with PSY_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
@@ -54,7 +56,8 @@ set(PSY_PLATFORMS_serial   Windows Linux Darwin)
 set(PSY_THREADS_serial     ON)
 
 # The adaptive-method headers are pure computation: every platform, no
-# worker thread, so no NO_THREADS variant.
+# worker thread, so no NO_THREADS variant. quest and gp have an opt-in async
+# layer on psy_rt.h's pump, which PSY_ASYNC_<name> builds as a second variant.
 set(PSY_PREFIX_stair       PSYST)
 set(PSY_PLATFORMS_stair    Windows Linux Darwin)
 set(PSY_THREADS_stair      OFF)

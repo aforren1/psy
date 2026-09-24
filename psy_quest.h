@@ -14,8 +14,8 @@
  *   inference on a background thread, which is the one thing here that needs
  *   psy_rt.h and an OS; see ASYNC.
  *
- *   Targets every platform the compiler does. C++17, C11, or the pre-C11 C
- *   dialect MSVC compiles with by default.
+ *   Targets every platform the compiler does. C99 is the floor: it builds as
+ *   C99, C11 and C++17, and in the C dialect MSVC compiles by default.
  *
  *   ---------------------------------------------------------------------
  *   CHANGELOG
@@ -195,10 +195,11 @@
  *   dialect and as C++, both ways: the test prints the same passes and the
  *   same simulation numbers as gcc, and the four examples build and exit 0.
  *
- *   The cost numbers under MEMORY, COST AND THREADS, including the two
- *   lower-precision variants under PRECISION that were measured and then
- *   removed, come from examples/quest_bench.c on one x86-64 laptop, and they
- *   are the only measurement of cost there is.
+ *   The cost numbers under MEMORY, COST AND THREADS come from
+ *   examples/quest_bench.c on one x86-64 laptop (an i7-1360P under WSL2),
+ *   measured on v0.5.2; the two lower-precision variants under PRECISION were
+ *   measured on the same laptop at v0.3.1 and then removed. They are the only
+ *   measurement of cost there is.
  *
  *   Compared cell by cell against the reference implementations, through the
  *   MEX binding in MATLAB R2023a (tests/compare/compare_quest_mquestplus.m).
@@ -236,16 +237,17 @@
  *       #define PSY_QUEST_IMPLEMENTATION
  *       #include "psy_quest.h"
  *
- *       psyq_desc d = {0};
- *       d.pf = PSYQ_PF_GUMBEL;                       // Weibull in log units
- *       d.stim[0]   = psyq_linspace(-3.0, 0.0, 31); // log10 contrast
- *       d.n_stim    = 1;
- *       d.param[0]  = psyq_linspace(-3.0, 0.0, 61); // threshold (log10)
- *       d.param[1]  = psyq_linspace( 0.5, 6.0, 12); // slope
- *       d.param[2]  = psyq_fixed(0.5);              // guess: 2AFC
- *       d.param[3]  = psyq_fixed(0.02);             // lapse
- *       d.n_param   = 4;
- *       d.stop_trials = 60;
+ *       psyq_desc d = {                           // unset fields are 0
+ *           .stim    = { psyq_linspace(-3.0, 0.0, 31) }, // log10 contrast
+ *           .n_stim  = 1,
+ *           .param   = { psyq_linspace(-3.0, 0.0, 61),   // threshold (log10)
+ *                        psyq_linspace( 0.5, 6.0, 12),   // slope
+ *                        psyq_fixed(0.5),                // guess: 2AFC
+ *                        psyq_fixed(0.02) },             // lapse
+ *           .n_param = 4,
+ *           .pf      = PSYQ_PF_GUMBEL,             // Weibull in log units
+ *           .stop_trials = 60,
+ *       };
  *
  *       psyq_quest q;
  *       if (!psyq_open(&q, &d)) { fputs(psyq_error(&q), stderr); return 1; }
@@ -673,26 +675,28 @@
  *   for four configurations of the Psi-marginal grid, and next to a MEMORY
  *   FLOOR, which is the same dot product over the same bytes with nothing
  *   else in it. What it prints on your machine is what to log. On one x86-64
- *   laptop (WSL2, gcc 11.4 -O2, a 4.5 MB table, so well out of cache), median
- *   of 40 calls, one core:
+ *   laptop (an i7-1360P under WSL2, gcc 11.4 -O2, v0.5.2, a 4.5 MB table, so
+ *   well out of cache), median of 40 calls, one core, load average under 1:
  *
  *     memory floor                          0.37 ns/cell
- *     Psi, 61 x 12 grid    0.03 ms next     0.59 ns/cell, 0.7 us update
- *     joint entropy        1.07 ms next     0.94 ns/cell,  23 us update
- *     marginal entropy     1.09 ms next     0.96 ns/cell,  19 us update
- *     random subset of 8   0.41 ms next     1.41 ns/cell,  25 us update
- *     no table at all     21.6  ms next    19.0  ns/cell, 624 us update
+ *     Psi, 61 x 12 grid    0.03 ms next     0.57 ns/cell, 0.7 us update
+ *     joint entropy        0.70 ms next     0.61 ns/cell,  16 us update
+ *     marginal entropy     0.89 ms next     0.79 ns/cell,  17 us update
+ *     random subset of 8   0.22 ms next     0.76 ns/cell,  16 us update
+ *     no table at all     17.3  ms next    15.3  ns/cell, 535 us update
  *
- *   The table sweeps are within about twice the floor, and the rest is the
- *   entropy row, the logarithms and the per-stimulus bookkeeping; the Psi row
- *   is faster per cell than the others because its whole table is 272 KB and
- *   stays in cache. They are bound by memory, not by arithmetic: building
- *   with -mavx2 -mfma, which doubles the vector width, does not change the
- *   numbers. There are no SIMD intrinsics in this header for that reason.
- *   Under MSVC 19.44 /O2 the same grid measured 1.19 and 0.96 ns/cell against
- *   a 0.70 ns/cell floor. Run to run on a loaded machine these numbers move
- *   by a factor of two, which is the reason to measure on the rig rather than
- *   to quote a number from here.
+ *   A second run minutes later agreed within 12%. The table sweeps are within
+ *   about twice the floor, and the rest is the entropy row, the logarithms
+ *   and the per-stimulus bookkeeping. The Psi row is the fastest per cell,
+ *   because its whole table is 272 KB and stays in cache. The sweeps are
+ *   bound by memory, not by arithmetic: building with -mavx2 -mfma, which
+ *   doubles the vector width, does not change the numbers. There are no SIMD
+ *   intrinsics in this header for that reason. Under MSVC 19.44 /O2 on the
+ *   same laptop, over two runs, the same grid measured 1.00 to 1.15 ns/cell
+ *   joint and 0.92 to 0.97 marginal against a 0.63 to 0.66 ns/cell floor.
+ *   Run to run on a loaded machine these numbers move by a factor of two,
+ *   which is the reason to measure on the rig rather than to quote a number
+ *   from here.
  *
  *   FRAME BUDGET
  *   One psyq_next() plus one psyq_update() that fit inside a 60 Hz frame,
@@ -700,27 +704,30 @@
  *   pacing, no worker and no thread of any kind. Measured on the machine
  *   above, next + update against the budget:
  *
- *     Psi, 31 x (61 x 12 x 1 x 1) x 2         0.03 ms   fits, 580x over
- *     Psi-marginal, 31 x (61 x 12 x 5 x 5)    1.11 ms   fits, 14x over
- *     the same grid, nothing flagged          1.09 ms   fits, 15x over
- *     the same grid, subset_size 8            0.44 ms   fits, 37x over
- *     the same grid, desc.no_table           22.2  ms   DOES NOT FIT
- *     qCSF with a table, 29 M cells          ~27 ms     DOES NOT FIT
- *     qCSF with desc.no_table                ~550 ms    DOES NOT FIT
+ *     Psi, 31 x (61 x 12 x 1 x 1) x 2         0.03 ms   fits 600 times
+ *     Psi-marginal, 31 x (61 x 12 x 5 x 5)    0.91 ms   fits 17 times
+ *     the same grid, nothing flagged          0.71 ms   fits 22 times
+ *     the same grid, subset_size 8            0.24 ms   fits 67 times
+ *     the same grid, desc.no_table           17.9  ms   DOES NOT FIT
+ *     qCSF with a table, 29 M cells          ~20 ms     DOES NOT FIT
+ *     qCSF with desc.no_table                ~450 ms    DOES NOT FIT
  *
- *   So every configuration that keeps a table and is not of qCSF size is a
- *   fraction of a frame, and examples/quest_qcsf.c, whose grid is ninety times
- *   smaller than the qCSF row, is one too (0.3 ms there). When a configuration does not fit,
- *   in this order: set desc.subset_size, which divides the sweep by
+ *   The two qCSF rows are estimates, not measurements: the Psi-marginal rate
+ *   per cell times the qCSF cell count. So every configuration that keeps a
+ *   table and is not of qCSF size is a fraction of a frame, and
+ *   examples/quest_qcsf.c, whose grid is ninety times smaller than the qCSF
+ *   row, is one too (0.3 ms there). When a configuration does not fit, do
+ *   this, in this order: set desc.subset_size, which divides the sweep by
  *   S / subset_size and is what Watson 2017 sec. 4.2 recommends anyway (8 of
- *   31 stimuli above, 37x under the budget); coarsen the grid, which Watson
- *   2017 sec. 4 argues for on statistical grounds as well; or run psyq_next()
- *   on a thread of your own during the inter-trial interval, which this
+ *   31 stimuli above, 67 times under the budget); coarsen the grid, which
+ *   Watson 2017 sec. 4 argues for on statistical grounds as well; or run
+ *   psyq_next() on a thread during the inter-trial interval, which this
  *   header allows because it does no I/O and touches nothing but its own
- *   handle. Do not split one selection across frames: the posterior must not
- *   change underneath it. examples/quest_bench.c prints this line for every
- *   configuration it times, so a desc of your own can be checked against the
- *   budget before it is trusted with an experiment.
+ *   handle, and which ASYNC does for you. Do not split one selection across
+ *   frames: the posterior must not change underneath it.
+ *   examples/quest_bench.c prints this line for every configuration it
+ *   times, so a desc of your own can be checked against the budget before it
+ *   is trusted with an experiment.
  *
  *   PRECISION
  *   The likelihood table is float; the posterior, every accumulator, the
@@ -745,8 +752,8 @@
  *   threshold estimate moved by at most 3.6e-6 log units against a posterior
  *   sd of 0.06, the posterior by 1.2e-6 relative, the entropy by 1.1e-4 bits,
  *   and the mode and the quantiles were identical. It was dropped because
- *   1.1 to 1.5x off a selection that already fits a display frame fourteen
- *   times over buys the experiment nothing, while a second precision would
+ *   1.1 to 1.5x off a selection that already fits a display frame more than
+ *   ten times over buys the experiment nothing, while a second precision would
  *   have to be documented, tested and supported for good; and because the one
  *   configuration that does NOT fit the frame, desc.no_table, is where it was
  *   consistently slower.
@@ -791,9 +798,10 @@
  *   truth. examples/quest_qcsf.c does the same for a four-parameter quick CSF
  *   through desc.pf_fn, and tests/adapt/psy_quest_test.c replays a fixed
  *   response sequence against a reference posterior computed from the
- *   definitions. Checking those same streams against mQUESTPlus's
- *   qpQuestPlusPaperSimpleExamplesDemo is what the bindings are for, and is
- *   not done yet; see docs/psy_adapt.md.
+ *   definitions. The comparison with mQUESTPlus's
+ *   qpQuestPlusPaperSimpleExamplesDemo runs through the MEX binding, in
+ *   tests/compare/compare_quest_mquestplus.m. STATUS has its result, and
+ *   docs/psy_adapt.md, "Verification", has the other comparisons.
  *
  *   ---------------------------------------------------------------------
  *   SNAPSHOTS
@@ -890,9 +898,10 @@
  *       #define PSY_QUEST_IMPLEMENTATION
  *       #include "psy_quest.h"          // brings psy_rt.h with it
  *
- *       psyq_quest q;  psyq_async a;  psyq_async_desc ad = {0};
+ *       psyq_quest q;
  *       psyq_open(&q, &desc);           // as usual, on this thread
- *       ad.quest = &q;
+ *       psyq_async a;
+ *       psyq_async_desc ad = { .quest = &q };
  *       if (!psyq_async_start(&a, &ad)) die(psyq_async_error(&a));
  *
  *       psyq_snapshot s;
@@ -954,11 +963,12 @@
  *
  *   WHAT IT DOES NOT DO. It does not make a slow configuration fast, it moves
  *   it: the counts under MEMORY, COST AND THREADS still decide how many trials
- *   a session can afford, and a no_table qCSF selection is still 550 ms, now
- *   on another core. It does not touch the posterior's determinism either: the
- *   thread runs the same functions in submit order, so the same responses give
- *   the same posterior bit for bit whether they went through the queue or not,
- *   and tests/adapt/psy_quest_test.c checks exactly that with memcmp.
+ *   a session can afford, and a no_table qCSF selection is still about 450 ms,
+ *   now on another core. It does not touch the posterior's determinism
+ *   either: the thread runs the same functions in submit order, so the same
+ *   responses give the same posterior bit for bit whether they went through
+ *   the queue or not, and tests/adapt/psy_quest_test.c checks exactly that
+ *   with memcmp.
  *
  *   COST. The handle is about 5.5 KB (most of it psyrt_pump's inline ring,
  *   which this layer does not use: PSYRT_PUMP_INLINE_BYTES can be set to 1 if

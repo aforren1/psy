@@ -18,7 +18,10 @@ psy_stair.h 0.1.1, psy_quest.h 0.4.1 and psy_gp.h 0.13.1. Every GP-model
 and psychometric-model row comes from psy_gp.h 0.13.1. The staircase and
 QUEST+ rows come from the first run, because those headers did not change.
 [What changed between psy_gp.h 0.4.1 and 0.13.1](#what-changed-between-psy_gph-041-and-0131)
-compares the two runs.
+compares the two runs. The current headers are psy_stair.h 0.1.2,
+psy_quest.h 0.5.2 and psy_gp.h 0.14.0. By their CHANGELOGs, none of the
+later versions changes what a default configuration computes, so the
+tables hold for them.
 
 ### The problems
 
@@ -152,10 +155,14 @@ ties are exact: the three categories have equal widths, so stimuli 120 deg
 apart have the same expected entropy. So psy.quest reproduces Watson's
 reference implementation trial for trial on every example in his notebook.
 
-mQUESTPlus itself did not run: it needs MATLAB, and its demos draw from
-MATLAB's generator and differ from the paper in true values and trial
-counts (for example 128 CSF trials, not 32). The replay above checks
-against the code that mQUESTPlus ports.
+mQUESTPlus is not in this replay: its demos draw from MATLAB's generator
+and differ from the paper in true values and trial counts (for example 128
+CSF trials, not 32). The replay checks against the code that mQUESTPlus
+ports. mQUESTPlus itself runs in MATLAB through the MEX binding, in
+[tests/compare/compare_quest_mquestplus.m](../tests/compare/compare_quest_mquestplus.m),
+with mQUESTPlus choosing every stimulus: on the paper's figure 2, 3 and 4
+examples and a marginalized case, 0 of 424 selections differ, and the
+posteriors agree to 4.3e-7.
 
 ## Results by problem
 
@@ -639,7 +646,7 @@ model's no-cross average there fell from 1.5 to 1.9 columns to 0.1 to 0.9.
 - **High-dimensional real data (csf6).** The psychometric model with BALD
   gives the best field in 300 trials. No method pins down a 5-D level set
   to 0.1 log10 units in 300 trials. Two fits of the truth itself differ by
-  0.23 log10 units. Look-ahead acquisitions cost seconds per trial at 1000
+  0.22 log10 units. Look-ahead acquisitions cost seconds per trial at 1000
   candidates in 6-D.
 
 Caveats. The staircase scores in 2-D are a best case, because the scoring
@@ -682,9 +689,10 @@ What remains:
   audiogram: 9.5 dB (metabolic+sensory, beta 2, replication 14) and 7.6 dB
   (older-normal, beta 0.5, replication 10). They are the same in both
   versions and keep a crossing in every column.
-- `PSYGP_MAX_TRIALS` is 512 in the binding. The psy.gp truth for csf6 can
-  use only 512 of the 1001 trials. A binding build with a larger ceiling
-  would let the same fit use all of them.
+- `PSYGP_MAX_TRIALS` is 512 in the default binding build, so the psy.gp
+  truth for csf6 uses only 512 of the 1001 trials. A build with
+  `PSY_GP_MAX_TRIALS=1024` (see the psy_gp binding's README) lets the same
+  fit use all of them. The run above did not use one.
 
 ## Reproduce
 

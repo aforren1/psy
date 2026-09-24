@@ -313,6 +313,12 @@ turn. Log `policy` with your timing data.
 [tests/compare/compare_quest_questplus.py](../../../tests/compare/compare_quest_questplus.py)
 runs this binding and the `questplus` package on the same Psi and
 Psi-marginal grids with one simulated observer, and reports per-trial
-stimulus agreement and the largest posterior difference. The numbers,
-the cost model and the frame budget are in the manual at the top of
-[psy_quest.h](../../../psy_quest.h).
+stimulus agreement and the largest posterior difference: 180 of 180
+selections are identical, and the largest posterior difference is 6.8e-8,
+which is the float likelihood table.
+[tests/compare/methods_compare.py](../../../tests/compare/methods_compare.py)
+`--replay` replays the 17 runs saved in Watson's QUEST+ notebook through
+this binding: 1452 of 1504 selections identical, 52 ties within 2e-8 bits,
+and no difference. The comparisons with mQUESTPlus and Palamedes run
+through the MEX binding. The numbers, the cost model and the frame budget
+are in the manual at the top of [psy_quest.h](../../../psy_quest.h).

@@ -21,9 +21,10 @@ unexercised. The header's top comment is the user-facing documentation
 - Byte I/O over serial ports for the devices used in psychophysics and
   neuroscience rigs: trigger boxes, response boxes, and DIY microcontroller
   boards.
-- Same shape as `psy_parallel.h`: one header, zero dependencies, a
-  caller-owned handle, a zero-initialized `desc` for defaults, a message
-  string in the handle for setup errors.
+- Same shape as `psy_parallel.h`: one header plus the shared `psy_rt.h`
+  (since v0.4) and no other dependency, a caller-owned handle, a
+  zero-initialized `desc` for defaults, and a message string in the handle
+  for setup errors.
 - Honest timing. The header documents what USB-serial can and cannot do, and
   the API gives the caller the clock to bracket a write.
 - Windows, Linux, and macOS. Labs use all three.
@@ -266,7 +267,7 @@ whole struct with the writer's constant preserved, and only when the timeout
 changed (`rd_timeout_applied_ms`).
 
 The `OVERLAPPED` structures live in the handle (`rd_ovl`, `wr_ovl`), never
-on the stack: a cancelled read that is not reaped with
+on the stack: a canceled read that is not reaped with
 `GetOverlappedResult(TRUE)` would complete into a dead frame.
 
 An aborted read that carried no bytes does not end the call. `psys_interrupt`
@@ -424,7 +425,7 @@ this transfer is the thread that is in it. A read then resumes its wait rather
 than reporting 0, and a write reports what got through, which is the only place
 in the write path where a short count is not a timeout. An aborted transfer
 still returns any bytes it moved, because `serial.sys` fills in the count even
-on a cancelled IRP; the interrupted path and the completed-then-aborted path
+on a canceled IRP; the interrupted path and the completed-then-aborted path
 keep them on the same terms, which they did not in v0.2.
 
 One Windows failure mode has no clean mapping: some VCP drivers never complete

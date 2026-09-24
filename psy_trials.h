@@ -17,8 +17,8 @@
  *   an is-done callback, so this header interleaves anything and knows
  *   nothing about stimuli or levels.
  *
- *   Targets every platform the compiler does. C++17, C11, or the pre-C11 C
- *   dialect MSVC compiles with by default.
+ *   Targets every platform the compiler does. C99 is the floor: it builds as
+ *   C99, C11 and C++17, and in the C dialect MSVC compiles by default.
  *
  *   ---------------------------------------------------------------------
  *   CHANGELOG
@@ -108,9 +108,17 @@
  *   compared bit for bit with the uninterrupted run, snapshot bytes
  *   included; every load refusal; every rejected desc; PSYTR_ERR_FULL;
  *   the format functions against fixed strings.
- *   What is NOT done: no comparison against psychopy.data.TrialHandler
- *   (the Python binding and tests/compare/ script in docs/psy_trials.md
- *   do not exist yet); no run on macOS or big-endian hardware, so the
+ *   Compared with PsychoPy's psychopy.data.TrialHandler and TrialHandlerExt
+ *   through the Python binding (tests/compare/compare_trials_psychopy.py),
+ *   on the same condition lists over 100 seeds per design. The two use
+ *   different generators, so random orders are compared by the properties
+ *   each promises: SEQUENTIAL is identical to PsychoPy's order; under RANDOM
+ *   every repetition is one block holding each condition once, on both
+ *   sides; FULL_RANDOM and weighted FULL_RANDOM give exact counts per
+ *   condition on both sides. The weighted SEQUENTIAL orders differ by
+ *   design (PsychoPy runs a row's copies back to back, this header cycles
+ *   the rows); the script reports that and does not fail on it.
+ *   What is NOT done: no run on macOS or big-endian hardware, so the
  *   snapshot's portability is by construction, not by test; no loading
  *   of a snapshot written by another compiler; the constraint repair's
  *   success rate is measured only on the designs in the test, and a
@@ -137,15 +145,16 @@
  *       #include "psy_trials.h"
  *
  *       uint64_t seed = 20260923u;                  // the caller owns it
- *       psytr_desc d = {0};
- *       d.factors[0] = psytr_factor("orientation", 2);
- *       d.factors[1] = psytr_factor("contrast", 5);
- *       d.n_factors  = 2;                           // 10 conditions
- *       d.reps       = 20;                          // 200 trials
- *       d.order      = PSYTR_ORDER_CONSTRAINED;
- *       d.constraints[0] = psytr_max_run(0, PSYTR_ANY_LEVEL, 3);
- *       d.n_constraints  = 1;
- *       d.rng = psytr_splitmix; d.rng_ctx = &seed;
+ *       psytr_desc d = {                            // unset fields are 0
+ *           .factors = { psytr_factor("orientation", 2),
+ *                        psytr_factor("contrast", 5) },
+ *           .n_factors     = 2,                     // 10 conditions
+ *           .reps          = 20,                    // 200 trials
+ *           .order         = PSYTR_ORDER_CONSTRAINED,
+ *           .constraints   = { psytr_max_run(0, PSYTR_ANY_LEVEL, 3) },
+ *           .n_constraints = 1,
+ *           .rng = psytr_splitmix, .rng_ctx = &seed,
+ *       };
  *
  *       static psytr_trials t;                      // 89 KB; not the stack
  *       if (!psytr_open(&t, &d)) { fputs(psytr_error(&t), stderr); return 1; }
@@ -166,19 +175,21 @@
  *
  *       static double levels[PSYTR_MAX_TRIALS];     // one record per trial
  *       psyst_stair s[3];                           // opened by the caller
- *       psytr_desc d = {0};
- *       d.n_conditions = 1;                         // the catch trial
- *       d.reps         = 24;
- *       d.order        = PSYTR_ORDER_CONSTRAINED;
- *       d.constraints[0] = psytr_min_gap(PSYTR_CONDITION, 0, 1);
- *       d.n_constraints  = 1;
- *       for (int i = 0; i < 3; i++)
- *           d.tracks[i] = psytr_track(&s[i], psytr_stair_done);
- *       d.n_tracks    = 3;
- *       d.track_rate  = 0.9;                        // 9 in 10 while any runs
- *       d.records     = levels;
- *       d.record_size = sizeof(double);
- *       d.rng = psytr_splitmix; d.rng_ctx = &seed;
+ *       psytr_desc d = {
+ *           .n_conditions  = 1,                     // the catch trial
+ *           .reps          = 24,
+ *           .order         = PSYTR_ORDER_CONSTRAINED,
+ *           .constraints   = { psytr_min_gap(PSYTR_CONDITION, 0, 1) },
+ *           .n_constraints = 1,
+ *           .tracks = { psytr_track(&s[0], psytr_stair_done),
+ *                       psytr_track(&s[1], psytr_stair_done),
+ *                       psytr_track(&s[2], psytr_stair_done) },
+ *           .n_tracks      = 3,
+ *           .track_rate    = 0.9,                   // 9 in 10 while any runs
+ *           .rng = psytr_splitmix, .rng_ctx = &seed,
+ *           .records       = levels,
+ *           .record_size   = sizeof(double),
+ *       };
  *       ...
  *       while (psytr_next(&t, &ti) >= 0) {
  *           if (ti.track >= 0) {

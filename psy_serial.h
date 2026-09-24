@@ -87,7 +87,9 @@
  *   stb_rect_pack.h: two files to copy, one library to use. With
  *   psy_parallel.h it shares conventions but not code.
  *
- *   Targets Windows (Win32 COM API), Linux and macOS (POSIX termios).
+ *   Targets Windows (Win32 COM API), Linux and macOS (POSIX termios). C99 is
+ *   the floor: it builds as C99, C11 and C++17, and in the C dialect MSVC
+ *   compiles by default.
  *
  *   ---------------------------------------------------------------------
  *   USAGE
@@ -608,7 +610,7 @@ typedef struct psys_port {
     void*    wr_event;              /* OVERLAPPED.hEvent, writer side                        */
     void*    wake_event;            /* manual-reset event set by psys_interrupt()            */
     uint64_t rd_ovl[4];             /* OVERLAPPED storage, reader (kept in the handle so a   */
-    uint64_t wr_ovl[4];             /* cancelled I/O can never complete into a dead frame)   */
+    uint64_t wr_ovl[4];             /* canceled I/O can never complete into a dead frame)   */
     uint64_t pa_ovl[4];             /* the same, for the async worker's trailing write: a
                                      * transfer is reaped by the thread that started it, so
                                      * the worker never borrows wr_ovl/wr_event             */
@@ -1550,14 +1552,14 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
             DWORD w = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
             if (w != WAIT_OBJECT_0) {
                 /* Interrupted, or the wait itself failed: either way the read
-                 * must be cancelled and reaped before the OVERLAPPED in the
+                 * must be canceled and reaped before the OVERLAPPED in the
                  * handle can be reused. */
                 bool woke = (w == WAIT_OBJECT_0 + 1);
                 p->rd_oserr = woke ? 0 : (int)GetLastError();
                 CancelIoEx(h, ovl);
                 if (!GetOverlappedResult(h, ovl, &done, TRUE) &&
                     GetLastError() != ERROR_OPERATION_ABORTED)
-                    done = 0;  /* only a cancelled IRP carries a count */
+                    done = 0;  /* only a canceled IRP carries a count */
                 if (!woke) return PSYS_ERR_IO;
                 /* Bytes that beat the cancel are not thrown away, whether the
                  * reap succeeded or reported the cancel: serial.sys fills in
@@ -1574,7 +1576,7 @@ static int psys__read_some(psys_port* p, void* buf, int cap, uint32_t timeout_ms
                 if (psys__gone(e)) return PSYS_ERR_DISCONNECTED;
                 if (e == ERROR_OPERATION_ABORTED) {
                     /* serial.sys fills in the transfer count even on a
-                     * cancelled IRP, so bytes that made it into the buffer are
+                     * canceled IRP, so bytes that made it into the buffer are
                      * returned rather than dropped. */
                     if (done > 0) return (int)done;
                     /* A purge or a cancel aborts the read, and some drivers

@@ -3,8 +3,8 @@
 the same simulated observer, and report per-trial stimulus agreement and the
 largest posterior difference.
 
-Not part of CI. This is the acceptance test that docs/psy_adapt.md
-("Verification plan") sets for psy_quest.h.
+Not part of CI. This is the acceptance test for psy_quest.h that
+docs/psy_adapt.md ("Verification") reports.
 
     uv pip install ./bindings/python/psy_quest numpy questplus
     python tests/compare/compare_quest_questplus.py

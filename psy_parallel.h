@@ -16,7 +16,8 @@
  *   stb_truetype / stb_rect_pack arrangement). Nothing else is needed: the
  *   pair still depends on nothing but the OS.
  *
- *   Targets Windows and Linux.
+ *   Targets Windows and Linux. C99 is the floor: it builds as C99, C11 and
+ *   C++17, and in the C dialect MSVC compiles by default.
  *
  *   ---------------------------------------------------------------------
  *   CHANGELOG

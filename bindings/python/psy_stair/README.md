@@ -148,4 +148,7 @@ clamped step counts as, which reversals the default estimate uses) are in the
 manual at the top of [psy_stair.h](../../../psy_stair.h).
 [tests/compare/compare_stair_psychopy.py](../../../tests/compare/compare_stair_psychopy.py)
 replays fixed response sequences through this binding and PsychoPy's
-`StairHandler` and reports where they differ.
+`StairHandler` and reports where they differ. On its seven configurations
+no proposal differs on any trial, the reversals are the same, and the
+estimates agree, the log and dB cases to 1e-15. The comparison with
+Palamedes' `PAL_AMUD` runs through the MEX binding.

@@ -10,8 +10,8 @@
  *   computation: no OS calls, no threads, no heap. Needs nothing but libm.
  *   Not a transport header, so it does not include psy_rt.h.
  *
- *   Targets every platform the compiler does. C++17, C11, or the pre-C11 C
- *   dialect MSVC compiles with by default.
+ *   Targets every platform the compiler does. C99 is the floor: it builds as
+ *   C99, C11 and C++17, and in the C dialect MSVC compiles by default.
  *
  *   ---------------------------------------------------------------------
  *   CHANGELOG
@@ -93,18 +93,19 @@
  *       #define PSY_STAIR_IMPLEMENTATION
  *       #include "psy_stair.h"
  *
- *       psyst_desc d = {0};
- *       d.start          = 0.5;          // starting level, caller's units
- *       d.n_up           = 1;            // 1-up ...
- *       d.n_down         = 3;            // ... 3-down: converges on 79.4%
- *       d.step_type      = PSYST_STEP_LOG;
- *       d.steps[0]       = 0.3;          // log10 units: a factor of 2
- *       d.steps[1]       = 0.15;         // halved after the first reversal
- *       d.steps[2]       = 0.075;        // and again after the second
- *       d.n_steps        = 3;
- *       d.min            = 0.001;
- *       d.max            = 1.0;
- *       d.stop_reversals = 10;
+ *       psyst_desc d = {                  // unset fields are 0: the defaults
+ *           .start          = 0.5,        // starting level, caller's units
+ *           .n_up           = 1,          // 1-up ...
+ *           .n_down         = 3,          // ... 3-down: converges on 79.4%
+ *           .step_type      = PSYST_STEP_LOG,
+ *           .steps          = { 0.3,      // log10 units: a factor of 2
+ *                               0.15,     // halved after the first reversal
+ *                               0.075 },  // and again after the second
+ *           .n_steps        = 3,
+ *           .min            = 0.001,
+ *           .max            = 1.0,
+ *           .stop_reversals = 10,
+ *       };
  *
  *       psyst_stair s;
  *       if (!psyst_open(&s, &d)) { fputs(psyst_error(&s), stderr); return 1; }

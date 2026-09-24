@@ -13,8 +13,9 @@ permissions:
 jobs:
   # --------------------------------------------------------------------- #
   # Headers: CMake builds every registered header's compile checks (C11,  #
-  # C++17, no-threads) and the examples, warnings as errors, on all three #
-  # platforms. CMakeLists.txt decides which headers apply to which OS.    #
+  # C++17, no-threads, async), the tests/adapt/ tests and the examples,   #
+  # warnings as errors, on all three platforms. ctest runs the checks and #
+  # the tests. CMakeLists.txt decides which headers apply to which OS.    #
   # --------------------------------------------------------------------- #
   headers:
     name: Headers (${{ matrix.os }})
@@ -245,23 +246,6 @@ jobs:
           emcc $W $T -DPSYGP_ASYNC -o test_gp_async.js    tests/adapt/psy_gp_test.c    && node test_gp_async.js
 
   # --------------------------------------------------------------------- #
-  # Octave: the MEX bindings build with Octave's mex and run their test   #
-  # script. MATLAB is not available on a runner without a license; the    #
-  # same script passes in MATLAB R2023a locally (bindings/mex/README.md). #
-  # --------------------------------------------------------------------- #
-  octave-mex:
-    name: Octave MEX (ubuntu-latest)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Octave
-        run: sudo apt-get update && sudo apt-get install -y octave liboctave-dev
-      - name: Build
-        run: octave-cli --eval "run('bindings/mex/build.m')"
-      - name: Test
-        run: octave-cli --eval "cd bindings/mex; test_mex"
-
-  # --------------------------------------------------------------------- #
   # Python: cibuildwheel builds one abi3 wheel (Limited API, cp38+) per     #
   # platform for each binding package. Add a directory to the matrix when  #
   # a binding lands; exclude the platforms its header does not support.    #
@@ -383,6 +367,13 @@ jobs:
             end
             if accepted, error('psy:smoke', 'an unknown handle was accepted'); end"
 
+      # The four adaptive bindings simulate their observers, so their test
+      # script needs no hardware. Locally it passes in Octave 10 and MATLAB
+      # R2023a (bindings/mex/README.md); this runs it on the pinned 7.3.
+      - name: Adaptive bindings test (test_mex.m)
+        working-directory: bindings/mex
+        run: octave-cli -q --eval "test_mex"
+
       - uses: actions/upload-artifact@v7
         with:
           name: octave-mex-bookworm
@@ -463,6 +454,11 @@ jobs:
               fprintf('unknown handle rejected: %s\n', e.message);
             end
             if accepted, error('psy:smoke', 'an unknown handle was accepted'); end
+
+      - name: Adaptive bindings test (test_mex.m)
+        uses: matlab-actions/run-command@v3
+        with:
+          command: cd('bindings/mex'); test_mex
 
       - uses: actions/upload-artifact@v7
         with:
