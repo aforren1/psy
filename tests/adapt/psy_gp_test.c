@@ -424,7 +424,7 @@ static void test_gradient(psygp_lik lik, psygp_kernel kernel, const char* name) 
     psygp_gp g;
     psygp__param p[PSYGP__NTHETA];
     double th[PSYGP__NTHETA] = { 0.0 }, ga[PSYGP__NTHETA] = { 0.0 }, gn[PSYGP__NTHETA] = { 0.0 };
-    double v0, vp, vm;
+    double v0 = 0.0, vp = 0.0, vm = 0.0;
     int np, n = 12, nd = 2;
     rng_state = 0x243F6A8885A308D3ull + 0x33ull;
     memset(&d, 0, sizeof(d));
@@ -929,7 +929,7 @@ static void test_categorical_field(void) {
 static void test_fit(void) {
     psygp_desc d;
     psygp_gp g;
-    double before, after;
+    double before = 0.0, after = 0.0;
     int rc;
     rng_state = 0x243F6A8885A308D3ull + 0x77ull;
     memset(&d, 0, sizeof(d));
@@ -1762,7 +1762,7 @@ static void test_psychometric_math(psygp_link link, const char* name) {
         }
         for (int i = 0; i < n; i++) {
             double xi = g.X[(size_t)i * 2 + id], b = exp(g.hyper.mean_g + hg[i]);
-            double lp, d1, d2, d3;
+            double lp = 0.0, d1 = 0.0, d2 = 0.0, d3 = 0.0;
             psygp__ll(&g, b * (xi - g.hyper.mean - hm[i]), g.y[i], &lp, &d1, &d2, &d3);
             ll += lp;
         }
@@ -2206,7 +2206,7 @@ static void test_psychometric(void) {
         double t_ps = 0.0, p_ps = 0.0, b_ps = 0.0, t_gp = 0.0, p_gp = 0.0, b_gp = 0.0;
         const int reps = 3, trials = 120;
         for (int r = 0; r < reps; r++) {
-            double te, pe, be;
+            double te = 0.0, pe = 0.0, be = 0.0;
             ps_session(PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC, r, trials, &te, &pe, &be);
             t_ps += te / reps; p_ps += pe / reps; b_ps += be / reps;
             ps_session(PSYGP_ACQ_LSE, PSYGP_MODEL_GP, r, trials, &te, &pe, &be);
@@ -2629,7 +2629,7 @@ static void test_regress_collapse(void) {
         psygp_desc d;
         psygp_gp g;
         int crossed = 0;
-        double lm;
+        double lm = 0.0;
         audiogram_desc(&d, PSYGP_MODEL_PSYCHOMETRIC, run[r].acq);
         CHECK(psygp_open(&g, &d), "open: %s", psygp_error(&g));
         replay(&g, run[r].x, run[r].y, run[r].n, run[r].name);
@@ -2652,7 +2652,7 @@ static void test_regress_collapse(void) {
         psygp_desc d;
         psygp_gp g;
         psygp__scr s;
-        double cold, warm;
+        double cold = 0.0, warm = 0.0;
         int ld;
         audiogram_desc(&d, PSYGP_MODEL_PSYCHOMETRIC, PSYGP_ACQ_BALD);
         d.fit = false;
@@ -2762,7 +2762,7 @@ static void test_regressions(void) {
 static double priors_run(const psygp_priors* pr, bool no_prior, psygp_hyper* h) {
     psygp_desc d;
     psygp_gp g;
-    double lm;
+    double lm = 0.0;
     ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
     d.stop_trials = 60;
     d.fit = true; d.fit_every = 20;
@@ -2793,7 +2793,7 @@ static void test_priors(void) {
     memset(&h0, 0, sizeof(h0));
     memset(&h1, 0, sizeof(h1));
     memset(&h2, 0, sizeof(h2));
-    double lm0, lm1, lm2;
+    double lm0 = 0.0, lm1 = 0.0, lm2 = 0.0;
     printf("desc.priors:\n");
     ps_desc(&d, PSYGP_ACQ_LSE, PSYGP_MODEL_PSYCHOMETRIC);
     d.stop_trials = 10;
@@ -3015,7 +3015,7 @@ static void test_pairwise_math(void) {
         }
     /* 2. The utility's predicted differences at the trials are the mode. */
     for (int i = 0; i < n; i++) {
-        double m1, m2;
+        double m1 = 0.0, m2 = 0.0;
         psygp_predict_f(&g, g.X + (size_t)i * 2, 0, &m1, NULL);
         psygp_predict_f(&g, g.X2 + (size_t)i * 2, 0, &m2, NULL);
         track(&worst_mode, fabs((m1 - m2) - g.f[i]) / (1.0 + fabs(g.f[i])));
@@ -3060,7 +3060,7 @@ static void test_pairwise_math(void) {
                 cov[q][r] = c;
             }
         for (int q = 0; q < 2; q++) {
-            double sd;
+            double sd = 0.0;
             psygp_predict_f(&g, xs[q], 0, &mean[q], &sd);
             track(&pw_var, fabs(sd * sd - cov[q][q]) / (1.0 + cov[q][q]));
         }
@@ -3308,7 +3308,7 @@ static void test_async_fit_in_idle(void) {
     psygp_async_poll(&a, &s);
     for (int i = 0; i < 60; i++) {
         int seq, rc;
-        double lm_before, lm_after;
+        double lm_before = 0.0, lm_after = 0.0;
         int y = observe(s.x[0]);
         seq = psygp_async_submit(&a, s.x, y);
         CHECK(seq > 0, "fit_in_idle submit: %s", psygp_strerror(seq));
@@ -3549,7 +3549,7 @@ static void test_mixed(void) {
      * psychometric, on a categorical and an integer dimension. */
     for (int arm = 0; arm < 3; arm++) {
         psygp__param p[PSYGP__NTHETA];
-        double th[PSYGP__NTHETA], ga[PSYGP__NTHETA], v0, vp, vm, worst = 0.0;
+        double th[PSYGP__NTHETA], ga[PSYGP__NTHETA], v0 = 0.0, vp = 0.0, vm = 0.0, worst = 0.0;
         int np;
         mixed_desc(&d, true, arm == 2 ? PSYGP_MODEL_PSYCHOMETRIC : PSYGP_MODEL_GP);
         if (arm == 1) d.kernel = PSYGP_KERNEL_SEMIP;
@@ -3676,7 +3676,7 @@ static void test_monotone(void) {
             want = psygp__q_smooth(&g, &s, best, sd, 0.0);
             track(&worst_p, fabs(psygp_predict_p(&g, x) - want));
             {
-                double pm;
+                double pm = 0.0;
                 psygp_predict_p_many(&g, x, 1, &pm);
                 track(&worst_p, fabs(pm - want));
             }
@@ -3687,7 +3687,7 @@ static void test_monotone(void) {
             double x[2] = { 0.0 };
             psygp_next(&g, x);
             for (int j = 0; j < g.M; j++) {
-                double mu, sd;
+                double mu = 0.0, sd = 0.0;
                 const double* c = psygp__cand(&g, j);
                 psygp_predict_f(&g, c, 0, &mu, &sd);
                 track(&worst_c, fabs(g.cand_mu[j] - psygp__mono_mu(&g, &s, c, mu, s.t1)));
@@ -3704,7 +3704,7 @@ static void test_monotone(void) {
             psygp_predict_p_many(&g, xs, 101, p);
             for (int k = 1; k <= 100; k++) if (p[k] < p[k - 1] - 1e-12) pdrops_on++;
             for (int k = 0; k <= 100; k++) {
-                double sd, other;
+                double sd = 0.0, other = 0.0;
                 psygp__target_latent_p(&g, &s, xs + 2 * k, &p[k], &sd, &other, s.t1, s.t2);
             }
             for (int k = 1; k <= 100; k++) if (p[k] < p[k - 1] - 1e-12) fdrops_on++;
@@ -3742,7 +3742,7 @@ static void test_monotone(void) {
             double xs[2 * 101] = { 0.0 }, p[101] = { 0.0 };
             for (int k = 0; k <= 100; k++) { xs[2 * k] = 0.25 * c; xs[2 * k + 1] = 0.01 * k; }
             for (int k = 0; k <= 100; k++) {
-                double sd;
+                double sd = 0.0;
                 psygp_predict_f(&g, xs + 2 * k, 0, &p[k], &sd);
             }
             for (int k = 1; k <= 100; k++) if (p[k] < p[k - 1] - 1e-12) drops_off++;
@@ -4147,7 +4147,7 @@ static void test_fit_budget(void) {
     psygp_desc d;
     psygp_gp ga, gb;
     int rounds = 0, rc = 0;
-    double la, lb;
+    double la = 0.0, lb = 0.0;
     printf("fit budget and tolerance:\n");
     memset(&d, 0, sizeof(d));
     d.n_dims = 2;
@@ -4516,7 +4516,7 @@ int main(void) {
     test_refine();
     {
         /* The same eight LSE streams with two rounds of refinement. */
-        double e_ref;
+        double e_ref = 0.0;
         obs_refine = 2;
         e_ref = mean_error(PSYGP_ACQ_LSE, 100, "LSE+r", 8);
         obs_refine = 0;
