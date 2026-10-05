@@ -2029,7 +2029,7 @@ static void ps_grad_case(psygp_link link, bool ord, double guess, double lapse,
         th[i] = psygp__clamp(th[i] + 0.1 * (double)(i % 3 - 1), pp[i].lo, pp[i].hi);
     CHECK(psygp__fit_eval(&g, pp, np, th, &v, gr) == PSYGP_OK, "%s: gradient", name);
     for (int i = 0; i < np; i++) {
-        double h = (real_is_double ? 1e-4 : 3e-3) * (1.0 + fabs(th[i])), vp, vm, fd;
+        double h = (real_is_double ? 1e-4 : 3e-3) * (1.0 + fabs(th[i])), vp = 0.0, vm = 0.0, fd;
         memcpy(tw, th, sizeof(double) * (size_t)np);
         tw[i] = th[i] + h;
         psygp__fit_eval(&g, pp, np, tw, &vp, NULL);
