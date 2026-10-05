@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
     psyrt_policy pol = psyrt_thread_elevate(NULL);
 
     psyrt_report rep;
-    char line[192];
+    char line[256];
     psyrt_report_get(&rep, pol);
     psyrt_describe(&rep, line, sizeof(line));
     puts(line);

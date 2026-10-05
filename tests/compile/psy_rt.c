@@ -1,8 +1,13 @@
 /* Compile check: psy_rt.h as a C translation unit with the implementation
  * enabled. CMake and CI build this as C11 with warnings as errors, once with
  * threading and once with PSYRT_NO_THREADS (which drops the deadline worker
- * and the pump); psy_rt.cpp builds the same source as C++17. It runs and
- * returns 0 to prove it links. */
+ * and the pump); psy_rt.cpp builds the same source as C++17. With
+ * -DPSY_TRACY_CHECK=ON, CMake also builds it with PSYRT_TRACY against a
+ * fetched Tracy. It runs and returns 0 to prove it links.
+ *
+ * The event ring, the clock correlation and the instrumentation macros are
+ * outside the thread guard: they exist in every build. In the default mode
+ * the check also proves that no macro evaluates its arguments. */
 #define PSY_RT_IMPLEMENTATION
 #include "psy_rt.h"
 
@@ -67,8 +72,101 @@ static psyrt_pump_desc pump_desc(void) {
 }
 #endif /* PSYRT_NO_THREADS */
 
-int main(void) {
+typedef struct ring_api {
+    bool (*open)(psyrt_ring*, const psyrt_ring_desc*);
+    const char* (*error)(const psyrt_ring*);
+    int  (*push)(psyrt_ring*, const psyrt_event*);
+    int  (*drain)(psyrt_ring*, psyrt_event*, int);
+    uint32_t (*capacity)(const psyrt_ring*);
+    uint32_t (*dropped)(const psyrt_ring*);
+    int  (*correlate)(const psyrt_corr_desc*, psyrt_corr*);
+    void (*trace_set)(psyrt_ring*);
+    psyrt_ring* (*trace_get)(void);
+    uint32_t (*thread_id)(void);
+    uint64_t (*interrupt_time)(void);
+    const char* (*strerror)(int);
+    int64_t (*ticks_to_ns)(int64_t);
+} ring_api;
+
+static const ring_api g_ring_api = {
+    psyrt_ring_open, psyrt_ring_error, psyrt_ring_push, psyrt_ring_drain,
+    psyrt_ring_capacity, psyrt_ring_dropped, psyrt_correlate,
+    psyrt_trace_set_ring, psyrt_trace_ring, psyrt_thread_id,
+    psyrt_interrupt_time_100ns, psyrt_strerror, psyrt_ticks_to_ns
+};
+
+static unsigned char g_ring_mem[PSYRT_RING_BYTES(4)];
+
+/* One record through a 4-slot ring, a correlation of the clock with itself,
+ * and every macro once with the ring attached. */
+static int ring_check(void) {
     int rc = 0;
+    psyrt_ring ring;
+    psyrt_ring_desc rd;
+    psyrt_event ev, out[8];
+    psyrt_corr_desc cd;
+    psyrt_corr c;
+    memset(&rd, 0, sizeof(rd));
+    rd.memory = g_ring_mem;
+    rd.bytes  = sizeof(g_ring_mem);
+    if (!g_ring_api.open(&ring, &rd)) return 1;
+    if (g_ring_api.capacity(&ring) != 4u) rc = 1;
+    memset(&ev, 0, sizeof(ev));
+    ev.source = (uint16_t)PSYRT_SRC_USER;
+    ev.kind   = 1;
+    ev.u.i64[0] = 42;
+    if (g_ring_api.push(&ring, &ev) != 0) rc = 1;
+    if (g_ring_api.drain(&ring, out, 8) != 1 || out[0].u.i64[0] != 42) rc = 1;
+    if (out[0].tid != g_ring_api.thread_id() || out[0].t_ns == 0) rc = 1;
+    if (g_ring_api.dropped(&ring) != 0u || g_ring_api.error(&ring)[0] != '\0') rc = 1;
+    if (g_ring_api.strerror(PSYRT_ERR_FULL)[0] == '\0') rc = 1;
+    memset(&cd, 0, sizeof(cd));
+    cd.read = psyrt_now_ns;
+    if (g_ring_api.correlate(&cd, &c) != 16 || c.width_ns == 0) rc = 1;
+    (void)g_ring_api.interrupt_time();
+    if (g_ring_api.ticks_to_ns(0) != 0) rc = 1;
+
+    g_ring_api.trace_set(&ring);
+    if (g_ring_api.trace_get() != &ring) rc = 1;
+    {
+        /* `fill` exists only for the plot: the default mode must still count
+         * it as used, or -Werror stops the build. */
+        double fill = 0.5;
+        PSYRT_THREAD_INIT("compile check");
+        PSYRT_THREAD_NAME("compile check");
+        PSYRT_ZONE(z, "compile.zone");
+        PSYRT_ZONE_VALUE(z, 7);
+        PSYRT_PLOT("fill", fill);
+        PSYRT_MESSAGE("hello");
+        PSYRT_MESSAGEF("trial %d", 3);
+        PSYRT_FRAME_MARK();
+        PSYRT_FRAME_MARK_NAMED("display 2");
+        PSYRT_ZONE_END(z);
+    }
+#ifdef __cplusplus
+    {
+        PSYRT_ZONE_SCOPED("compile.scoped");
+    }
+#endif
+#if !defined(PSYRT_TRACY) && !defined(PSYRT_TRACE_RING)
+    {
+        /* The default mode compiles to nothing and evaluates nothing. */
+        int count = 0;
+        PSYRT_PLOT("x", (count++, 1.0));
+        PSYRT_ZONE_VALUE(z, count++);
+        PSYRT_MESSAGEF("%d", count++);
+        if (count != 0) rc = 1;
+        if (g_ring_api.drain(&ring, out, 8) != 0) rc = 1;
+    }
+#elif defined(PSYRT_TRACE_RING)
+    if (g_ring_api.drain(&ring, out, 8) <= 0) rc = 1;
+#endif
+    g_ring_api.trace_set(NULL);
+    return rc;
+}
+
+int main(void) {
+    int rc = ring_check();
 #ifndef PSYRT_NO_THREADS
     psyrt_pump p;
     psyrt_pump_desc d = pump_desc();

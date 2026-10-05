@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
     psyrt_pump_desc d;
     pump_ctx k;
     psyrt_report rep;
-    char line[192];
+    char line[256];
     uint32_t rng = 0x5eed1234u;
     uint32_t next_stamp = 1u;
     int frames = (argc > 1) ? (int)strtol(argv[1], NULL, 0) : 120;

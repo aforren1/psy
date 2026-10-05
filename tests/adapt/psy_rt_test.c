@@ -1,6 +1,12 @@
-/* psy_rt_test.c - self-checking test for psyrt_pump in psy_rt.h. No
- * framework: it returns 0 when every check passed and 1 after printing each
- * failure.
+/* psy_rt_test.c - self-checking test for psyrt_pump, the event ring, the
+ * trace macros and the clock correlation in psy_rt.h. No framework: it
+ * returns 0 when every check passed and 1 after printing each failure.
+ *
+ * The ring's stress test runs 2, 4 and 8 producers on deadline workers into
+ * a 256-slot ring against one draining thread, and checks every record and
+ * every push's outcome exactly: no torn record, no duplicate, each
+ * producer's order, no seq gap, drained + refused = pushed, and the LOSS
+ * records summing to the refusals. Run it under ThreadSanitizer too.
  *
  *     gcc -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -pthread -I. \
  *         -o pump_test tests/adapt/psy_rt_test.c
@@ -28,13 +34,16 @@
  *
  * It lives in tests/adapt/ rather than tests/compile/ because the pump exists
  * for the adaptive-method headers (docs/psy_adapt.md, "Inference on a thread")
- * and because it is a behavior test, not a compile check. It is deliberately
- * NOT registered in CMakeLists.txt yet.
+ * and because it is a behavior test, not a compile check.
  *
  * Timing: the test spends about 1.5 s in deliberate sleeps, which is how it
  * gets deterministic answers out of a thread it does not control. Every margin
  * is at least a factor of ten, so a sanitizer's slowdown does not reach them.
  */
+/* The whole test runs in trace-ring mode, so the zones psy_rt.h puts in its
+ * own worker and pump run here too, under the sanitizers. With no trace ring
+ * attached (every test but test_trace) they cost a pointer load each. */
+#define PSYRT_TRACE_RING
 #define PSY_RT_IMPLEMENTATION
 #include "psy_rt.h"
 
@@ -725,6 +734,681 @@ static void test_hammer_wait_vs_stop(void) {
            (double)(psyrt_now_ns() - t0) / 1e6);
 }
 
+/* ------------------------------------------------------------- event ring */
+
+static unsigned char g_ring_mem[PSYRT_RING_BYTES(4096) + 1];
+
+/* Open, sizes, order, the stamps, a full ring and its LOSS record. */
+static void test_ring_basic(void) {
+    psyrt_ring r;
+    psyrt_ring_desc d;
+    psyrt_event ev, out[16];
+    uint64_t t0, t1;
+    int i, n;
+
+    memset(&r, 0, sizeof(r));
+    memset(&d, 0, sizeof(d));
+    memset(&ev, 0, sizeof(ev));
+    CHECK(!psyrt_ring_open(&r, NULL), "a NULL desc fails");
+    CHECK(psyrt_ring_error(&r)[0] != '\0', "a failed open leaves a message");
+    CHECK(!psyrt_ring_open(&r, &d), "NULL memory fails");
+    d.memory = g_ring_mem;
+    d.bytes = 64;   /* at most one slot after alignment */
+    CHECK(!psyrt_ring_open(&r, &d), "room for fewer than 2 records fails");
+    CHECK(strstr(psyrt_ring_error(&r), "PSYRT_RING_BYTES") != NULL,
+          "the message must name the macro that sizes the memory");
+    CHECK_I(psyrt_ring_push(&r, &ev), PSYRT_ERR_ARG, "push to a ring that never opened");
+    CHECK_I(psyrt_ring_drain(&r, out, 16), PSYRT_ERR_ARG, "drain of a ring that never opened");
+    CHECK_I(psyrt_ring_capacity(&r), 0, "an unopened ring has no capacity");
+
+    d.bytes = PSYRT_RING_BYTES(4096);
+    CHECK(psyrt_ring_open(&r, &d), "PSYRT_RING_BYTES(4096)");
+    CHECK_I(psyrt_ring_capacity(&r), 4096, "PSYRT_RING_BYTES(n) holds n");
+    d.memory = g_ring_mem + 1;   /* misaligned on purpose */
+    CHECK(psyrt_ring_open(&r, &d), "misaligned memory");
+    CHECK_I(psyrt_ring_capacity(&r), 4096, "the alignment pad covers a misaligned start");
+    CHECK(((uintptr_t)r.slots & 63u) == 0, "slots are 64-aligned");
+    d.bytes = PSYRT_RING_BYTES(100);
+    CHECK(psyrt_ring_open(&r, &d), "100 records");
+    CHECK_I(psyrt_ring_capacity(&r), 64, "rounded down to a power of two");
+
+    /* Order, seq, and the zero-means-stamp rule. */
+    d.memory = g_ring_mem;
+    d.bytes = PSYRT_RING_BYTES(8);
+    CHECK(psyrt_ring_open(&r, &d), "8 records");
+    t0 = psyrt_now_ns();
+    for (i = 0; i < 5; i++) {
+        memset(&ev, 0, sizeof(ev));
+        ev.seq = 999u;                   /* ignored */
+        ev.source = (uint16_t)PSYRT_SRC_USER;
+        ev.kind = 3;
+        ev.aux = (uint32_t)i;
+        ev.u.i64[4] = -i;
+        if (i == 4) { ev.t_ns = 12345u; ev.tid = 77u; }
+        CHECK_I(psyrt_ring_push(&r, &ev), 0, "push into room");
+    }
+    t1 = psyrt_now_ns();
+    n = psyrt_ring_drain(&r, out, 16);
+    CHECK_I(n, 5, "drain returns what was pushed");
+    for (i = 0; i < n && i < 5; i++) {
+        CHECK_I(out[i].seq, i + 1, "seq is ticket + 1, in push order");
+        CHECK_I(out[i].aux, i, "records come out in push order");
+        CHECK(out[i].u.i64[4] == -i, "payload intact");
+        CHECK_I(out[i].source, PSYRT_SRC_USER, "source");
+        if (i < 4) {
+            CHECK(out[i].t_ns >= t0 && out[i].t_ns <= t1, "t_ns 0 is stamped at the push");
+            CHECK(out[i].tid == psyrt_thread_id(), "tid 0 is the pushing thread");
+        }
+    }
+    CHECK(out[4].t_ns == 12345u && out[4].tid == 77u, "set stamps are kept");
+    CHECK_I(psyrt_ring_drain(&r, out, 16), 0, "an empty ring drains nothing");
+    CHECK_I(psyrt_ring_drain(&r, out, 0), 0, "cap 0 drains nothing");
+
+    /* Full: 8 fit, 3 are refused, the drain reports them first, then the 8. */
+    memset(&ev, 0, sizeof(ev));
+    for (i = 0; i < 8; i++) {
+        ev.aux = (uint32_t)(100 + i);
+        CHECK_I(psyrt_ring_push(&r, &ev), 0, "fill the ring");
+    }
+    for (i = 0; i < 3; i++)
+        CHECK_I(psyrt_ring_push(&r, &ev), PSYRT_ERR_FULL, "a full ring refuses");
+    CHECK_I(psyrt_ring_dropped(&r), 3, "every refusal is counted");
+    n = psyrt_ring_drain(&r, out, 4);
+    CHECK_I(n, 4, "LOSS plus 3 records in a cap of 4");
+    CHECK(out[0].source == PSYRT_SRC_RT && out[0].kind == PSYRT_KIND_LOSS, "LOSS first");
+    CHECK(out[0].u.u64[0] == 3u && out[0].u.u64[1] == 3u, "LOSS counts the refusals");
+    CHECK_I(out[0].seq, 0, "LOSS has no ticket");
+    CHECK_I(out[1].aux, 100, "the oldest record follows the LOSS");
+    CHECK_I(out[1].seq, 6, "tickets continue across a refusal");
+    n = psyrt_ring_drain(&r, out, 16);
+    CHECK_I(n, 5, "the rest, and no second LOSS");
+    CHECK_I(out[0].aux, 103, "in order");
+    CHECK_I(psyrt_ring_push(&r, &ev), 0, "room again after the drain");
+    CHECK_I(psyrt_ring_push(&r, NULL), PSYRT_ERR_ARG, "NULL event");
+    CHECK_I(psyrt_ring_drain(&r, NULL, 4), PSYRT_ERR_ARG, "NULL out");
+    printf("  ring: open, sizes, order, stamps, full and LOSS: ok\n");
+}
+
+/* Many producers, one drainer, a ring small enough to fill. Every record
+ * carries words derived from (producer, index), so a torn record cannot pass,
+ * and every push's outcome is kept, so the accounting is checked exactly:
+ * each push is drained once or refused once, never both and never neither. */
+#define STRESS_M    20000
+#define STRESS_PMAX 8
+
+typedef struct stress_ctx {
+    psyrt_ring*    r;
+    const int*     go;
+    int            pid;
+    int            done;
+    uint32_t       tid;
+    long           refused;
+    unsigned char* refused_at;   /* STRESS_M flags */
+} stress_ctx;
+
+static unsigned char g_stress_refused[STRESS_PMAX][STRESS_M];
+static unsigned char g_stress_seen[STRESS_PMAX][STRESS_M];
+
+static uint64_t stress_word(int pid, uint32_t i, int k) {
+    uint64_t x = ((uint64_t)(pid + 1) << 40) ^ ((uint64_t)i << 8) ^ (uint64_t)k;
+    x *= 0x9E3779B97F4A7C15ull;
+    return x ^ (x >> 29);
+}
+
+static void stress_job(void* ctx, const psyrt_job_info* info) {
+    stress_ctx* s = (stress_ctx*)ctx;
+    psyrt_event ev;
+    uint32_t i;
+    int k;
+    (void)info;
+    s->tid = psyrt_thread_id();
+    while (!t_load(s->go)) { }
+    for (i = 0; i < STRESS_M; i++) {
+        memset(&ev, 0, sizeof(ev));
+        ev.source = (uint16_t)PSYRT_SRC_USER;
+        ev.kind = (uint16_t)(s->pid + 1);
+        ev.aux = i;
+        ev.t_ns = (uint64_t)i + 1u;
+        for (k = 0; k < 5; k++) ev.u.u64[k] = stress_word(s->pid, i, k);
+        if (psyrt_ring_push(s->r, &ev) == PSYRT_ERR_FULL) {
+            s->refused_at[i] = 1;
+            s->refused++;
+        }
+        /* Bursts with gaps, so the drainer keeps up most of the time and
+         * the pushes interleave with drains rather than only with refusals. */
+        if (i % 32u == 31u) (void)psyrt_spin_until(psyrt_now_ns() + 20000u);
+    }
+    t_store(&s->done, 1);
+}
+
+static void test_ring_stress(int producers) {
+    static unsigned char mem[PSYRT_RING_BYTES(256)];
+    static psyrt_event out[128];
+    static psyrt_worker w[STRESS_PMAX];
+    static stress_ctx c[STRESS_PMAX];
+    psyrt_ring r;
+    psyrt_ring_desc d;
+    psyrt_worker_desc wd;
+    uint32_t last_i[STRESS_PMAX], last_seq = 0;
+    int have_last[STRESS_PMAX];
+    int go = 0, started = 0, i, all_done = 0, naps = 0;
+    long drained = 0, refused = 0, torn = 0, dup = 0, order = 0, seq_gap = 0, bad_tid = 0;
+    long accounting = 0;
+    uint64_t loss = 0, t0, t_nap;
+
+    memset(&d, 0, sizeof(d));
+    d.memory = mem;
+    d.bytes = sizeof(mem);
+    if (!psyrt_ring_open(&r, &d)) { fail(__LINE__, psyrt_ring_error(&r)); return; }
+    memset(g_stress_refused, 0, sizeof(g_stress_refused));
+    memset(g_stress_seen, 0, sizeof(g_stress_seen));
+    memset(&wd, 0, sizeof(wd));
+    wd.no_elevate = true;
+    for (i = 0; i < producers; i++) {
+        memset(&c[i], 0, sizeof(c[i]));
+        c[i].r = &r;
+        c[i].go = &go;
+        c[i].pid = i;
+        c[i].refused_at = g_stress_refused[i];
+        have_last[i] = 0;
+        last_i[i] = 0;
+        memset(&w[i], 0, sizeof(w[i]));
+        if (!psyrt_worker_start(&w[i], &wd)) { fail(__LINE__, psyrt_worker_error(&w[i])); break; }
+        started++;
+        if (psyrt_worker_submit(&w[i], 0, stress_job, &c[i]) < 0) fail(__LINE__, "stress submit");
+    }
+    nap_ms(20);   /* every producer parked on `go` */
+    t0 = t_nap = psyrt_now_ns();
+    t_store(&go, 1);
+    for (;;) {
+        int n, j, k;
+        int was_done = all_done;
+        if (!all_done) {
+            all_done = 1;
+            for (i = 0; i < started; i++) if (!t_load(&c[i].done)) all_done = 0;
+        }
+        n = psyrt_ring_drain(&r, out, 128);
+        for (j = 0; j < n; j++) {
+            const psyrt_event* e = &out[j];
+            int pid;
+            if (e->source == PSYRT_SRC_RT && e->kind == PSYRT_KIND_LOSS) {
+                loss += e->u.u64[0];
+                if (e->u.u64[1] != loss) torn++;
+                continue;
+            }
+            if (e->seq != last_seq + 1u) seq_gap++;
+            last_seq = e->seq;
+            pid = (int)e->kind - 1;
+            if (pid < 0 || pid >= started || e->aux >= STRESS_M) { torn++; continue; }
+            for (k = 0; k < 5; k++)
+                if (e->u.u64[k] != stress_word(pid, e->aux, k)) { torn++; break; }
+            if (e->t_ns != (uint64_t)e->aux + 1u) torn++;
+            if (e->tid != c[pid].tid) bad_tid++;
+            if (g_stress_seen[pid][e->aux]) dup++;
+            g_stress_seen[pid][e->aux] = 1;
+            if (have_last[pid] && e->aux <= last_i[pid]) order++;
+            have_last[pid] = 1;
+            last_i[pid] = e->aux;
+            drained++;
+        }
+        /* Fall behind for 1 ms in every 6, so the ring fills and refuses
+         * some of the time and keeps up the rest. */
+        if (!all_done && psyrt_now_ns() - t_nap > 5000000u) {
+            nap_ms(1);
+            t_nap = psyrt_now_ns();
+            naps++;
+        }
+        /* Done only after a drain that started with every producer finished
+         * came back empty. */
+        if (was_done && n == 0) break;
+    }
+    for (i = 0; i < started; i++) psyrt_worker_stop(&w[i]);
+    for (i = 0; i < started; i++) {
+        uint32_t j;
+        refused += c[i].refused;
+        for (j = 0; j < STRESS_M; j++)
+            if (g_stress_seen[i][j] == g_stress_refused[i][j]) accounting++;
+    }
+    CHECK_I(started, producers, "every producer started");
+    CHECK_I(torn, 0, "no torn record");
+    CHECK_I(dup, 0, "no duplicate record");
+    CHECK_I(order, 0, "each producer's records in its own order");
+    CHECK_I(seq_gap, 0, "a refusal takes no ticket, so seq has no gaps");
+    CHECK_I(bad_tid, 0, "tid 0 is filled with the pushing thread's id");
+    CHECK_I(accounting, 0, "each push is drained once or refused once");
+    CHECK_I(drained + refused, (long)producers * STRESS_M, "drained + refused = pushed");
+    CHECK_I((long)loss, refused, "the LOSS records add up to the refusals");
+    CHECK_I((long)psyrt_ring_dropped(&r), refused, "psyrt_ring_dropped is exact");
+    CHECK(drained > 0 && refused > 0, "the run must both drain and refuse");
+    printf("  ring stress, %d producers x %d into 256 slots: drained %ld, refused %ld, "
+           "%d drainer naps, %.0f ms\n", producers, STRESS_M, drained, refused, naps,
+           (double)(psyrt_now_ns() - t0) / 1e6);
+}
+
+/* The trace macros in PSYRT_TRACE_RING mode (this file defines it), and the
+ * zones psy_rt.h's own worker emits. */
+static void trace_job(void* ctx, const psyrt_job_info* info) {
+    (void)ctx; (void)info;
+}
+
+static void test_trace(void) {
+    static unsigned char mem[PSYRT_RING_BYTES(256)];
+    static psyrt_event out[256];
+    psyrt_ring r;
+    psyrt_ring_desc d;
+    psyrt_worker w;
+    psyrt_worker_desc wd;
+    int n, i, zones = 0, plots = 0, msgs = 0, frames = 0, names = 0;
+    int worker_zone = 0, worker_name = 0;
+    uint64_t t0;
+
+    memset(&d, 0, sizeof(d));
+    d.memory = mem;
+    d.bytes = sizeof(mem);
+    if (!psyrt_ring_open(&r, &d)) { fail(__LINE__, psyrt_ring_error(&r)); return; }
+
+    /* Detached: the macros write nothing anywhere. */
+    CHECK(psyrt_trace_ring() == NULL, "no trace ring by default");
+    {
+        PSYRT_ZONE(z0, "detached");
+        PSYRT_PLOT("detached", 1.0);
+        PSYRT_ZONE_END(z0);
+    }
+
+    psyrt_trace_set_ring(&r);
+    CHECK(psyrt_trace_ring() == &r, "attached");
+    t0 = psyrt_now_ns();
+    PSYRT_THREAD_NAME("test main");
+    {
+        PSYRT_ZONE(outer, "outer");
+        PSYRT_ZONE_VALUE(outer, 99);
+        {
+            PSYRT_ZONE(inner, "inner");
+            nap_ms(2);
+            PSYRT_ZONE_END(inner);
+        }
+        PSYRT_PLOT("fill", 0.25);
+        PSYRT_MESSAGE("trial start");
+        PSYRT_MESSAGEF("trial %d of %d, and a tail long enough to truncate", 3, 40);
+        PSYRT_FRAME_MARK();
+        PSYRT_FRAME_MARK_NAMED("display 2");
+        PSYRT_ZONE_END(outer);
+    }
+    memset(&w, 0, sizeof(w));
+    memset(&wd, 0, sizeof(wd));
+    wd.no_elevate = true;
+    if (psyrt_worker_start(&w, &wd)) {
+        (void)psyrt_worker_submit(&w, 0, trace_job, NULL);
+        nap_ms(30);
+        psyrt_worker_stop(&w);
+    } else {
+        fail(__LINE__, psyrt_worker_error(&w));
+    }
+    psyrt_trace_set_ring(NULL);
+
+    n = psyrt_ring_drain(&r, out, 256);
+    for (i = 0; i < n; i++) {
+        const psyrt_event* e = &out[i];
+        if (e->source != PSYRT_SRC_RT) continue;
+        if (e->kind == PSYRT_KIND_ZONE) {
+            const char* nm = e->u.zone.loc->name;
+            zones++;
+            if (strcmp(nm, "outer") == 0) {
+                CHECK(e->u.zone.value == 99u, "zone value");
+                CHECK(e->u.zone.dur_ns >= 2000000u, "outer contains the 2 ms nap");
+                CHECK(e->t_ns >= t0, "zone t_ns is its begin");
+                CHECK(strcmp(e->u.zone.loc->function, "test_trace") == 0, "srcloc function");
+                CHECK(e->tid == psyrt_thread_id(), "zone tid");
+            }
+            if (strcmp(nm, "inner") == 0)
+                CHECK(e->u.zone.dur_ns >= 2000000u, "inner contains the nap");
+            if (strcmp(nm, "psyrt.worker.job") == 0 && e->tid != psyrt_thread_id())
+                worker_zone++;
+            CHECK(strcmp(nm, "detached") != 0, "a detached zone is not recorded");
+        } else if (e->kind == PSYRT_KIND_PLOT) {
+            plots++;
+            CHECK(strcmp(e->u.plot.name, "fill") == 0 && e->u.plot.value == 0.25, "plot");
+        } else if (e->kind == PSYRT_KIND_MESSAGE) {
+            msgs++;
+            if (msgs == 2) {
+                CHECK(strlen(e->u.text) == 39, "MESSAGEF truncates to 39 characters");
+                CHECK(strncmp(e->u.text, "trial 3 of 40", 13) == 0, "MESSAGEF formats");
+            } else {
+                CHECK(strcmp(e->u.text, "trial start") == 0, "MESSAGE");
+            }
+        } else if (e->kind == PSYRT_KIND_FRAME) {
+            frames++;
+            if (frames == 2)
+                CHECK(e->u.plot.name && strcmp(e->u.plot.name, "display 2") == 0,
+                      "FRAME_MARK_NAMED carries its name");
+        } else if (e->kind == PSYRT_KIND_THREAD_NAME) {
+            names++;
+            if (strcmp(e->u.text, "psyrt worker") == 0) worker_name++;
+        }
+    }
+    CHECK(zones >= 3, "outer, inner and the worker's job");
+    CHECK_I(plots, 1, "one plot");
+    CHECK_I(msgs, 2, "two messages");
+    CHECK_I(frames, 2, "two frame marks");
+    CHECK(names >= 2, "the main thread and the worker named themselves");
+    CHECK_I(worker_zone, 1, "the worker traced its job on its own thread");
+    CHECK_I(worker_name, 1, "PSYRT_THREAD_INIT on the worker thread");
+    printf("  trace ring: %d records (%d zones), worker zone and name: ok\n", n, zones);
+}
+
+/* ------------------------------------------------------ clock correlation */
+
+static uint64_t offset_clock(void* ctx) { return psyrt_now_ns() + *(const uint64_t*)ctx; }
+static uint64_t ms_clock(void* ctx) { (void)ctx; return psyrt_now_ns() / 1000000u; }
+static uint64_t frozen_clock(void) { return 7u; }
+
+static uint64_t abs_diff(uint64_t a, uint64_t b) { return a > b ? a - b : b - a; }
+
+static void test_correlate(void) {
+    psyrt_corr_desc d;
+    psyrt_corr c;
+    uint64_t off = 123456789u, t0, el, self_w;
+    int rc;
+
+    memset(&d, 0, sizeof(d));
+    CHECK_I(psyrt_correlate(&d, &c), PSYRT_ERR_ARG, "no reader");
+    CHECK_I(psyrt_correlate(NULL, &c), PSYRT_ERR_ARG, "NULL desc");
+    d.read = psyrt_now_ns;
+    d.read_ctx = offset_clock;
+    CHECK_I(psyrt_correlate(&d, &c), PSYRT_ERR_ARG, "two readers");
+    d.read_ctx = NULL;
+    CHECK_I(psyrt_correlate(&d, NULL), PSYRT_ERR_ARG, "NULL out");
+
+    /* The clock against itself: the read lies inside its own bracket. */
+    CHECK_I(psyrt_correlate(&d, &c), 16, "plain mode takes 16 tries by default");
+    CHECK(c.width_ns > 0, "the width is never 0");
+    CHECK(abs_diff(c.other, c.rt_ns) <= c.width_ns / 2u + 1u,
+          "the clock against itself agrees within half the width");
+    self_w = c.width_ns;
+
+    /* A fixed offset is recovered within half the width. */
+    memset(&d, 0, sizeof(d));
+    d.read_ctx = offset_clock;
+    d.ctx = &off;
+    d.tries = 5;
+    CHECK_I(psyrt_correlate(&d, &c), 5, "tries is honored");
+    CHECK(abs_diff(c.other - off, c.rt_ns) <= c.width_ns / 2u + 1u, "offset recovered");
+
+    /* Edge mode on a 1 ms clock made from ours: the edge is exactly at
+     * value * 1e6 on our clock, so it must lie within half the width. */
+    memset(&d, 0, sizeof(d));
+    d.read_ctx = ms_clock;
+    d.edge = true;
+    t0 = psyrt_now_ns();
+    rc = psyrt_correlate(&d, &c);
+    el = psyrt_now_ns() - t0;
+    CHECK_I(rc, 4, "edge mode takes 4 edges by default");
+    CHECK(abs_diff(c.other * 1000000u, c.rt_ns) <= c.width_ns / 2u + 1u,
+          "edge mode finds the tick boundary within half the width");
+    CHECK(c.width_ns < 1000000u, "an edge is far tighter than the tick");
+    CHECK(el < 50000000u, "4 edges of a 1 ms clock take about 4 ms");
+    printf("  correlate: self width %llu ns, 1 ms edge width %llu ns, 4 edges in %.1f ms\n",
+           (unsigned long long)self_w, (unsigned long long)c.width_ns, (double)el / 1e6);
+
+    /* A clock that never moves: the timeout, not a hang. */
+    memset(&d, 0, sizeof(d));
+    d.read = frozen_clock;
+    d.edge = true;
+    d.timeout_ns = 2000000u;
+    CHECK_I(psyrt_correlate(&d, &c), PSYRT_ERR_TIMEOUT, "edge mode times out");
+
+#if defined(_WIN32)
+    {
+        /* Interrupt time against QPC: two correlations 50 ms apart must agree
+         * on the rate, and the width is never below the QPC tick. */
+        psyrt_corr a, b;
+        double rate;
+        CHECK(psyrt_interrupt_time_100ns() != 0, "QueryInterruptTimePrecise exists (Win10+)");
+        memset(&d, 0, sizeof(d));
+        d.read = psyrt_interrupt_time_100ns;
+        CHECK(psyrt_correlate(&d, &a) > 0, "correlate interrupt time");
+        nap_ms(50);
+        CHECK(psyrt_correlate(&d, &b) > 0, "correlate interrupt time again");
+        CHECK(a.width_ns >= 100u, "the width floor is the QPC tick");
+        rate = (double)(b.other - a.other) * 100.0 / (double)(b.rt_ns - a.rt_ns);
+        CHECK(rate > 0.999 && rate < 1.001, "interrupt time runs at the QPC rate");
+        printf("  interrupt time: width %llu ns, rate %.6f\n",
+               (unsigned long long)a.width_ns, rate);
+    }
+#else
+    CHECK(psyrt_interrupt_time_100ns() == 0, "interrupt time is a Windows clock");
+#endif
+}
+
+/* -------------------------------------------- Windows power throttling */
+
+#if defined(_WIN32)
+/* What psyrt_report_get() says about EcoQoS on a thread psy_rt.h set up,
+ * read on that thread from an on_start hook. */
+static int g_eco_seen = -1;
+
+static bool eco_probe(void* ctx, char* err, size_t cap) {
+    psyrt_report rep;
+    (void)ctx; (void)err; (void)cap;
+    psyrt_report_get(&rep, PSYRT_POLICY_NONE);
+    g_eco_seen = rep.throttle_known ? (rep.ecoqos_off ? 1 : 0) : -1;
+    return true;
+}
+
+static void eco_msg(void* ctx, const void* msg, uint32_t seq) { (void)ctx; (void)msg; (void)seq; }
+#endif
+
+static void test_throttle(void) {
+#if defined(_WIN32)
+    psyrt_worker w;
+    psyrt_worker_desc wd;
+    psyrt_pump p;
+    psyrt_pump_desc pd;
+    psyrt_report rep;
+    char line[256];
+    int worker_eco, plain_eco, pump_eco;
+
+    memset(&w, 0, sizeof(w));
+    memset(&wd, 0, sizeof(wd));
+    wd.on_start = eco_probe;   /* elevates first, then runs the hook */
+    g_eco_seen = -1;
+    if (psyrt_worker_start(&w, &wd)) psyrt_worker_stop(&w);
+    worker_eco = g_eco_seen;
+    wd.no_elevate = true;
+    g_eco_seen = -1;
+    memset(&w, 0, sizeof(w));
+    if (psyrt_worker_start(&w, &wd)) psyrt_worker_stop(&w);
+    plain_eco = g_eco_seen;
+    memset(&p, 0, sizeof(p));
+    memset(&pd, 0, sizeof(pd));
+    pd.msg_size = 4;
+    pd.capacity = 1;
+    pd.on_msg = eco_msg;
+    pd.on_start = eco_probe;
+    pd.below_normal = true;
+    g_eco_seen = -1;
+    if (psyrt_pump_start(&p, &pd)) psyrt_pump_stop(&p);
+    pump_eco = g_eco_seen;
+    CHECK(worker_eco >= 0, "Windows 10 1709+ reports the thread's EcoQoS state");
+    CHECK_I(worker_eco, 1, "an elevated worker thread is opted out of EcoQoS");
+    CHECK_I(plain_eco, 0, "a no_elevate worker is left to the OS");
+    CHECK_I(pump_eco, 1, "the pump thread is opted out of EcoQoS, below normal too");
+
+    CHECK(psyrt_timer_resolution_begin(), "timeBeginPeriod(1)");
+    psyrt_report_get(&rep, PSYRT_POLICY_NORMAL);
+    CHECK(rep.timer_throttle_off, "raising the resolution opts out of its throttling");
+    psyrt_describe(&rep, line, sizeof(line));
+    CHECK(strstr(line, "timer_throttle=off") != NULL, "psyrt_describe says so");
+    CHECK(strstr(line, "ecoqos=on") != NULL, "the test's own thread was never elevated");
+    psyrt_timer_resolution_end();
+    printf("  power throttling: worker %d, no_elevate worker %d, pump %d; %s\n",
+           worker_eco, plain_eco, pump_eco, line);
+#else
+    psyrt_report rep;
+    char line[256];
+    psyrt_report_get(&rep, PSYRT_POLICY_NORMAL);
+    psyrt_describe(&rep, line, sizeof(line));
+    CHECK(!rep.throttle_known, "power throttling is a Windows notion");
+    CHECK(strstr(line, "timer_throttle=n/a ecoqos=n/a") != NULL, "psyrt_describe says n/a");
+    printf("  power throttling: n/a on this platform\n");
+#endif
+}
+
+/* ------------------------------------------------------------ core types */
+
+#if defined(_WIN32)
+/* Run on an elevated worker thread before start() returns: what the report
+ * says after psyrt_thread_elevate(), then after a pin to an E-core. */
+typedef struct core_probe {
+    int e_cpu;
+    bool pref_after_elevate, pref_after_pin, pinned_runs_there;
+    int pinned_cpu;
+    psyrt_core_type pinned_core;
+    char line[256];
+} core_probe;
+
+static bool core_probe_start(void* ctx, char* err, size_t cap) {
+    core_probe* c = (core_probe*)ctx;
+    psyrt_report rep;
+    (void)err; (void)cap;
+    psyrt_report_get(&rep, PSYRT_POLICY_NONE);
+    c->pref_after_elevate = rep.pcores_preferred;
+    if (c->e_cpu >= 0 && psyrt_thread_pin(c->e_cpu)) {
+#if defined(_WIN32)
+        int k;
+        c->pinned_runs_there = true;
+        for (k = 0; k < 50; k++) {
+            if ((int)GetCurrentProcessorNumber() != c->e_cpu) c->pinned_runs_there = false;
+            Sleep(1);
+        }
+#endif
+        psyrt_report_get(&rep, PSYRT_POLICY_NONE);
+        c->pref_after_pin = rep.pcores_preferred;
+        c->pinned_cpu = rep.pinned_cpu;
+        c->pinned_core = rep.pinned_core;
+        psyrt_describe(&rep, c->line, sizeof(c->line));
+    }
+    return true;
+}
+#endif
+
+static void test_core_types(void) {
+    int cpu, np = 0, ne = 0, nu = 0, nq = 0, first_e = -1;
+    psyrt_report rep;
+    psyrt_report big;
+    char line[256];
+    int len;
+    for (cpu = 0; cpu < 64; cpu++) {
+        psyrt_core_type t = psyrt_cpu_core_type(cpu);
+        if (t == PSYRT_CORE_PERFORMANCE) np++;
+        else if (t == PSYRT_CORE_EFFICIENCY) { ne++; if (first_e < 0) first_e = cpu; }
+        else if (t == PSYRT_CORE_UNIFORM) nu++;
+        else nq++;
+    }
+    CHECK_I(np + ne + nu + nq, 64, "every CPU number gets an answer");
+    CHECK_I(psyrt_cpu_core_type(-1), PSYRT_CORE_UNKNOWN, "a CPU that does not exist");
+    CHECK(strcmp(psyrt_core_type_name(PSYRT_CORE_PERFORMANCE), "P") == 0, "names");
+    CHECK(strcmp(psyrt_core_type_name(PSYRT_CORE_EFFICIENCY), "E") == 0, "names");
+    psyrt_report_get(&rep, PSYRT_POLICY_NORMAL);
+    CHECK_I(rep.pinned_cpu, -1, "the test's own thread was never pinned");
+    CHECK(!rep.pcores_preferred, "nor elevated");
+#if defined(_WIN32)
+    CHECK(np + ne + nu > 0, "Windows 10+ names the kind of every CPU");
+    CHECK(!(np && nu) && !(ne && nu), "a machine is hybrid or uniform, not both");
+    if (ne > 0) {
+        /* Hybrid: an elevated worker prefers the P-cores, and a pin to an
+         * E-core drops the preference and holds. */
+        psyrt_worker w;
+        psyrt_worker_desc wd;
+        static core_probe c;
+        memset(&c, 0, sizeof(c));
+        c.e_cpu = first_e;
+        memset(&w, 0, sizeof(w));
+        memset(&wd, 0, sizeof(wd));
+        wd.on_start = core_probe_start;
+        wd.start_ctx = &c;
+        if (psyrt_worker_start(&w, &wd)) psyrt_worker_stop(&w);
+        CHECK(c.pref_after_elevate, "an elevated thread prefers the P-cores on a hybrid CPU");
+        CHECK(!c.pref_after_pin, "a pin drops the preference");
+        CHECK(c.pinned_runs_there, "the pinned thread runs on its E-core");
+        CHECK_I(c.pinned_cpu, first_e, "the report has the pinned CPU");
+        CHECK_I(c.pinned_core, PSYRT_CORE_EFFICIENCY, "and its kind");
+        CHECK(strstr(c.line, " cores=any") != NULL, "the line says the preference is gone");
+        printf("  core types: %d P, %d E; pinned worker: %s\n", np, ne, c.line);
+    } else {
+        printf("  core types: uniform machine (%d CPUs), no preference to test\n", nu);
+    }
+#else
+    CHECK_I(np + ne + nu, 0, "only Windows names core kinds");
+    printf("  core types: unknown here (%d CPUs asked)\n", nq);
+#endif
+    /* The longest line a report can give on this platform still fits in
+     * 192 bytes; any report fits in 256. */
+    memset(&big, 0, sizeof(big));
+    psyrt_report_get(&big, PSYRT_POLICY_TIME_CONSTRAINT);
+    big.pinned_cpu = 1023;
+    big.pinned_core = PSYRT_CORE_UNIFORM;
+    big.memory_locked = big.timer_resolution_raised = big.hires_timer = true;
+    big.pcores_preferred = false;
+    len = psyrt_describe(&big, line, sizeof(line));
+    CHECK(len < 191, "a real report's line fits in 192 bytes");
+    big.clock_res_ns = UINT64_MAX;
+    big.timer_slack_known = true;
+    big.timer_slack_ns = UINT64_MAX;
+    big.pinned_cpu = 99999;
+    len = psyrt_describe(&big, line, sizeof(line));
+    CHECK(len < 255, "any report's line fits in 256 bytes");
+}
+
+/* ----------------------------------------------------------- raw counter */
+
+/* psyrt_ticks_to_ns() must be the conversion psyrt_now_ns() uses: a counter
+ * read just before and just after psyrt_now_ns() must convert to times that
+ * bracket it, every second of counts must be exactly 1e9 ns, and a negative
+ * count converts as a difference. */
+static void test_ticks(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER f, a, b;
+    uint64_t now;
+    int i, bad = 0;
+    QueryPerformanceFrequency(&f);
+    for (i = 0; i < 1000; i++) {
+        QueryPerformanceCounter(&a);
+        now = psyrt_now_ns();
+        QueryPerformanceCounter(&b);
+        if ((uint64_t)psyrt_ticks_to_ns(a.QuadPart) > now ||
+            (uint64_t)psyrt_ticks_to_ns(b.QuadPart) < now) bad++;
+        if (a.QuadPart == b.QuadPart && (uint64_t)psyrt_ticks_to_ns(a.QuadPart) != now) bad++;
+    }
+    CHECK_I(bad, 0, "psyrt_ticks_to_ns(QPC) brackets psyrt_now_ns(), and equals it on one tick");
+    CHECK(psyrt_ticks_to_ns(f.QuadPart * 3600) == 3600000000000ll, "an hour of counts is an hour");
+    CHECK(psyrt_ticks_to_ns(-f.QuadPart) == -1000000000ll, "negative counts convert");
+#if defined(__SIZEOF_INT128__)
+    {
+        /* An independent reference in 128-bit arithmetic, over 40 days of
+         * uptime at this machine's frequency. */
+        __extension__ typedef unsigned __int128 u128;
+        uint64_t x = 88172645463325252ull;
+        int mism = 0;
+        for (i = 0; i < 100000; i++) {
+            int64_t t;
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            t = (int64_t)(x % ((uint64_t)f.QuadPart * 3456000ull));
+            if ((u128)psyrt_ticks_to_ns(t) != (u128)t * 1000000000u / (uint64_t)f.QuadPart)
+                mism++;
+        }
+        CHECK_I(mism, 0, "psyrt_ticks_to_ns matches a 128-bit reference");
+    }
+#endif
+    printf("  ticks to ns: QPC at %lld Hz converts as psyrt_now_ns() does\n",
+           (long long)f.QuadPart);
+#else
+    CHECK(psyrt_ticks_to_ns(123456789) == 123456789, "identity where the unit is the ns");
+    CHECK(psyrt_ticks_to_ns(-5) == -5, "identity for negatives");
+    printf("  ticks to ns: identity (clock_gettime counts in ns)\n");
+#endif
+}
+
 /* ---------------------------------------------------------------- version */
 
 /* --------------------------------------------------------------- platform */
@@ -736,7 +1420,7 @@ static void test_hammer_wait_vs_stop(void) {
 static void test_platform(void) {
     psyrt_clock_info ci;
     psyrt_report rep;
-    char line[192];
+    char line[256];
     memset(&ci, 0, sizeof(ci));
     psyrt_get_clock_info(&ci);
     CHECK(ci.resolution_ns > 0, "the clock must report a resolution");
@@ -791,6 +1475,15 @@ int main(void) {
     test_stop_releases_wait();
     test_hammer_wait_vs_stop();
     test_edges();
+    test_ring_basic();
+    test_ring_stress(2);
+    test_ring_stress(4);
+    test_ring_stress(8);
+    test_trace();
+    test_correlate();
+    test_ticks();
+    test_throttle();
+    test_core_types();
     test_platform();
     test_version();
 

@@ -1,9 +1,10 @@
-/* psy_rt.h - v0.4.1 - public domain single-header real-time timing library
+/* psy_rt.h - v0.5.0 - public domain single-header real-time timing library
  *
  *   The clock, the waits, the scheduling ladder, the one-shot deadline
- *   worker and the background-compute pump that a psychophysics rig needs,
- *   factored out of the transport headers so experiment code and future
- *   transports share one clock base and one set of timing claims.
+ *   worker, the background-compute pump, the event ring, the clock
+ *   correlation and the instrumentation macros that a psychophysics rig
+ *   needs, factored out of the transport headers so experiment code and
+ *   future transports share one clock base and one set of timing claims.
  *
  *   Written in the single-header style of the stb / sokol libraries. It is
  *   the base the other psy headers stand on: psy_parallel.h and psy_serial.h
@@ -17,6 +18,43 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.5.0 - The event ring: psyrt_ring, a wait-free ring of 64-byte
+ *          psyrt_event records in memory the caller supplies, pushed from
+ *          any number of threads (an audio callback included) and drained
+ *          by one. A full ring refuses the new record, counts it, and the
+ *          next drain reports the count in band as a PSYRT_KIND_LOSS
+ *          record. See EVENT RING.
+ *          psyrt_correlate(): the psy_rt clock against another clock read
+ *          between two of its own reads, the tightest of N tries, with the
+ *          bracket's width; an edge mode for coarse clocks.
+ *          psyrt_interrupt_time_100ns(), the Windows interrupt-time clock,
+ *          and psyrt_ticks_to_ns(), the exact conversion psyrt_now_ns()
+ *          applies to a QPC value. psyrt_thread_id(). See CLOCK
+ *          CORRELATION.
+ *          The instrumentation macros (PSYRT_ZONE, PSYRT_FRAME_MARK,
+ *          PSYRT_PLOT, PSYRT_MESSAGE and the rest): nothing by default, the
+ *          Tracy C API with PSYRT_TRACY, records in a trace ring with
+ *          PSYRT_TRACE_RING. The worker, the pump and psyrt_sleep_until()
+ *          are instrumented. See INSTRUMENTATION.
+ *          PSYRT_OK, the PSYRT_ERR_* codes and psyrt_strerror() are now
+ *          outside the PSYRT_NO_THREADS guard, because the ring and the
+ *          correlation use them; a no-threads build gains them and loses
+ *          nothing. PSYRT_ERR_FULL's text is "ring full, not taken", for
+ *          the pump and the event ring alike.
+ *          Windows 11 power throttling: psyrt_timer_resolution_begin() also
+ *          opts the process out of the timer throttling a minimized process
+ *          gets, and psyrt_thread_elevate() and the pump thread opt their
+ *          thread out of EcoQoS. psyrt_report gains timer_throttle_off,
+ *          ecoqos_off and throttle_known, and the psyrt_describe() line ends
+ *          in timer_throttle= and ecoqos= on every platform. See POWER
+ *          THROTTLING under SCHEDULING.
+ *          psyrt_cpu_core_type() and psyrt_core_type_name(): P-core or
+ *          E-core, from Windows' EfficiencyClass. psyrt_thread_elevate()
+ *          prefers the P-cores on a hybrid CPU (Windows), and
+ *          psyrt_thread_pin() records what it pinned. psyrt_report gains
+ *          pinned_cpu, pinned_core and pcores_preferred, and the line
+ *          gains pin= and cores=. A 256-byte buffer now always holds the
+ *          line. See CORE TYPES under SCHEDULING.
  *   v0.4.1 - MinGW: the worker and pump threads start with the x87 control
  *          word of the thread that started them, not Windows' default, so
  *          x87 libm code (mingw-w64's msvcrt exp and pow) gives the same bits
@@ -84,7 +122,82 @@
  *          now builds this header without /std:c11.
  *   v0.1 - first release.
  *
- *   STATUS: v0.4.1. The Windows path is built and measured on Windows 11 by
+ *   STATUS: v0.5.0. The event ring, the correlation and the macros (v0.5.0)
+ *   are built with warnings as errors by MSVC 19.44 (/W4 /WX, its default C
+ *   dialect, /std:c11 and /std:c++17), by MinGW-w64 gcc 16.1 (C99, C11,
+ *   C++17) on Windows 11, and by gcc 11.4 on WSL2 (C99, C11, C++17), in all
+ *   three macro modes; also by MSVC for 32-bit x86, and by emcc 6.0.10 (C11
+ *   and C++17, with and without -pthread, with PSYRT_NO_THREADS and with
+ *   PSYRT_TRACE_RING). PSYRT_TRACY is built and run against Tracy v0.14.1
+ *   by MSVC and gcc. tests/adapt/psy_rt_test.c, which runs in
+ *   PSYRT_TRACE_RING mode, passes on all of them (under node with -pthread)
+ *   and is clean under ThreadSanitizer and ASan+UBSan on Linux. It checks open and sizing, order, seq, the stamps,
+ *   a full ring and its LOSS record, and a stress run of 2, 4 and 8
+ *   producers pushing 20,000 records each into 256 slots against one
+ *   drainer, where every record carries words derived from (producer,
+ *   index): no torn record, no duplicate, per-producer order, no seq gap,
+ *   and drained + refused equal to pushed exactly, with the LOSS records
+ *   adding up to the refusals. Three deliberately broken copies of the
+ *   header are caught by it: publishing before the copy (every run, and
+ *   by TSan), no admission check (every run), and freeing the slots before
+ *   copying them out (2 runs of 3). The trace test checks every macro and
+ *   the zone and thread name the worker emits; the correlation test checks
+ *   a known offset, a 1 ms clock's edge within half the width, the
+ *   timeout, and on Windows that interrupt time runs at the QPC rate and
+ *   that psyrt_ticks_to_ns() brackets psyrt_now_ns() and matches a 128-bit
+ *   reference. examples/rt_ring_bench.c measured, on a 16-thread Windows 11
+ *   machine (MSVC and MinGW) and in WSL2 on the same machine (8 vCPUs),
+ *   per push: 11 to 16 ns from one thread with the stamps set (14 to 37 ns
+ *   in WSL2) and 37 to 43 ns with t_ns and tid stamped by the ring; 0.4 to
+ *   0.6 us mean with 8 threads pushing back-to-back on Windows (1.5 us in
+ *   WSL2, where 9 threads share 8 vCPUs). A TIME_CRITICAL producer pushing
+ *   once a millisecond while 7 others hammered took 1.5 to 2.2 us at the
+ *   99.9th percentile, clock reads included, against 115 to 553 us for the
+ *   same records behind a lock. Drain: 1.5 to 6 ns per record. A zone in
+ *   PSYRT_TRACE_RING mode costs 52 to 95 ns with a ring attached and under
+ *   1 ns over an empty loop without one (471 ns attached under node, where
+ *   one clock read costs 190 ns); the default mode is the empty
+ *   loop; Tracy v0.14.1 costs 2 to 10 ns per zone on demand and not
+ *   connected, 65 to 90 ns buffering. Correlation: a 100 ns width (one QPC
+ *   tick, the floor) against QPC and interrupt time on Windows and 41 to
+ *   46 ns against CLOCK_MONOTONIC_RAW in WSL2, 1 to 2 us per call; an edge
+ *   of GetTickCount64 to 100 to 200 ns, in 62 ms for 4 edges. The
+ *   head-of-line stall in EVENT RING is real: with producers at 1.1 million
+ *   records a second, drains waited up to 5 ms on a producer descheduled
+ *   inside its push, and the elevated producer's pushes were refused (up
+ *   to 684 of 5000); with a stall injected at 6000 records a second the
+ *   refusals began between 0.6 and 0.8 s, as 4096 / 6000 predicts. As root
+ *   under WSL2 the bench's worker obtained PSYRT_POLICY_DEADLINE. The
+ *   tables are in docs/psy_rt.md.
+ *   POWER THROTTLING was measured on an i7-1360P laptop (4 P-cores, 8
+ *   E-cores) under Windows 11 25H2 build 26200, on AC power, by a probe
+ *   that owns a window, visible, minimized and covered by a second
+ *   process's window, with 12 s to settle. Minimized, timeBeginPeriod(1)
+ *   waits of 1 and 2 ms woke 13 to 14 ms late (3 of 3 runs); with the
+ *   IGNORE_TIMER_RESOLUTION opt-out, 0.44 to 0.76 ms. The high-resolution
+ *   timer that psyrt_sleep_until(), the worker and the pump use woke 0.26 to
+ *   0.46 ms late (p50) in every state, with or without either opt-out.
+ *   Minimized, 99 to 100% of the threads ran on E-cores; one computation
+ *   alternated on one thread took 1.12 to 1.22 ms opted out of EcoQoS
+ *   against 1.42 to 1.60 ms not (2 runs), and 7 to 12% less while visible.
+ *   SetProcessInformation and SetThreadInformation returned success for
+ *   every mask, also in a 32-bit process, where GetThreadInformation cannot
+ *   read the state back (ERROR_INVALID_PARAMETER) and the report uses what
+ *   this header set. CORE TYPES was measured on the same laptop with 8
+ *   spinning threads of a second process loading all cores, alternating
+ *   the setting every 200 ms on the same threads for 30 s, two runs each
+ *   visible and minimized. With the EcoQoS opt-out alone, the elevated
+ *   frame thread and the worker ran on E-cores 55 to 90% of the time;
+ *   steered to every P-core CPU set, 0%, their fixed computation was 9 to
+ *   25% faster at p50, and their wake p99 was lower in 7 of 8 pairs (by 3
+ *   to 15%, and 9% higher in the eighth). Splitting the P-cores so the two
+ *   elevated threads never share a physical core measured the same as
+ *   steering both to all of them. The pump, steered, was 8 to 20% faster
+ *   but its wake p99 was 14.5 ms in 1 run of 4 against 0.14 ms. Without
+ *   the load every thread already ran on P-cores 92 to 100% of the time.
+ *   Covering the window throttled the timer in 1 of 19 runs
+ *   only, and battery power was not available to test.
+ *   The Windows path is built and measured on Windows 11 by
  *   examples/rt_jitter.c, and also builds in MSVC's default (pre-C11) C mode,
  *   which is what the Python and MEX bindings compile with. The Linux path is
  *   built as C11, as C++17 and with PSYRT_NO_THREADS (warnings as errors) and
@@ -127,12 +240,14 @@
  *   run here at all, so its relative condition wait and its
  *   THREAD_PRECEDENCE_POLICY rung are written, not tested; CI compiles them and
  *   a rig should print what psyrt_pump_policy() reports before believing it.
- *   What NO machine here could exercise is the top of the ladder: neither
- *   test host grants CAP_SYS_NICE, so PSYRT_POLICY_DEADLINE,
- *   PSYRT_POLICY_FIFO and PSYRT_POLICY_TIME_CONSTRAINT have never been
- *   obtained. Only PSYRT_POLICY_TIME_CRITICAL (Windows) and
- *   PSYRT_POLICY_NORMAL have run. Treat the real-time rungs as written, not
- *   as tested, and check what psyrt_describe() reports on your rig.
+ *   The top of the ladder is barely exercised: the test hosts run without
+ *   CAP_SYS_NICE, so the tests see PSYRT_POLICY_TIME_CRITICAL (Windows) and
+ *   PSYRT_POLICY_NORMAL. PSYRT_POLICY_DEADLINE was obtained once, by
+ *   rt_ring_bench run as root under WSL2 (v0.5.0), and nothing timed there
+ *   is a claim about a real kernel; PSYRT_POLICY_FIFO and
+ *   PSYRT_POLICY_TIME_CONSTRAINT have never been obtained. Treat the
+ *   real-time rungs as written, not as tested, and check what
+ *   psyrt_describe() reports on your rig.
  *   Outside this STATUS block, no number in this header is a measurement.
  *   Every latency statement is a bound or a pointer at rt_jitter.
  *
@@ -177,6 +292,14 @@
  *   share. A timestamp from psyrt_now_us() and one from psys_now_us() taken
  *   in the same process are directly comparable; subtract them. They are not
  *   comparable across a reboot or with wall-clock time.
+ *
+ *   psyrt_ticks_to_ns() is the conversion psyrt_now_ns() applies to the raw
+ *   counter, as a function. On Windows, give it a QueryPerformanceCounter
+ *   value that another API reports (DXGI's SyncQPCTime, a WASAPI QPC
+ *   position). The result is the psy_rt time of that counter value, bit for
+ *   bit, so you do not need a correlation for it. On the other platforms
+ *   the counter already counts nanoseconds and the function returns its
+ *   argument.
  *
  *   psyrt_get_clock_info() reports what the OS says the clock is worth
  *   (clock_getres on POSIX, 1 s / QueryPerformanceFrequency on Windows) and
@@ -275,6 +398,9 @@
  *                                   and below migration and the watchdog
  *                                   (99). Needs CAP_SYS_NICE on Linux.
  *     PSYRT_POLICY_TIME_CRITICAL    Windows THREAD_PRIORITY_TIME_CRITICAL.
+ *                                   On every rung it gets, the Windows
+ *                                   thread is also opted out of EcoQoS; see
+ *                                   POWER THROTTLING below.
  *     PSYRT_POLICY_NORMAL           Nothing was granted. On Linux the timer
  *                                   slack is still dropped to 1 ns (the kernel
  *                                   rounds up to its own floor), which is free
@@ -313,7 +439,11 @@
  *                                     is the other way to build a quiet
  *                                     thread. macOS has no true pinning, only
  *                                     an affinity hint, so this returns false
- *                                     there.
+ *                                     there. On a hybrid CPU the number does
+ *                                     not tell you the kind of core: ask
+ *                                     psyrt_cpu_core_type() first, and read
+ *                                     pin= in the report line. See CORE
+ *                                     TYPES.
  *     psyrt_process_lock_memory()     POSIX mlockall(MCL_CURRENT|MCL_FUTURE):
  *                                     no page of this process is paged out,
  *                                     so no wait ends in a major fault. Needs
@@ -337,14 +467,80 @@
  *                                     psyrt_sleep_until() uses makes it
  *                                     largely unnecessary; it still matters
  *                                     for Sleep() and for the fallback timer.
+ *                                     It also opts the process out of the
+ *                                     Windows 11 timer throttling below.
  *                                     Pair with psyrt_timer_resolution_end().
  *                                     No-op elsewhere.
+ *
+ *   POWER THROTTLING (Windows 11). When every window of a process is
+ *   minimized or hidden, Windows may do two things to it:
+ *
+ *     Timer resolution  It no longer honors timeBeginPeriod(). Sleep() and
+ *                       a waitable timer without the high-resolution flag
+ *                       wake on the 15.6 ms tick again. Measured on this
+ *                       repository's test laptop, minimized: 13 ms late
+ *                       instead of 0.5 ms. psyrt_timer_resolution_begin()
+ *                       therefore also calls SetProcessInformation() with
+ *                       PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+ *                       which kept the 0.5 ms. psyrt_sleep_until(), the
+ *                       worker and the pump use the high-resolution timer,
+ *                       which this throttling does not touch: no state
+ *                       changed their lateness.
+ *     EcoQoS            It runs the process's threads on efficiency cores.
+ *                       Minimized, 99 to 100% of the measured threads ran on
+ *                       E-cores, and the same computation took about 1.25
+ *                       times as long; wake lateness did not change. So
+ *                       psyrt_thread_elevate() and the pump thread call
+ *                       SetThreadInformation() with
+ *                       THREAD_POWER_THROTTLING_EXECUTION_SPEED off, for the
+ *                       calling thread only. A worker with no_elevate and
+ *                       every thread psy_rt.h does not touch are left to the
+ *                       OS.
+ *
+ *   Both calls are looked up at run time, so the header still builds and
+ *   runs on Windows versions and with MinGW headers that lack them; there a
+ *   call does nothing, and the report says n/a. Neither call is undone: the
+ *   opt-outs last for the life of the process and the thread.
+ *   psyrt_timer_resolution_end() does not undo the first one.
+ *
+ *   CORE TYPES. A hybrid CPU has performance cores (P) and efficiency cores
+ *   (E). psyrt_cpu_core_type(cpu) says which one a logical CPU is. On
+ *   Windows 10 and later it reads the EfficiencyClass of
+ *   GetSystemCpuSetInformation(): the highest class is P, any lower class
+ *   is E, one class everywhere is PSYRT_CORE_UNIFORM. Everywhere else it
+ *   returns PSYRT_CORE_UNKNOWN. Linux on Intel hybrid lists the two kinds
+ *   in /sys/devices/cpu_core/cpus and /sys/devices/cpu_atom/cpus, but WSL2
+ *   hides them (it shows 8 identical vCPUs on the test laptop's 4 P-cores
+ *   and 8 E-cores), so this header does not read them; check those files
+ *   yourself before you pin on a Linux rig.
+ *
+ *   On Windows, psyrt_thread_elevate() also prefers the P-cores for the
+ *   calling thread, with SetThreadSelectedCpuSets() and the CPU sets of the
+ *   highest EfficiencyClass. It does this on a hybrid CPU only. The opt-out
+ *   from EcoQoS alone does not keep a thread on a P-core: with 8 busy
+ *   threads on the test laptop, an elevated thread still woke on an E-core
+ *   55 to 90% of the time, and a fixed computation took 9 to 25% longer
+ *   than on a P-core. With the preference it ran on P-cores every time.
+ *   The preference is soft: Windows still runs the thread elsewhere when
+ *   no P-core is available. psyrt_thread_pin() removes it, because a pin
+ *   is the explicit choice. The pump does not get it: at normal priority on
+ *   busy P-cores, its wake p99 rose to 14.5 ms in one run of four. Every
+ *   thread psy_rt.h does not touch is left alone.
  *
  *   psyrt_report_get() and psyrt_describe() put the whole outcome on one
  *   line, for the log file next to the timing data:
  *
  *     psy_rt: policy=TIME_CRITICAL clock_res=100ns slack=n/a hires_timer=yes
- *             mlock=no timer_res=no
+ *             mlock=no timer_res=yes timer_throttle=off ecoqos=off pin=none
+ *             cores=P
+ *
+ *   timer_throttle=off means the process is opted out of the timer
+ *   throttling, and ecoqos=off that the CALLING thread is opted out of
+ *   EcoQoS; "on" means Windows may still apply it, and "n/a" means the OS
+ *   has no such setting (every platform but Windows 10 1709 and later).
+ *   pin= is the CPU psyrt_thread_pin() bound the calling thread to, with
+ *   its kind (P, E, uniform or ?), or none. cores=P means the calling
+ *   thread prefers the P-cores; cores=any means it does not.
  *
  *   Jitter numbers without that line are unlabeled. Print it.
  *
@@ -507,7 +703,11 @@
  *   and a Mach THREAD_PRECEDENCE_POLICY importance of -16 on macOS. Failing to
  *   lower is not an error; psyrt_pump_policy() then reports
  *   PSYRT_POLICY_NORMAL instead of PSYRT_POLICY_BELOW_NORMAL, and those two
- *   are the only values it ever returns while the pump runs.
+ *   are the only values it ever returns while the pump runs. On Windows the
+ *   pump thread is also opted out of EcoQoS, below normal or not: priority
+ *   decides who runs first, and EcoQoS decides on which core and how fast;
+ *   minimized, an inference took about 1.25 times as long on the efficiency
+ *   cores. See POWER THROTTLING.
  *
  *   The pump NEVER elevates. It does not call psyrt_thread_elevate() and has
  *   no desc.sched. A thread that may hold a CPU for 30 ms must not be able to
@@ -550,6 +750,228 @@
  *   exactly that, with two such threads, and its 300 start-and-stop cycles
  *   took 0.4 to 4.3 s in all across Linux, Windows and node, thread creation
  *   included; a caller that sleeps between waits never sees it.
+ *
+ *   ---------------------------------------------------------------------
+ *   EVENT RING
+ *   ---------------------------------------------------------------------
+ *   psyrt_ring holds fixed 64-byte records, psyrt_event, in memory you
+ *   supply. Any thread pushes. One thread drains. It is the log primitive
+ *   of the rig: the flip record, the audio onset, the video frame decision,
+ *   restamped input and trace zones all go through a ring, and the drain
+ *   writes them out in whatever format you choose.
+ *
+ *       static unsigned char mem[PSYRT_RING_BYTES(4096)];   // 256 KB + 64
+ *       static psyrt_ring ring;
+ *       if (!psyrt_ring_open(&ring, &(psyrt_ring_desc){
+ *               .memory = mem, .bytes = sizeof mem }))
+ *           die(psyrt_ring_error(&ring));
+ *
+ *       // any thread, an audio callback included; t_ns 0 = now, tid 0 = me
+ *       psyrt_ring_push(&ring, &(psyrt_event){ .source = MY_SRC,
+ *                                             .kind = ONSET,
+ *                                             .u.i64 = { start_frame } });
+ *
+ *       // the frame thread, once per frame, after the flip
+ *       psyrt_event ev[64];
+ *       for (int n; (n = psyrt_ring_drain(&ring, ev, 64)) > 0; )
+ *           for (int i = 0; i < n; i++) write_csv_row(&ev[i]);
+ *
+ *   examples/rt_ring_csv.c is the whole program. In C++17, zero a desc and
+ *   an event and set their fields one by one.
+ *
+ *   THE RECORD. seq (written by the ring), tid, t_ns, source, kind, aux and
+ *   a 40-byte payload with several views (i64, u64, f64, u32, u16, text,
+ *   bytes). A zero t_ns gets the time of the push. A zero tid gets
+ *   psyrt_thread_id(). The source says who pushed the record. The kind says
+ *   what it is, and its meaning belongs to the source. psy_rt.h assigns the
+ *   sources 1 to 255 to the psy headers (PSYRT_SRC_*); an extension host
+ *   assigns 256 to 32767; 32768 and up are yours. Records come out in the
+ *   order the ring took them, which is each thread's push order. That is
+ *   NOT time order: a record can carry a time in the future (an estimated
+ *   onset) or in the past. Sort a batch by t_ns if you need time order.
+ *
+ *   WAIT-FREE PUSH. A push is a fixed sequence: one fetch-add on a count of
+ *   used slots, one on the ticket counter, a copy of 60 bytes, and one
+ *   release store that publishes the record. There is no lock, no retry
+ *   loop, no allocation and, with t_ns and tid set, no system call. No
+ *   thread ever waits for another inside a push, whatever its priority and
+ *   whatever the other thread is doing. That holds where a fetch-add is one
+ *   instruction: x86-64, ARMv8.1 and later with LSE atomics, and
+ *   WebAssembly. On an ARMv8.0 core, and with MSVC on ARM64 below
+ *   /arch:armv8.1, every atomic add is a retry loop in hardware, so the push
+ *   is lock-free there, not wait-free.
+ *
+ *   A FULL RING refuses the new record. The push returns PSYRT_ERR_FULL,
+ *   writes nothing and counts the refusal. The next drain puts a
+ *   PSYRT_KIND_LOSS record first in its output (source PSYRT_SRC_RT), with
+ *   the number lost since the previous drain in u.u64[0] and the total in
+ *   u.u64[1]. A writer that copies every record out therefore cannot omit a
+ *   loss. The ring keeps what it already holds and refuses what is new, so
+ *   every record that comes out is whole and every gap is counted.
+ *   psyrt_ring_dropped() gives the total for a status line. With P threads
+ *   inside a push at the same instant, a push can be refused when the ring
+ *   is within P - 1 records of full.
+ *
+ *   A STALLED PRODUCER STALLS THE DRAIN. Records come out in ticket order,
+ *   so the drain stops at a record whose producer took a ticket and has not
+ *   yet written it. A push holds a ticket for a few dozen instructions. But
+ *   a normal-priority producer that the OS deschedules inside that window
+ *   holds it until it runs again, for a scheduler quantum or longer on a
+ *   busy machine. During that time the drain returns nothing, the ring
+ *   fills behind the stalled record, and then the ring refuses the next
+ *   pushes, from every thread. The audio callback's records are then the
+ *   ones that are lost, although the audio thread never waited. A producer
+ *   that dies inside a push stops the drain for good. Size the ring for the
+ *   longest stall you expect at the record rate you expect: capacity /
+ *   rate is the stall the ring absorbs. For example, 4096 records at 6000
+ *   records a second absorb a 0.68 s stall (arithmetic, not a measurement).
+ *   Watch for LOSS records in the log, and give the ring more memory if any
+ *   appear.
+ *
+ *   MEMORY. You own the memory and the handle; nothing allocates.
+ *   PSYRT_RING_BYTES(n) is the size for n records. The ring aligns the
+ *   start to 64 bytes and uses the largest power of two of slots that
+ *   fits. psyrt_ring_open() zeroes the memory, which also brings every page
+ *   in before the first push. There is no close. Stop every producer before
+ *   you free the memory or the handle, and detach the ring from the trace
+ *   (psyrt_trace_set_ring(NULL)) if it is attached.
+ *
+ *   ONE DRAINER. Call psyrt_ring_drain() from one thread at a time. The
+ *   ring does not detect a second drainer. A drain copies records out,
+ *   frees their slots once per batch, and stops early when it reaches an
+ *   unfinished record, so a short count does not mean an empty ring.
+ *
+ *   The ring is not a threading feature: it exists in a PSYRT_NO_THREADS
+ *   build, because other libraries' threads still push.
+ *
+ *   ---------------------------------------------------------------------
+ *   CLOCK CORRELATION
+ *   ---------------------------------------------------------------------
+ *   Every time in the rig is on the psy_rt clock. A library that stamps
+ *   with another clock (SDL's tick clock, Windows interrupt time, an audio
+ *   device's frame count, an eye tracker) is converted at the boundary, and
+ *   psyrt_correlate() gives the pair of readings to convert with:
+ *
+ *       psyrt_corr c;
+ *       psyrt_correlate(&(psyrt_corr_desc){ .read = SDL_GetTicksNS }, &c);
+ *       uint64_t t = c.rt_ns + (ev.common.timestamp - c.other);
+ *
+ *   PLAIN MODE reads the psy_rt clock, the other clock, and the psy_rt clock
+ *   again, `tries` times (16 by default), and keeps the try with the
+ *   smallest gap between the two psy_rt reads. The other read happened
+ *   inside that gap, so rt_ns is its middle and width_ns is the gap. The
+ *   true psy_rt time of `other` is within width_ns / 2 of rt_ns. The width
+ *   is never 0: it is at least the psy_rt clock's tick (the QPC period on
+ *   Windows, clock_getres() on POSIX, the measured step under Emscripten),
+ *   so a weight of 1 / width^2 is always finite. Plain mode cannot see the
+ *   other clock's own tick: a 1 ms clock read in a 100 ns bracket is still
+ *   wrong by up to 1 ms.
+ *
+ *   EDGE MODE (.edge = true) is for a coarse clock. It reads in a tight
+ *   loop until the value changes, and brackets the change: from the start
+ *   of the last read that saw the old value to the end of the first read
+ *   that saw the new one. `other` is the new value, at the moment it began.
+ *   It keeps the tightest of `tries` edges (4 by default) and spins the
+ *   whole time, so the worst case is `tries` ticks of the other clock: 4 x
+ *   15.6 ms = 62.5 ms for GetTickCount64 at the default Windows tick, and
+ *   4 x 1 ms for a millisecond clock. timeout_ns (100 ms by default) ends
+ *   the wait with PSYRT_ERR_TIMEOUT when the clock does not change at all.
+ *   Correlate between trials, not inside a frame.
+ *
+ *   THE CLOCKS THE RIG NAMES:
+ *     SDL3 ticks       .read = SDL_GetTicksNS. Plain mode. SDL2's
+ *                      SDL_GetTicks counts milliseconds; use edge mode.
+ *     Interrupt time   .read = psyrt_interrupt_time_100ns, 100 ns units,
+ *                      plain mode, Windows 10 and later; 0 elsewhere. It is
+ *                      the clock GetTickCount64() and window message times
+ *                      count in (in coarser steps; use edge mode for those).
+ *                      It includes time the machine spent asleep.
+ *     QPC values       No correlation: psyrt_ticks_to_ns() converts them
+ *                      exactly. See CLOCK.
+ *     An audio device  A frame count, not a time. Read a position that the
+ *                      API reports from any thread (WASAPI's
+ *                      IAudioClock::GetPosition) through .read_ctx with the
+ *                      device in .ctx. Or stamp the callback's own frame
+ *                      count with psyrt_now_ns() at callback entry and use
+ *                      that pair as it is. To turn frames into time you also
+ *                      need the device's true rate, which only repeated pairs
+ *                      over a long time give; psy_audio.h will fit that.
+ *
+ *   Push a correlation into the log as a PSYRT_KIND_CLOCK record, so the
+ *   analysis can convert the other clock's stamps again later.
+ *
+ *   ---------------------------------------------------------------------
+ *   INSTRUMENTATION
+ *   ---------------------------------------------------------------------
+ *   Macros that mark what the code is doing, for a profiler or for the log:
+ *
+ *     PSYRT_ZONE(z, "name")      begin a zone; declares a local named z
+ *     PSYRT_ZONE_VALUE(z, n)     attach a number to it
+ *     PSYRT_ZONE_END(z)          end it
+ *     PSYRT_FRAME_MARK()         the flip
+ *     PSYRT_FRAME_MARK_NAMED(s)  the flip of a second display
+ *     PSYRT_PLOT("name", x)      one point of a numeric plot
+ *     PSYRT_MESSAGE("text")      a message, a string literal
+ *     PSYRT_MESSAGEF(fmt, ...)   a formatted message
+ *     PSYRT_THREAD_NAME("name")  name the calling thread
+ *     PSYRT_THREAD_INIT("name")  name it and set up its per-thread state
+ *     PSYRT_ZONE_SCOPED("name")  C++ only: a zone that ends with the scope
+ *
+ *       PSYRT_ZONE(z, "draw");
+ *       draw_stimuli();
+ *       PSYRT_ZONE_END(z);
+ *       PSYRT_FRAME_MARK();
+ *
+ *   C has no destructors, so a zone is a pair. PSYRT_ZONE is a declaration:
+ *   put it at block scope, as a statement of its own, not as the body of an
+ *   unbraced if. Every path out of the zone needs its PSYRT_ZONE_END. Every
+ *   name is a string literal, because the trace keeps the pointer. Do not
+ *   give a macro an argument with a side effect: what it does depends on
+ *   the mode.
+ *
+ *   THE MODE is one define for the whole program, on the compiler command
+ *   line, because the first include of this header decides it:
+ *
+ *     (none)            Every macro is ((void)0) or ((void)sizeof(x)). No
+ *                       code, and no argument is evaluated. sizeof is what
+ *                       keeps a value computed only for a plot from being an
+ *                       unused variable under -Werror.
+ *     PSYRT_TRACE_RING  The macros push records into the trace ring set by
+ *                       psyrt_trace_set_ring(). One ZONE record per zone, at
+ *                       its end, with the begin time, the duration and the
+ *                       value; a zone left by an early return is not
+ *                       recorded. FRAME, PLOT, MESSAGE (at most 39
+ *                       characters) and THREAD_NAME push one record each.
+ *                       With no ring attached a macro does one pointer load
+ *                       and reads no clock. A rig without Tracy still gets
+ *                       its zones in its log.
+ *     PSYRT_TRACY       The macros call Tracy's C API (<tracy/TracyC.h>, or
+ *                       the header PSYRT_TRACY_HEADER names). Define
+ *                       TRACY_ENABLE too, or the build stops: without it
+ *                       TracyC.h compiles every zone away and the profiler
+ *                       shows nothing. Compile and link Tracy's
+ *                       TracyClient.cpp into the program. The frame mark
+ *                       also plots "psyrt_ns", the psy_rt time, so a
+ *                       capture can be put on the rig's clock.
+ *
+ *   PSYRT_TRACY and PSYRT_TRACE_RING together stop the build.
+ *   PSYRT_TRACE_WEB is reserved for a browser backend that does not exist
+ *   yet, and also stops the build.
+ *
+ *   A REAL-TIME THREAD calls PSYRT_THREAD_INIT once, at its start, before it
+ *   is on a deadline. Tracy allocates a queue for each thread on its first
+ *   event, and the ring mode asks the OS for the thread id on its first
+ *   record; both belong at the start, not in the first audio callback. The
+ *   worker and the pump do it for their own threads before their start
+ *   functions return.
+ *
+ *   What psy_rt.h instruments itself: a "psyrt.worker.job" zone around
+ *   each worker job (value: its lateness in ns), "psyrt.pump.msg" (value:
+ *   the seq) and "psyrt.pump.idle" around the pump's callbacks, and
+ *   "psyrt.sleep" around the wait in psyrt_sleep_until(). The mode of the
+ *   translation unit that defines PSY_RT_IMPLEMENTATION decides whether
+ *   these exist. The trace-ring functions are always compiled in, so any
+ *   other translation unit may use PSYRT_TRACE_RING whatever that mode is.
  *
  *   ---------------------------------------------------------------------
  *   WEBASSEMBLY
@@ -618,6 +1040,14 @@
  *   to a browser unchanged; run examples/rt_jitter.c under the runtime you
  *   will use and log its psy_rt: line.
  *
+ *     Ring     With -pthread the ring's atomics are wasm's, and a push from
+ *              a pthread or an AudioWorklet thread is wait-free as on a
+ *              native core. Without -pthread there is no shared memory and
+ *              emcc turns the atomics into plain loads and stores, which is
+ *              correct for the one thread there is. psyrt_thread_id() is
+ *              the pthread handle. psyrt_correlate()'s width floor is the
+ *              measured clock step, taken once per process (up to 5 ms).
+ *
  *   ---------------------------------------------------------------------
  *   BUILDING
  *   ---------------------------------------------------------------------
@@ -630,10 +1060,21 @@
  *
  *   Define PSYRT_NO_THREADS to drop the worker and the pump. That removes
  *   psyrt_worker, psyrt_pump and every psyrt_worker_* / psyrt_pump_*
- *   declaration, and the PSYRT_ERR_* codes and psyrt_strerror() with them, so
- *   code that uses them must guard the same way. The clock, the waits and the
- *   whole scheduling section stay: elevating the calling thread is not a
- *   threading feature.
+ *   declaration, so code that uses them must guard the same way. The clock,
+ *   the waits, the whole scheduling section, the event ring, the clock
+ *   correlation, the instrumentation macros, the PSYRT_ERR_* codes and
+ *   psyrt_strerror() stay: none of them starts a thread.
+ *
+ *   Define PSYRT_TRACE_RING or PSYRT_TRACY, for the whole program, to turn
+ *   the instrumentation macros on; see INSTRUMENTATION. PSYRT_TRACY needs
+ *   TRACY_ENABLE, Tracy's public/ directory on the include path and
+ *   TracyClient.cpp in the build:
+ *
+ *       c++ -O2 -DTRACY_ENABLE -DTRACY_ON_DEMAND -Itracy/public \
+ *           -c tracy/public/TracyClient.cpp
+ *       cc -O2 -pthread -DPSYRT_TRACY -DTRACY_ENABLE -DTRACY_ON_DEMAND -I. \
+ *           -Itracy/public -c app.c
+ *       c++ -pthread -o app app.o TracyClient.o -ldl
  *
  *   Define PSYRT_PUMP_INLINE_BYTES to size the ring a pump gets when
  *   psyrt_pump_desc.ring is NULL (4096 by default). It sits inside every
@@ -658,9 +1099,9 @@
 /* The version of this header, for a binding's __version__ and for a log line.
  * The string always matches the three numbers. */
 #define PSYRT_VERSION_MAJOR  0
-#define PSYRT_VERSION_MINOR  4
-#define PSYRT_VERSION_PATCH  1
-#define PSYRT_VERSION_STRING "0.4.1"
+#define PSYRT_VERSION_MINOR  5
+#define PSYRT_VERSION_PATCH  0
+#define PSYRT_VERSION_STRING "0.5.0"
 
 /* Feature-test macro for clock_nanosleep() and mlockall() in the Linux
  * implementation. Defined here, before the first system header, so it takes
@@ -726,6 +1167,34 @@ PSYRT_API uint64_t psyrt_now_ns(void);
 /* Monotonic microseconds, the same clock truncated. Use it where a uint64 of
  * nanoseconds is more precision than the record needs. */
 PSYRT_API uint64_t psyrt_now_us(void);
+
+/* The conversion psyrt_now_ns() applies to the platform's raw counter, for a
+ * timestamp an API hands over in that counter's units. On Windows `ticks` is
+ * a QueryPerformanceCounter value (DXGI's SyncQPCTime, a WASAPI QPC
+ * position, a raw LARGE_INTEGER), and the result is bit-identical to what
+ * psyrt_now_ns() returns for that counter value, so such a stamp is on the
+ * psy_rt clock exactly, with no correlation and no width. On Linux, macOS
+ * and Emscripten the clock is clock_gettime(CLOCK_MONOTONIC), whose native
+ * unit is already the nanosecond, and this returns `ticks` unchanged. A
+ * negative `ticks` converts as minus the conversion of its magnitude, so a
+ * difference of two counter values converts too. */
+PSYRT_API int64_t psyrt_ticks_to_ns(int64_t ticks);
+
+/* The calling thread's OS id: GetCurrentThreadId() on Windows, the kernel
+ * task id (gettid) on Linux, pthread_threadid_np() truncated to 32 bits on
+ * macOS, and the pthread handle under Emscripten. The same number Tracy, a
+ * debugger and a Chrome trace show. On POSIX the first call on each thread
+ * makes a syscall and later calls read a thread-local copy, so a real-time
+ * thread should call it (or PSYRT_THREAD_INIT) once before it matters. */
+PSYRT_API uint32_t psyrt_thread_id(void);
+
+/* Windows interrupt time in 100 ns units, from QueryInterruptTimePrecise()
+ * (Windows 10 and later), which is loaded at run time so the header still
+ * links nothing. It is the clock GetTickCount64() and window message times
+ * count in, at a finer grain; it includes time the machine spent asleep.
+ * Returns 0 where the call does not exist and on every other platform. Its
+ * signature fits psyrt_corr_desc.read; see CLOCK CORRELATION. */
+PSYRT_API uint64_t psyrt_interrupt_time_100ns(void);
 
 /* What the OS says the timing facilities are worth. Filled by
  * psyrt_get_clock_info(); every field is a property of the machine, not of
@@ -870,6 +1339,11 @@ PSYRT_API const char* psyrt_policy_name(psyrt_policy p);
  * done is dropping the Linux timer slack to 1 ns, which needs no privilege.
  * Nothing here is undone for you; a thread stays elevated until it exits.
  *
+ * On Windows it also opts the calling thread out of EcoQoS (efficiency
+ * cores at a low clock) and, on a hybrid CPU, prefers the performance
+ * cores for it, whatever rung it gets; see POWER THROTTLING and CORE
+ * TYPES.
+ *
  * On Linux, call this BEFORE psyrt_thread_pin(): the kernel refuses
  * SCHED_DEADLINE to a thread whose affinity is not the root domain, and it
  * refuses to narrow the affinity of a thread that already has it. */
@@ -899,6 +1373,24 @@ PSYRT_API bool psyrt_thread_set_timer_slack(uint64_t ns);
  * rather than pretend. */
 PSYRT_API bool psyrt_thread_pin(int cpu);
 
+/* What kind of core a logical CPU is, on a CPU with more than one kind. */
+typedef enum psyrt_core_type {
+    PSYRT_CORE_UNKNOWN = 0,     /* the OS does not say (see SCHEDULING)       */
+    PSYRT_CORE_UNIFORM,         /* every core of this machine is the same kind */
+    PSYRT_CORE_PERFORMANCE,     /* a P-core: the highest efficiency class     */
+    PSYRT_CORE_EFFICIENCY       /* an E-core: any lower class                 */
+} psyrt_core_type;
+
+/* The kind of logical CPU `cpu`, numbered as psyrt_thread_pin() numbers it.
+ * Windows 10 and later: from GetSystemCpuSetInformation()'s
+ * EfficiencyClass. Everywhere else, and for a CPU that does not exist,
+ * PSYRT_CORE_UNKNOWN: see SCHEDULING for what Linux exposes. On a hybrid CPU
+ * the number alone does not tell you the kind; ask before you pin. */
+PSYRT_API psyrt_core_type psyrt_cpu_core_type(int cpu);
+
+/* "P", "E", "uniform" or "?", for a log line. */
+PSYRT_API const char* psyrt_core_type_name(psyrt_core_type t);
+
 /* Lock this PROCESS's pages into RAM so no wait can end in a page fault:
  * mlockall(MCL_CURRENT|MCL_FUTURE) on POSIX, which needs RLIMIT_MEMLOCK
  * headroom or CAP_IPC_LOCK. Returns true if it was applied.
@@ -920,7 +1412,12 @@ PSYRT_API bool psyrt_process_lock_memory(void);
  * which is what an older machine or a third-party library in the same process
  * will be using. Pair every call with psyrt_timer_resolution_end(): the OS
  * reference-counts them. Process-wide; call from one thread. No-op and false
- * elsewhere. */
+ * elsewhere.
+ *
+ * On success it also opts the process out of Windows 11's timer throttling
+ * (PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION), without which a
+ * minimized or hidden process loses the raised resolution; see POWER
+ * THROTTLING. psyrt_report.timer_throttle_off says whether that took. */
 PSYRT_API bool psyrt_timer_resolution_begin(void);
 
 /* Undo one psyrt_timer_resolution_begin(). No-op elsewhere, and no-op if the
@@ -942,6 +1439,21 @@ typedef struct psyrt_report {
     bool     hires_timer;           /* psyrt_clock_info.hires_timer          */
     bool     memory_locked;         /* psyrt_process_lock_memory() succeeded */
     bool     timer_resolution_raised; /* psyrt_timer_resolution_begin() did  */
+    /* Windows 11 power throttling. False on every other platform.      */
+    bool     timer_throttle_off;  /* the process told Windows to keep its
+                                   * raised timer resolution while its
+                                   * windows are minimized or hidden      */
+    bool     ecoqos_off;          /* the CALLING thread is opted out of
+                                   * EcoQoS (efficiency cores, low clock)  */
+    bool     throttle_known;      /* Windows 10 1709 or later: the two
+                                   * fields above mean something          */
+    /* Core placement of the CALLING thread. */
+    int      pinned_cpu;          /* what psyrt_thread_pin() bound it to on
+                                   * this thread, or -1                   */
+    psyrt_core_type pinned_core;  /* psyrt_cpu_core_type(pinned_cpu)      */
+    bool     pcores_preferred;    /* psyrt_thread_elevate() steered it to
+                                   * the performance cores (Windows, a
+                                   * hybrid CPU)                          */
 } psyrt_report;
 
 /* Fill `out` with what can be queried right now, plus the `policy` the caller
@@ -954,31 +1466,366 @@ PSYRT_API void psyrt_report_get(psyrt_report* out, psyrt_policy policy);
 
 /* Write a one-line, log-ready summary of `r` into `buf` (NUL-terminated,
  * truncated to fit) and return the number of characters written, not counting
- * the NUL. 192 bytes is always enough. The line looks like:
+ * the NUL. 256 bytes always hold the whole line. The lines
+ * psyrt_report_get() fills are shorter than 192 bytes on every platform
+ * tested; a line that does not fit is cut, never overrun. The line looks
+ * like:
  *
  *   psy_rt: policy=DEADLINE clock_res=1ns slack=50000ns hires_timer=yes
- *           mlock=yes timer_res=no
+ *           mlock=yes timer_res=no timer_throttle=n/a ecoqos=n/a pin=none
+ *           cores=any
  *
  * (on one line). Print it once per session, beside the jitter numbers. */
 PSYRT_API int psyrt_describe(const psyrt_report* r, char* buf, size_t cap);
 
-/* --- worker ------------------------------------------------------------- */
-
-#ifndef PSYRT_NO_THREADS
+/* --- return codes ------------------------------------------------------- */
 
 /* Return codes for the functions a second thread may call. A count, a job
  * seq, or 0 when >= 0; one of these when negative. psyrt_strerror() names
  * them. PSYRT_OK is what "no error, nothing to report" means; do not compare
- * against it, compare against 0. */
+ * against it, compare against 0. Outside the PSYRT_NO_THREADS guard since
+ * v0.5.0, because the event ring and the clock correlation use them and
+ * neither is a threading feature. */
 #define PSYRT_OK           0
 #define PSYRT_ERR_ARG    (-1)  /* null handle, null callback, null message  */
 #define PSYRT_ERR_STOPPED (-2) /* the worker or pump is not running         */
-#define PSYRT_ERR_FULL    (-3) /* psyrt_pump_submit: the ring is full and
-                                * the message was NOT taken                 */
-#define PSYRT_ERR_TIMEOUT (-4) /* psyrt_pump_wait: the timeout expired      */
+#define PSYRT_ERR_FULL    (-3) /* psyrt_pump_submit, psyrt_ring_push: the
+                                * ring is full and NOTHING was taken        */
+#define PSYRT_ERR_TIMEOUT (-4) /* psyrt_pump_wait: the timeout expired;
+                                * psyrt_correlate: the clock never ticked   */
 
 /* Static description of a PSYRT_ERR_* code ("ok" for values >= 0). */
 PSYRT_API const char* psyrt_strerror(int code);
+
+/* --- event ring --------------------------------------------------------- */
+
+/* Where a zone is in the source, for the trace. One static instance per zone,
+ * declared by PSYRT_ZONE; a zone record points at it, so it must outlive the
+ * drain (string literals and statics do). The fields are in the order and of
+ * the types of Tracy's ___tracy_source_location_data. */
+typedef struct psyrt_srcloc {
+    const char* name;
+    const char* function;
+    const char* file;
+    uint32_t    line;
+    uint32_t    color;
+} psyrt_srcloc;
+
+/* The 40 bytes a record carries. Its meaning is the record's (source, kind):
+ * pick the view that fits. Named rather than anonymous because anonymous
+ * unions are C11. The zone and plot views are psy_rt.h's own kinds; their
+ * pointers are only meaningful inside this process. */
+typedef union psyrt_payload {
+    int64_t       i64[5];
+    uint64_t      u64[5];
+    double        f64[5];
+    int32_t       i32[10];
+    uint32_t      u32[10];
+    float         f32[10];
+    uint16_t      u16[20];
+    char          text[40];   /* NUL-terminated in psy_rt.h's own kinds    */
+    unsigned char bytes[40];
+    struct { const psyrt_srcloc* loc; uint64_t dur_ns; uint64_t value; } zone;
+    struct { const char* name; double value; } plot;  /* PLOT and FRAME     */
+} psyrt_payload;
+
+/* One record: 64 bytes, a cache line, on every target (the implementation
+ * asserts it). Build one with a designated initializer; every field left 0
+ * gets its default. */
+typedef struct psyrt_event {
+    uint32_t seq;      /* written by the ring: the ring's ticket + 1. What you
+                        * put here is ignored. Consecutive records differ by
+                        * 1 (mod 2^32) in the order the ring took them. A
+                        * refused push takes no ticket, so a gap never means
+                        * loss; the LOSS record does (see EVENT RING).      */
+    uint32_t tid;      /* the pushing thread; 0 = psyrt_thread_id()         */
+    uint64_t t_ns;     /* on the psy_rt clock; 0 = stamped at the push      */
+    uint16_t source;   /* who: a PSYRT_SRC_* number                          */
+    uint16_t kind;     /* what: its meaning belongs to the source            */
+    uint32_t aux;      /* the producer's: a code, an index, a count          */
+    psyrt_payload u;
+} psyrt_event;
+
+/* Sources. A record's kind means nothing without its source. 1 to 255 are
+ * the psy headers', assigned here so no two collide; 256 to 32767 belong to
+ * extensions, which the host assigns at load; 32768 to 65535 are yours. Only
+ * PSYRT_SRC_RT pushes today; the rest are reserved names. */
+#define PSYRT_SRC_NONE       0u
+#define PSYRT_SRC_RT         1u
+#define PSYRT_SRC_SCREEN     2u
+#define PSYRT_SRC_AUDIO      3u
+#define PSYRT_SRC_VIDEO      4u
+#define PSYRT_SRC_TIMELINE   5u
+#define PSYRT_SRC_SERIAL     6u
+#define PSYRT_SRC_PARALLEL   7u
+#define PSYRT_SRC_INPUT      8u
+#define PSYRT_SRC_TRIALS     9u
+#define PSYRT_SRC_NET       10u
+#define PSYRT_SRC_EXTENSION 256u   /* first extension source           */
+#define PSYRT_SRC_USER    32768u   /* first source for your own program */
+
+/* Kinds under PSYRT_SRC_RT. */
+#define PSYRT_KIND_ZONE        1u  /* t_ns = begin; u.zone = {loc, dur, value} */
+#define PSYRT_KIND_FRAME       2u  /* t_ns = mark; u.plot.name = NULL or the
+                                    * PSYRT_FRAME_MARK_NAMED name             */
+#define PSYRT_KIND_PLOT        3u  /* u.plot = {name, value}                   */
+#define PSYRT_KIND_MESSAGE     4u  /* u.text, at most 39 chars and a NUL       */
+#define PSYRT_KIND_THREAD_NAME 5u  /* u.text: the name of thread `tid`         */
+#define PSYRT_KIND_LOSS        6u  /* made by the drain: u.u64[0] records lost
+                                    * since the previous drain, u.u64[1] lost
+                                    * in all; t_ns = the drain; seq = 0       */
+#define PSYRT_KIND_CLOCK       7u  /* a correlation, pushed by whoever made
+                                    * it: u.u64[0] = psyrt_corr.other,
+                                    * u.u64[1] = width_ns, t_ns = rt_ns, aux =
+                                    * the caller's number for the clock      */
+
+/* Bytes of desc.memory that hold exactly n records: n slots of 64 bytes and
+ * up to 64 bytes lost to aligning the start. */
+#define PSYRT_RING_BYTES(n) ((size_t)(n) * 64u + 64u)
+
+/* Ring description. Both fields are required. */
+typedef struct psyrt_ring_desc {
+    void*  memory;     /* the records' storage, owned by the caller and
+                        * alive while anything may push or drain. Any
+                        * alignment; the ring aligns it to 64 itself.     */
+    size_t bytes;      /* its size. The ring holds the largest power of
+                        * two of 64-byte slots that fits, at least 2 and
+                        * at most 2^24: PSYRT_RING_BYTES(n) gives n when n
+                        * is a power of two.                               */
+} psyrt_ring_desc;
+
+/* Ring handle. The caller allocates it and treats every field as opaque.
+ * Four groups, each starting 128 bytes after the last, so no two share a
+ * cache line from any 8-byte-aligned address: `used`, which every push and
+ * every drain batch read-modify-write; the ticket counter and what a push
+ * reads; the drainer's own fields; and the cold error text. `used` and
+ * `head` were measured on one line and on two, and two pushed more records
+ * per second at every producer count (docs/psy_rt.md). */
+typedef struct psyrt_ring {
+    /* --- every push and every drain batch --- */
+    uint32_t       used;     /* claimed and not yet drained, plus the brief
+                              * increments of pushes being refused          */
+    unsigned char  pad0_[128 - sizeof(uint32_t)];
+    /* --- every push --- */
+    uint32_t       head;     /* the next ticket                             */
+    uint32_t       dropped;  /* refused pushes in all, wrapping              */
+    uint32_t       mask;     /* capacity - 1; 0 = not open                   */
+    uint32_t       spare_;   /* keeps `slots` at the same offset everywhere */
+    unsigned char* slots;    /* 64-aligned, inside desc.memory               */
+    unsigned char  pad1_[128 - 4 * sizeof(uint32_t) - sizeof(unsigned char*)];
+    /* --- the drainer --- */
+    uint64_t       lost;     /* refused pushes reported in LOSS records      */
+    uint32_t       tail;     /* the next ticket to drain                     */
+    uint32_t       dropped_seen;
+    unsigned char  pad2_[128 - sizeof(uint64_t) - 2 * sizeof(uint32_t)];
+    /* --- cold --- */
+    char           error[128];
+} psyrt_ring;
+
+/* Lay the ring out in desc.memory and zero it, which also touches every page
+ * now rather than in the first push from an audio callback. Returns false
+ * with a message in psyrt_ring_error() for a NULL desc, NULL memory, or room
+ * for fewer than 2 records. Must not run while anything pushes or drains;
+ * on an open ring it starts over, discarding what was in it. There is no
+ * close: stop the producers (and detach it from the trace) before you free
+ * the memory or the handle. */
+PSYRT_API bool psyrt_ring_open(psyrt_ring* r, const psyrt_ring_desc* desc);
+
+/* Last psyrt_ring_open() message for this handle ("" if none). */
+PSYRT_API const char* psyrt_ring_error(const psyrt_ring* r);
+
+/* Copy `ev` into the ring. A zero ev->t_ns is stamped with psyrt_now_ns() and
+ * a zero ev->tid with psyrt_thread_id(), both before the slot is claimed; the
+ * ring writes ev->seq itself.
+ *
+ * Returns 0, PSYRT_ERR_FULL when the ring had no room (nothing was written,
+ * and the refusal is counted and reported to the drainer), or PSYRT_ERR_ARG
+ * for a NULL pointer or a ring that was never opened.
+ *
+ * WAIT-FREE: any thread, any number of threads at once, an audio callback
+ * included. No lock, no loop, no allocation, no system call when t_ns and tid
+ * are set (a zero tid costs one on a POSIX thread's first push). See EVENT
+ * RING for what "full" means with several producers. */
+PSYRT_API int psyrt_ring_push(psyrt_ring* r, const psyrt_event* ev);
+
+/* Copy up to `cap` records into `out`, oldest ticket first, and free their
+ * slots. Stops at the first record whose producer has not finished writing
+ * it. When pushes were refused since the previous drain, out[0] is a
+ * PSYRT_KIND_LOSS record that says how many. Returns the count written, 0
+ * when there is nothing, or PSYRT_ERR_ARG. ONE drainer at a time: two threads
+ * draining the same ring at once is not detected and corrupts it. */
+PSYRT_API int psyrt_ring_drain(psyrt_ring* r, psyrt_event* out, int cap);
+
+/* Records the ring holds, or 0 when it is not open. */
+PSYRT_API uint32_t psyrt_ring_capacity(const psyrt_ring* r);
+
+/* Pushes refused since the ring was opened, wrapping at 2^32. */
+PSYRT_API uint32_t psyrt_ring_dropped(const psyrt_ring* r);
+
+/* --- clock correlation -------------------------------------------------- */
+
+/* How to read the other clock, and how hard to look. Zero-initialize it and
+ * set `read` or `read_ctx`; exactly one of the two. */
+typedef struct psyrt_corr_desc {
+    uint64_t (*read)(void);          /* SDL_GetTicksNS, psyrt_interrupt_time_100ns,
+                                      * anything of this shape               */
+    uint64_t (*read_ctx)(void* ctx); /* the same with a context: a device    */
+    void*    ctx;
+    int      tries;       /* reads (edges in edge mode) to take the tightest
+                           * of; 0 = 16, or 4 in edge mode                   */
+    bool     edge;        /* the other clock is coarse: time a CHANGE of its
+                           * value instead of one read. Spins until it has
+                           * seen `tries` changes; see CLOCK CORRELATION    */
+    uint64_t timeout_ns;  /* edge mode: give up after this long; 0 = 100 ms */
+} psyrt_corr_desc;
+
+/* One correspondence between the two clocks. */
+typedef struct psyrt_corr {
+    uint64_t rt_ns;       /* the psy_rt time at which...                     */
+    uint64_t other;       /* ...the other clock read this, in its own units  */
+    uint64_t width_ns;    /* the bracket around rt_ns: the true time is
+                           * within width_ns / 2 of it. Never 0: at least the
+                           * psy_rt clock's tick. In plain mode the other
+                           * clock's own tick comes on top.                  */
+    int      tries;       /* reads or edges taken                            */
+} psyrt_corr;
+
+/* Read the other clock between two psy_rt reads, `tries` times, and keep the
+ * tightest pair. Returns the number of tries taken (> 0), PSYRT_ERR_ARG for a
+ * NULL pointer or not exactly one reader, or PSYRT_ERR_TIMEOUT when edge
+ * mode saw no change in timeout_ns. Allocates nothing; spins, so call it
+ * between trials, not inside a frame. */
+PSYRT_API int psyrt_correlate(const psyrt_corr_desc* desc, psyrt_corr* out);
+
+/* --- instrumentation ---------------------------------------------------- */
+
+/* The trace ring the PSYRT_TRACE_RING macros write into, for headers and
+ * threads that have no ring pointer of their own. NULL (the default) detaches
+ * it, and the macros then skip their clock reads. Detach, and stop every
+ * thread that traces, before freeing the ring. */
+PSYRT_API void        psyrt_trace_set_ring(psyrt_ring* r);
+PSYRT_API psyrt_ring* psyrt_trace_ring(void);
+
+/* An open zone in PSYRT_TRACE_RING mode. Declared by PSYRT_ZONE. */
+typedef struct psyrt_zone {
+    uint64_t            t0_ns;  /* 0 = no trace ring at the begin       */
+    const psyrt_srcloc* loc;
+    uint64_t            value;  /* PSYRT_ZONE_VALUE                     */
+} psyrt_zone;
+
+/* The functions the PSYRT_TRACE_RING macros expand to. Call the macros, not
+ * these. They are the only entry points the trace needs, all plain C, so an
+ * extension host can hand them over as function pointers. */
+PSYRT_API psyrt_zone psyrt__zone_begin(const psyrt_srcloc* loc);
+PSYRT_API void psyrt__zone_end(const psyrt_zone* z);
+PSYRT_API void psyrt__trace_frame(const char* name);
+PSYRT_API void psyrt__trace_plot(const char* name, double value);
+PSYRT_API void psyrt__trace_message(const char* text, size_t len);
+PSYRT_API void psyrt__trace_thread_name(const char* name);
+#if defined(__GNUC__) || defined(__clang__)
+PSYRT_API void psyrt__trace_messagef(const char* fmt, ...)
+    __attribute__((format(printf, 1, 2)));
+/* Declared and never defined: the default mode names it inside sizeof, so a
+ * PSYRT_MESSAGEF format is checked even when nothing is compiled. */
+int psyrt__messagef_check(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+#else
+PSYRT_API void psyrt__trace_messagef(const char* fmt, ...);
+int psyrt__messagef_check(const char* fmt, ...);
+#endif
+
+#if defined(PSYRT_TRACE_WEB)
+    #error "psy_rt: PSYRT_TRACE_WEB is a reserved name; the web backend is not written yet"
+#endif
+#if defined(PSYRT_TRACY) && defined(PSYRT_TRACE_RING)
+    #error "psy_rt: define PSYRT_TRACY or PSYRT_TRACE_RING, not both"
+#endif
+
+#if defined(PSYRT_TRACE_RING)
+
+    #define PSYRT_ZONE(z, name) \
+        static const psyrt_srcloc psyrt__sl_##z = \
+            { name, __func__, __FILE__, (uint32_t)__LINE__, 0u }; \
+        psyrt_zone z = psyrt__zone_begin(&psyrt__sl_##z)
+    #define PSYRT_ZONE_END(z)            psyrt__zone_end(&(z))
+    #define PSYRT_ZONE_VALUE(z, v)       ((void)((z).value = (uint64_t)(v)))
+    #define PSYRT_FRAME_MARK()           psyrt__trace_frame(NULL)
+    #define PSYRT_FRAME_MARK_NAMED(name) psyrt__trace_frame(name)
+    #define PSYRT_PLOT(name, v)          psyrt__trace_plot((name), (double)(v))
+    #define PSYRT_MESSAGE(text)          psyrt__trace_message((text), sizeof(text) - 1)
+    #define PSYRT_MESSAGEF(...)          psyrt__trace_messagef(__VA_ARGS__)
+    #define PSYRT_THREAD_NAME(name)      psyrt__trace_thread_name(name)
+    #define PSYRT_THREAD_INIT(name) \
+        do { psyrt__trace_thread_name(name); (void)psyrt_thread_id(); } while (0)
+
+#elif defined(PSYRT_TRACY)
+
+    #if !defined(TRACY_ENABLE)
+        #error "psy_rt: PSYRT_TRACY needs TRACY_ENABLE, or TracyC.h compiles every zone away"
+    #endif
+    #ifdef PSYRT_TRACY_HEADER
+        #include PSYRT_TRACY_HEADER
+    #else
+        #include <tracy/TracyC.h>
+    #endif
+    #include <stdio.h>
+    #include <stdarg.h>
+
+    #define PSYRT_ZONE(z, name)          TracyCZoneN(z, name, 1)
+    #define PSYRT_ZONE_END(z)            ___tracy_emit_zone_end(z)
+    #define PSYRT_ZONE_VALUE(z, v)       ___tracy_emit_zone_value((z), (uint64_t)(v))
+    #define PSYRT_FRAME_MARK()           psyrt__tracy_frame_mark()
+    #define PSYRT_FRAME_MARK_NAMED(name) ___tracy_emit_frame_mark(name)
+    #define PSYRT_PLOT(name, v)          ___tracy_emit_plot((name), (double)(v))
+    #define PSYRT_MESSAGE(text)          do { TracyCMessageL(text); } while (0)
+    #define PSYRT_MESSAGEF(...)          psyrt__tracy_messagef(__VA_ARGS__)
+    #define PSYRT_THREAD_NAME(name)      ___tracy_set_thread_name(name)
+    #define PSYRT_THREAD_INIT(name) \
+        do { ___tracy_set_thread_name(name); \
+             { TracyCZoneN(psyrt__init_zone, "psyrt thread init", 1); \
+               ___tracy_emit_zone_end(psyrt__init_zone); } } while (0)
+
+    /* The frame mark carries the psy_rt time as a plot point, so a Tracy
+     * capture can be put on the rig's clock: Tracy stamps the plot with its
+     * own clock, and the value is ours. A double holds the nanoseconds
+     * exactly for 104 days of uptime. */
+    static inline void psyrt__tracy_frame_mark(void) {
+        ___tracy_emit_frame_mark(0);
+        ___tracy_emit_plot("psyrt_ns", (double)psyrt_now_ns());
+    }
+    #if defined(__GNUC__) || defined(__clang__)
+    static inline void psyrt__tracy_messagef(const char* fmt, ...)
+        __attribute__((format(printf, 1, 2)));
+    #endif
+    static inline void psyrt__tracy_messagef(const char* fmt, ...) {
+        char buf[128];
+        va_list ap;
+        int n;
+        va_start(ap, fmt);
+        n = vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        if (n < 0) return;
+        if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+        TracyCMessage(buf, (size_t)n);
+    }
+
+#else /* nothing: no code, no argument evaluated */
+
+    #define PSYRT_ZONE(z, name)          ((void)0)
+    #define PSYRT_ZONE_END(z)            ((void)0)
+    #define PSYRT_ZONE_VALUE(z, v)       ((void)sizeof(v))
+    #define PSYRT_FRAME_MARK()           ((void)0)
+    #define PSYRT_FRAME_MARK_NAMED(name) ((void)0)
+    #define PSYRT_PLOT(name, v)          ((void)sizeof(v))
+    #define PSYRT_MESSAGE(text)          ((void)0)
+    #define PSYRT_MESSAGEF(...)          ((void)sizeof(psyrt__messagef_check(__VA_ARGS__)))
+    #define PSYRT_THREAD_NAME(name)      ((void)0)
+    #define PSYRT_THREAD_INIT(name)      ((void)0)
+
+#endif
+
+/* --- worker ------------------------------------------------------------- */
+
+#ifndef PSYRT_NO_THREADS
 
 /* What the worker thread knows about the job it is running. Valid only for
  * the duration of the callback. */
@@ -1350,6 +2197,41 @@ PSYRT_API psyrt_policy psyrt_pump_policy(const psyrt_pump* p);
 } /* extern "C" */
 #endif
 
+/* C++ only: a zone that ends when the scope does. C has no destructors, so
+ * this is not defined there and costs C nothing. */
+#ifdef __cplusplus
+    #define PSYRT__PASTE2(a, b) a##b
+    #define PSYRT__PASTE(a, b)  PSYRT__PASTE2(a, b)
+    #if defined(PSYRT_TRACE_RING)
+        struct psyrt__scoped_zone {
+            psyrt_zone z;
+            explicit psyrt__scoped_zone(const psyrt_srcloc* l) : z(psyrt__zone_begin(l)) {}
+            ~psyrt__scoped_zone() { psyrt__zone_end(&z); }
+            psyrt__scoped_zone(const psyrt__scoped_zone&) = delete;
+            psyrt__scoped_zone& operator=(const psyrt__scoped_zone&) = delete;
+        };
+        #define PSYRT_ZONE_SCOPED(name) \
+            static const psyrt_srcloc PSYRT__PASTE(psyrt__ssl_, __LINE__) = \
+                { name, __func__, __FILE__, (uint32_t)__LINE__, 0u }; \
+            psyrt__scoped_zone PSYRT__PASTE(psyrt__sz_, __LINE__)(&PSYRT__PASTE(psyrt__ssl_, __LINE__))
+    #elif defined(PSYRT_TRACY)
+        struct psyrt__scoped_zone {
+            TracyCZoneCtx z;
+            explicit psyrt__scoped_zone(const ___tracy_source_location_data* l)
+                : z(___tracy_emit_zone_begin(l, 1)) {}
+            ~psyrt__scoped_zone() { ___tracy_emit_zone_end(z); }
+            psyrt__scoped_zone(const psyrt__scoped_zone&) = delete;
+            psyrt__scoped_zone& operator=(const psyrt__scoped_zone&) = delete;
+        };
+        #define PSYRT_ZONE_SCOPED(name) \
+            static const ___tracy_source_location_data PSYRT__PASTE(psyrt__ssl_, __LINE__) = \
+                { name, __func__, __FILE__, (uint32_t)__LINE__, 0u }; \
+            psyrt__scoped_zone PSYRT__PASTE(psyrt__sz_, __LINE__)(&PSYRT__PASTE(psyrt__ssl_, __LINE__))
+    #else
+        #define PSYRT_ZONE_SCOPED(name) ((void)0)
+    #endif
+#endif
+
 #endif /* PSY_RT_H_INCLUDED */
 
 /* ======================================================================= *
@@ -1361,6 +2243,7 @@ PSYRT_API psyrt_policy psyrt_pump_policy(const psyrt_pump* p);
 
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 /* Pick the concrete platform once. */
 #if defined(_WIN32)
@@ -1436,6 +2319,90 @@ PSYRT_API psyrt_policy psyrt_pump_policy(const psyrt_pump* p);
  * usual 15.625 ms so a wait that must spin the last tick spins a whole one. */
 #define PSYRT__TICK_NS 16000000ull
 
+#if defined(__cplusplus)
+    #define PSYRT__THREAD_LOCAL thread_local
+#elif defined(_MSC_VER)
+    #define PSYRT__THREAD_LOCAL __declspec(thread)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+    #define PSYRT__THREAD_LOCAL _Thread_local
+#else
+    #define PSYRT__THREAD_LOCAL __thread
+#endif
+
+/* The event ring's atomics. Separate from the pump's flag helpers because
+ * the ring exists in a PSYRT_NO_THREADS build too: other libraries' threads
+ * (an audio callback) push into it. One fetch-add is one instruction on
+ * x86-64, on ARMv8.1+ with LSE and in WebAssembly, which is what makes the
+ * push wait-free there. On MSVC x86/x64 a volatile access has acquire or
+ * release semantics (/volatile:ms) and the barrier only stops the compiler;
+ * ARM64 has no such default, so it gets the explicit load-acquire and
+ * store-release instructions. */
+#if defined(_MSC_VER)
+static uint32_t psyrt__rfadd(uint32_t* p, uint32_t v) {
+    return (uint32_t)_InterlockedExchangeAdd((volatile long*)p, (long)v);
+}
+    #if defined(_M_ARM64)
+static uint32_t psyrt__rload(const uint32_t* p) {
+    return (uint32_t)__ldar32((unsigned __int32 volatile*)(uintptr_t)p);
+}
+static void psyrt__rstore(uint32_t* p, uint32_t v) {
+    __stlr32((unsigned __int32 volatile*)p, v);
+}
+static void* psyrt__pload(void* const* p) {
+    return (void*)(uintptr_t)__ldar64((unsigned __int64 volatile*)(uintptr_t)p);
+}
+    #else
+static uint32_t psyrt__rload(const uint32_t* p) {
+    uint32_t v = *(const volatile uint32_t*)p;
+    _ReadWriteBarrier();
+    return v;
+}
+static void psyrt__rstore(uint32_t* p, uint32_t v) {
+    _ReadWriteBarrier();
+    *(volatile uint32_t*)p = v;
+}
+/* A plain load, not an interlocked one: every traced zone reads this
+ * pointer, and an interlocked read would take the line exclusive and make
+ * every tracing thread fight over it. */
+static void* psyrt__pload(void* const* p) {
+    void* v = *(void* const volatile*)p;
+    _ReadWriteBarrier();
+    return v;
+}
+    #endif
+static void psyrt__pstore(void** p, void* v) {
+    (void)_InterlockedExchangePointer((void* volatile*)p, v);
+}
+#elif defined(__GNUC__) || defined(__clang__)
+static uint32_t psyrt__rfadd(uint32_t* p, uint32_t v) {
+    return __atomic_fetch_add(p, v, __ATOMIC_ACQ_REL);
+}
+static uint32_t psyrt__rload(const uint32_t* p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+static void psyrt__rstore(uint32_t* p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+static void* psyrt__pload(void* const* p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+static void psyrt__pstore(void** p, void* v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+#else
+#error "psy_rt: the event ring needs atomic fetch-add (GCC, Clang or MSVC builtins)"
+#endif
+
+/* Core placement of the calling thread, for psyrt_report_get(): the CPU
+ * psyrt_thread_pin() bound it to plus one (0 = none), and whether
+ * psyrt_thread_elevate() steered it to the performance cores. */
+static PSYRT__THREAD_LOCAL int psyrt__pinned_plus1 = 0;
+static PSYRT__THREAD_LOCAL int psyrt__pcores_set = 0;
+
+/* The record is one cache line on every target, wasm32 and its 4-byte
+ * pointers included, and the publish word comes first so a push can copy
+ * the other 60 bytes in one piece and then publish. */
+PSYRT__STATIC_ASSERT(sizeof(psyrt_payload) == 40, "psyrt_payload must be 40 bytes");
+PSYRT__STATIC_ASSERT(sizeof(psyrt_event) == 64, "psyrt_event must be 64 bytes");
+PSYRT__STATIC_ASSERT(offsetof(psyrt_event, seq) == 0, "psyrt_event.seq must be first");
+PSYRT__STATIC_ASSERT(offsetof(psyrt_event, t_ns) == 8, "psyrt_event.t_ns at 8");
+PSYRT__STATIC_ASSERT(offsetof(psyrt_event, u) == 24, "psyrt_event.u at 24");
+PSYRT__STATIC_ASSERT(offsetof(psyrt_ring, head) == 128, "ring: head 128 bytes past used");
+PSYRT__STATIC_ASSERT(offsetof(psyrt_ring, lost) == 256, "ring: drainer 128 bytes past head");
+PSYRT__STATIC_ASSERT(offsetof(psyrt_ring, error) == 384, "ring: cold 128 bytes past drainer");
+
 /* Process-wide outcomes, for psyrt_report_get(). Both are set by functions
  * the manual says to call once from one thread, so a plain static is honest
  * here and a lock would only hide misuse. */
@@ -1450,22 +2417,62 @@ static bool psyrt__timer_res_raised = false;
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#if defined(__cplusplus)
-    #define PSYRT__THREAD_LOCAL thread_local
-#elif defined(_MSC_VER)
-    #define PSYRT__THREAD_LOCAL __declspec(thread)
-#else
-    #define PSYRT__THREAD_LOCAL _Thread_local
-#endif
+/* Split the multiply: a TSC-rate counter (GHz) times 1e9 overflows 64 bits
+ * within hours of uptime if done in one step. The one conversion both
+ * psyrt_now_ns() and psyrt_ticks_to_ns() use, so the two agree to the bit. */
+static uint64_t psyrt__qpc_to_ns(uint64_t t, uint64_t fr) {
+    return (t / fr) * 1000000000ull + (t % fr) * 1000000000ull / fr;
+}
 
 uint64_t psyrt_now_ns(void) {
     LARGE_INTEGER f, c;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&c);
-    uint64_t t = (uint64_t)c.QuadPart, fr = (uint64_t)f.QuadPart;
-    /* Split the multiply: a TSC-rate counter (GHz) times 1e9 overflows 64
-     * bits within hours of uptime if done in one step. */
-    return (t / fr) * 1000000000ull + (t % fr) * 1000000000ull / fr;
+    return psyrt__qpc_to_ns((uint64_t)c.QuadPart, (uint64_t)f.QuadPart);
+}
+
+int64_t psyrt_ticks_to_ns(int64_t ticks) {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    if (ticks < 0)
+        return -(int64_t)psyrt__qpc_to_ns(0u - (uint64_t)ticks, (uint64_t)f.QuadPart);
+    return (int64_t)psyrt__qpc_to_ns((uint64_t)ticks, (uint64_t)f.QuadPart);
+}
+
+/* The tick psyrt_now_ns() counts in, without psyrt_get_clock_info()'s
+ * waitable timer, for psyrt_correlate()'s floor on a bracket's width. */
+static uint64_t psyrt__clock_step_ns(void) {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return f.QuadPart > 0 ? (1000000000ull + (uint64_t)f.QuadPart - 1) / (uint64_t)f.QuadPart : 1;
+}
+
+uint32_t psyrt_thread_id(void) {
+    return (uint32_t)GetCurrentThreadId();
+}
+
+/* QueryInterruptTimePrecise is Windows 10 only and lives in an API set, not
+ * in kernel32's import library, so it is looked up once. A racing first call
+ * on two threads looks it up twice and stores the same pointer. */
+typedef VOID (WINAPI *psyrt__qitp_fn)(PULONGLONG);
+static void* psyrt__qitp = NULL;      /* the function, as an integer */
+static uint32_t psyrt__qitp_tried = 0;
+
+uint64_t psyrt_interrupt_time_100ns(void) {
+    /* Through uintptr_t both ways: ISO C has no conversion between object
+     * and function pointers, and MinGW's -Wpedantic says so. */
+    psyrt__qitp_fn fn = (psyrt__qitp_fn)(uintptr_t)psyrt__pload(&psyrt__qitp);
+    ULONGLONG t = 0;
+    if (!fn && !psyrt__rload(&psyrt__qitp_tried)) {
+        HMODULE k = GetModuleHandleW(L"kernelbase.dll");
+        fn = k ? (psyrt__qitp_fn)(void (*)(void))GetProcAddress(k, "QueryInterruptTimePrecise")
+               : NULL;
+        psyrt__pstore(&psyrt__qitp, (void*)(uintptr_t)fn);
+        psyrt__rstore(&psyrt__qitp_tried, 1u);
+    }
+    if (!fn) return 0;
+    fn(&t);
+    return (uint64_t)t;
 }
 
 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, spelled out because the SDK only
@@ -1550,9 +2557,12 @@ uint64_t psyrt_sleep_until(uint64_t deadline_ns, uint32_t spin_ns) {
     if (!t->hires && spin < PSYRT__TICK_NS) spin = PSYRT__TICK_NS;
     uint64_t now = psyrt_now_ns();
     if (now >= deadline_ns) return now - deadline_ns;
+    PSYRT_ZONE(z, "psyrt.sleep");
     uint64_t wake = (deadline_ns > spin) ? deadline_ns - spin : 0;
     if (now < wake) psyrt__coarse_wait_until(t->timer, wake);
-    return psyrt_spin_until(deadline_ns);
+    uint64_t late = psyrt_spin_until(deadline_ns);
+    PSYRT_ZONE_END(z);
+    return late;
 }
 
 bool psyrt_thread_set_timer_slack(uint64_t ns) {
@@ -1560,10 +2570,101 @@ bool psyrt_thread_set_timer_slack(uint64_t ns) {
     return false; /* Windows has no per-thread timer slack to set. */
 }
 
+/* CPU sets (Windows 10 and later), looked up at run time like the other
+ * newer calls. The record layout is SYSTEM_CPU_SET_INFORMATION's, spelled
+ * out because older SDKs and MinGW's headers lack the type. */
+typedef struct psyrt__cpuset {
+    DWORD   size;
+    DWORD   type;        /* 0 = CpuSetInformation */
+    DWORD   id;
+    WORD    group;
+    BYTE    lp;          /* LogicalProcessorIndex within the group */
+    BYTE    core;
+    BYTE    llc;
+    BYTE    numa;
+    BYTE    eff;         /* EfficiencyClass: higher is faster */
+    BYTE    flags;
+    DWORD   reserved;
+    DWORD64 tag;
+} psyrt__cpuset;
+PSYRT__STATIC_ASSERT(sizeof(psyrt__cpuset) == 32, "SYSTEM_CPU_SET_INFORMATION is 32 bytes");
+typedef BOOL (WINAPI *psyrt__cpusetinfo_fn)(void*, ULONG, PULONG, HANDLE, ULONG);
+typedef BOOL (WINAPI *psyrt__selcpus_fn)(HANDLE, const ULONG*, ULONG);
+
+typedef struct psyrt__topo {
+    BYTE  eff[64];       /* group 0, by logical processor */
+    bool  have[64];
+    BYTE  top, bottom;   /* highest and lowest class anywhere */
+    ULONG pids[256];     /* the CPU set ids of the highest class */
+    int   npids;
+} psyrt__topo;
+
+/* False when the OS has no CPU sets or the machine has more than 256. */
+static bool psyrt__topology(psyrt__topo* t) {
+    unsigned char buf[256 * sizeof(psyrt__cpuset)];
+    ULONG len = (ULONG)sizeof(buf), off;
+    HMODULE k = GetModuleHandleW(L"kernel32.dll");
+    psyrt__cpusetinfo_fn info = k ? (psyrt__cpusetinfo_fn)(void (*)(void))
+        GetProcAddress(k, "GetSystemCpuSetInformation") : NULL;
+    memset(t, 0, sizeof(*t));
+    t->bottom = 255;
+    if (!info || !info(buf, len, &len, GetCurrentProcess(), 0)) return false;
+    for (off = 0; off + sizeof(psyrt__cpuset) <= len; ) {
+        psyrt__cpuset c;
+        memcpy(&c, buf + off, sizeof(c));
+        if (c.size < sizeof(c)) break;
+        if (c.type == 0) {
+            if (c.eff > t->top) t->top = c.eff;
+            if (c.eff < t->bottom) t->bottom = c.eff;
+            if (c.group == 0 && c.lp < 64) { t->eff[c.lp] = c.eff; t->have[c.lp] = true; }
+        }
+        off += c.size;
+    }
+    for (off = 0; off + sizeof(psyrt__cpuset) <= len; ) {
+        psyrt__cpuset c;
+        memcpy(&c, buf + off, sizeof(c));
+        if (c.size < sizeof(c)) break;
+        if (c.type == 0 && c.eff == t->top && t->npids < 256) t->pids[t->npids++] = c.id;
+        off += c.size;
+    }
+    return t->bottom != 255;
+}
+
+static psyrt__selcpus_fn psyrt__selcpus(void) {
+    HMODULE k = GetModuleHandleW(L"kernel32.dll");
+    return k ? (psyrt__selcpus_fn)(void (*)(void))GetProcAddress(k, "SetThreadSelectedCpuSets")
+             : NULL;
+}
+
+psyrt_core_type psyrt_cpu_core_type(int cpu) {
+    psyrt__topo t;
+    if (cpu < 0 || cpu >= 64 || !psyrt__topology(&t) || !t.have[cpu]) return PSYRT_CORE_UNKNOWN;
+    if (t.top == t.bottom) return PSYRT_CORE_UNIFORM;
+    return t.eff[cpu] == t.top ? PSYRT_CORE_PERFORMANCE : PSYRT_CORE_EFFICIENCY;
+}
+
+/* Prefer the performance cores for the calling thread, on a hybrid CPU
+ * only. A preference, not a binding: the CPU sets are soft, and Windows
+ * still runs the thread elsewhere when they are unavailable. */
+static void psyrt__prefer_pcores(void) {
+    psyrt__topo t;
+    psyrt__selcpus_fn sel = psyrt__selcpus();
+    if (!sel || !psyrt__topology(&t) || t.top == t.bottom || t.npids == 0) return;
+    if (sel(GetCurrentThread(), t.pids, (ULONG)t.npids)) psyrt__pcores_set = 1;
+}
+
 bool psyrt_thread_pin(int cpu) {
     if (cpu < 0 || cpu >= (int)(8 * sizeof(DWORD_PTR))) return false;
     DWORD_PTR mask = (DWORD_PTR)1 << cpu;
-    return SetThreadAffinityMask(GetCurrentThread(), mask) != 0;
+    if (SetThreadAffinityMask(GetCurrentThread(), mask) == 0) return false;
+    /* The pin is the explicit choice: drop a P-core preference that could
+     * disagree with it. */
+    {
+        psyrt__selcpus_fn sel = psyrt__selcpus();
+        if (sel && sel(GetCurrentThread(), NULL, 0)) psyrt__pcores_set = 0;
+    }
+    psyrt__pinned_plus1 = cpu + 1;
+    return true;
 }
 
 bool psyrt_process_lock_memory(void) {
@@ -1580,6 +2681,67 @@ typedef UINT (WINAPI *psyrt__timeperiod_fn)(UINT); /* MMRESULT, which
  * lives in mmsystem.h; this header does not include it. */
 static HMODULE psyrt__winmm = NULL;
 static psyrt__timeperiod_fn psyrt__time_end = NULL;
+
+/* Windows 11 power throttling, through SetProcessInformation and
+ * SetThreadInformation, looked up at run time: both are Windows 8 calls and
+ * the throttling classes are Windows 10 1709 and later, and older SDKs and
+ * MinGW's headers do not have the names. A refused call is not an error; the
+ * report says what took. The constants and the struct layout are the SDK's
+ * (processthreadsapi.h). */
+#define PSYRT__PT_VERSION     1u
+#define PSYRT__PT_EXEC_SPEED  0x1u   /* EcoQoS: efficiency cores, low clock */
+#define PSYRT__PT_IGNORE_TIMER 0x4u  /* keep the timer resolution when hidden */
+#define PSYRT__PROCESS_POWER_THROTTLING 4
+#define PSYRT__THREAD_POWER_THROTTLING  3
+typedef struct psyrt__pt_state { ULONG version, control, state; } psyrt__pt_state;
+typedef BOOL (WINAPI *psyrt__setinfo_fn)(HANDLE, int, LPVOID, DWORD);
+
+static psyrt__setinfo_fn psyrt__k32(const char* name) {
+    HMODULE k = GetModuleHandleW(L"kernel32.dll");
+    return k ? (psyrt__setinfo_fn)(void (*)(void))GetProcAddress(k, name) : NULL;
+}
+
+/* Set when this header opted the calling thread out of EcoQoS. A 32-bit
+ * process under WOW64 can set the thread's state but not read it back
+ * (GetThreadInformation fails with ERROR_INVALID_PARAMETER, measured on
+ * build 26200), so the report falls back to this. */
+static PSYRT__THREAD_LOCAL int psyrt__ecoqos_set = 0;
+
+/* Take the throttling in `mask` away from the calling thread or the whole
+ * process: control says "this process decides", state 0 says "never". */
+static bool psyrt__throttle_off(bool thread, ULONG mask) {
+    psyrt__setinfo_fn set = psyrt__k32(thread ? "SetThreadInformation" : "SetProcessInformation");
+    psyrt__pt_state s;
+    s.version = PSYRT__PT_VERSION;
+    s.control = mask;
+    s.state   = 0;
+    if (!set) return false;
+    if (!set(thread ? GetCurrentThread() : GetCurrentProcess(),
+             thread ? PSYRT__THREAD_POWER_THROTTLING : PSYRT__PROCESS_POWER_THROTTLING,
+             &s, (DWORD)sizeof(s)))
+        return false;
+    if (thread && (mask & PSYRT__PT_EXEC_SPEED)) psyrt__ecoqos_set = 1;
+    return true;
+}
+
+/* Whether the calling thread is opted out of EcoQoS: read back from the OS
+ * where it can say, so the report also sees a thread someone else set up,
+ * and otherwise what this header did. -1 when the OS has no such setting. */
+static int psyrt__thread_ecoqos_off(void) {
+    psyrt__setinfo_fn get = psyrt__k32("GetThreadInformation");
+    psyrt__pt_state s;
+    s.version = PSYRT__PT_VERSION;
+    s.control = 0;
+    s.state   = 0;
+    if (get && get(GetCurrentThread(), PSYRT__THREAD_POWER_THROTTLING, &s, (DWORD)sizeof(s)))
+        return ((s.control & PSYRT__PT_EXEC_SPEED) && !(s.state & PSYRT__PT_EXEC_SPEED)) ? 1 : 0;
+    if (psyrt__ecoqos_set) return 1;
+    return psyrt__k32("SetThreadInformation") ? 0 : -1;
+}
+
+/* Process-wide and set by the call the manual says to make once from one
+ * thread, like psyrt__timer_res_raised. */
+static bool psyrt__timer_throttle_off = false;
 
 bool psyrt_timer_resolution_begin(void) {
     if (psyrt__timer_res_raised) return true;
@@ -1601,6 +2763,11 @@ bool psyrt_timer_resolution_begin(void) {
     if (!begin || !psyrt__time_end) return false;
     if (begin(1) != 0 /*TIMERR_NOERROR*/) return false;
     psyrt__timer_res_raised = true;
+    /* Windows 11 drops a raised resolution while the process's windows are
+     * minimized or hidden, and Sleep() and the fallback timer then wake on
+     * the 15.6 ms tick again (measured: 13 ms late instead of 0.5 ms; see
+     * docs/psy_rt.md). This is the documented opt-out. */
+    psyrt__timer_throttle_off = psyrt__throttle_off(false, PSYRT__PT_IGNORE_TIMER);
     return true;
 }
 
@@ -1615,6 +2782,14 @@ psyrt_policy psyrt_thread_elevate(const psyrt_sched_deadline* rt) {
      * accepted and ignored rather than refused: the same call site works on
      * every platform and only the returned rung differs. */
     (void)rt;
+    /* Whatever the priority: a minimized process's threads otherwise run on
+     * efficiency cores, where the same computation took about 1.25 times as
+     * long (measured; docs/psy_rt.md). It needs no privilege. */
+    (void)psyrt__throttle_off(true, PSYRT__PT_EXEC_SPEED);
+    /* With the P-cores busy, an elevated thread opted out of EcoQoS still
+     * woke on an E-core 55 to 90% of the time, and its work took 9 to 25%
+     * longer there (measured; docs/psy_rt.md). */
+    psyrt__prefer_pcores();
     if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL))
         return PSYRT_POLICY_TIME_CRITICAL;
     return PSYRT_POLICY_NORMAL;
@@ -1670,6 +2845,82 @@ uint64_t psyrt_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+int64_t psyrt_ticks_to_ns(int64_t ticks) {
+    return ticks;   /* clock_gettime counts in nanoseconds already */
+}
+
+#if defined(PSYRT__EMSCRIPTEN)
+/* Emscripten's clock_getres answers 1 ns whatever the host does, and the host
+ * decides: performance.now() is coarsened to 5 us to 100 us in a browser
+ * page that is not cross-origin isolated, and each read is a call out to
+ * JavaScript. So measure the smallest step two reads can see, over 64 steps
+ * or 5 ms. Under node the step is the cost of a read, which a single
+ * preemption can inflate, hence 64 samples rather than a few. 0 when the
+ * clock did not move at all in 5 ms. */
+static uint64_t psyrt__measure_step_ns(void) {
+    uint64_t start = psyrt_now_ns(), prev = start, now, step = UINT64_MAX;
+    int changes = 0;
+    while (changes < 64 && (now = psyrt_now_ns()) - start < 5000000ull) {
+        if (now != prev) {
+            if (now - prev < step) step = now - prev;
+            prev = now;
+            changes++;
+        }
+    }
+    return changes > 0 ? step : 0;
+}
+static uint32_t psyrt__step_cache = 0;   /* ns; 0 = not measured yet */
+#endif
+
+/* The tick psyrt_now_ns() counts in, for psyrt_correlate()'s floor on a
+ * bracket's width: clock_getres() natively, the measured step under
+ * Emscripten (once per process; it costs up to 5 ms). */
+static uint64_t psyrt__clock_step_ns(void) {
+    struct timespec res;
+    uint64_t r = 1;
+    if (clock_getres(CLOCK_MONOTONIC, &res) == 0)
+        r = (uint64_t)res.tv_sec * 1000000000ull + (uint64_t)res.tv_nsec;
+#if defined(PSYRT__EMSCRIPTEN)
+    {
+        uint64_t s = psyrt__rload(&psyrt__step_cache);
+        if (s == 0) {
+            s = psyrt__measure_step_ns();
+            if (s == 0 || s > 0xffffffffull) s = 0xffffffffull;
+            psyrt__rstore(&psyrt__step_cache, (uint32_t)s);
+        }
+        if (s > r) r = s;
+    }
+#endif
+    return r ? r : 1;
+}
+
+/* The kernel's id for this thread, cached: on Linux gettid is a syscall every
+ * time, and a traced zone asks for it twice. */
+static PSYRT__THREAD_LOCAL uint32_t psyrt__tid_cache = 0;
+
+uint32_t psyrt_thread_id(void) {
+    uint32_t id = psyrt__tid_cache;
+    if (id) return id;
+#if defined(PSYRT__LINUX)
+    id = (uint32_t)syscall(SYS_gettid);
+#elif defined(PSYRT__DARWIN)
+    {
+        uint64_t t = 0;
+        pthread_threadid_np(NULL, &t);
+        id = (uint32_t)t;
+    }
+#else
+    id = (uint32_t)(uintptr_t)pthread_self();
+#endif
+    if (id == 0) id = 1;   /* 0 means "fill it in" to psyrt_ring_push */
+    psyrt__tid_cache = id;
+    return id;
+}
+
+uint64_t psyrt_interrupt_time_100ns(void) {
+    return 0;   /* a Windows clock */
+}
+
 static void psyrt__ns_to_ts(uint64_t ns, struct timespec* ts) {
     ts->tv_sec  = (time_t)(ns / 1000000000ull);
     ts->tv_nsec = (long)(ns % 1000000000ull);
@@ -1713,25 +2964,10 @@ void psyrt_get_clock_info(psyrt_clock_info* out) {
         out->resolution_ns = 0;
 #if defined(PSYRT__EMSCRIPTEN)
     {
-        /* Emscripten's clock_getres answers 1 ns whatever the host does, and
-         * the host decides: performance.now() is coarsened to 5 us to 100 us
-         * in a browser page that is not cross-origin isolated, and each read
-         * is a call out to JavaScript. So measure the smallest step two reads
-         * can see, over 64 steps or 5 ms, and report the larger of the two
-         * numbers. Under node the step is the cost of a read, which a single
-         * preemption can inflate, hence 64 samples rather than a few. This is
-         * the only platform where psyrt_get_clock_info() measures instead of
-         * asking. */
-        uint64_t start = psyrt_now_ns(), prev = start, now, step = UINT64_MAX;
-        int changes = 0;
-        while (changes < 64 && (now = psyrt_now_ns()) - start < 5000000ull) {
-            if (now != prev) {
-                if (now - prev < step) step = now - prev;
-                prev = now;
-                changes++;
-            }
-        }
-        if (changes > 0 && step > out->resolution_ns) out->resolution_ns = step;
+        /* The only platform where this measures instead of asking; see
+         * psyrt__measure_step_ns() for why. */
+        uint64_t step = psyrt__measure_step_ns();
+        if (step > out->resolution_ns) out->resolution_ns = step;
     }
 #endif
     /* The POSIX sleep syscalls already work at the clock's own resolution;
@@ -1742,9 +2978,12 @@ void psyrt_get_clock_info(psyrt_clock_info* out) {
 uint64_t psyrt_sleep_until(uint64_t deadline_ns, uint32_t spin_ns) {
     uint64_t now = psyrt_now_ns();
     if (now >= deadline_ns) return now - deadline_ns;
+    PSYRT_ZONE(z, "psyrt.sleep");
     uint64_t wake = (deadline_ns > spin_ns) ? deadline_ns - spin_ns : 0;
     if (now < wake) psyrt__coarse_wait_until(wake);
-    return psyrt_spin_until(deadline_ns);
+    uint64_t late = psyrt_spin_until(deadline_ns);
+    PSYRT_ZONE_END(z);
+    return late;
 }
 
 bool psyrt_thread_set_timer_slack(uint64_t ns) {
@@ -1767,11 +3006,22 @@ bool psyrt_thread_pin(int cpu) {
     memset(mask, 0, sizeof(mask));
     size_t bits = 8 * sizeof(unsigned long);
     mask[(size_t)cpu / bits] |= 1UL << ((size_t)cpu % bits);
-    return syscall(SYS_sched_setaffinity, 0, (unsigned)sizeof(mask), mask) == 0;
+    if (syscall(SYS_sched_setaffinity, 0, (unsigned)sizeof(mask), mask) != 0) return false;
+    psyrt__pinned_plus1 = cpu + 1;
+    return true;
 #else
     (void)cpu;
     return false; /* Darwin: affinity sets are a hint, not a binding. */
 #endif
+}
+
+psyrt_core_type psyrt_cpu_core_type(int cpu) {
+    /* Not read on POSIX: Linux on Intel hybrid lists the kinds in
+     * /sys/devices/cpu_core/cpus and /sys/devices/cpu_atom/cpus, but WSL2,
+     * the only Linux this header is tested on, hides them, and an untested
+     * parser is not a claim. See SCHEDULING. */
+    (void)cpu;
+    return PSYRT_CORE_UNKNOWN;
 }
 
 bool psyrt_process_lock_memory(void) {
@@ -1948,6 +3198,15 @@ bool psyrt_sched_normalize(psyrt_sched_deadline* rt) {
     return true;
 }
 
+const char* psyrt_core_type_name(psyrt_core_type t) {
+    switch (t) {
+        case PSYRT_CORE_UNIFORM:     return "uniform";
+        case PSYRT_CORE_PERFORMANCE: return "P";
+        case PSYRT_CORE_EFFICIENCY:  return "E";
+        default:                     return "?";
+    }
+}
+
 const char* psyrt_policy_name(psyrt_policy p) {
     switch (p) {
         case PSYRT_POLICY_NONE:            return "NONE";
@@ -1972,6 +3231,18 @@ void psyrt_report_get(psyrt_report* out, psyrt_policy policy) {
     out->hires_timer  = ci.hires_timer;
     out->memory_locked = psyrt__mem_locked;
     out->timer_resolution_raised = psyrt__timer_res_raised;
+    out->pinned_cpu  = psyrt__pinned_plus1 - 1;
+    out->pinned_core = out->pinned_cpu >= 0 ? psyrt_cpu_core_type(out->pinned_cpu)
+                                            : PSYRT_CORE_UNKNOWN;
+    out->pcores_preferred = psyrt__pcores_set != 0;
+#if defined(PSYRT__WINDOWS)
+    {
+        int eco = psyrt__thread_ecoqos_off();
+        out->throttle_known     = eco >= 0;
+        out->ecoqos_off         = eco > 0;
+        out->timer_throttle_off = psyrt__timer_throttle_off;
+    }
+#endif
 #if defined(PSYRT__LINUX)
     /* PR_GET_TIMERSLACK returns the value itself, so a negative result is the
      * error and 0 is a legitimate (if unusual) answer. */
@@ -1999,20 +3270,311 @@ int psyrt_describe(const psyrt_report* r, char* buf, size_t cap) {
 #else
     const char* platform = "";
 #endif
+    /* "off" means opted out of the throttling, which is what a rig wants;
+     * "on" means Windows may still apply it. */
+    const char* tt = !r->throttle_known ? "n/a" : r->timer_throttle_off ? "off" : "on";
+    const char* eq = !r->throttle_known ? "n/a" : r->ecoqos_off ? "off" : "on";
+    /* The pin with the kind of core it is on, because on a hybrid CPU the
+     * number alone does not say. Bounded so a report filled by hand cannot
+     * push the line past the 192 bytes the manual promises. */
+    char pin[24];
+    if (r->pinned_cpu >= 0 && r->pinned_cpu < 100000)
+        snprintf(pin, sizeof(pin), "%d/%s", r->pinned_cpu, psyrt_core_type_name(r->pinned_core));
+    else
+        snprintf(pin, sizeof(pin), "none");
     int n = snprintf(buf, cap,
                      "psy_rt: policy=%s clock_res=%lluns slack=%s "
-                     "hires_timer=%s mlock=%s timer_res=%s%s",
+                     "hires_timer=%s mlock=%s timer_res=%s "
+                     "timer_throttle=%s ecoqos=%s pin=%s cores=%s%s",
                      psyrt_policy_name(r->policy),
                      (unsigned long long)r->clock_res_ns,
                      slack,
                      r->hires_timer ? "yes" : "no",
                      r->memory_locked ? "yes" : "no",
                      r->timer_resolution_raised ? "yes" : "no",
-                     platform);
+                     tt, eq, pin, r->pcores_preferred ? "P" : "any", platform);
     /* snprintf reports what it WOULD have written; the caller wants what is
      * in the buffer. */
     if (n < 0) { buf[0] = '\0'; return 0; }
     return (n >= (int)cap) ? (int)cap - 1 : n;
+}
+
+const char* psyrt_strerror(int code) {
+    switch (code) {
+        case PSYRT_ERR_ARG:     return "bad argument";
+        case PSYRT_ERR_STOPPED: return "worker or pump not running";
+        case PSYRT_ERR_FULL:    return "ring full, not taken";
+        case PSYRT_ERR_TIMEOUT: return "timed out";
+        default:                return code >= 0 ? "ok" : "unknown error";
+    }
+}
+
+/* ======================================================================= *
+ *  EVENT RING
+ *
+ *  Many producers, one drainer, fixed 64-byte records in caller memory.
+ *  Two counters on the producers' line: `used` admits a push only while a
+ *  slot is free, and `head` hands out tickets. With `head` alone, a producer
+ *  that found the ring full would already hold a ticket it could not fill,
+ *  and the drainer could not tell that hole from a producer still writing.
+ *  `used` lets a refused push leave without a ticket. Each slot's first word
+ *  is ticket + 1 once its record is complete.
+ * ======================================================================= */
+
+bool psyrt_ring_open(psyrt_ring* r, const psyrt_ring_desc* desc) {
+    uintptr_t base, aligned;
+    size_t pad, avail;
+    uint32_t cap = 0;
+    if (!r) return false;
+    memset(r, 0, sizeof(*r));
+    if (!desc || !desc->memory) {
+        snprintf(r->error, sizeof(r->error), "ring: desc.memory is required");
+        return false;
+    }
+    base = (uintptr_t)desc->memory;
+    aligned = (base + 63u) & ~(uintptr_t)63u;
+    pad = (size_t)(aligned - base);
+    avail = desc->bytes > pad ? (desc->bytes - pad) / 64u : 0u;
+    if (avail > ((size_t)1 << 24)) avail = (size_t)1 << 24;
+    if (avail >= 2u) {
+        cap = 2u;
+        while ((size_t)cap * 2u <= avail) cap *= 2u;
+    }
+    if (cap < 2u) {
+        snprintf(r->error, sizeof(r->error),
+                 "ring: desc.bytes (%lu) holds fewer than 2 records; size it "
+                 "with PSYRT_RING_BYTES(n)", (unsigned long)desc->bytes);
+        return false;
+    }
+    /* Zeroed, so no stale word can pass for a published ticket, and touched,
+     * so the first push from a callback does not take a page fault. */
+    memset((void*)aligned, 0, (size_t)cap * 64u);
+    r->slots = (unsigned char*)aligned;
+    r->mask  = cap - 1u;
+    return true;
+}
+
+const char* psyrt_ring_error(const psyrt_ring* r) {
+    return r ? r->error : "null ring handle";
+}
+
+uint32_t psyrt_ring_capacity(const psyrt_ring* r) {
+    return (r && r->slots) ? r->mask + 1u : 0u;
+}
+
+uint32_t psyrt_ring_dropped(const psyrt_ring* r) {
+    return r ? psyrt__rload(&r->dropped) : 0u;
+}
+
+int psyrt_ring_push(psyrt_ring* r, const psyrt_event* ev) {
+    unsigned char* s;
+    uint64_t t_ns;
+    uint32_t tid, n, t;
+    if (!r || !ev || !r->slots) return PSYRT_ERR_ARG;
+    /* Before the claim: between its ticket and its publish a push holds up
+     * the drainer, so nothing optional happens in that window. */
+    t_ns = ev->t_ns ? ev->t_ns : psyrt_now_ns();
+    tid  = ev->tid ? ev->tid : psyrt_thread_id();
+    n = psyrt__rfadd(&r->used, 1u);
+    if (n > r->mask) {
+        /* Full. The increment is undone rather than checked first, so the
+         * push stays one fetch-add with no retry; a push racing this window
+         * may be refused one record early, which the manual states. */
+        (void)psyrt__rfadd(&r->used, 0xffffffffu);
+        (void)psyrt__rfadd(&r->dropped, 1u);
+        return PSYRT_ERR_FULL;
+    }
+    t = psyrt__rfadd(&r->head, 1u);
+    s = r->slots + (size_t)(t & r->mask) * 64u;
+    memcpy(s + 4, &tid, sizeof(tid));
+    memcpy(s + 8, &t_ns, sizeof(t_ns));
+    memcpy(s + 16, (const unsigned char*)ev + 16, 48);
+    psyrt__rstore((uint32_t*)(void*)s, t + 1u);
+    return 0;
+}
+
+int psyrt_ring_drain(psyrt_ring* r, psyrt_event* out, int cap) {
+    uint32_t tail, got = 0, d;
+    int k = 0;
+    if (!r || !out || !r->slots) return PSYRT_ERR_ARG;
+    if (cap <= 0) return 0;
+    d = psyrt__rload(&r->dropped);
+    if (d != r->dropped_seen) {
+        /* In band, first, so a writer that only copies records out cannot
+         * leave the loss out of its file. */
+        uint32_t delta = d - r->dropped_seen;
+        r->dropped_seen = d;
+        r->lost += delta;
+        memset(&out[0], 0, sizeof(out[0]));
+        out[0].t_ns   = psyrt_now_ns();
+        out[0].tid    = psyrt_thread_id();
+        out[0].source = (uint16_t)PSYRT_SRC_RT;
+        out[0].kind   = (uint16_t)PSYRT_KIND_LOSS;
+        out[0].u.u64[0] = delta;
+        out[0].u.u64[1] = r->lost;
+        k = 1;
+    }
+    tail = r->tail;
+    while (k < cap) {
+        const unsigned char* s = r->slots + (size_t)((tail + got) & r->mask) * 64u;
+        if (psyrt__rload((const uint32_t*)(const void*)s) != tail + got + 1u) break;
+        memcpy(&out[k], s, sizeof(psyrt_event));
+        k++;
+        got++;
+    }
+    if (got) {
+        r->tail = tail + got;
+        /* After the copies, with release: this is what lets a producer reuse
+         * the slots, once per batch rather than once per record. */
+        (void)psyrt__rfadd(&r->used, 0u - got);
+    }
+    return k;
+}
+
+/* ======================================================================= *
+ *  TRACE (PSYRT_TRACE_RING)
+ * ======================================================================= */
+
+static void* psyrt__trace_ptr = NULL;
+
+void psyrt_trace_set_ring(psyrt_ring* r) { psyrt__pstore(&psyrt__trace_ptr, r); }
+
+psyrt_ring* psyrt_trace_ring(void) { return (psyrt_ring*)psyrt__pload(&psyrt__trace_ptr); }
+
+psyrt_zone psyrt__zone_begin(const psyrt_srcloc* loc) {
+    psyrt_zone z;
+    z.loc = loc;
+    z.value = 0;
+    /* No ring, no clock read: an untraced build that happens to be compiled
+     * in ring mode pays one pointer load per zone. */
+    z.t0_ns = psyrt__pload(&psyrt__trace_ptr) ? psyrt_now_ns() : 0;
+    return z;
+}
+
+static void psyrt__trace_event(psyrt_event* e, uint16_t kind) {
+    memset(e, 0, sizeof(*e));
+    e->source = (uint16_t)PSYRT_SRC_RT;
+    e->kind   = kind;
+}
+
+void psyrt__zone_end(const psyrt_zone* z) {
+    psyrt_ring* r;
+    psyrt_event e;
+    if (!z || !z->t0_ns) return;
+    r = (psyrt_ring*)psyrt__pload(&psyrt__trace_ptr);
+    if (!r) return;
+    psyrt__trace_event(&e, (uint16_t)PSYRT_KIND_ZONE);
+    e.t_ns = z->t0_ns;
+    e.u.zone.loc    = z->loc;
+    e.u.zone.dur_ns = psyrt_now_ns() - z->t0_ns;
+    e.u.zone.value  = z->value;
+    (void)psyrt_ring_push(r, &e);
+}
+
+void psyrt__trace_frame(const char* name) {
+    psyrt_event e;
+    psyrt_ring* r = (psyrt_ring*)psyrt__pload(&psyrt__trace_ptr);
+    if (!r) return;
+    psyrt__trace_event(&e, (uint16_t)PSYRT_KIND_FRAME);
+    e.u.plot.name = name;
+    (void)psyrt_ring_push(r, &e);
+}
+
+void psyrt__trace_plot(const char* name, double value) {
+    psyrt_event e;
+    psyrt_ring* r = (psyrt_ring*)psyrt__pload(&psyrt__trace_ptr);
+    if (!r) return;
+    psyrt__trace_event(&e, (uint16_t)PSYRT_KIND_PLOT);
+    e.u.plot.name  = name;
+    e.u.plot.value = value;
+    (void)psyrt_ring_push(r, &e);
+}
+
+static void psyrt__trace_text(uint16_t kind, const char* text, size_t len) {
+    psyrt_event e;
+    psyrt_ring* r = (psyrt_ring*)psyrt__pload(&psyrt__trace_ptr);
+    if (!r) return;
+    psyrt__trace_event(&e, kind);
+    if (text) {
+        if (len > sizeof(e.u.text) - 1) len = sizeof(e.u.text) - 1;
+        memcpy(e.u.text, text, len);
+    }
+    (void)psyrt_ring_push(r, &e);
+}
+
+void psyrt__trace_message(const char* text, size_t len) {
+    psyrt__trace_text((uint16_t)PSYRT_KIND_MESSAGE, text, len);
+}
+
+void psyrt__trace_thread_name(const char* name) {
+    psyrt__trace_text((uint16_t)PSYRT_KIND_THREAD_NAME, name, name ? strlen(name) : 0);
+}
+
+void psyrt__trace_messagef(const char* fmt, ...) {
+    psyrt_event e;
+    va_list ap;
+    psyrt_ring* r = (psyrt_ring*)psyrt__pload(&psyrt__trace_ptr);
+    if (!r || !fmt) return;
+    psyrt__trace_event(&e, (uint16_t)PSYRT_KIND_MESSAGE);
+    va_start(ap, fmt);
+    (void)vsnprintf(e.u.text, sizeof(e.u.text), fmt, ap);
+    va_end(ap);
+    (void)psyrt_ring_push(r, &e);
+}
+
+/* ======================================================================= *
+ *  CLOCK CORRELATION
+ * ======================================================================= */
+
+static uint64_t psyrt__corr_read(const psyrt_corr_desc* d) {
+    return d->read ? d->read() : d->read_ctx(d->ctx);
+}
+
+int psyrt_correlate(const psyrt_corr_desc* d, psyrt_corr* out) {
+    uint64_t best_w = UINT64_MAX, best_rt = 0, best_o = 0, a, b, v, w, step;
+    int tries, taken = 0;
+    if (!d || !out) return PSYRT_ERR_ARG;
+    if ((d->read == NULL) == (d->read_ctx == NULL)) return PSYRT_ERR_ARG;
+    tries = d->tries > 0 ? d->tries : (d->edge ? 4 : 16);
+    if (!d->edge) {
+        for (taken = 0; taken < tries; taken++) {
+            a = psyrt_now_ns();
+            v = psyrt__corr_read(d);
+            b = psyrt_now_ns();
+            w = b - a;
+            if (w < best_w) { best_w = w; best_rt = a + w / 2u; best_o = v; }
+        }
+    } else {
+        /* The value changed somewhere between the start of the last read
+         * that still saw the old value and the end of the first that saw
+         * the new one. */
+        uint64_t timeout = d->timeout_ns ? d->timeout_ns : 100000000ull;
+        uint64_t a_old = psyrt_now_ns();
+        uint64_t v_old = psyrt__corr_read(d);
+        uint64_t end = a_old + timeout;
+        while (taken < tries) {
+            a = psyrt_now_ns();
+            v = psyrt__corr_read(d);
+            b = psyrt_now_ns();
+            if (v != v_old) {
+                w = b - a_old;
+                if (w < best_w) { best_w = w; best_rt = a_old + w / 2u; best_o = v; }
+                taken++;
+            }
+            a_old = a;
+            v_old = v;
+            if (b >= end) break;
+        }
+        if (taken == 0) return PSYRT_ERR_TIMEOUT;
+    }
+    /* A 100 ns counter can read the same tick on both sides, and a width of
+     * 0 would claim an exact match and break a 1 / width^2 weight. */
+    step = psyrt__clock_step_ns();
+    out->rt_ns    = best_rt;
+    out->other    = best_o;
+    out->width_ns = best_w < step ? step : best_w;
+    out->tries    = taken;
+    return taken;
 }
 
 /* ======================================================================= *
@@ -2089,16 +3651,6 @@ static int psyrt__sc_add(int* p, int v) { return __atomic_add_fetch(p, v, __ATOM
  * the generation check only needs "different", not "greater". */
 static uint32_t psyrt__next_gen(uint32_t g) {
     return (g >= 0x7fffffffu) ? 1u : g + 1u;
-}
-
-const char* psyrt_strerror(int code) {
-    switch (code) {
-        case PSYRT_ERR_ARG:     return "bad argument";
-        case PSYRT_ERR_STOPPED: return "worker or pump not running";
-        case PSYRT_ERR_FULL:    return "pump ring full, message not taken";
-        case PSYRT_ERR_TIMEOUT: return "timed out";
-        default:                return code >= 0 ? "ok" : "unknown error";
-    }
 }
 
 psyrt_policy psyrt_worker_policy(const psyrt_worker* w) {
@@ -2217,7 +3769,12 @@ static void psyrt__worker_run(psyrt_worker* w, bool flushed) {
     psyrt__worker_unlock(w);
     info.at_ns = psyrt_now_ns();
     info.late_ns = (int64_t)(info.at_ns - info.deadline_ns);
-    if (fn) fn(ctx, &info);
+    if (fn) {
+        PSYRT_ZONE(z, "psyrt.worker.job");
+        PSYRT_ZONE_VALUE(z, info.late_ns);
+        fn(ctx, &info);
+        PSYRT_ZONE_END(z);
+    }
     psyrt__worker_lock(w);
 }
 
@@ -2263,6 +3820,9 @@ static void* psyrt__worker_main(void* arg) {
     psyrt_worker* w = (psyrt_worker*)arg;
     psyrt_policy pol = w->no_elevate ? PSYRT_POLICY_NORMAL
                                      : psyrt_thread_elevate(&w->sched);
+    /* Before the handshake, so a tracer allocates its per-thread state now
+     * and not inside the first job. */
+    PSYRT_THREAD_INIT("psyrt worker");
     /* After the elevation, so a hook can see the rung it is running at, and
      * before the handshake, so a refusal fails the start instead of a job. */
     bool ok = psyrt__worker_on_start(w);
@@ -2452,6 +4012,9 @@ static DWORD WINAPI psyrt__worker_main(LPVOID arg) {
 static DWORD psyrt__worker_thread(psyrt_worker* w) {
     psyrt_policy pol = w->no_elevate ? PSYRT_POLICY_NORMAL
                                      : psyrt_thread_elevate(&w->sched);
+    /* Before the handshake, so a tracer allocates its per-thread state now
+     * and not inside the first job. */
+    PSYRT_THREAD_INIT("psyrt worker");
     /* See the POSIX twin: after the elevation, before the handshake. */
     bool ok = psyrt__worker_on_start(w);
     psyrt__worker_lock(w);
@@ -2647,6 +4210,13 @@ static void psyrt__worker_loop(psyrt_worker* w) {
  * an error: the pump runs at normal priority and psyrt_pump_policy() says so.
  * There is no path in here that raises. */
 static psyrt_policy psyrt__pump_priority(bool below_normal) {
+#if defined(PSYRT__WINDOWS)
+    /* Below normal is about who runs first, not about which core: a
+     * minimized process's pump otherwise runs on efficiency cores, where the
+     * same computation took about 1.25 times as long, below normal or not
+     * (measured; docs/psy_rt.md). */
+    (void)psyrt__throttle_off(true, PSYRT__PT_EXEC_SPEED);
+#endif
     if (!below_normal) return PSYRT_POLICY_NORMAL;
 #if defined(PSYRT__WINDOWS)
     if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL))
@@ -2828,7 +4398,12 @@ static void psyrt__pump_loop(psyrt_pump* p) {
              * over yet. */
             p->busy = 1;
             psyrt__pump_unlock_ring(p);
-            p->on_msg(p->ctx, slot, seq);
+            {
+                PSYRT_ZONE(z, "psyrt.pump.msg");
+                PSYRT_ZONE_VALUE(z, seq);
+                p->on_msg(p->ctx, slot, seq);
+                PSYRT_ZONE_END(z);
+            }
             psyrt__pump_lock_ring(p);
             p->busy = 0;
             p->head = (p->head + 1u == p->capacity) ? 0u : p->head + 1u;
@@ -2845,7 +4420,11 @@ static void psyrt__pump_loop(psyrt_pump* p) {
         if (p->on_idle) {
             bool again;
             psyrt__pump_unlock_ring(p);
-            again = p->on_idle(p->ctx);
+            {
+                PSYRT_ZONE(z, "psyrt.pump.idle");
+                again = p->on_idle(p->ctx);
+                PSYRT_ZONE_END(z);
+            }
             psyrt__pump_lock_ring(p);
             /* Re-check the ring before idling again, so a submit that arrived
              * while on_idle ran is never starved by a callback that always
@@ -3039,6 +4618,7 @@ static void* psyrt__pump_main(void* arg) {
     psyrt_policy pol = psyrt__pump_priority(p->below_normal);
     bool ok;
     if (p->pin_cpu > 0) (void)psyrt_thread_pin(p->pin_cpu);
+    PSYRT_THREAD_INIT("psyrt pump");
     /* After the priority and the pin, so a hook sees the thread it will run
      * on as it will be, and before the handshake, so a refusal fails the
      * start instead of a message. */
@@ -3187,6 +4767,7 @@ static DWORD psyrt__pump_thread(psyrt_pump* p) {
     psyrt_policy pol = psyrt__pump_priority(p->below_normal);
     bool ok;
     if (p->pin_cpu > 0) (void)psyrt_thread_pin(p->pin_cpu);
+    PSYRT_THREAD_INIT("psyrt pump");
     /* See the POSIX twin: after the priority and the pin, before the
      * handshake. */
     ok = psyrt__pump_on_start(p);
