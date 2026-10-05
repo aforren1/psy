@@ -457,8 +457,8 @@ and independent flip does not learn it again. On these backends open()
 does not learn the depth: it starts at 1.
 
 The core test runs three cases on a scripted display that holds frames
-to their target, with a random wait of up to a quarter period before
-each flip:
+to their target, on a virtual clock, with a seeded random wait of up to
+a quarter period before each flip:
 
 | Case | Drops after the 3 misses | Frames that waited 2 vblanks |
 |---|---|---|

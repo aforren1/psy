@@ -6,12 +6,15 @@
  *
  * It needs no SDL, no display and no GPU: PSYSCR_NO_SDL builds the core
  * alone, and a scripted presenter (the Presenter extension interface) plays
- * a display on the psy_rt clock with the depth, drops, path changes and
- * missing statistics each case asks for. The simulated backend runs too.
+ * a display with the depth, drops, path changes and missing statistics each
+ * case asks for.
  *
- * It runs in real time on a 4 ms grid, so a loaded machine can make a
- * frame late. Every check on a frame skips frames the header flagged
- * LATE_TARGET, and the run fails if too many were skipped to mean anything.
+ * The core and the script run on a virtual clock that only the test moves:
+ * the header's PSYSCR__NOW() and PSYSCR__SLEEP_UNTIL() seam points at it.
+ * So the host's scheduling cannot change a result, and preemption is a
+ * scripted input (the thread loses N ns at a chosen point), not an
+ * accident of a busy CI runner. One smoke test runs the simulated backend
+ * in real time, with bounds a loaded runner meets.
  *
  *     gcc -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -O2 -I. \
  *         -o screen_test tests/adapt/psy_screen_test.c -lm -pthread && ./screen_test
@@ -24,8 +27,26 @@
 #ifndef PSYSCR_NO_SDL
 #define PSYSCR_NO_SDL
 #endif
+/* The virtual clock. Starts far from 0, so no grid arithmetic meets it.
+ * long long, not int64_t: no system header may come before psy_rt.h,
+ * which sets the feature macros glibc reads once. */
+static int g_virtual = 1;
+static long long g_vt = 1000000000000LL;
+static long long vnow(void);
+static void vsleep_until(long long t);
+#define PSYSCR__NOW() ((int64_t)vnow())
+#define PSYSCR__SLEEP_UNTIL(t, spin) vsleep_until((long long)(t))
+
 #define PSY_SCREEN_IMPLEMENTATION
 #include "psy_screen.h"
+
+static long long vnow(void) { return g_virtual ? g_vt : (long long)psyrt_now_ns(); }
+static void vsleep_until(long long t) {
+    if (!g_virtual) { psyrt_sleep_until((uint64_t)t, PSYRT_DEFAULT_SPIN_NS); return; }
+    if (t > g_vt) g_vt = t;
+}
+/* The thread loses ns: preemption, or a slow frame */
+static void vlose(int64_t ns) { g_vt += ns; }
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,12 +95,14 @@ typedef struct script {
     unsigned char missing[MAX_ID];/* no statistic for this present          */
     unsigned char act[MAX_ID];    /* 1 skipped, 2 canceled, 3 no time with
                                    * OCCLUDED, 4 an ONSET_PLANNED time      */
+    int64_t  preempt_next;        /* ns the next present call loses, after
+                                   * the header planned its flip            */
     flight   fl[8];
     int64_t  last_shown;
     int      opened, closed, presents;
 } script;
 
-static int64_t now_ns(void) { return (int64_t)psyrt_now_ns(); }
+static int64_t now_ns(void) { return vnow(); }
 
 static int64_t sc_count(const script* c, int64_t t) {
     int64_t d = t - c->t0;
@@ -125,7 +148,7 @@ static int sc_acquire(void* ctx, int64_t deadline_ns, psyscr_vblank* newest) {
             if (free_at > until) until = free_at;
         }
     }
-    if (until > now_ns()) psyrt_sleep_until((uint64_t)until, PSYRT_DEFAULT_SPIN_NS);
+    if (until > now_ns()) vsleep_until(until);
     newest->t_ns = 0;
     return PSYSCR_OK;
 }
@@ -133,7 +156,9 @@ static int sc_acquire(void* ctx, int64_t deadline_ns, psyscr_vblank* newest) {
 static int sc_present(void* ctx, const psyscr_present_req* req) {
     script* c = (script*)ctx;
     int i, depth = sc_depth(c, req->present_id);
-    int64_t shown = sc_count(c, now_ns()) + depth;
+    int64_t shown;
+    if (c->preempt_next) { vlose(c->preempt_next); c->preempt_next = 0; }
+    shown = sc_count(c, now_ns()) + depth;
     if (c->native && req->target_count > shown) shown = req->target_count;
     if (shown <= c->last_shown) shown = c->last_shown + 1;
     if (req->present_id < MAX_ID && c->drop[req->present_id]) shown++;
@@ -216,7 +241,10 @@ static bool open_scripted(psyscr_screen* s, script* c, double lead, uint32_t ind
     return psyscr_open(s, &d);
 }
 
-static void busy_until(int64_t t) { while (now_ns() < t) { } }
+static void busy_until(int64_t t) {
+    if (g_virtual) { if (t > g_vt) g_vt = t; return; }
+    while (now_ns() < t) { }
+}
 
 /* ------------------------------------------------------------- the cases */
 
@@ -442,7 +470,8 @@ static void test_native_depth(int case_) {
     for (i = K + 3; i < N; i++) {
         if (flags[i] & PSYSCR_FLIP_LATE_TARGET) { late++; continue; }
         if (dropped[i]) { drops_after++; if (i >= N - 150) drops_end++; }
-        if (i + 1 < N && onset[i + 1] - onset[i] == 2 * P_NS) half++;
+        /* a gap that ends on a LATE_TARGET frame is the caller's lateness */
+        if (i + 1 < N && !(flags[i + 1] & PSYSCR_FLIP_LATE_TARGET) && onset[i + 1] - onset[i] == 2 * P_NS) half++;
     }
     for (i = N - 40; i < N - 1; i++) {
         int64_t want = case_ == 1 ? 2 * P_NS : P_NS;   /* one in flight, slot at the flip */
@@ -461,6 +490,85 @@ static void test_native_depth(int case_) {
     if (late) printf("  native depth %d: %d frames late on this machine\n", case_, late);
     if (getenv("PSYSCR_TEST_TRACE"))
         printf("  native depth %d: drops after the misses %d, half-rate gaps %d\n", case_, drops_after, half);
+}
+
+/* Preemption, on purpose. Lateness of the calling thread makes a flip late,
+ * never early: losing time between begin() and the flip is the caller's
+ * (LATE_TARGET); losing it inside the present call, after the header
+ * planned the flip, is a drop the header cannot see coming; and a flip
+ * whose call lands within the margin before a vblank waits for that
+ * vblank, because a DXGI-like display would otherwise show it a vblank
+ * before the one the header planned (it did, with EARLY set, before the
+ * fix). */
+static void test_preemption(int native) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;   /* static: gcc -O3 cannot see begin() fill it */
+    enum { N = 120 };
+    static int64_t planned[N], onset[N];
+    static uint32_t dropped[N];
+    static uint16_t flags[N];
+    int i, j, n;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.native = native;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 3));
+    if (!psyscr_is_open(&s)) return;
+    memset(planned, 0, sizeof planned);
+    for (i = 0; i < N; i++) {
+        psyscr_record out;
+        int64_t vb;
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        vlose(P_NS / 20);   /* a short draw */
+        vb = c.t0 + (sc_count(&c, now_ns()) + 1) * P_NS;   /* the next vblank */
+        switch (i % 20) {
+        case 5: vlose(P_NS + P_NS / 2); break;            /* caller preempted */
+        case 9: c.preempt_next = P_NS + P_NS / 2; break;  /* preempted in the call */
+        case 13: busy_until(vb - P_NS / 16); break;       /* inside the margin */
+        case 17: busy_until(vb - 1000); break;            /* 1 us before a vblank */
+        default: break;
+        }
+        CHECK_I(psyscr_flip_at(&s, f.onset, &out), PSYSCR_OK);
+        planned[i] = out.planned;
+    }
+    psyscr_close(&s);
+    memset(onset, 0, sizeof onset);
+    memset(dropped, 0, sizeof dropped);
+    memset(flags, 0, sizeof flags);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const psyrt_event* e = &g_ev[j];
+        uint32_t idx;
+        if (e->source != PSYRT_SRC_SCREEN || e->kind != PSYSCR_EV_FLIP) continue;
+        idx = e->u.u32[9];
+        if (idx >= N) continue;
+        onset[idx] = (int64_t)e->t_ns;
+        dropped[idx] = e->u.u16[4];
+        flags[idx] = (uint16_t)PSYSCR_EV_FLAGS_OF(e->u.u16[5]);
+    }
+    for (i = 0; i < N; i++) {
+        int k = i % 20;
+        CHECK(onset[i] != 0);
+        CHECK(!(flags[i] & PSYSCR_FLIP_EARLY));
+        CHECK(onset[i] >= planned[i]);
+        if (k == 5) {
+            CHECK(flags[i] & PSYSCR_FLIP_LATE_TARGET);
+            CHECK_I(dropped[i], 0);
+            CHECK_I(onset[i], planned[i]);
+        } else if (k == 9) {
+            CHECK(!(flags[i] & PSYSCR_FLIP_LATE_TARGET));
+            CHECK(dropped[i] >= 1);
+        } else if (k == 13 || k == 17) {
+            CHECK_I(dropped[i], 0);
+            CHECK_I(onset[i], planned[i]);
+        } else if (k != 6 && k != 10) {   /* the frame after a lost one may be late */
+            CHECK(!(flags[i] & PSYSCR_FLIP_LATE_TARGET));
+            CHECK_I(dropped[i], 0);
+            CHECK_I(onset[i], planned[i]);
+        }
+    }
 }
 
 /* Missing statistics give ESTIMATED records at the planned vblank. */
@@ -822,27 +930,39 @@ static void test_params(void) {
     }
 }
 
-/* The simulated backend in real time. */
+/* Smoke test: the simulated backend in real time, the one test here that
+ * the host's scheduling can touch. Its bounds hold on a loaded runner:
+ * every onset is on the simulated grid, and a flip that was neither late
+ * nor dropped has the onset begin() predicted. */
 static void test_sim(void) {
     psyscr_screen s;
     psyscr_desc d;
     static psyscr_frame f;   /* static: gcc -O3 cannot see begin() fill it */
     char line[256];
-    int i, late = 0, onset_ok = 0;
-    int64_t prev = 0;
+    int i, late = 0, onset_ok = 0, completed = 0;
+    int64_t prev = 0, grid0 = 0;
+    g_virtual = 0;
     memset(&s, 0, sizeof s);
     memset(&d, 0, sizeof d);
     d.backend = PSYSCR_BACKEND_SIM;
     d.sim_period_ns = P_NS;
     CHECK(psyscr_open(&s, &d));
-    if (!psyscr_is_open(&s)) return;
+    if (!psyscr_is_open(&s)) { g_virtual = 1; return; }
     for (i = 0; i < 120; i++) {
         psyscr_record out;
         CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
-        if (i && f.last && f.last->index == i - 1 && !(f.last->flags & PSYSCR_FLIP_LATE_TARGET)) {
-            CHECK_I(f.last->onset, prev);
+        CHECK_I(f.period, P_NS);
+        if (!grid0) grid0 = f.onset;
+        CHECK_I((f.onset - grid0) % P_NS, 0);
+        if (i && f.last && f.last->index == i - 1) {
+            completed++;
             CHECK_I(f.last->path, PSYSCR_PATH_SIMULATED);
-            onset_ok++;
+            CHECK_I((f.last->onset - grid0) % P_NS, 0);
+            CHECK(f.last->onset >= f.last->planned);   /* never early */
+            if (!(f.last->flags & PSYSCR_FLIP_LATE_TARGET) && f.last->dropped == 0) {
+                CHECK_I(f.last->onset, prev);
+                onset_ok++;
+            }
         }
         prev = f.onset;
         CHECK_I(psyscr_flip_at(&s, f.onset, &out), PSYSCR_OK);
@@ -851,8 +971,9 @@ static void test_sim(void) {
     CHECK(psyscr_describe(&s, line, sizeof line) > 0);
     CHECK(strstr(line, "backend=sim") != NULL);
     psyscr_close(&s);
-    CHECK(onset_ok >= 90);
-    if (late) printf("  sim: %d of 120 frames late on this machine\n", late);
+    g_virtual = 1;
+    CHECK(completed >= 1);
+    if (late || onset_ok < completed) printf("  sim: %d of 120 frames late, %d of %d on the prediction\n", late, onset_ok, completed);
 }
 
 int main(void) {
@@ -866,6 +987,8 @@ int main(void) {
     test_native_depth(0);
     test_native_depth(1);
     test_native_depth(2);
+    test_preemption(0);
+    test_preemption(1);
     test_missing();
     test_snap_and_hold(1, 0);
     test_snap_and_hold(0, 0);

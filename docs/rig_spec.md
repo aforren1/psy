@@ -318,17 +318,17 @@ The same trial with the builder (C99):
 
 ```c
 psytl_seq q = psytl_seq_on(&tl, TRIAL);          /* cursor at base time 0 */
-psytl_show(&q, FIX);
+psytl_on(&q, FIX);
 psytl_wait(&q, PSYTL_MS(500));
-psytl_hide(&q, FIX);
-psytl_show(&q, GRATING);
+psytl_off(&q, FIX);
+psytl_on(&q, GRATING);
 psytl_trigger(&q, 12);
 psytl_to(&q, CONTRAST, &(psytl_tween_desc){
     .to = 0.5f, .duration = PSYTL_MS(100), .ease = PSYTL_EASE_COSINE });
 psytl_wait(&q, PSYTL_MS(600));
 psytl_then(&q, CONTRAST, &(psytl_tween_desc){
     .to = 0.0f, .duration = PSYTL_MS(100), .ease = PSYTL_EASE_COSINE });
-psytl_hide(&q, GRATING);
+psytl_off(&q, GRATING);
 if (q.err < 0) report(psytl_strerror(q.err), q.err_call);
 ```
 
@@ -339,7 +339,7 @@ The rules:
   `psytl_wait(&q, dt)` moves the cursor by `dt`, and `psytl_at(&q, t)`
   sets it. `q.t` is the cursor: store it in a variable to use it as a
   label.
-- **Events and tweens at the cursor.** `psytl_show`, `psytl_hide`,
+- **Events and tweens at the cursor.** `psytl_on`, `psytl_off`,
   `psytl_set`, `psytl_trigger` and `psytl_mark` add an event at the
   cursor. `psytl_to` starts a tween at the cursor plus the desc's
   `delay`, and the cursor does not move. That is the script's
@@ -352,11 +352,11 @@ The rules:
   code in `q.err` and its index in `q.err_call`. Every call after that
   does nothing. So a sequence needs no check after each line, only one
   at the end. That is the C analog of a chained JS call.
-- **Keyframes and stagger** come from a caller-supplied arena in the
-  seq (`q.keys`, `q.n_keys_cap`), because keys must outlive the call:
+- **Keyframes and stagger** copy their keys into the timeline's key
+  arena (see the decisions below), because keys must outlive the call:
   `psytl_keyframes(&q, ch, values, times, n, ease)` and
-  `psytl_show_n(&q, chans, n, stagger)`. The arena is cleared with the
-  trial base.
+  `psytl_on_n(&q, chans, n, stagger)`. `psytl_clear()` of the base frees
+  them.
 - **Nothing here changes timing.** Every call lowers to `psytl_add`,
   `psytl_tween` or `psytl_set_track` at an absolute base time. Frame
   placement, sampling at the onset and replay are the core's.
@@ -379,13 +379,13 @@ gives each op to the same builder calls, in order, with a sticky error:
 
 ```c
 static const psytl_op trial[] = {
-    PSYTL_SHOW(FIX),
+    PSYTL_ON(FIX),
     PSYTL_WAIT(PSYTL_MS(500)),
-    PSYTL_HIDE(FIX), PSYTL_SHOW(GRATING), PSYTL_TRIGGER(12),
+    PSYTL_OFF(FIX), PSYTL_ON(GRATING), PSYTL_TRIGGER(12),
     PSYTL_TO(CONTRAST, .to = 0.5f, .duration = PSYTL_MS(100), .ease = PSYTL_EASE_COSINE),
     PSYTL_WAIT(PSYTL_MS(600)),
     PSYTL_THEN(CONTRAST, .to = 0.0f, .duration = PSYTL_MS(100), .ease = PSYTL_EASE_COSINE),
-    PSYTL_HIDE(GRATING),
+    PSYTL_OFF(GRATING),
 };
 
 psytl_seq q = psytl_seq_on(&tl, TRIAL);
@@ -397,7 +397,7 @@ An op is a tagged struct:
 
 ```c
 typedef struct psytl_op {
-    int              op;      /* PSYTL_OP_SHOW, _HIDE, _SET, _TRIGGER, _MARK,
+    int              op;      /* PSYTL_OP_ON, _OFF, _SET, _TRIGGER, _MARK,
                                * _WAIT, _AT, _TO, _THEN                      */
     int              ch;
     int64_t          t;       /* WAIT: dt; AT: base time                    */
@@ -406,7 +406,7 @@ typedef struct psytl_op {
     psytl_tween_desc tween;   /* TO, THEN                                   */
 } psytl_op;
 
-#define PSYTL_SHOW(c)      { .op = PSYTL_OP_SHOW, .ch = (c) }
+#define PSYTL_ON(c)      { .op = PSYTL_OP_ON, .ch = (c) }
 #define PSYTL_WAIT(dt)     { .op = PSYTL_OP_WAIT, .t = (dt) }
 #define PSYTL_TO(c, ...)   { .op = PSYTL_OP_TO, .ch = (c), .tween = { __VA_ARGS__ } }
 ```
@@ -445,22 +445,56 @@ The costs:
   `psytl_tween_desc`. C does not require this.
 - C++17 users use the builder.
 
+Decisions (2026-10-05):
+- **`psytl_on` and `psytl_off`, not show and hide.** The header does not
+  know what a channel means. The script layer keeps `show` and `hide`
+  for stimuli, and they lower to on and off. The ops are `PSYTL_ON` and
+  `PSYTL_OFF`, as in the examples above.
+- **Audio is not frame-quantized.** An on or off on a channel that the
+  player maps to a sound goes to `psyau_play_at()` at the event's own
+  time, sample-accurate. It must also be handed over before that time,
+  because the audio path needs lead time. An evaluate fires an event on
+  the frame that shows it. That is too late and too coarse for sound. So
+  the timeline needs a look-ahead query: give the pending events of a
+  base whose RT time is at or before a given RT time, without firing
+  them, for example `psytl_peek(tl, base, until_rt, out, cap)`. The
+  player's audio path schedules from it, and the video path keeps
+  evaluate. The event's landing record stays the video frame's. The
+  audio onset record comes from `psy_audio.h` (section 4.4). Which base
+  and channel kinds are audio is the player's choice, not the header's.
+- **The key arena is in the timeline handle.** `desc.keys` and
+  `desc.key_capacity` give caller-owned storage, as `desc.events` does.
+  Keyframes and stagger allocate from it. Each allocation is tagged with
+  its base, and `psytl_clear(base)` frees that base's allocations, then
+  compacts the arena in one pass, as it does the events. A track that
+  uses the arena stores an offset, not a pointer, so compaction does not
+  leave it dangling. The arena is not in the seq: a seq is a short-lived
+  cursor, often on the stack, and the keys must live until the track is
+  replaced or its base is cleared, which only the timeline knows.
+- **No C++ sugar for now.** C++17 users use the builder. A chained C++
+  wrapper is not planned.
+- **g++ and `-Wmissing-field-initializers`.** The C++20 compile check of
+  the op macros builds with `-Wno-missing-field-initializers`. The
+  macros keep zero means default.
+- **`psytl_run()` checks every table again.** A table that the designer
+  checked at import can still be wrong in the player: the player can be
+  a different version from the designer, an extension that an op needs
+  may not be installed, the parameter tables and channel counts may have
+  changed, or the rig's display or audio rate may make an op invalid,
+  for example a flicker rate. The check is O(n) once per run, not per
+  frame. It is all or nothing, as `psytl_add_n()` is: the whole table is
+  checked before the first op is applied, so a bad op at index 37 does
+  not leave half a trial. `psytl_check_ops(tl, ops, n, &bad)` does the
+  same check without applying, so the player can reject a pack when it
+  loads, before the session starts, not at trial 190.
+
 Open questions:
-- Names. `psytl_show` and `psytl_hide` assume a visibility channel. Is a
-  plain `psytl_on(&q, ch)` and `psytl_off(&q, ch)` better for a header
-  that does not know what a channel means?
-- Should the arena be in the seq, or should keys be copied into the
-  event storage's spare capacity?
-- C++17 users get no designated initializers. A small inline C++ wrapper
-  with chained methods (`q.to(CONTRAST).to_value(0).ms(100).cosine()`)
-  is possible, but it is a second API.
-- Should the test suite's CMake target build the C++ compile check with
-  `-Wno-missing-field-initializers` for g++ before 12, or should the
-  macros fill every field? Filling every field makes the macros longer
-  and breaks the zero-means-default style.
-- Should a `psytl_op` table from the pack be checked at pack import (by
-  the designer) and then trusted by the player, or checked again by
-  `psytl_run()`?
+- How far ahead must `psytl_peek()` look for audio? That is the audio
+  path's measured scheduling lead, from the line-in loopback test, plus
+  one frame. Measure it, do not choose it.
+- How large should the arena default be when `desc.keys` is NULL: none,
+  or a small inline arena in the handle, as `psy_rt.h`'s pump has an
+  inline ring?
 
 ### 4.6 psy_video.h (`psyvid_`, `PSYVID_`)
 

@@ -35,7 +35,10 @@
  *          The depth on a backend that holds frames to their target is
  *          raised by misses and lowered only on slack evidence, per path,
  *          never by a try (DEPTH); begin() never predicts a vblank a flip
- *          in flight already has.
+ *          in flight already has. Fixed: on DXGI_FLIP a flip_at() call
+ *          within the margin before a vblank presented at once, and the
+ *          frame showed a vblank before the one planned (EARLY set); it now
+ *          waits for that vblank.
  *   v0.1.0 - first release: the DXGI flip swap path (Windows 10 and 11)
  *          through ANGLE, the simulated display, the presenter interface,
  *          prediction, the snap, the per-flip record, phases, the patch,
@@ -118,11 +121,13 @@
  *   from 6.2 ms before to 12.1 ms after it.
  *   The core (prediction, snap, drops, depth, estimated, skipped and
  *   canceled records, tiers, the ring record, phases, groups, errors, the
- *   mode picker) is checked without SDL or a display by
- *   tests/adapt/psy_screen_test.c against a scripted swap path, on MSVC,
+ *   mode picker, preemption) is checked without SDL or a display by
+ *   tests/adapt/psy_screen_test.c against a scripted swap path on a
+ *   virtual clock, so the host's load cannot change a result, on MSVC,
  *   MinGW gcc 16.1, gcc 11.4 (WSL2; also as C99 at -O3, as C++17, and
- *   under ASan and UBSan) and clang (emcc, run in node); twelve deliberate
- *   mutations of the header each make it fail.
+ *   under ASan and UBSan, and 8 of 8 runs with a busy loop on its CPU) and
+ *   clang (emcc, run in node); fourteen deliberate mutations of the header
+ *   each make it fail.
  *   tests/compile/psy_screen_com.cpp checks every COM slot and struct the
  *   header declares against the Windows SDK (MSVC; MinGW for DComp only).
  *   NOT done: any rate but 60 Hz, any other GPU, Windows 10 (COMPOSITION
@@ -263,7 +268,9 @@
  *     PSYSCR_FLIP_LATE_TARGET: the caller was late. When it is later, the
  *     header sleeps on the psy_rt clock until just after vblank
  *     (planned - depth), and presents then; DXGI shows a frame at the first
- *     vblank it can, so this is what puts it on the planned one. (DXGI's
+ *     vblank it can, so this is what puts it on the planned one. The same
+ *     wait applies when the call comes within the margin before a vblank,
+ *     which the plan already put the flip after. (DXGI's
  *     own SyncInterval was measured as the other way to hold a frame and
  *     put 795 of 1800 held frames early; see docs/psy_screen.md.)
  *
@@ -1118,7 +1125,16 @@ enum {
 
 /* --- small helpers ------------------------------------------------------- */
 
-static int64_t psyscr__now(void) { return (int64_t)psyrt_now_ns(); }
+/* Test-only seam, not API: tests/adapt/psy_screen_test.c defines these
+ * before the implementation to run the core on a virtual clock, so no
+ * check there depends on how the host schedules the test. */
+#ifndef PSYSCR__NOW
+#define PSYSCR__NOW() ((int64_t)psyrt_now_ns())
+#endif
+#ifndef PSYSCR__SLEEP_UNTIL
+#define PSYSCR__SLEEP_UNTIL(t, spin) psyrt_sleep_until((uint64_t)(t), (spin))
+#endif
+static int64_t psyscr__now(void) { return PSYSCR__NOW(); }
 
 static void psyscr__set_error(char* buf, size_t cap, const char* fmt, ...) {
     va_list ap;
@@ -1350,7 +1366,7 @@ static int psyscr__sim_acquire(void* ctx, int64_t deadline_ns, psyscr_vblank* ne
     (void)deadline_ns;
     if (m->has_pend) {
         int64_t t = m->t0 + m->pend_count * m->period;
-        if (t > psyscr__now()) psyrt_sleep_until((uint64_t)t, PSYRT_DEFAULT_SPIN_NS);
+        if (t > psyscr__now()) PSYSCR__SLEEP_UNTIL((int64_t)t, PSYRT_DEFAULT_SPIN_NS);
         m->done.present_id = m->pend_id;
         m->done.t_ns = t;
         m->done.count = m->pend_count;
@@ -2982,7 +2998,7 @@ static void psyscr__warmup(psyscr_screen* s) {
         while (psyscr__pending(s) > 0 && psyscr__now() < end) {
             psyscr__drain(s);
             if (psyscr__pending(s) == 0) break;
-            psyrt_sleep_until((uint64_t)(psyscr__now() + 200000), 0);
+            PSYSCR__SLEEP_UNTIL((int64_t)(psyscr__now() + 200000), 0);
         }
     }
     for (i = 0; i < PSYSCR__MAX_PEND; i++) s->pend[i].used = 0;
@@ -3236,7 +3252,7 @@ PSYSCR_API void psyscr_close(psyscr_screen* s) {
             if (!s->slot_held && s->pr->acquire(s->pr_ctx, end, &newest) == PSYSCR_OK) s->slot_held = 1;
             psyscr__drain(s);
             if (psyscr__pending(s) == 0) break;
-            psyrt_sleep_until((uint64_t)(psyscr__now() + 500000), 0);
+            PSYSCR__SLEEP_UNTIL((int64_t)(psyscr__now() + 500000), 0);
         }
         {
             int i;
@@ -3408,8 +3424,12 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
     planned = count_t;
     if (count_t < earliest) { planned = earliest; flags |= PSYSCR_FLIP_LATE_TARGET; }
 
-    /* A later vblank: wait until the present can no longer show early. */
-    if (planned > earliest && !s->caps.native_target) {
+    /* Wait until the present can no longer show early: DXGI shows a frame
+     * at the first vblank it can. That covers a later vblank asked for, and
+     * also a call within the margin before a vblank: the margin planned the
+     * flip after that vblank, and a present made before it showed a vblank
+     * early (EARLY set; a preempted frame loop hit this). */
+    if (!s->caps.native_target) {
         int64_t guard = (int64_t)(s->period_f / 8);
         int64_t wake;
         if (guard > 500000) guard = 500000;
@@ -3424,10 +3444,10 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
                 int64_t poll = psyscr__time_of(s, psyscr__count_at(s, now2)) + 2500000;
                 if (poll <= now2) poll = psyscr__time_of(s, psyscr__count_at(s, now2) + 1) + 2500000;
                 if (poll + 1000000 >= wake) break;
-                psyrt_sleep_until((uint64_t)poll, 0);
+                PSYSCR__SLEEP_UNTIL((int64_t)poll, 0);
                 psyscr__drain_overdue(s);
             }
-            psyrt_sleep_until((uint64_t)wake, PSYRT_DEFAULT_SPIN_NS);
+            PSYSCR__SLEEP_UNTIL((int64_t)wake, PSYRT_DEFAULT_SPIN_NS);
             PSYRT_ZONE_END(z_hold);
         }
     }
@@ -3518,7 +3538,7 @@ PSYSCR_API int psyscr_wait_flip(psyscr_screen* s, psyscr_record* out) {
             for (i = 0; i < PSYSCR__MAX_PEND; i++) if (s->pend[i].used) psyscr__estimate(s, &s->pend[i]);
             break;
         }
-        psyrt_sleep_until((uint64_t)(psyscr__now() + 100000), 0);
+        PSYSCR__SLEEP_UNTIL((int64_t)(psyscr__now() + 100000), 0);
     }
     if (out) {
         if (!s->have_last) return PSYSCR_ERR_ORDER;
