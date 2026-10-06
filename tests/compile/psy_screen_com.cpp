@@ -279,6 +279,18 @@ static_assert(PSYSCR__KIND_STATUS == PresentStatisticsKind_PresentStatus && PSYS
 static_assert(PSYSCR__STATUS_SKIPPED == PresentStatus_Skipped && PSYSCR__STATUS_CANCELED == PresentStatus_Canceled, "PresentStatus");
 #endif /* HAVE_PRESENTATION */
 
+/* The display config structs the header declares itself (OS GAMMA, CODES). */
+static_assert(sizeof(psyscr__dci_header) == sizeof(DISPLAYCONFIG_DEVICE_INFO_HEADER), "DEVICE_INFO_HEADER");
+static_assert(sizeof(psyscr__dc_path) == sizeof(DISPLAYCONFIG_PATH_INFO), "PATH_INFO");
+static_assert(offsetof(psyscr__dc_path, tgt_adapter) == offsetof(DISPLAYCONFIG_PATH_INFO, targetInfo.adapterId), "targetInfo.adapterId");
+static_assert(offsetof(psyscr__dc_path, tgt_id) == offsetof(DISPLAYCONFIG_PATH_INFO, targetInfo.id), "targetInfo.id");
+static_assert(offsetof(psyscr__dc_path, flags) == offsetof(DISPLAYCONFIG_PATH_INFO, flags), "flags");
+static_assert(sizeof(psyscr__dc_mode) == sizeof(DISPLAYCONFIG_MODE_INFO), "MODE_INFO");
+static_assert(sizeof(psyscr__dc_source_name) == sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME), "SOURCE_DEVICE_NAME");
+static_assert(sizeof(psyscr__dc_preferred) == sizeof(DISPLAYCONFIG_TARGET_PREFERRED_MODE), "TARGET_PREFERRED_MODE");
+static_assert(offsetof(psyscr__dc_preferred, width) == offsetof(DISPLAYCONFIG_TARGET_PREFERRED_MODE, width), "width");
+static_assert(sizeof(psyscr__aci) == sizeof(DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO), "GET_ADVANCED_COLOR_INFO");
+
 int main(void) {
     check_dcomp();
 #if defined(HAVE_PRESENTATION)

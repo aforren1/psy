@@ -1,4 +1,4 @@
-/* psy_timeline.h - v0.2.0 - public domain single-header timeline library
+/* psy_timeline.h - v0.3.0 - public domain single-header timeline library
  *
  *   What a frame shows, as a function of when the frame appears. Events
  *   (onsets, offsets, value changes, triggers, annotations) at times on a
@@ -21,6 +21,16 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.3.0 - psytl_skip(): a seek that marks the events it passes over
+ *          PSYTL_EV_SKIPPED instead of firing them late on one frame, and
+ *          returns how many; their channel values still apply. A skip
+ *          back is an anchor's rewind. psytl_peek(): the pending events
+ *          in an RT window, with their RT times, changing nothing, for
+ *          the audio path's look-ahead. psytl_lead(): the lead in use.
+ *          A rewind now makes skipped events pending again, and prune
+ *          deletes skipped events with the fired ones. Nothing else
+ *          changes: a timeline that never skips gives the same bytes as
+ *          v0.2.0.
  *   v0.2.0 - tracks grow: psytl_track with a keyed or a SAMPLED form
  *          (floats at an integer rate, LINEAR, STEP or Catmull-Rom CUBIC,
  *          for long trajectories such as a sum-of-sines target), a REPEAT
@@ -48,7 +58,24 @@
  *          prune, remove and clear; the record of where every event
  *          landed.
  *
- *   STATUS: v0.2.0. Built and run on Linux (WSL2) with gcc 11.4 as C99
+ *   STATUS: v0.3.0. Skip, peek and lead: tests/adapt/psy_timeline_test.c
+ *   has directed checks for each (the 30-minute seek against an anchor,
+ *   skip back against an anchor back, a waiting late event, the reach and
+ *   rewind after a skip, prune and remove of skipped events, tracks and a
+ *   waiting tween, peek's window edges, order, cap, bases and purity by
+ *   memcmp of the whole handle, and a 22 s audio look-ahead at 60 Hz), and
+ *   skip and peek are ops of 10 more seeds of the random model check.
+ *   Unlike the v0.1 and v0.2 checks, these were written by the writer of
+ *   the implementation. Ten model mutations of skip and peek are each
+ *   caught; of 23 mutations of the header, 20 are caught and 3 cannot
+ *   change a result (docs/psy_timeline.md). The v0.2.0 test, unchanged,
+ *   passes with the same model counts, and the examples print the same
+ *   bytes but the version. Built and run with gcc 11.4 (WSL2: C99, C11,
+ *   C++17, ASan and UBSan), MinGW-w64 gcc 16.1 (C99, C11, C++17), MSVC
+ *   19.44 (default C, C11, C++17) and emcc 6.0.10 under node.
+ *   timeline_bench at 60 Hz (gcc): trial 51 ns, movie 322 ns mean and
+ *   599 ns p99, script 60 ns, tracks 246 ns: inside v0.2.0's ranges.
+ *   v0.2.0: Built and run on Linux (WSL2) with gcc 11.4 as C99
  *   and C11 under -Wall -Wextra -Wpedantic -Wshadow -Werror at -O2 and
  *   -O3, and under -fsanitize=address,undefined -fno-sanitize-recover=all
  *   with no diagnostic; the compile checks also as C++17. On Windows 11
@@ -230,8 +257,9 @@
  *     state, is how a trial clock restarts and how a movie seeks: forward,
  *     the next evaluate fires the events the base passed over, late by
  *     their residuals; back, the events from the new time on are pending
- *     again (REWIND). There is no rate other than 1: a movie played at
- *     another speed is a video decoder's business.
+ *     again (REWIND). psytl_skip() is the seek that does not fire what it
+ *     passes over (SKIP). There is no rate other than 1;
+ *     docs/psy_timeline.md has a proposal for an exact rational rate.
  *
  *   EVENTS (psytl_event, psytl_add, psytl_add_n)
  *     An event has a time on its base, a kind, and the caller's payload:
@@ -268,11 +296,12 @@
  *     psytl_clear() of a base frees the channels bound to it. A channel a
  *     prune left with no event is free but keeps its value, and a clear
  *     does not touch it.
- *     An event-driven channel's value is the value of its fired event with
- *     the latest (time, id), or its initial value when none has fired. So
- *     an event that fires late (LATE EVENTS) does not overwrite a later
- *     event that fired before it, and a rewind recomputes the channel from
- *     the events still fired.
+ *     An event-driven channel's value is the value of its fired or skipped
+ *     (SKIP) event with the latest (time, id), or its initial value when
+ *     there is none. So an event that fires late (LATE EVENTS) does not
+ *     overwrite a later event that fired before it, a skip leaves the
+ *     channel as playing through would, and a rewind recomputes the
+ *     channel from the events still fired or skipped.
  *
  *   TRACKS (psytl_track, psytl_set_track, psytl_set_keys, psytl_tween,
  *           psytl_sample)
@@ -477,6 +506,10 @@
  *     (docs/psy_timeline.md). Use PSYTL_LEAD_NONE only when "not before"
  *     matters more than "on the right frame". A script's wait(dt) lands on
  *     the frame nearest its target under the default.
+ *     psytl_lead(tl) gives the lead in use: 0.5 for a desc lead of 0, the
+ *     desc's lead in (0, 1), and 0 for PSYTL_LEAD_NONE, so that a window
+ *     ends lead x period after the onset in every case. A header that
+ *     places its own frames by the same rule (psy_video.h) reads it.
  *     Pass period 0 on a display with no fixed period (variable refresh),
  *     and lead does nothing. When it fires, the event records:
  *       frame     f.index of the frame it landed on
@@ -488,9 +521,9 @@
  *     The onset is a prediction. The flip record of the same frame number
  *     gives the measured one; the difference is the frame's error and
  *     applies to every event that landed on it.
- *     psytl_next_due(tl, &t) gives the earliest RT time of an event not
- *     yet fired on a running base, for a display that can flip at a time,
- *     or for sleeping until there is something to do.
+ *     psytl_next_due(tl, &t) gives the earliest RT time of a pending event
+ *     (not fired, not skipped) on a running base, for a display that can
+ *     flip at a time, or for sleeping until there is something to do.
  *
  *   LATE EVENTS
  *     A base's REACH is the furthest window end any evaluate has reached
@@ -507,13 +540,14 @@
  *
  *   REWIND
  *     psytl_anchor(tl, b, rt, bt) with bt at or before the furthest base
- *     time of an onset evaluated on the base moves the base back: every fired
- *     event of the base at or after bt, the one exactly at bt included,
- *     becomes pending again. Its landing fields reset (frame -1, onset 0,
- *     residual 0, flags 0), the base's event-driven channels are
- *     recomputed from the events still fired, and the events fire again
- *     when the base reaches them. The base's reach moves to just before
- *     bt. Running a trial's events twice is two anchors at base time 0.
+ *     time of an onset evaluated on the base (or before the time of its
+ *     last skip, SKIP) moves the base back: every fired or skipped event
+ *     of the base at or after bt, the one exactly at bt included, becomes
+ *     pending again. Its landing fields reset (frame -1, onset 0, residual
+ *     0, flags 0), the base's event-driven channels are recomputed from
+ *     the events still fired or skipped, and the events fire again when
+ *     the base reaches them. The base's reach moves to just before bt.
+ *     Running a trial's events twice is two anchors at base time 0.
  *     An anchor at a later bt rewinds nothing. Nothing else rewinds: an
  *     anchor at an earlier bt whose RT time is after the next onset puts
  *     that onset before bt, and the events from bt on wait for the base
@@ -522,10 +556,75 @@
  *     amount re-fires what lies in that amount; to avoid it, correct
  *     forward only.
  *
+ *   SKIP (psytl_skip)
+ *     psytl_skip(tl, b, rt, bt) is a seek that does not fire what it
+ *     passes over. It is psytl_anchor(tl, b, rt, bt), and then every
+ *     event of the base before bt that is still pending is skipped: its
+ *     flags become PSYTL_EV_SKIPPED, its frame stays -1, its onset
+ *     becomes rt and its residual bt minus its time (how far before the
+ *     seek's target it was). A skipped event never fires and is in no
+ *     evaluate's report. The return value, the number skipped, is the
+ *     report of the skip; the storage holds each one. After a skip no
+ *     event of the base before bt is pending, and the event exactly at
+ *     bt fires as usual on the frame that reaches it.
+ *     Forward, an anchor fires on the next frame every event it passed
+ *     over, late by its residual; a skip fires none. On a movie base with
+ *     an annotation every second, a 30-minute seek fires 1800 events on
+ *     one frame after an anchor and none after a skip.
+ *     Back, a skip is the anchor's REWIND, and then the late events
+ *     before bt still waiting for a window are skipped. A seek calls
+ *     psytl_skip() whatever its direction; refusing a skip back would
+ *     make every caller compare bt with a time it cannot read.
+ *     What else it does:
+ *       channels  a skipped ONSET, OFFSET or SET counts for its channel
+ *                 as a fired one does (CHANNELS), so the channel shows
+ *                 what playing through to bt would, with no report.
+ *       tracks    nothing: a track is a function of base time, and the
+ *                 next evaluate reads it at its onset's base time. A
+ *                 tween waiting for a start before bt takes over at the
+ *                 next evaluate, from the old track's value at its start,
+ *                 as it would without the skip. "now" is bt, as after an
+ *                 anchor.
+ *       reach     when the base's reach is before bt, it moves to just
+ *                 before bt, and so does the furthest base time of an
+ *                 evaluated onset. So an event added later at a time
+ *                 before bt is late (LATE EVENTS), and a later anchor back
+ *                 to a time before bt makes the skipped events from there
+ *                 pending again (REWIND).
+ *       state     the base runs from bt at rt, as after an anchor. A seek
+ *                 that stays paused is a skip and a psytl_pause() at the
+ *                 same rt.
+ *     A skip costs a binary search and a write per event it skips.
+ *
+ *   PEEK (psytl_peek)
+ *     psytl_peek(tl, b, from_rt, to_rt, out, cap) lists the pending events
+ *     of base b (or of every base, PSYTL_ALL_BASES) whose RT time is in
+ *     [from_rt, to_rt), and changes nothing: no flag, landing, channel,
+ *     reach or "now". An event's RT time is when its running base reaches
+ *     its time: the anchor's rt + (time - the anchor's base time). A
+ *     paused or stopped base has no RT times and gives no event; a fired
+ *     or skipped event is not pending. Returns how many events are in the
+ *     window; the first min(that, cap) are copied into out[] ordered by
+ *     RT time, then id, each with onset set to its RT time, residual 0,
+ *     frame -1 and flags 0. So onset - residual is the RT time in a peek
+ *     as in a report. out may be NULL with cap 0, to count.
+ *     It is the look-ahead for sound. An evaluate fires an event on the
+ *     frame that shows it, at most lead x period early, and psy_audio.h
+ *     needs an onset 43.5 to 54.5 ms before its time (docs/psy_audio.md).
+ *     The audio path peeks [last to_rt, now + its lead) each frame and
+ *     schedules by id: half-open windows that follow each other neither
+ *     overlap nor leave a gap. The event still fires on its frame, and
+ *     its landing record is the frame's. An event added less than the
+ *     audio lead before its time can be in no peek before its frame
+ *     fires it; it is in that evaluate's report, and the caller plays it
+ *     late from there. An anchor, skip, pause or resume moves the RT
+ *     times, so peek again after one. The cost is a binary search per
+ *     base and a read per event in the window.
+ *
  *   REMOVING (psytl_remove, psytl_prune, psytl_clear)
  *     psytl_remove(tl, id) deletes one event; when it had fired and its
  *     channel showed its value, the channel is recomputed.
- *     psytl_prune(tl, base) deletes every fired event of a base
+ *     psytl_prune(tl, base) deletes every fired or skipped event of a base
  *     (PSYTL_ALL_BASES for all): for a long session on the RT base, where
  *     a script adds waits forever and the caller has logged the reports.
  *     Channels keep their values; a channel left with no events is free,
@@ -555,7 +654,7 @@
  *     events and keys on a trial base, anchors the base at the trial's
  *     first frame, and the timeline runs it. Nothing links the two
  *     headers. At movie scale, the storage holds thousands of annotations
- *     on a movie base, anchored and paused with the player.
+ *     on a movie base, anchored, paused and skipped with the player.
  *
  *   ---------------------------------------------------------------------
  *   MEMORY AND THREADS
@@ -596,9 +695,9 @@
 
 /* The version of this header, for a log line or a compile-time check. */
 #define PSYTL_VERSION_MAJOR 0
-#define PSYTL_VERSION_MINOR 2
+#define PSYTL_VERSION_MINOR 3
 #define PSYTL_VERSION_PATCH 0
-#define PSYTL_VERSION_STRING "0.2.0"
+#define PSYTL_VERSION_STRING "0.3.0"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -671,8 +770,9 @@ typedef enum psytl_kind {
 } psytl_kind;
 
 /* Event flags, set by the header. */
-#define PSYTL_EV_FIRED 1u   /* it has landed on a frame                     */
-#define PSYTL_EV_LATE  2u   /* it was added after its window had passed     */
+#define PSYTL_EV_FIRED   1u /* it has landed on a frame                     */
+#define PSYTL_EV_LATE    2u /* it was added after its window had passed     */
+#define PSYTL_EV_SKIPPED 4u /* a psytl_skip() passed over it; never fires   */
 
 /* One event. The caller fills time, base, kind and its payload; the header
  * assigns id and writes the landing fields. 64 bytes. */
@@ -688,7 +788,8 @@ typedef struct psytl_event {
     uint64_t user;      /* the caller's: a pointer, a coroutine, a string id */
     int32_t  id;        /* assigned on add; ignored on add                  */
     int32_t  reserved_; /* zero                                             */
-    /* landing, written when it fires; frame -1 while pending */
+    /* landing, written when it fires; frame -1 while pending and when
+     * skipped (SKIP), and the RT time in a psytl_peek() copy (PEEK) */
     int64_t  frame;     /* psytl_frame.index of the frame it landed on      */
     int64_t  onset;     /* that frame's predicted onset, RT ns              */
     int64_t  residual;  /* base time at onset minus time, ns                */
@@ -890,6 +991,13 @@ PSYTL_API int psytl_resume(psytl_timeline* tl, int base, int64_t rt);
  * anchored again. */
 PSYTL_API int psytl_stop(psytl_timeline* tl, int base);
 
+/* Seek base `base` to `base_time` at RT time `rt` without firing what lies
+ * between (SKIP): psytl_anchor(), then every pending event of the base
+ * before base_time is marked PSYTL_EV_SKIPPED and never fires. Returns the
+ * number skipped (>= 0), or what psytl_anchor() returns on an error, with
+ * nothing changed. */
+PSYTL_API int psytl_skip(psytl_timeline* tl, int base, int64_t rt, int64_t base_time);
+
 /* The base's time at RT time `rt` into *out, and true, when the base is
  * running or paused (a paused base gives its frozen time); false when it is
  * stopped or the arguments are bad. */
@@ -908,8 +1016,8 @@ PSYTL_API int psytl_add_n(psytl_timeline* tl, const psytl_event* e, int n);
 /* Delete one event by id. Returns 0 or PSYTL_ERR_NOT_FOUND. */
 PSYTL_API int psytl_remove(psytl_timeline* tl, int id);
 
-/* Delete every fired event of `base` (or PSYTL_ALL_BASES). Returns the
- * number deleted. Channel values stay. */
+/* Delete every fired or skipped event of `base` (or PSYTL_ALL_BASES).
+ * Returns the number deleted. Channel values stay. */
 PSYTL_API int psytl_prune(psytl_timeline* tl, int base);
 
 /* Delete every event of `base` (or PSYTL_ALL_BASES) and the keys of the
@@ -955,6 +1063,20 @@ PSYTL_API int psytl_evaluate(psytl_timeline* tl, const psytl_frame* f,
  * late event's time is in the past. False when nothing is pending. */
 PSYTL_API bool psytl_next_due(const psytl_timeline* tl, int64_t* rt);
 
+/* The pending events of `base` (or PSYTL_ALL_BASES) whose RT time is in
+ * [from_rt, to_rt), on running bases only, without changing anything
+ * (PEEK). Returns how many; the first min(that, cap) are copied into out[]
+ * in RT time order, then id, with onset = the RT time, residual 0 and
+ * frame -1. PSYTL_ERR_ARG for a bad base, cap < 0, out NULL with cap > 0,
+ * from_rt > to_rt, or a bound at or past +-2^62. */
+PSYTL_API int psytl_peek(const psytl_timeline* tl, int base, int64_t from_rt, int64_t to_rt,
+                         psytl_event* out, int cap);
+
+/* The lead in use (QUANTIZATION): 0.5 for a desc lead of 0, 0 for
+ * PSYTL_LEAD_NONE, else the desc's. A window ends lead x period, truncated
+ * to whole ns, after the onset. 0 when the handle is not open. */
+PSYTL_API double psytl_lead(const psytl_timeline* tl);
+
 /* --- state and record -------------------------------------------------- */
 
 /* The channel values, n_channels floats, into the handle. NULL when the
@@ -993,6 +1115,11 @@ PSYTL_API const psytl_event* psytl_find(const psytl_timeline* tl, int id);
 #define PSYTL__PAUSED  2
 #define PSYTL__NONE    INT32_MAX
 #define PSYTL__LIMIT   (INT64_C(1) << 62)
+
+/* An event the base has passed: fired, or skipped by psytl_skip(). Every
+ * rule that asks "is it still to come" asks this, so a skipped event is
+ * never fired late and counts for its channel. */
+#define PSYTL__DONE    (PSYTL_EV_FIRED | PSYTL_EV_SKIPPED)
 
 /* A tween with keep_velocity: a cubic Hermite segment whose start tangent
  * is curves[0].x1 and whose end tangent is 0. Never accepted from a
@@ -1242,6 +1369,7 @@ static bool psytl__user_base(const psytl_timeline* tl, int base) {
 
 static void psytl__recompute(psytl_timeline* tl, int bi, int only);
 static bool psytl__drives(int kind);
+static void psytl__apply(psytl_timeline* tl, const psytl_event* e);
 
 /* Make the base's events from `from` (relative) to its window pending
  * again. Late events there were never fired and lose only the late mark. */
@@ -1251,7 +1379,7 @@ static void psytl__unfire_from(psytl_timeline* tl, int bi, int from) {
     int i;
     for (i = from; i < b->hi; i++) {
         psytl_event* e = &tl->events[b->begin + i];
-        if (e->flags & PSYTL_EV_FIRED) {
+        if (e->flags & PSYTL__DONE) {
             rewound = rewound || psytl__drives(e->kind);
             e->frame = -1;
             e->onset = 0;
@@ -1330,6 +1458,45 @@ PSYTL_API int psytl_stop(psytl_timeline* tl, int base) {
     return 0;
 }
 
+PSYTL_API int psytl_skip(psytl_timeline* tl, int base, int64_t rt, int64_t base_time) {
+    psytl__base* b;
+    int rc, i, start, end, n = 0;
+    /* A skip back must rewind as an anchor does, so it goes through the
+     * anchor; the skip proper is only the marking below. */
+    rc = psytl_anchor(tl, base, rt, base_time);
+    if (rc < 0) return rc;
+    b = &tl->bases[base];
+    end = psytl__upper(tl->events, b->begin, b->begin + b->count, base_time - 1) - b->begin;
+    /* Below min(dirty, hi) every event is done already. */
+    start = b->dirty < b->hi ? b->dirty : b->hi;
+    for (i = start; i < end; i++) {
+        psytl_event* e = &tl->events[b->begin + i];
+        if (e->flags & PSYTL__DONE) continue;
+        e->flags = PSYTL_EV_SKIPPED;
+        e->frame = -1;
+        e->onset = rt;
+        e->residual = base_time - e->time;
+        if (psytl__drives(e->kind)) psytl__apply(tl, e);
+        n++;
+    }
+    /* The base has passed everything before base_time: an add there is
+     * late, and an anchor back there must rewind. Both rules read these. */
+    if (!b->evaluated || base_time - 1 > b->last_hi) {
+        b->last_hi = base_time - 1;
+        b->hi = end;
+    }
+    if (!b->evaluated || base_time - 1 > b->last_now) b->last_now = base_time - 1;
+    b->evaluated = 1;
+    /* Only [end, hi) can still hold a late event: the window of a frame
+     * before the skip may have reached past base_time. */
+    if (b->dirty != PSYTL__NONE) {
+        int d = b->dirty > end ? b->dirty : end;
+        while (d < b->hi && (tl->events[b->begin + d].flags & PSYTL__DONE)) d++;
+        b->dirty = d < b->hi ? d : PSYTL__NONE;
+    }
+    return n;
+}
+
 /* Base 0 has anchor (0, 0), which is the identity. */
 static int64_t psytl__bt(const psytl__base* b, int64_t rt) {
     return b->state == PSYTL__PAUSED ? b->anchor_bt : b->anchor_bt + (rt - b->anchor_rt);
@@ -1383,7 +1550,7 @@ static void psytl__recompute(psytl_timeline* tl, int bi, int only) {
     }
     for (i = b->begin; i < b->begin + b->count; i++) {
         const psytl_event* e = &tl->events[i];
-        if (!(e->flags & PSYTL_EV_FIRED) || !psytl__drives(e->kind)) continue;
+        if (!(e->flags & PSYTL__DONE) || !psytl__drives(e->kind)) continue;
         if (only >= 0 && e->target != only) continue;
         psytl__apply(tl, e);
     }
@@ -1496,7 +1663,7 @@ static void psytl__delete(psytl_timeline* tl, int k, bool recompute) {
     if (b->dirty >= b->hi) b->dirty = PSYTL__NONE;
     if (psytl__drives(e.kind)) {
         psytl__chan* c = &tl->chans[e.target];
-        bool was_shown = (e.flags & PSYTL_EV_FIRED) && c->has_last
+        bool was_shown = (e.flags & PSYTL__DONE) && c->has_last
                          && c->last_id == e.id;
         c->n_events--;
         if (c->n_events == 0) psytl__free_chan(tl, e.target, recompute && was_shown);
@@ -1533,7 +1700,7 @@ static int psytl__compact(psytl_timeline* tl, int base, bool fired_only, bool re
         bool hit = base == PSYTL_ALL_BASES || base == bi;
         for (rel = 0; rel < b->count; rel++) {
             const psytl_event* e = &tl->events[b->begin + rel];
-            if (hit && (!fired_only || (e->flags & PSYTL_EV_FIRED))) {
+            if (hit && (!fired_only || (e->flags & PSYTL__DONE))) {
                 if (psytl__drives(e->kind)) {
                     tl->chans[e->target].n_events--;
                     tl->chans[e->target].mark = 1;
@@ -1872,7 +2039,7 @@ PSYTL_API int psytl_evaluate(psytl_timeline* tl, const psytl_frame* f,
         start = b->dirty < hi_kept ? b->dirty : hi_kept;
         for (i = start; i < i_hi; i++) {
             psytl_event* e = &tl->events[begin + i];
-            if (e->flags & PSYTL_EV_FIRED) continue;
+            if (e->flags & PSYTL__DONE) continue;
             e->flags = (uint16_t)(PSYTL_EV_FIRED | (i < hi_kept ? PSYTL_EV_LATE : 0u));
             e->frame = f->index;
             e->onset = f->onset;
@@ -1883,7 +2050,7 @@ PSYTL_API int psytl_evaluate(psytl_timeline* tl, const psytl_frame* f,
         }
         if (i_hi < b->hi) {
             int d = b->dirty > i_hi ? b->dirty : i_hi;
-            while (d < b->hi && (tl->events[begin + d].flags & PSYTL_EV_FIRED)) d++;
+            while (d < b->hi && (tl->events[begin + d].flags & PSYTL__DONE)) d++;
             b->dirty = d < b->hi ? d : PSYTL__NONE;
         } else {
             /* i_hi == hi with hi_t behind the reach is possible when no
@@ -1922,7 +2089,7 @@ PSYTL_API bool psytl_next_due(const psytl_timeline* tl, int64_t* rt) {
         for (i = start; i < b->count; i++) {
             const psytl_event* e = &tl->events[b->begin + i];
             int64_t t;
-            if (e->flags & PSYTL_EV_FIRED) continue;
+            if (e->flags & PSYTL__DONE) continue;
             t = b->anchor_rt + (e->time - b->anchor_bt);
             if (!found || t < best) best = t;
             found = true;
@@ -1932,6 +2099,43 @@ PSYTL_API bool psytl_next_due(const psytl_timeline* tl, int64_t* rt) {
     }
     if (found) *rt = best;
     return found;
+}
+
+PSYTL_API int psytl_peek(const psytl_timeline* tl, int base, int64_t from_rt, int64_t to_rt,
+                         psytl_event* out, int cap) {
+    int bi, i, n = 0;
+    if (!tl || !tl->open) return PSYTL_ERR_CLOSED;
+    if (!psytl__base_arg(base) || cap < 0 || (cap > 0 && !out) || from_rt > to_rt
+        || !psytl__time_ok(from_rt) || !psytl__time_ok(to_rt))
+        return PSYTL_ERR_ARG;
+    for (bi = 0; bi < PSYTL_MAX_BASES; bi++) {
+        const psytl__base* b = &tl->bases[bi];
+        int lo, hi;
+        if (base != PSYTL_ALL_BASES && base != bi) continue;
+        if (b->state != PSYTL__RUNNING) continue;
+        /* An event's RT time is the first RT ns at which the base reaches
+         * it, so it is in [from_rt, to_rt) exactly when the base time at
+         * from_rt - 1 is before it and the one at to_rt - 1 is not. Put
+         * this way the bounds stay right for any mapping that rounds down,
+         * not only for rate 1. */
+        lo = psytl__upper(tl->events, b->begin, b->begin + b->count, psytl__bt(b, from_rt - 1));
+        hi = psytl__upper(tl->events, lo, b->begin + b->count, psytl__bt(b, to_rt - 1));
+        for (i = lo; i < hi; i++) {
+            const psytl_event* e = &tl->events[i];
+            psytl_event c;
+            if (e->flags & PSYTL__DONE) continue;
+            c = *e;
+            c.onset = b->anchor_rt + (e->time - b->anchor_bt);
+            c.residual = 0;
+            psytl__report(out, cap, n, &c);
+            n++;
+        }
+    }
+    return n;
+}
+
+PSYTL_API double psytl_lead(const psytl_timeline* tl) {
+    return tl && tl->open ? tl->lead : 0.0;
 }
 
 /* --- state and record -------------------------------------------------- */

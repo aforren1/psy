@@ -648,6 +648,412 @@ not stop a run, because a path can change in the middle of a trial and
 only the caller knows what to do with that trial.
 
 
+## Flip hooks (v0.3.0)
+
+The design is in the scratchpad note `screen_hooks_design.md`; this
+section records what was built and measured. All runs: one laptop, on
+battery, Balanced power plan, `screen_flipstats` built with MSVC 19.4
+/O2, 2026-10-05, under the shared measurement lock.
+
+### What VPixx devices read from the frame
+
+| Code | Pixels | Where | Bits | Source |
+|---|---|---|---|---|
+| Pixel Mode | 1 | the top-left pixel of each frame | digital out 0 to 7 from red, 8 to 15 green, 16 to 23 blue; modes RGB, GB, B | [VPixx, Sending Triggers with Pixel Mode](https://docs.vpixx.com/vocal/sending-triggers-with-pixel-mode), [Datapixx('EnablePixelMode')](http://psychtoolbox.org/docs/Datapixx-EnablePixelMode) |
+| Pixel sync | "at least 8" recommended, caller-defined RGB | a raster line set with `DPxSetVidPsyncRasterLine`; Psychtoolbox draws it on scanline 0 from x = 10 and blanks that line | all 24 bits of each pixel compared | [VPixx, Example: sending a digital trigger on Pixel Sync](https://docs.vpixx.com/vocal/example-sending-a-digital-trigger-on-pixel-sync), [libdpx](https://www.vpixx.com/manuals/libdpx/html/libdpx.html), [PsychDataPixx.m](https://raw.githubusercontent.com/Psychtoolbox-3/Psychtoolbox-3/beta/Psychtoolbox/PsychHardware/DatapixxToolbox/DatapixxBasic/PsychDataPixx.m) |
+
+VPixx also documents a "stereo blue line" for the VIEWPixx /3D
+([Setting up a 3D display](https://docs.vpixx.com/matlab/setting-up-a-3d-display));
+its pixels were not found in the pages read, so there is no preset. The
+pages read do not say in which DATAPixx video modes Pixel Mode works or
+whether pixel sync searches a whole line. Both presets
+(`psyscr_slot_pixel_mode`, `psyscr_slot_psync`) follow the sources above.
+
+### Codes
+
+| Run | Backend, path | Frames | Self test | Read back | Differed | Codes zone, mean / p50 / p99 us | Code risk |
+|---|---|---|---|---|---|---|---|
+| ROW by ClearView per pixel, fullscreen, 1 min | DXGI_FLIP, overlay | 3600 | pass | 720 | 0 | 3.82 / 3.10 / 18.3 | 0x0002 (advanced color) |
+| same | COMPOSITION, independent | 3600 | pass | 720 | 0 | 4.24 / 3.20 / 14.8 | 0x0002 |
+| ROW by UpdateSubresource, fullscreen, 30 s | DXGI_FLIP, overlay | 1800 | pass | 360 | 0 | 5.31 / 3.90 / 22.5 | 0x0002 |
+
+Each frame drew a 1-pixel Pixel Mode code and an 8-pixel pixel-sync row,
+and read them back every 10 flips. The zone is the CPU time of the D3D11
+calls, including the staging copy on read-back frames. One ClearView per
+pixel was cheaper for 8 pixels, so rows of up to 8 pixels use it and
+longer ones use UpdateSubresource; the longer case was not timed.
+
+The read-back and the self test see the back buffer only. The describe
+line on this laptop says `color=wcg`: Windows runs auto color management
+on the internal panel, so DWM and the display kernel convert colors, and
+every code here carries `CODE_RISK_ADVANCED_COLOR`. No device has read a
+code from this laptop.
+
+### Triggers
+
+One trigger per frame on a TIME_CRITICAL worker; the callback did
+nothing. "Moved" counts triggers armed or re-armed for another vblank;
+"GPU moved" those moved by the fence check, with how many of those
+frames were in fact late.
+
+| Run | Backend, path | Frames | Fired minus deadline, p50 / p99 / max us | Moved | GPU moved (frame late) | Fired early | Fired late | Flip cost, mean us |
+|---|---|---|---|---|---|---|---|---|
+| fullscreen, codes, 1 min | DXGI_FLIP, overlay | 3600 | 1.57 / 58.7 / 3200 | 0 | off | 0 | 0 | 12.0 |
+| fullscreen, codes, 1 min | COMPOSITION, independent | 3600 | 2.05 / 102 / 646 | 0 | off | 0 | 0 | 12.0 |
+| window, `--miss 300`, no fence | DXGI_FLIP | 7200 | 1.98 / 238 / 7933 | 62 | off | 72 | 0 | 12.6 |
+| window, `--miss 300`, fence | DXGI_FLIP | 7200 | 0.98 / 215 / 3240 | 137 | 71 (70) | 0 | 0 | 12.4 |
+| window, `--miss 300`, fence | COMPOSITION | 7200 | 0.97 / 271 / 3655 | 70 | 70 (70) | 1 | 0 | 11.4 |
+| window, idle, fence | COMPOSITION | 7200 | 1.16 / 300 / 2103 | 0 | 0 | 1 | 0 | 14.4 |
+| fullscreen, idle, fence, 1 min | DXGI_FLIP, overlay | 3600 | 0.99 / 113 / 838 | 0 | 0 | 0 | 0 | 13.6 |
+
+- `--miss 300` gives 3 frames in a row 25 ms of GPU work every 300
+  frames. Without the fence every one of their triggers fired a frame
+  early (72 of 72); the after-flip hook and the ring said so. With the
+  fence, 140 of 142 were moved before they fired; the other 2 were frames
+  whose drop the fence could not see.
+- The 62 moves on DXGI_FLIP without the fence are the window's path
+  changes: a flip shown a vblank early (EARLY) completes before its
+  trigger fires, and the trigger moves to it.
+- No false move: no trigger fired after its frame (fired late 0), and no
+  GPU move in 10800 idle frames. The fence stays off by default because
+  this is one GPU.
+- The flip cost rose from 4.5 us (codes, no triggers) to 12 us with a
+  trigger: arming takes the trigger lock and wakes the worker
+  (`psyrt_worker_submit`). Begin and flip together miss the 20 us bar.
+- A trigger whose record completed before it fired is reported PENDING
+  by the after-flip hook: 0 to 3 in 3600 fullscreen frames, up to 131 in
+  7200 windowed frames with path changes.
+- The table above uses one word for two things. In it, "fired late" is
+  a mismatch (PSYSCR_TRIG_FIRED_LATE: the trigger fired, then its frame
+  was shown a vblank EARLIER), not the worker's lateness. The worker's
+  lateness is the "fired minus deadline" column. Later tables call the
+  mismatch "fired a vblank late".
+
+### The trigger tail (v0.3.0, 2026-10-05)
+
+Work notes, kept as the work goes, so a restart loses nothing. All runs
+on AC power (`power: AC` in the flipstats output), Balanced plan, the
+laptop panel only, 800 x 600 window unless the row says fullscreen.
+"Late" in these notes means fired minus deadline over 20 us.
+
+The split. `psyscr_trigger_info` has `woke_ns` (the clock as psy_rt.h's
+worker entered the job, after its spin) and `lock_ns` (the wait for the
+trigger lock). Fired minus deadline = wake (psy_rt.h's own lateness) +
+lock + dispatch.
+
+| Run (DXGI_FLIP, window, 1200 frames) | Fired - deadline p50 / p99 / max us | Wake p99 / max | Lock p99 / max | Dispatch p99 / max |
+|---|---|---|---|---|
+| default | 0.76 / 18.4 / 356 | 17.7 / 356 | 0.4 / 1.2 | 1.4 / 7.8 |
+| channel offset 4 ms (deadline off the vblank) | 0.52 / 1.74 / 32.6 | 0.40 / 31.7 | 0.3 / 9.9 | 0.8 / 8.7 |
+| spin window 3 ms (default 1.2 ms) | 1.10 / 48.7 / 215 | 47.3 / 215 | 0.5 / 2.4 | 1.6 / 4.8 |
+
+- The lock is not the cause: its wait is at most 13 us in every run.
+  The whole tail is in the wake.
+- The spin window is not the cause: 3 ms does no better than 1.2 ms.
+- The tail is tied to the vblank: with the deadline 4 ms after it, p99
+  falls from 18 to 50 us to 1.7 us.
+- Repeated default runs vary widely: p99 18 to 240 us, max 0.36 to 23
+  ms, in 20 to 30 s windows minutes apart.
+
+Where the time goes. A probe (now removed) armed psy_rt.h's worker 300
+us early and spun to the deadline inside the job, logging every gap over
+5 us between two clock reads, with the CPU before and after and the
+thread's cycle count (QueryThreadCycleTime) across the gap. In 1800
+frames: 962 gaps over 20 us, 740 of them starting 50 to 100 us before
+the vblank time, 643 crossing the deadline, 50 to 400 us long. Across a
+gap the thread ran almost no cycles and stayed on its CPU (2 of 962
+moved). The thread was stopped on its CPU while something else ran
+there: an interrupt or a DPC, or a thread of higher priority.
+
+- Not a thread of priority 16 (dwm.exe has 3, csrss.exe 2): with the
+  worker raised to 18 by MMCSS ("Pro Audio", critical), the tail stayed
+  (p99 166 and 241 us against 108 and 223 us without, alternated).
+- A DPC: `% DPC Time` per CPU (typeperf, 1 s samples) shows 2 to 3% of
+  one P-core (330 to 500 us per frame at 60 Hz) during a run, on the CPU
+  the worker spun on (CPUs 0 to 2 in that run). Pinned to E-core 10, the
+  DPC ran on P-cores 2 and 4 and the worker fired at p99 5.4 us.
+- Pinned per CPU (900 frames each): CPU 0 p50 31 us, CPU 1 p50 35 us
+  (the same core), CPU 2 p99 292 us, CPU 3 p99 206 us, CPU 4 p99 120 us,
+  CPU 6 p99 4.2 us, CPU 10 p99 6.1 us, CPU 15 p99 7.2 us. A pinned
+  thread cannot move off a CPU that is taken: max 0.4 to 48 ms.
+
+So the cause: psy_rt.h's worker prefers the P-cores, and on this laptop
+the display's vblank DPC runs on a P-core, often the one the worker is
+spinning on. Raising the priority cannot help against a DPC.
+
+Placement trials (window, 1200 frames each, with the self-arming below):
+
+- A soft CPU set (SetThreadSelectedCpuSets) of the E-cores did not keep
+  the worker there: Windows still ran it on P-cores 0 to 6, p99 37 and
+  132 us.
+- A hard mask of the 8 E-cores: p99 2.1 and 2.6 us, 6 and 7 triggers over
+  20 us late. A mask of 4 E-cores did as well (1.3 and 2.9 us); CPUs
+  12 to 15 once gave p99 2.8 ms. The gap probe with the 8 E-core mask: 4
+  and 0 gaps over 20 us before the deadline, none crossing it.
+- Pinned to E-core 10: p99 1.0 and 1.7 us, but a pin cannot leave its CPU.
+
+The fix: on Windows on a hybrid CPU, the worker's on_start sets a hard
+affinity mask of the E-cores (all logical CPUs below the highest
+EfficiencyClass) and drops psy_rt.h's P-core CPU sets. `trigger_cpu = -1`
+keeps psy_rt.h's placement; `k > 0` still pins.
+
+Arming cost. `psyscr.trigarm` was 3.8 us mean on AC (8 us on battery),
+of which `psyscr.trigsubmit` (psyrt_worker_submit: the worker's lock, an
+event and a condition variable) was 3.3 us. The trigger lock itself was
+uncontended. So the arming cost is the wake-up, not the lock, and a
+lock-free job slot would not remove it. The fix: after a flip trigger
+fires, the worker arms itself 50 us before the next vblank's deadline
+(`PSYSCR__SPEC_EARLY_NS`), and the frame thread submits only when its
+wake is earlier than the one armed. In steady state the frame thread
+never submits; the worker wakes 50 us early, finds nothing due, and
+re-arms itself for the real deadline. With no trigger in the next frame
+the worker spins one window for nothing. The race guarantees are
+unchanged: every state change is still under the one lock, a FIRING job
+cannot move, and the test checks it.
+
+Lock waits. `psyscr__lock` now tries the lock first and records a
+`psyscr.lockwait` zone only when it has to wait: 0 to 15 waits in 1200 to
+3600 frames, at most 2.1 us.
+
+### Before and after (v0.3.0, 2026-10-05, AC)
+
+"Before" is the header as it was at the start of this work (worker on
+the P-cores, a submit per trigger), built from a copy; "after" is the
+current header. One trigger per frame, a no-op callback, the laptop panel,
+Balanced plan, `power: AC` on every run. "Over 20" and "over 200" count
+triggers that fired that many us or more after their deadline.
+
+Fullscreen, 3600 frames each:
+
+| Run | Fired - deadline p50 / p99 / max us | Over 20 / over 200 | Wake p99 | trigarm mean us | flip_at mean us | Drops |
+|---|---|---|---|---|---|---|
+| DXGI_FLIP, before | 0.97 / 31.5 / 369 | 152 / 2 | 30.7 | 3.83 | 5.03 | 0 |
+| DXGI_FLIP, after | 0.46 / 1.66 / 406 | 4 / 1 | 0.56 | 0.94 | 2.56 | 0 |
+| DXGI_FLIP, after, again | 0.45 / 2.55 / 2108 | 11 / 4 | 0.35 | 0.73 | 2.01 | 0 |
+| COMPOSITION, before | 0.99 / 29.2 / 1627 | 122 / 2 | 28.2 | 4.08 | 5.28 | 0 |
+| COMPOSITION, after | 0.47 / 1.76 / 9239 | 6 / 6 | 0.59 | 1.16 | 3.04 | 3 |
+| COMPOSITION, after, again | 0.48 / 1.60 / 703 | 7 / 3 | 0.45 | 0.64 | 1.84 | 5 |
+
+The fullscreen runs used the 6-minute budget. They ran between 19:15 and
+19:47, inside the hour in which another agent ran GPU pixel tests and
+started and stopped Docker Desktop outside the measurement lock, so their
+tails may carry that load. They were not repeated in fullscreen.
+
+Window, the final batch, repeated on a quiet machine (no docker, cl,
+gcc or gfx test process in `tasklist` before each run, GPU 3D engine at
+0.2%, under the lock, 19:52 to 20:00), 3600 frames each, alternated:
+
+| Run | Fired - deadline p50 / p99 / max us | Over 20 / over 200 | trigarm mean us | flip_at mean us | Drops |
+|---|---|---|---|---|---|
+| DXGI_FLIP, before | 2.66 / 169 / 12563 | 1116 / 22 | 11.7 | 15.8 | 1 |
+| DXGI_FLIP, after | 0.66 / 3.15 / 4460 | 18 / 8 | 1.46 | 4.34 | 1 |
+| DXGI_FLIP, before | 2.37 / 148 / 4857 | 1023 / 19 | 7.88 | 10.7 | 2 |
+| DXGI_FLIP, after | 0.48 / 2.40 / 31268 | 18 / 15 | 1.17 | 3.49 | 1 |
+| COMPOSITION on top, before | 2.56 / 140 / 2460 | 877 / 18 | 10.7 | 13.9 | 13 |
+| COMPOSITION on top, after | 0.46 / 1.08 / 861 | 12 / 2 | 0.62 | 1.71 | 0 |
+| COMPOSITION on top, before | 0.98 / 38.8 / 669 | 227 / 1 | 4.03 | 5.18 | 0 |
+| COMPOSITION on top, after | 0.46 / 0.96 / 347 | 6 / 1 | 0.69 | 1.87 | 0 |
+
+The first runs of this batch had a slow frame thread in both builds
+(trigarm 8 to 12 us before); the after build is faster in each pair.
+An earlier window batch (19:37 to 19:43, possibly under the other agent's
+load) agreed: p99 32 to 94 us before, 1.3 to 3.0 us after; maxima 0.88
+to 1.9 ms before, 0.55 to 43 ms after.
+
+The OS tail. examples/rt_jitter.c, 1800 waits of 16.667 ms per spin
+window, no display involved, AC, under the lock:
+
+| Placement | Spin 1.2 ms (default): p50 / p99 / max us | Spin 0: p50 / p99 / max us |
+|---|---|---|
+| E-cores (`start /affinity FF00`), 19:26 | 0.0 / 0.2 / 2603 | 448 / 902 / 2646 |
+| P-cores (default), 19:28 | 0.0 / 21.2 / 2996 | 377 / 844 / 3689 |
+| E-cores, quiet, 20:00 | 0.0 / 0.1 / 32559 | 338 / 663 / 1049 |
+| P-cores, quiet, 20:02 | 0.0 / 0.0 / 20.5 | 319 / 634 / 746 |
+
+On the simulated display (no GPU, no window), 7200 triggers on the
+E-cores: p99 1.68 us, max 2232 us, 2 over 200 us.
+
+What this says:
+
+- The p99 target (20 us) is met in every after run; the before runs
+  missed it in every run, by the vblank DPC.
+- The max target (200 us) is missed in every run, before and after. The
+  waits that make it are rare (1 to 15 a minute after, 1 to 22 before)
+  and come from the OS: rt_jitter without a display, on the same cores
+  and the same spin window, woke 2.6 ms and 32.6 ms late in two of four
+  runs. A wider spin window covers a late timer (spin 0 shows the timer
+  alone up to 3.7 ms late), not a thread kept off its CPU, at the cost
+  of a spinning core.
+- The E-cores carry their own rare stall: the 32.6 ms rt_jitter wake and
+  the 31 and 43 ms trigger waits were on E-cores. P-cores had stalls of
+  12 to 48 ms in the earlier pinned and default runs. The data do not
+  show which placement has fewer such stalls; they do show the E-cores
+  remove the DPC tail. `trigger_cpu = -1` restores the P-cores.
+- begin() cost the frame thread more in some after runs (16 to 32 us
+  mean against 14 to 24 us before, in runs minutes apart); with the
+  worker pinned to E-core 10 and on the P-cores in the same minutes it
+  was the same, and lock waits were at most 2.1 us, so the change is not
+  the header's; whether the DPC moved to the frame thread's CPU was not
+  measured.
+- COMPOSITION fullscreen dropped 3 and 5 frames a minute after and 0
+  before, in the window of possible outside load; in the quiet window
+  batch the after runs dropped 0 and 0. Not resolved with these few runs.
+
+Mutations. The core test catches each of these 24 changes to the header
+(`gcc -std=c11 -O1` on WSL, one build per change): the snap without its
+lead, the depth on one vote, drops not counted, ESTIMATED not set, the
+prediction a vblank late, the hold a vblank early, LATE_TARGET not set, a
+path change not adopted at once, the native depth raised on one miss,
+EARLY not set, an estimated flip keeping its tier, a trigger not moved
+after a late present, a taken trigger moved, a taken trigger fired again,
+an armed trigger not moved to the vblank shown, the fence never moving,
+the mismatch direction swapped, the channel offset ignored, the
+trigger_at offset ignored, FLUSHED not set, triggers fired out of deadline
+order, the frame thread submitting on every change, no self-arming, and
+self-arming after the deadline. The native depth and EARLY changes were
+first missed; `test_one_miss_and_early` now catches them (one drop on a
+backend that holds frames leaves the depth at 1; a DXGI-like path whose
+depth falls from 2 to 1 shows a flip a vblank early, and EARLY is set on
+that flip and on no other). The previous agent's list of 20 was lost;
+this list replaces it.
+
+### Where the trigger worker runs: the rule and this machine
+
+The rule is: keep the trigger worker off the CPUs that service the
+display's vblank DPC. A DPC preempts every thread at any priority, so a
+worker that spins on that CPU at the vblank waits until the DPC ends.
+
+The E-cores are this machine's answer to that rule, not the rule. The
+measurements that justify it here (i7-1360P, Iris Xe, Windows 11,
+Balanced, AC; all above):
+
+- The gap probe: in 1800 frames, 740 gaps over 20 us started 50 to 100
+  us before the vblank, 643 crossed the deadline, 50 to 400 us long, with
+  the worker's thread running almost no cycles and not changing CPU.
+- `% DPC Time` per processor during a run: 2 to 3% of one P-core (330
+  to 500 us per frame), on the P-cores the worker ran on; with the worker
+  pinned to E-core 10, the DPC ran on P-cores 2 and 4 and the worker
+  fired at p99 5.4 us.
+- MMCSS priority 18 did not remove the tail, so it is not a thread.
+- A hard mask of the E-cores: p99 1 to 3 us in every run after.
+
+On another machine this can differ. A CPU of one core type has no
+E-cores; the default is then psy_rt.h's placement, which can share a CPU
+with the DPC. Another GPU or driver can route its interrupt elsewhere, an
+administrator can set the device's MSI interrupt affinity policy, and
+Windows can steer the interrupt toward a CPU that is awake. On such a
+machine the E-cores may be the busy ones. To check a rig: run
+`screen_flipstats --trigger` (it prints the triggers over 20 us late per
+CPU) and `typeperf "\Processor(*)\% DPC Time"` during the run, and set
+`desc.trigger_cpu` from what they show.
+
+Later (not built): a diagnostic at open that samples the DPC count or DPC
+time of each CPU for about 0.5 s while the swap path flips, and places
+the worker on the CPUs with the least. The documented way is PDH (the
+counters `\Processor(*)\DPCs Queued/sec` and `% DPC Time`, as typeperf
+reads them), which needs no privilege. The undocumented ways are
+NtQuerySystemInformation with SystemProcessorPerformanceInformation
+(per-CPU DPC and interrupt time in fields the SDK calls Reserved1) or
+SystemInterruptInformation (per-CPU DPC counts). The cost of the sample
+at open, and whether 0.5 s finds the vblank DPC's CPU every time, are
+not measured.
+
+### The OS gamma ramp
+
+`examples/screen_gamma.c`, without changing what is shown: the laptop's
+ramp is the 8-bit identity; setting the same ramp again and reading it
+back was exact; GetDeviceGammaRamp took 0.8 to 20 ms (the first call is
+slow), SetDeviceGammaRamp 4.6 to 18 ms. Because the ramp was already the
+identity, no fullscreen run set one, and the identity path of
+`psyscr_open` did not run on hardware. Microsoft documents that
+SetDeviceGammaRamp can report success without setting a ramp, that other
+programs and the OS may overwrite it, that display events reset it, and
+that it is undefined under HDR
+([SetDeviceGammaRamp](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-setdevicegammaramp)).
+No primary source says whether it acts on independent-flip or overlay
+frames, or how it combines with Night Light, which uses the GPU color
+pipeline ([display calibration pipeline](https://learn.microsoft.com/en-us/windows/win32/wcs/display-calibration-mhc));
+that needs a capture card or light, and is not claimed.
+
+### Two frames planned for one vblank (v0.3.0, 2026-10-05)
+
+The video agent's report, windowed DXGI_FLIP (composed, 640 x 360, AC):
+begin() sometimes planned two frames in a row for one vblank (their
+predicted onsets 136 ns apart, after flips flagged EARLY), and f.vblank
+sometimes rose by 2 before a drop was reported.
+
+Reproduced on the virtual clock (`test_flap_prediction`): a DXGI-like
+scripted presenter whose path moves between composed (depth 2) and
+overlay (depth 1) every 9 presents, with a random wait of up to a third
+of a period per frame. 300 frames: 16 frames planned on the vblank of the
+frame before, 48 early flips in runs of 3.
+
+The cause, in two parts:
+
+1. A flip planned at depth 2 when the depth has fallen to 1 shows a
+   vblank early and completes. begin() kept "one frame per vblank" only
+   against flips still in flight and the newest vblank shown, so the next
+   frame was planned for the vblank the early frame had been planned for.
+   The 136 ns is the grid's period refit between the two begin() calls,
+   not a different vblank.
+2. After a path change the header adopts a new depth on one flip. The
+   first flip on the new path was shown on the vblank after the flip
+   before it: it had waited behind that flip in the queue, so its count
+   matched the old depth (2). That match closed the one-flip window, and
+   three flips in a row had to vote the depth down: 3 early flips per fall.
+
+The fix: the screen keeps the vblank flip_at() last planned, and begin()
+and flip_at() never plan at or before it. A flip shown on the vblank right
+after the flip before it no longer closes a path change's window (for up
+to 3 such flips). On the virtual clock: 0 frames on the vblank of the
+frame before, 16 early flips, each alone. The price: the early frame
+stays on the screen for the vblank it was planned for, so that vblank
+shows it a second time, where before a second frame was planned there.
+The prediction stays monotone, which psy_timeline.h and psy_video.h
+assume.
+
+The rise by 2 is not a fault. When the depth rises, the flip planned at
+the old depth shows late (a drop), and the frame after it is planned 2
+vblanks on; its begin() runs before the drop's record completes, because
+one frame is in flight. On the virtual clock every vblank that no frame
+was planned for followed an early flip or preceded a late one (the test
+checks it). On a backend that holds frames (COMPOSITION), the flapping
+script ran at half rate on the overlay path, because the depth there is
+lowered only on evidence (DEPTH); that is the depth rule, not this bug,
+and was not changed.
+
+Windowed check (DXGI_FLIP, `--windowed --topmost`, AC, under the lock,
+Docker Desktop running; flipstats counts frames planned at or before the
+vblank of the frame before):
+
+| Build | Frames | Planned at or before the frame before | Early | Dropped |
+|---|---|---|---|---|
+| fixes reverted | 3600 | 1 | 3 | 2 |
+| fixed | 5400 | 0 | 3 | 4 |
+
+The window stayed on the overlay path except at start (6 to 8 composed
+frames), so these runs saw few depth falls; the virtual-clock test is the
+evidence, the window runs only confirm that nothing else broke.
+
+### psy_video.h's requests (v0.3.0)
+
+- `psyscr_frame.done`, `n_done`, `done_lost`: every record completed
+  since the begin() before, in ring order, including those completed in
+  flip_at() during a hold and the ESTIMATED ones. In the windowed runs
+  above, f.done carried 3599 of 3600 and 5399 of 5400 records (the last
+  completes in close()).
+- `psyscr_native()`: the D3D11 device and immediate context, ANGLE's EGL
+  display, the adapter LUID. Borrowed pointers, valid until close(); the
+  device is free-threaded, the context is the frame thread's and ANGLE's.
+  In the windowed runs all three were set and the LUID was
+  00000000:0001e8e6. Not done: a device with VIDEO_SUPPORT and
+  multithread protection (psy_video.h's zero-copy request).
+
+Mutations now caught: 29 (the 24 above, plus begin() and flip_at()
+planning the last planned vblank again, a queued flip closing the
+window, completed records not listed, and the list not cleared per
+begin()).
+
 ## Not measured
 
 - Light. No photodiode was attached. `tests/loopback/psy_screen_loopback.c`
@@ -662,3 +1068,9 @@ only the caller knows what to do with that trial.
 - Two physical displays. The group calls ran on two windows on one display.
 - The keyboard itself: its scan, USB polling and the HID stack are not in
   the input times above.
+- Any code read by a device (VPixx or Bits#), and codes on a display
+  without auto color management.
+- The OS gamma ramp set to identity on hardware (the ramp here was
+  identity), and its effect on independent-flip and overlay frames.
+- How late the after-flip hook runs, per backend (derived only, in the
+  design note).

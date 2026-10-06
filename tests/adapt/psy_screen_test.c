@@ -36,17 +36,61 @@ static long long vnow(void);
 static void vsleep_until(long long t);
 #define PSYSCR__NOW() ((int64_t)vnow())
 #define PSYSCR__SLEEP_UNTIL(t, spin) vsleep_until((long long)(t))
+/* The trigger worker's wake-up: recorded here, and run by the clock as it
+ * passes, through the same function the worker thread calls. */
+struct psyscr_screen;
+static void varm(struct psyscr_screen* s, long long t);
+#define PSYSCR__ARM(s, t)       varm((s), (long long)(t))
+#define PSYSCR__WORKER_START(s) (1)
+#define PSYSCR__WORKER_STOP(s)  ((void)(s))
 
 #define PSY_SCREEN_IMPLEMENTATION
 #include "psy_screen.h"
 
 static long long vnow(void) { return g_virtual ? g_vt : (long long)psyrt_now_ns(); }
+
+static struct { psyscr_screen* s; long long t; } g_armed[4];
+/* Wake-ups armed from the frame thread, not from the worker's own run:
+ * each is a submit, the bulk of what arming a trigger costs. */
+static int g_in_worker, g_frame_arms;
+static void varm(struct psyscr_screen* s, long long t) {
+    int i, free_i = -1;
+    if (!g_in_worker) g_frame_arms++;
+    for (i = 0; i < 4; i++) {
+        if (g_armed[i].s == s) { g_armed[i].t = t; return; }
+        if (!g_armed[i].s && free_i < 0) free_i = i;
+    }
+    if (free_i >= 0) { g_armed[free_i].s = s; g_armed[free_i].t = t; }
+}
+/* Fire every wake-up due by `to`, each at its own time, in time order. */
+static void vrun(long long to) {
+    for (;;) {
+        int i, best = -1;
+        for (i = 0; i < 4; i++)
+            if (g_armed[i].s && g_armed[i].t <= to && (best < 0 || g_armed[i].t < g_armed[best].t)) best = i;
+        if (best < 0) break;
+        {
+            psyscr_screen* s = g_armed[best].s;
+            long long t = g_armed[best].t;
+            g_armed[best].s = NULL;
+            if (t > g_vt) g_vt = t;
+            g_in_worker = 1;
+            psyscr__trig_run(s, (int64_t)g_vt, 0);
+            g_in_worker = 0;
+        }
+    }
+}
+static void vforget(psyscr_screen* s) {
+    int i;
+    for (i = 0; i < 4; i++) if (g_armed[i].s == s) g_armed[i].s = NULL;
+}
 static void vsleep_until(long long t) {
     if (!g_virtual) { psyrt_sleep_until((uint64_t)t, PSYRT_DEFAULT_SPIN_NS); return; }
+    vrun(t);
     if (t > g_vt) g_vt = t;
 }
 /* The thread loses ns: preemption, or a slow frame */
-static void vlose(int64_t ns) { g_vt += ns; }
+static void vlose(int64_t ns) { vrun(g_vt + ns); g_vt += ns; }
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +133,8 @@ typedef struct script {
     uint64_t change_id;           /* from this present on: depth2, path2    */
     int      depth2;
     uint8_t  path2;
+    int      flap;                /* > 0: from change_id on, the path and
+                                   * depth switch every flap presents     */
     int      free_at_flip;        /* the slot frees at the flip, as on
                                    * COMPOSITION, not depth - 1 before    */
     unsigned char drop[MAX_ID];   /* one extra vblank for this present     */
@@ -97,6 +143,11 @@ typedef struct script {
                                    * OCCLUDED, 4 an ONSET_PLANNED time      */
     int64_t  preempt_next;        /* ns the next present call loses, after
                                    * the header planned its flip            */
+    int64_t  gpu_ns[MAX_ID];      /* GPU work after the present call        */
+    int64_t  gpu_done_t[MAX_ID];  /* when that work finished                */
+    uint64_t max_id;
+    /* codes as a draws_patch presenter got them, per present id */
+    uint32_t code_seen[MAX_ID][3];
     flight   fl[8];
     int64_t  last_shown;
     int      opened, closed, presents;
@@ -130,8 +181,12 @@ static int sc_open(void* ctx, const psyscr_presenter_open* in, psyscr_caps* caps
 
 static void sc_close(void* ctx) { ((script*)ctx)->closed++; }
 
+static int sc_second(const script* c, uint64_t id) {
+    if (!c->change_id || id < c->change_id) return 0;
+    return c->flap > 0 ? (int)(((id - c->change_id) / (uint64_t)c->flap) % 2 == 0) : 1;
+}
 static int sc_depth(const script* c, uint64_t id) {
-    return (c->change_id && id >= c->change_id) ? c->depth2 : c->depth;
+    return sc_second(c, id) ? c->depth2 : c->depth;
 }
 
 /* The slot frees depth - 1 vblanks before the flip, as DXGI's waitable
@@ -159,6 +214,17 @@ static int sc_present(void* ctx, const psyscr_present_req* req) {
     int64_t shown;
     if (c->preempt_next) { vlose(c->preempt_next); c->preempt_next = 0; }
     shown = sc_count(c, now_ns()) + depth;
+    if (req->present_id < MAX_ID) {
+        int64_t done = now_ns() + c->gpu_ns[req->present_id];
+        c->gpu_done_t[req->present_id] = done;
+        if (c->gpu_ns[req->present_id]) shown = sc_count(c, done) + depth;   /* the GPU decides */
+        if (req->present_id > c->max_id) c->max_id = req->present_id;
+        {
+            int k;
+            for (k = 0; k < req->n_codes && k < 3; k++)
+                c->code_seen[req->present_id][k] = req->codes[k].px ? req->codes[k].px[0] : req->codes[k].value;
+        }
+    }
     if (c->native && req->target_count > shown) shown = req->target_count;
     if (shown <= c->last_shown) shown = c->last_shown + 1;
     if (req->present_id < MAX_ID && c->drop[req->present_id]) shown++;
@@ -168,7 +234,7 @@ static int sc_present(void* ctx, const psyscr_present_req* req) {
         c->fl[i].used = 1;
         c->fl[i].id = req->present_id;
         c->fl[i].count = shown;
-        c->fl[i].path = (c->change_id && req->present_id >= c->change_id) ? c->path2 : c->path;
+        c->fl[i].path = sc_second(c, req->present_id) ? c->path2 : c->path;
         break;
     }
     c->presents++;
@@ -205,9 +271,21 @@ static int sc_completions(void* ctx, psyscr_vblank* out, int cap) {
     return n;
 }
 
+static uint64_t sc_gpu_done(void* ctx) {
+    script* c = (script*)ctx;
+    uint64_t id, best = 0;
+    for (id = 1; id <= c->max_id && id < MAX_ID; id++) if (c->gpu_done_t[id] <= now_ns()) best = id; else break;
+    return best;
+}
+
 static const psyscr_presenter g_scripted = {
     PSYSCR_PRESENTER_VERSION, "scripted", false, false, false,
-    sc_open, sc_close, sc_acquire, sc_present, sc_completions, NULL, NULL, NULL
+    sc_open, sc_close, sc_acquire, sc_present, sc_completions, NULL, NULL, NULL, sc_gpu_done
+};
+/* The same display, drawing the patch and the codes itself. */
+static const psyscr_presenter g_scripted_codes = {
+    PSYSCR_PRESENTER_VERSION, "scripted", false, false, true,
+    sc_open, sc_close, sc_acquire, sc_present, sc_completions, NULL, NULL, NULL, sc_gpu_done
 };
 
 /* ------------------------------------------------------------------ ring */
@@ -492,6 +570,206 @@ static void test_native_depth(int case_) {
         printf("  native depth %d: drops after the misses %d, half-rate gaps %d\n", case_, drops_after, half);
 }
 
+/* A single miss on a backend that holds frames to their target is a drop,
+ * not a new depth: three in a row are needed. And a flip the display shows
+ * before its planned vblank (a DXGI-like path whose depth fell from 2 to
+ * 1) carries EARLY, and only such a flip does. */
+static void test_one_miss_and_early(void) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;
+    int i, j, n, early = 0, wrong = 0, depth_moved = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.native = 1;
+    c.path = PSYSCR_PATH_INDEPENDENT;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (psyscr_is_open(&s)) {
+        for (i = 0; i < 60; i++) {
+            CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+            if (i == 20) c.drop[s.next_id + 1] = 1;
+            CHECK_I(psyscr_flip(&s), PSYSCR_OK);
+            if (i > 20 && s.depth != 1) depth_moved++;
+        }
+        psyscr_close(&s);
+    }
+    CHECK_I(depth_moved, 0);
+
+    memset(&c, 0, sizeof c);
+    c.depth = 2;
+    c.path = PSYSCR_PATH_COMPOSED;
+    c.change_id = 40;
+    c.depth2 = 1;
+    c.path2 = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!psyscr_is_open(&s)) return;
+    for (i = 0; i < 60; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        CHECK_I(psyscr_flip(&s), PSYSCR_OK);
+    }
+    psyscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const psyrt_event* e = &g_ev[j];
+        int is_early, flagged;
+        if (e->source != PSYRT_SRC_SCREEN || e->kind != PSYSCR_EV_FLIP) continue;
+        is_early = (int64_t)e->t_ns < e->u.i64[0];
+        flagged = (PSYSCR_EV_FLAGS_OF(e->u.u16[5]) & PSYSCR_FLIP_EARLY) != 0;
+        if (flagged) early++;
+        if (is_early != flagged) wrong++;
+    }
+    CHECK(early >= 1);   /* the first flip after the depth fell */
+    CHECK_I(wrong, 0);
+}
+
+/* A window that moves between the composed path (depth 2) and the
+ * overlay (depth 1), as DXGI_FLIP did in a window (the video agent's
+ * report). When the depth falls, the header learns it from the flips, so
+ * a flip planned at the old depth shows a vblank early (EARLY). Then:
+ *   - begin() never plans a frame for the vblank the frame before it was
+ *     planned for: it did, for the flip after each early one (same onset);
+ *   - one early flip per fall, not three: a flip that waited in the queue
+ *     behind the one before it closed the path change's one-vote window;
+ *   - a vblank no frame shows on comes only after an early flip (that
+ *     flip shows twice) or before a late one. */
+static void test_flap_prediction(int native) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;
+    enum { N = 300 };
+    static int64_t vb[N], pred[N], shown_t[N];
+    int i, j, n, same = 0, back = 0, run = 0, max_run = 0, early = 0, unused = 0, unexplained = 0;
+    uint32_t rng = 7u;
+    memset(&c, 0, sizeof c);
+    c.native = native;
+    c.depth = 2;
+    c.path = PSYSCR_PATH_COMPOSED;
+    c.change_id = 30;
+    c.flap = 9;
+    c.depth2 = 1;
+    c.path2 = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!psyscr_is_open(&s)) return;
+    for (i = 0; i < N; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        vb[i] = f.vblank;
+        pred[i] = f.onset;
+        if (i && vb[i] == vb[i - 1]) same++;
+        if (i && vb[i] < vb[i - 1]) back++;
+        rng = rng * 1664525u + 1013904223u;
+        busy_until(now_ns() + (int64_t)((rng >> 8) % (P_NS / 3)));
+        CHECK_I(psyscr_flip(&s), PSYSCR_OK);
+    }
+    psyscr_close(&s);
+    memset(shown_t, 0, sizeof shown_t);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const psyrt_event* e = &g_ev[j];
+        if (e->source == PSYRT_SRC_SCREEN && e->kind == PSYSCR_EV_FLIP && e->u.u32[9] < N &&
+            !(PSYSCR_EV_FLAGS_OF(e->u.u16[5]) & (PSYSCR_FLIP_SKIPPED | PSYSCR_FLIP_CANCELED)))
+            shown_t[e->u.u32[9]] = (int64_t)e->t_ns;
+    }
+    for (i = 0; i < N; i++) {
+        int is_early = shown_t[i] && shown_t[i] < pred[i] - P_NS / 2;
+        early += is_early;
+        run = is_early ? run + 1 : 0;
+        if (run > max_run) max_run = run;
+        if (i && shown_t[i] && shown_t[i - 1] && shown_t[i] - shown_t[i - 1] > P_NS + P_NS / 2) {
+            unused++;
+            if (!(shown_t[i - 1] < pred[i - 1] - P_NS / 2) && !(shown_t[i] > pred[i] + P_NS / 2)) unexplained++;
+        }
+    }
+    if (getenv("PSYSCR_TEST_TRACE"))
+        printf("  flap %d: early %d (longest run %d), same vblank %d, back %d, unused vblanks %d (unexplained %d)\n",
+               native, early, max_run, same, back, unused, unexplained);
+    CHECK_I(same, 0);
+    CHECK_I(back, 0);
+    CHECK(max_run <= 1);
+    /* On a backend that holds frames, one frame in flight at depth 2 runs
+     * at half rate on a path whose depth the header has not lowered; that
+     * is the depth rule (DEPTH), not this check. */
+    if (!native) { CHECK(early >= 1); CHECK_I(unexplained, 0); }
+
+    /* flip_at() keeps the rule too: a target on the vblank the last frame
+     * was planned for, after that frame completed (as an early one does),
+     * goes one vblank on, flagged LATE_TARGET. */
+    memset(&c, 0, sizeof c);
+    c.native = native;
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!psyscr_is_open(&s)) return;
+    {
+        psyscr_record r;
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        s.last_planned = f.vblank;   /* as if the frame before had it */
+        CHECK_I(psyscr_flip_at(&s, f.onset, &r), PSYSCR_OK);
+        CHECK(r.planned > f.onset + f.period / 2);
+        CHECK(r.flags & PSYSCR_FLIP_LATE_TARGET);
+    }
+    psyscr_close(&s);
+}
+
+/* f.done carries every record completed since the begin() before, in
+ * the ring's order, including those completed inside flip_at() while it
+ * held a frame and those with no statistic (ESTIMATED); f.last is its
+ * final one. And psyscr_native() has nothing to give off Windows' swap
+ * paths. */
+static void test_done_and_native(void) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;
+    enum { N = 120 };
+    static int64_t got[4 * N];
+    psyscr_native_info nat;
+    int i, j, n, n_got = 0, n_ring = 0, order_ok = 1, held = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    for (i = 0; i < MAX_ID; i += 17) c.missing[i] = 1;
+    for (i = 5; i < MAX_ID; i += 23) c.drop[i] = 1;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!psyscr_is_open(&s)) return;
+    CHECK_I(psyscr_native(&s, &nat), PSYSCR_ERR_NOT_IMPLEMENTED);
+    CHECK(nat.d3d11_device == NULL && nat.d3d11_context == NULL && nat.egl_display == NULL);
+    CHECK(nat.luid_low == 0 && nat.luid_high == 0);
+    CHECK_I(psyscr_native(&s, NULL), PSYSCR_ERR_ARG);
+    for (i = 0; i < N; i++) {
+        int k;
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        CHECK(f.n_done >= 0 && f.n_done <= PSYSCR_MAX_DONE);
+        if (f.n_done > 0) {
+            CHECK(f.last != NULL);
+            if (f.last) CHECK_I(f.done[f.n_done - 1].index, f.last->index);
+        }
+        if (f.n_done > 1) held++;
+        for (k = 0; k < f.n_done && n_got < 4 * N; k++) {
+            CHECK(!(f.done[k].flags & PSYSCR_FLIP_PENDING));
+            got[n_got++] = f.done[k].index;
+        }
+        /* every fourth frame 3 vblanks ahead: the hold reads statistics */
+        CHECK_I(psyscr_flip_at(&s, f.onset + (i % 4 == 0 ? 3 * f.period : 0), NULL), PSYSCR_OK);
+    }
+    psyscr_close(&s);
+    CHECK_I(f.done_lost, 0);
+    CHECK_I(psyscr_native(&s, &nat), PSYSCR_ERR_CLOSED);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const psyrt_event* e = &g_ev[j];
+        if (e->source != PSYRT_SRC_SCREEN || e->kind != PSYSCR_EV_FLIP) continue;
+        if (n_ring < n_got && (int64_t)e->u.u32[9] != got[n_ring]) order_ok = 0;
+        n_ring++;
+    }
+    CHECK(n_got >= N - 3);           /* all but the last, which complete in close() */
+    CHECK(n_ring >= n_got);
+    CHECK(order_ok);
+    CHECK(held > 0);                 /* some begin() delivered more than one */
+}
+
 /* Preemption, on purpose. Lateness of the calling thread makes a flip late,
  * never early: losing time between begin() and the flip is the caller's
  * (LATE_TARGET); losing it inside the present call, after the header
@@ -569,6 +847,443 @@ static void test_preemption(int native) {
             CHECK_I(onset[i], planned[i]);
         }
     }
+}
+
+
+/* -------------------------------------------------------- triggers, codes */
+
+static struct { int n; psyscr_trigger_info e[1024]; } g_tl;
+static void tl_fn(void* ctx, const psyscr_trigger_info* i) {
+    (void)ctx;
+    if (g_tl.n < 1024) g_tl.e[g_tl.n++] = *i;
+}
+static struct { int n; psyscr_record r[512]; psyscr_trigger_result t[512]; int nt[512]; } g_fl;
+static void fl_fn(void* ctx, const psyscr_record* r, const psyscr_trigger_result* t, int n) {
+    (void)ctx;
+    if (g_fl.n < 512) {
+        g_fl.r[g_fl.n] = *r;
+        g_fl.nt[g_fl.n] = n;
+        if (n > 0) g_fl.t[g_fl.n] = t[0];
+        g_fl.n++;
+    }
+}
+
+static bool open_trig(psyscr_screen* s, script* c, int n_ch, const int64_t* offsets, bool fence) {
+    static psyscr_trigger_desc td[4];
+    psyscr_desc d;
+    int i;
+    memset(s, 0, sizeof *s);
+    memset(&d, 0, sizeof d);
+    for (i = 0; i < n_ch; i++) {
+        memset(&td[i], 0, sizeof td[i]);
+        td[i].fn = tl_fn;
+        td[i].offset_ns = offsets ? offsets[i] : 0;
+    }
+    d.backend = PSYSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted;
+    d.presenter_ctx = c;
+    d.ring = &g_ring;
+    d.triggers = td;
+    d.n_triggers = n_ch;
+    d.trigger_fence = fence;
+    g_tl.n = 0;
+    g_fl.n = 0;
+    if (!psyscr_open(s, &d)) return false;
+    psyscr_on_flip(s, fl_fn, NULL);
+    return true;
+}
+
+/* A trigger fires at its flip's planned vblank. Lateness the header knows
+ * before that vblank moves it; lateness it learns after is reported, once,
+ * by the after-flip hook. Every case on purpose, on the virtual clock:
+ *   i % 20 == 5   the caller loses 1.5 periods before flip_at (LATE_TARGET)
+ *   i % 20 == 9   the present call loses 1.5 periods (MOVED, no mismatch)
+ *   i % 20 == 13  the frame misses after a timely present (FIRED_EARLY) */
+static void test_triggers(void) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;   /* static: gcc -O3 cannot see begin() fill it */
+    enum { N = 100 };
+    int i, j, n, by_frame[N], seen = 0, recs = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_trig(&s, &c, 1, NULL, false));
+    if (!psyscr_is_open(&s)) return;
+    for (i = 0; i < N; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        CHECK_I(psyscr_trigger(&s, 0, (uint32_t)i), PSYSCR_OK);
+        vlose(P_NS / 20);
+        if (i % 20 == 5) vlose(P_NS + P_NS / 2);
+        if (i % 20 == 9) c.preempt_next = P_NS + P_NS / 2;
+        if (i % 20 == 13) c.drop[s.next_id + 1] = 1;
+        CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+    }
+    CHECK_I(psyscr_trigger(&s, 0, 1), PSYSCR_ERR_ORDER);   /* outside a frame */
+    psyscr_close(&s);
+    vforget(&s);
+    for (i = 0; i < N; i++) by_frame[i] = -1;
+    for (j = 0; j < g_tl.n; j++) if (g_tl.e[j].frame >= 0 && g_tl.e[j].frame < N) by_frame[g_tl.e[j].frame] = j;
+    for (j = 0; j < g_fl.n; j++) {
+        const psyscr_record* r = &g_fl.r[j];
+        const psyscr_trigger_result* t = &g_fl.t[j];
+        int k;
+        if (r->index < 0 || r->index >= N) continue;
+        recs++;
+        CHECK_I(g_fl.nt[j], 1);
+        if (g_fl.nt[j] != 1) continue;
+        k = (int)(r->index % 20);
+        CHECK(by_frame[r->index] >= 0);
+        CHECK_I(t->code, r->index);
+        CHECK(!(t->flags & PSYSCR_TRIG_FLUSHED));
+        if (k == 13) {
+            CHECK_I(r->dropped, 1);
+            CHECK(t->flags & PSYSCR_TRIG_FIRED_EARLY);
+            CHECK_I(t->mismatch, 1);
+            CHECK_I(t->fired_ns, r->onset - P_NS);   /* on the planned vblank */
+        } else {
+            CHECK_I(t->mismatch, 0);
+            CHECK_I(t->fired_ns, r->onset);           /* exactly on the onset */
+            CHECK(!(t->flags & (PSYSCR_TRIG_FIRED_EARLY | PSYSCR_TRIG_FIRED_LATE)));
+            if (k == 9) { CHECK(t->flags & PSYSCR_TRIG_MOVED); CHECK(r->dropped >= 1); }
+            if (k == 5) { CHECK(r->flags & PSYSCR_FLIP_LATE_TARGET); CHECK(!(t->flags & PSYSCR_TRIG_MOVED)); }
+            if (k != 9 && k != 13) CHECK_I(r->dropped, 0);
+        }
+        seen++;
+    }
+    CHECK(recs >= N - 1);
+    CHECK_I(seen, recs);
+    /* the ring has one TRIGGER record per trigger, with the same verdict */
+    n = ring_drain();
+    {
+        int trig = 0, early = 0;
+        for (j = 0; j < n; j++) {
+            const psyrt_event* e = &g_ev[j];
+            if (e->source != PSYRT_SRC_SCREEN || e->kind != PSYSCR_EV_TRIGGER) continue;
+            trig++;
+            if (e->u.u16[13] & PSYSCR_TRIG_FIRED_EARLY) { early++; CHECK_I(e->u.i32[7], 1); }
+            CHECK_I((int64_t)e->t_ns, e->u.i64[0]);   /* fired at its deadline */
+        }
+        CHECK_I(trig, N);
+        CHECK_I(early, N / 20);
+    }
+}
+
+/* The GPU check: a frame whose GPU work runs past its vblank is moved
+ * before the trigger fires, so the trigger lands on the vblank shown. */
+static void test_trigger_fence(int fence) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;
+    int i, j, early = 0, gpu_moved = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_trig(&s, &c, 1, NULL, fence != 0));
+    if (!psyscr_is_open(&s)) return;
+    for (i = 0; i < 40; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        CHECK_I(psyscr_trigger(&s, 0, (uint32_t)i), PSYSCR_OK);
+        if (i % 10 == 4) c.gpu_ns[s.next_id + 1] = P_NS + P_NS / 5;   /* finishes after its vblank */
+        CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+    }
+    psyscr_close(&s);
+    vforget(&s);
+    for (j = 0; j < g_fl.n; j++) {
+        const psyscr_trigger_result* t = &g_fl.t[j];
+        if (g_fl.r[j].index < 0 || g_fl.nt[j] != 1) continue;
+        if (t->flags & PSYSCR_TRIG_FIRED_EARLY) early++;
+        if (t->flags & PSYSCR_TRIG_GPU_MOVED) { gpu_moved++; CHECK_I(t->mismatch, 0); CHECK_I(t->fired_ns, g_fl.r[j].onset); }
+    }
+    if (fence) { CHECK_I(early, 0); CHECK_I(gpu_moved, 4); }
+    else { CHECK_I(early, 4); CHECK_I(gpu_moved, 0); }
+}
+
+/* Several channels with offsets fire in deadline order; trigger_at fires at
+ * its time; a frame takes at most PSYSCR_MAX_JOBS; close flushes what is
+ * still armed, flagged. */
+static void test_trigger_channels(void) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;
+    static const int64_t off[3] = { 0, 1000000, -500000 };
+    int i, j, refused = 0;
+    int64_t t_at;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_trig(&s, &c, 3, off, false));
+    if (!psyscr_is_open(&s)) return;
+    CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+    for (i = 0; i < 3; i++) CHECK_I(psyscr_trigger(&s, i, 100u + (uint32_t)i), PSYSCR_OK);
+    CHECK_I(psyscr_trigger(&s, 3, 1), PSYSCR_ERR_ARG);
+    for (i = 3; i < PSYSCR_MAX_JOBS + 1; i++) if (psyscr_trigger(&s, 0, 0) == PSYSCR_ERR_REFUSED) refused++;
+    CHECK_I(refused, 1);
+    CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+    for (i = 0; i < 3; i++) {   /* the frame's 16 jobs fire and free their slots */
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+    }
+    t_at = now_ns() + 7 * P_NS + 12345;
+    CHECK_I(psyscr_trigger_at(&s, 1, 777, t_at), PSYSCR_OK);
+    CHECK_I(psyscr_trigger_at(&s, 0, 888, now_ns() + 1000000000LL), PSYSCR_OK);   /* still armed at close */
+    for (i = 0; i < 12; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+    }
+    psyscr_close(&s);
+    vforget(&s);
+    /* the frame's 16 in deadline order: channel 2 (-0.5 ms), the 14 on
+     * channel 0, channel 1 (+1 ms) */
+    CHECK(g_tl.n >= PSYSCR_MAX_JOBS);
+    if (g_tl.n >= PSYSCR_MAX_JOBS) {
+        CHECK_I(g_tl.e[0].channel, 2);
+        CHECK_I(g_tl.e[1].channel, 0);
+        CHECK_I(g_tl.e[PSYSCR_MAX_JOBS - 1].channel, 1);
+        CHECK_I(g_tl.e[0].fired_ns, g_tl.e[1].fired_ns - 500000);
+        CHECK_I(g_tl.e[PSYSCR_MAX_JOBS - 1].fired_ns, g_tl.e[1].fired_ns + 1000000);
+    }
+    for (j = 0; j < g_tl.n; j++) {
+        if (g_tl.e[j].code == 777) { CHECK_I(g_tl.e[j].fired_ns, t_at + 1000000); CHECK_I(g_tl.e[j].frame, -1); }
+        if (g_tl.e[j].code == 888) CHECK(g_tl.e[j].flags & PSYSCR_TRIG_FLUSHED);
+    }
+    CHECK_I(g_tl.n, PSYSCR_MAX_JOBS + 2);
+}
+
+/* The race the lock settles: a trigger the worker has taken (FIRING) when
+ * its flip turns out late is a mismatch, never moved and never fired twice.
+ * The worker's choice is made by hand here, between the two calls the
+ * real threads would make. */
+static void test_trigger_race(void) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;
+    psyscr__pend fake;
+    psyscr__job* j = NULL;
+    int i, fired_before;
+    int64_t deadline;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_trig(&s, &c, 1, NULL, false));
+    if (!psyscr_is_open(&s)) return;
+    CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+    CHECK_I(psyscr_trigger(&s, 0, 5), PSYSCR_OK);
+    CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+    for (i = 0; i < PSYSCR_MAX_JOBS; i++) if (s.job[i].state == PSYSCR__J_ARMED) j = &s.job[i];
+    CHECK(j != NULL);
+    if (j) {
+        j->state = PSYSCR__J_FIRING;   /* the worker took it */
+        deadline = j->deadline;
+        fired_before = g_tl.n;
+        memset(&fake, 0, sizeof fake);
+        fake.id = j->pend_id;
+        fake.rec.index = j->frame;
+        fake.rec.onset = deadline + P_NS;
+        psyscr__trig_flip_done(&s, &fake, j->count + 1);   /* shown a vblank later */
+        CHECK_I(j->state, PSYSCR__J_FIRING);
+        CHECK_I(j->deadline, deadline);                    /* not moved */
+        CHECK_I(j->mismatch, 1);
+        CHECK(j->flags & PSYSCR_TRIG_FIRED_EARLY);
+        psyscr__trig_run(&s, deadline + 10 * P_NS, 0);    /* the worker runs again */
+        CHECK_I(g_tl.n, fired_before);                     /* no second firing */
+        j->state = PSYSCR__J_FIRED;                        /* the worker finishes */
+        j->fired = deadline;
+    }
+    /* Not taken yet: the record moves it to the vblank shown, where it
+     * fires once, with no mismatch. */
+    CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+    CHECK_I(psyscr_trigger(&s, 0, 6), PSYSCR_OK);
+    CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+    j = NULL;
+    for (i = 0; i < PSYSCR_MAX_JOBS; i++) if (s.job[i].state == PSYSCR__J_ARMED && s.job[i].code == 6) j = &s.job[i];
+    CHECK(j != NULL);
+    if (j) {
+        deadline = j->deadline;
+        fired_before = g_tl.n;
+        memset(&fake, 0, sizeof fake);
+        fake.id = j->pend_id;
+        fake.rec.index = j->frame;
+        fake.rec.onset = deadline + P_NS;
+        psyscr__trig_flip_done(&s, &fake, j->count + 1);
+        CHECK_I(j->state, PSYSCR__J_ARMED);
+        CHECK(j->deadline > deadline + P_NS / 2);          /* one vblank on */
+        CHECK(j->flags & PSYSCR_TRIG_MOVED);
+        CHECK_I(j->mismatch, 0);
+        psyscr__trig_run(&s, deadline, 0);                 /* the old deadline: nothing */
+        CHECK_I(g_tl.n, fired_before);
+        psyscr__trig_run(&s, j->deadline, 0);
+        CHECK_I(g_tl.n, fired_before + 1);
+        psyscr__trig_run(&s, j->deadline + P_NS, 0);
+        CHECK_I(g_tl.n, fired_before + 1);
+    }
+    /* A worker late past two deadlines fires both in deadline order, not
+     * in the order they were armed. */
+    {
+        int64_t t0 = now_ns() + 50 * P_NS;
+        fired_before = g_tl.n;
+        CHECK_I(psyscr_trigger_at(&s, 0, 71, t0 + 1000), PSYSCR_OK);
+        CHECK_I(psyscr_trigger_at(&s, 0, 72, t0), PSYSCR_OK);
+        psyscr__trig_run(&s, t0 + 5000, 0);
+        CHECK_I(g_tl.n, fired_before + 2);
+        if (g_tl.n == fired_before + 2) {
+            CHECK_I(g_tl.e[fired_before].code, 72);
+            CHECK_I(g_tl.e[fired_before + 1].code, 71);
+        }
+    }
+    psyscr_close(&s);
+    vforget(&s);
+}
+
+/* After a flip trigger fires, the worker arms itself for the next
+ * vblank, so a trigger every frame costs the frame thread no submit; one
+ * that skips frames, or comes after a late frame, still fires on its
+ * onset. */
+static void test_trigger_spec(void) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;
+    enum { N = 60 };
+    int i, j, steady = 0, fired = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_trig(&s, &c, 1, NULL, false));
+    if (!psyscr_is_open(&s)) return;
+    for (i = 0; i < N; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        if (i == 10) g_frame_arms = 0;
+        if (i < 30 || i % 4 == 0) CHECK_I(psyscr_trigger(&s, 0, (uint32_t)i), PSYSCR_OK);
+        vlose(P_NS / 20);
+        if (i == 41) vlose(P_NS + P_NS / 2);   /* a late frame: LATE_TARGET */
+        CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+        if (i == 29) steady = g_frame_arms;
+    }
+    psyscr_close(&s);
+    vforget(&s);
+    CHECK_I(steady, 0);   /* frames 10 to 29: a trigger each, no submit */
+    for (j = 0; j < g_fl.n; j++) {
+        if (g_fl.r[j].index < 0 || g_fl.nt[j] != 1) continue;
+        CHECK_I(g_fl.t[j].fired_ns, g_fl.r[j].onset);
+        CHECK_I(g_fl.t[j].mismatch, 0);
+        fired++;
+    }
+    CHECK_I(fired, 30 + 7);
+    CHECK_I(g_tl.n, 30 + 7);
+}
+
+/* Codes reach a presenter that draws them, per flip: one-flip, timed and
+ * held values, a ROW, the rest value between them, the CODE ring record;
+ * and slots that overlap each other or the patch are refused. */
+static void test_codes(void) {
+    static script c;
+    psyscr_screen s;
+    psyscr_desc d;
+    static psyscr_frame f;
+    uint32_t pat[8];
+    uint32_t want0[40], want1[40];
+    uint64_t id[40];
+    int i, j, n, codes_seen = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    memset(&s, 0, sizeof s);
+    memset(&d, 0, sizeof d);
+    d.backend = PSYSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted_codes;
+    d.presenter_ctx = &c;
+    d.ring = &g_ring;
+    d.codes[0] = psyscr_slot_pixel_mode();
+    d.codes[1] = psyscr_slot_psync();
+    d.codes[1].rest = 0x000001u;
+    d.n_codes = 2;
+    /* refused: a patch over the Pixel Mode pixel, then two slots that meet */
+    d.patch.on = true;
+    CHECK(!psyscr_open(&s, &d));
+    CHECK(strstr(psyscr_error(&s), "patch") != NULL);
+    d.patch.on = false;
+    d.codes[1].x = 0;
+    CHECK(!psyscr_open(&s, &d));
+    CHECK(strstr(psyscr_error(&s), "overlap") != NULL);
+    d.codes[1] = psyscr_slot_psync();
+    d.codes[1].rest = 0x000001u;
+    ring_reset();
+    CHECK(psyscr_open(&s, &d));
+    if (!psyscr_is_open(&s)) return;
+    psyscr_psync_pattern(pat, 42);
+    CHECK_I(pat[0], 0x0000FFu);
+    CHECK_I(pat[7], 42u << 8);
+    for (i = 0; i < 40; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        if (i == 3) psyscr_code(&s, 0, 0x123456u);
+        if (i == 5) psyscr_code_frames(&s, 0, 0xABCDEFu, 3);
+        if (i == 10) CHECK_I(psyscr_code_row(&s, 1, pat, 8, 1), PSYSCR_OK);
+        if (i == 12) psyscr_code_frames(&s, 0, 0x010203u, PSYSCR_CODE_HOLD);
+        if (i == 20) psyscr_code_frames(&s, 0, 0, 0);   /* back to rest */
+        want0[i] = (i == 3) ? 0x123456u : (i >= 5 && i < 8) ? 0xABCDEFu : (i >= 12 && i < 20) ? 0x010203u : 0u;
+        want1[i] = (i == 10) ? 0x0000FFu : 0x000001u;
+        id[i] = s.next_id + 1;
+        CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+    }
+    CHECK_I(psyscr_code_row(&s, 0, pat, 8, 1), PSYSCR_ERR_ARG);   /* slot 0 is SOLID */
+    psyscr_close(&s);
+    for (i = 0; i < 40; i++) {
+        CHECK_I(c.code_seen[id[i]][0], want0[i]);
+        CHECK_I(c.code_seen[id[i]][1], want1[i]);
+    }
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const psyrt_event* e = &g_ev[j];
+        uint32_t idx;
+        if (e->source != PSYRT_SRC_SCREEN || e->kind != PSYSCR_EV_CODE) continue;
+        idx = e->u.u32[0];
+        if (idx >= 40) continue;
+        CHECK_I(e->u.u16[3], 2);
+        CHECK_I(e->u.u32[2], want0[idx]);
+        CHECK_I(e->u.u32[3], want1[idx]);
+        CHECK(e->u.u16[2] & PSYSCR_CODE_RISK_UNVERIFIED);   /* no self test on a script */
+        codes_seen++;
+    }
+    CHECK(codes_seen >= 39);
+}
+
+/* The present callback runs once per flip, before the present, and moves
+ * the GL epoch; the generation is fixed from open to close. */
+static int g_pres_calls;
+static int64_t g_pres_index;
+static void pres_fn(void* ctx, const psyscr_present_info* i) { (void)ctx; g_pres_calls++; g_pres_index = i->index; }
+static void test_present_hook(void) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;
+    uint32_t e0, g0;
+    int i;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 3));
+    if (!psyscr_is_open(&s)) return;
+    psyscr_on_present(&s, pres_fn, NULL);
+    e0 = psyscr_gl_epoch(&s);
+    g0 = psyscr_gl_generation(&s);
+    CHECK(g0 != 0);
+    g_pres_calls = 0;
+    for (i = 0; i < 5; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        CHECK_I(psyscr_flip_at(&s, f.onset, NULL), PSYSCR_OK);
+        CHECK_I(g_pres_index, i);
+    }
+    CHECK_I(g_pres_calls, 5);
+    CHECK_I(psyscr_gl_epoch(&s) - e0, 5);
+    CHECK_I(psyscr_gl_generation(&s), g0);
+    psyscr_close(&s);
+    CHECK_I(psyscr_gl_generation(&s), 0);
 }
 
 /* Missing statistics give ESTIMATED records at the planned vblank. */
@@ -987,8 +1702,20 @@ int main(void) {
     test_native_depth(0);
     test_native_depth(1);
     test_native_depth(2);
+    test_one_miss_and_early();
+    test_flap_prediction(0);
+    test_flap_prediction(1);
+    test_done_and_native();
     test_preemption(0);
     test_preemption(1);
+    test_triggers();
+    test_trigger_fence(0);
+    test_trigger_fence(1);
+    test_trigger_channels();
+    test_trigger_race();
+    test_trigger_spec();
+    test_codes();
+    test_present_hook();
     test_missing();
     test_snap_and_hold(1, 0);
     test_snap_and_hold(0, 0);

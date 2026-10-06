@@ -267,6 +267,17 @@ static unsigned g_mut;
 #define MUT_TW_FROM_CALL 64u /* a tween's from read at the call, not at its start */
 #define MUT_TW_SLOPE  128u /* keep_velocity ignores the old track's slope      */
 #define MUT_TW_YOYO   256u /* yoyo's return leg missing                         */
+/* v0.3.0: skip and peek, in the random model (ops on) only. */
+#define MUT_SKIP_FIRES   512u    /* a skip is only an anchor: what it passes fires late */
+#define MUT_SKIP_NOCHAN  1024u   /* a skipped SET does not count for its channel   */
+#define MUT_SKIP_REACH   2048u   /* a skip leaves the reach of an evaluated base   */
+#define MUT_SKIP_NOW     4096u   /* a skip leaves the furthest onset: no rewind back */
+#define MUT_SKIP_AT      8192u   /* the event exactly at bt is skipped too         */
+#define MUT_SKIP_UNREW   16384u  /* a rewind leaves skipped events skipped         */
+#define MUT_PEEK_END     32768u  /* peek's window closed at to_rt                  */
+#define MUT_PEEK_FIRED   65536u  /* peek lists fired events too                    */
+#define MUT_PEEK_ONSET   131072u /* a peek copy's onset is its base time           */
+#define MUT_SKIP_LATEW   262144u /* a skip back leaves waiting late events pending */
 
 #define NS_E9 INT64_C(1000000000)
 
@@ -3994,6 +4005,14 @@ static uint64_t replay_run(psytl_timeline* tl, psytl_event* store) {
             ret = psytl_prune(tl, rnd_int(5) - 1);
         } else if (r < 70) {
             ret = psytl_clear(tl, 2 + rnd_int(2));
+        } else if (r < 73) {
+            ret = psytl_skip(tl, 1 + rnd_int(3), onset + rnd_range(-P60, 2 * P60), rnd_range(-P60, 60 * P60));
+        } else if (r < 75) {
+            int64_t from = onset + rnd_range(-5 * P60, 5 * P60);
+            memset(fired, 0, sizeof fired);
+            ret = psytl_peek(tl, rnd_int(5) - 1, from, from + rnd_range(0, 20 * P60), fired, 8);
+            nf = ret < 8 ? ret : 8;
+            if (nf > 0) h = fnv(h, fired, (size_t)nf * sizeof fired[0]);
         } else if (r < 100) {
             onset += rnd_int(8) == 0 ? 0 : P60;
             memset(fired, 0, sizeof fired);
@@ -4075,9 +4094,506 @@ static void test_replay(void) {
     CHECK(v1 && v2 && memcmp(v1, v2, 10 * sizeof(float)) == 0);
 }
 
+/* ------------------------------------------- 11b. lead, skip and peek */
+
+/* QUANTIZATION: psytl_lead() is the lead in use, and a window ends
+ * lead x period, truncated, after the onset. */
+static void test_lead(void) {
+    static psytl_event s[4];
+    static psytl_timeline t;
+    const double in[5] = { 0.0, 0.25, 0.5, 0.999, PSYTL_LEAD_NONE };
+    const double want[5] = { 0.5, 0.25, 0.5, 0.999, 0.0 };
+    const int64_t P = P60;
+    int k;
+    CHECK(psytl_lead(NULL) == 0.0);
+    memset(&t, 0, sizeof t);
+    CHECK(psytl_lead(&t) == 0.0);
+    for (k = 0; k < 5; k++) {
+        psytl_desc d;
+        int64_t w;
+        int a, b;
+        memset(&d, 0, sizeof d);
+        memset(s, 0, sizeof s);
+        d.events = s;
+        d.event_capacity = 4;
+        d.n_channels = 1;
+        d.lead = in[k];
+        CHECK(psytl_open(&t, &d));
+        CHECK(psytl_lead(&t) == want[k]);
+        w = (int64_t)(psytl_lead(&t) * (double)P);
+        a = add1(&t, 0, 10 * P + w, PSYTL_MARK, 0, 0.0f);
+        b = add1(&t, 0, 10 * P + w + 1, PSYTL_MARK, 0, 0.0f);
+        CHECK_I(eval_at(&t, 10 * P, P, 10, NULL, 0), 1);
+        CHECK(psytl_find(&t, a) && psytl_find(&t, a)->frame == 10);
+        CHECK(is_pending_reset(psytl_find(&t, b)));
+    }
+    CHECK(!open_h(&t, s, 4, 1, NULL, 2.0));
+    CHECK(psytl_lead(&t) == 0.0);
+}
+
+#define SK_N 4096
+static psytl_event g_sk_a[SK_N], g_sk_b[SK_N];
+static psytl_timeline g_ska, g_skb;
+
+/* A movie base (1): a MARK every second for an hour (code = the second)
+ * and a SET of channel 0 to the second every 10 s. 3960 events. */
+static void skip_movie(psytl_timeline* tl, psytl_event* st) {
+    int i;
+    CHECK(open_h(tl, st, SK_N, 3, NULL, 0.5));
+    for (i = 0; i < 3600; i++) {
+        psytl_event e = ev(1, (int64_t)i * S_NS, PSYTL_MARK, 0, 0.0f);
+        e.code = i;
+        CHECK(psytl_add(tl, &e) >= 0);
+        if (i % 10 == 0) CHECK(add1(tl, 1, (int64_t)i * S_NS, PSYTL_SET, 0, (float)i) >= 0);
+    }
+}
+
+static const psytl_event* find_at(const psytl_timeline* tl, int base, int64_t t, int kind) {
+    int n = 0, i;
+    const psytl_event* p = psytl_events(tl, base, &n);
+    for (i = 0; i < n; i++)
+        if (p[i].time == t && p[i].kind == kind) return &p[i];
+    return NULL;
+}
+
+static int count_flags(const psytl_timeline* tl, int base, unsigned mask) {
+    int n = 0, i, c = 0;
+    const psytl_event* p = psytl_events(tl, base, &n);
+    for (i = 0; i < n; i++)
+        if (p[i].flags & mask) c++;
+    return c;
+}
+
+static void test_skip_seek(void) {
+    const int64_t P = P60, R = 5 * S_NS, B = 1800 * S_NS, R2 = R + 60 * P60, R3 = R2 + 2 * S_NS;
+    const psytl_event* e;
+    int n, i, k, x, prunable;
+    int64_t due = 0;
+
+    skip_movie(&g_ska, g_sk_a);
+    skip_movie(&g_skb, g_sk_b);
+    CHECK_I(psytl_anchor(&g_ska, 1, R, 0), 0);
+    CHECK_I(psytl_anchor(&g_skb, 1, R, 0), 0);
+    for (k = 0; k < 60; k++) {   /* one second of play: the events at 0 fire */
+        (void)eval_at(&g_ska, R + k * P, P, k, NULL, 0);
+        (void)eval_at(&g_skb, R + k * P, P, k, NULL, 0);
+    }
+    CHECK_I(count_flags(&g_ska, 1, PSYTL_EV_FIRED), 2);
+
+    /* The 30-minute seek. Skipped: MARKs 1..1799 and SETs 10..1790. The
+     * channel already shows the last SET passed over. */
+    CHECK_I(psytl_skip(&g_ska, 1, R2, B), 1799 + 179);
+    CHECK_I(psytl_anchor(&g_skb, 1, R2, B), 0);
+    CHECK(psytl_value(&g_ska, 0) == 1790.0f);
+    e = find_at(&g_ska, 1, 1000 * S_NS, PSYTL_MARK);
+    CHECK(e && e->flags == PSYTL_EV_SKIPPED && e->frame == -1 && e->onset == R2
+          && e->residual == B - 1000 * S_NS && e->code == 1000);
+    e = find_at(&g_ska, 1, 0, PSYTL_MARK);
+    CHECK(e && e->flags == PSYTL_EV_FIRED && e->frame == 0);
+    e = find_at(&g_ska, 1, B, PSYTL_MARK);
+    CHECK(is_pending_reset(e));
+    CHECK(psytl_next_due(&g_ska, &due));
+    CHECK_I(due, R2);
+
+    /* The next frame: the skip fires only what is at B; the anchor fires
+     * all 1980 on the same frame. Both channels end the same. */
+    n = eval_at(&g_ska, R2, P, 60, g_fired, 16);
+    CHECK_I(n, 2);
+    for (i = 0; i < n && i < 2; i++) {
+        CHECK_I(g_fired[i].time, B);
+        CHECK_I(g_fired[i].residual, 0);
+        CHECK_I(g_fired[i].flags, PSYTL_EV_FIRED);
+    }
+    CHECK_I(eval_at(&g_skb, R2, P, 60, NULL, 0), 1980);
+    CHECK(psytl_value(&g_ska, 0) == 1800.0f);
+    CHECK(psytl_value(&g_skb, 0) == 1800.0f);
+    CHECK(psytl_next_due(&g_ska, &due));
+    CHECK_I(due, R2 + S_NS);
+
+    /* The reach moved to the seek: an add before B is late and fires on
+     * the next frame; one after waits for its time. */
+    x = add1(&g_ska, 1, B - 5 * S_NS, PSYTL_MARK, 0, 0.0f);
+    k = add1(&g_ska, 1, B + 2 * P, PSYTL_MARK, 0, 0.0f);
+    n = eval_at(&g_ska, R2 + P, P, 61, g_fired, 16);
+    CHECK_I(n, 1);
+    if (n >= 1) {
+        CHECK_I(g_fired[0].id, x);
+        CHECK_I(g_fired[0].flags, PSYTL_EV_FIRED | PSYTL_EV_LATE);
+        CHECK_I(g_fired[0].residual, P + 5 * S_NS);
+    }
+    CHECK(is_pending_reset(psytl_find(&g_ska, k)));
+
+    /* An anchor back to 1000 s: skipped events from there are pending
+     * again, the ones before stay skipped, and the channel is recomputed
+     * from what is fired or skipped. */
+    CHECK_I(psytl_anchor(&g_ska, 1, R3, 1000 * S_NS), 0);
+    CHECK(is_pending_reset(find_at(&g_ska, 1, 1000 * S_NS, PSYTL_MARK)));
+    CHECK(is_pending_reset(find_at(&g_ska, 1, 1500 * S_NS, PSYTL_SET)));
+    CHECK(is_pending_reset(find_at(&g_ska, 1, B, PSYTL_MARK)));
+    e = find_at(&g_ska, 1, 999 * S_NS, PSYTL_MARK);
+    CHECK(e && e->flags == PSYTL_EV_SKIPPED && e->onset == R2);
+    CHECK(psytl_value(&g_ska, 0) == 990.0f);
+    n = eval_at(&g_ska, R3, P, 200, g_fired, 16);
+    CHECK_I(n, 2);
+    for (i = 0; i < n && i < 2; i++) {
+        CHECK_I(g_fired[i].time, 1000 * S_NS);
+        CHECK_I(g_fired[i].flags, PSYTL_EV_FIRED);
+    }
+    CHECK(psytl_value(&g_ska, 0) == 1000.0f);
+
+    /* Prune deletes the fired and the skipped; channel values stay. */
+    prunable = count_flags(&g_ska, 1, PSYTL_EV_FIRED | PSYTL_EV_SKIPPED);
+    CHECK(prunable > 1000);
+    n = n_events(&g_ska, 1);
+    CHECK_I(psytl_prune(&g_ska, 1), prunable);
+    CHECK_I(n_events(&g_ska, 1), n - prunable);
+    CHECK_I(count_flags(&g_ska, 1, PSYTL_EV_FIRED | PSYTL_EV_SKIPPED), 0);
+    CHECK(psytl_value(&g_ska, 0) == 1000.0f);
+    check_sorted(&g_ska, __LINE__);
+}
+
+/* A skip back is an anchor back, when no late event waits before bt. */
+static void test_skip_back(void) {
+    const int64_t P = P60, R = S_NS;
+    int k;
+    skip_movie(&g_ska, g_sk_a);
+    skip_movie(&g_skb, g_sk_b);
+    CHECK_I(psytl_anchor(&g_ska, 1, R, 0), 0);
+    CHECK_I(psytl_anchor(&g_skb, 1, R, 0), 0);
+    for (k = 0; k < 600; k++) {
+        (void)eval_at(&g_ska, R + k * P, P, k, NULL, 0);
+        (void)eval_at(&g_skb, R + k * P, P, k, NULL, 0);
+    }
+    CHECK(psytl_value(&g_ska, 0) == 0.0f);   /* 600 frames is 9.99 s: SET 10 not yet */
+    CHECK_I(psytl_skip(&g_ska, 1, R + 600 * P, 3 * S_NS), 0);
+    CHECK_I(psytl_anchor(&g_skb, 1, R + 600 * P, 3 * S_NS), 0);
+    CHECK(memcmp(g_sk_a, g_sk_b, sizeof g_sk_a) == 0);
+    for (k = 600; k < 700; k++) {
+        CHECK_I(eval_at(&g_ska, R + k * P, P, k, NULL, 0), eval_at(&g_skb, R + k * P, P, k, NULL, 0));
+    }
+    CHECK(memcmp(g_sk_a, g_sk_b, sizeof g_sk_a) == 0);
+    CHECK(psytl_value(&g_ska, 0) == psytl_value(&g_skb, 0));
+}
+
+/* A skip back also skips a late event before bt still waiting for a
+ * window; the anchor leaves it to fire late. */
+static void test_skip_late_wait(void) {
+    const int64_t P = 10 * MS_NS, M = MS_NS;
+    psytl_timeline* t[2];
+    psytl_event* st[2];
+    int j, id90[2], id97[2], k, n;
+    t[0] = &g_tl;
+    t[1] = &g_tl2;
+    st[0] = g_store;
+    st[1] = g_store2;
+    for (j = 0; j < 2; j++) {
+        CHECK(open_h(t[j], st[j], 16, 2, NULL, 0.5));
+        id97[j] = add1(t[j], 1, 97 * M, PSYTL_MARK, 0, 0.0f);
+        CHECK_I(psytl_anchor(t[j], 1, 0, 0), 0);
+        for (k = 0; k <= 10; k++) (void)eval_at(t[j], k * P, P, k, NULL, 0);   /* reach 105 ms */
+        CHECK(psytl_find(t[j], id97[j]) && psytl_find(t[j], id97[j])->frame == 10);
+        /* Forward to 101 ms, but at an RT time after the next onset: that
+         * window ends at 76 ms, behind the reach. */
+        CHECK_I(psytl_anchor(t[j], 1, 140 * M, 101 * M), 0);
+        id90[j] = add1(t[j], 1, 90 * M, PSYTL_MARK, 0, 0.0f);    /* late: <= reach */
+        CHECK_I(eval_at(t[j], 110 * M, P, 11, NULL, 0), 0);      /* it waits */
+        CHECK(is_pending_reset(psytl_find(t[j], id90[j])));
+    }
+    /* Back to 95 ms (<= the furthest onset, 100 ms): 97 is pending again
+     * in both; the skip also skips 90. */
+    CHECK_I(psytl_skip(&g_tl, 1, 120 * M, 95 * M), 1);
+    CHECK_I(psytl_anchor(&g_tl2, 1, 120 * M, 95 * M), 0);
+    CHECK(is_pending_reset(psytl_find(&g_tl, id97[0])));
+    CHECK(is_pending_reset(psytl_find(&g_tl2, id97[1])));
+    CHECK(psytl_find(&g_tl, id90[0]) && psytl_find(&g_tl, id90[0])->flags == PSYTL_EV_SKIPPED
+          && psytl_find(&g_tl, id90[0])->residual == 5 * M);
+    n = eval_at(&g_tl, 120 * M, P, 12, g_fired, 4);
+    CHECK_I(n, 1);
+    if (n >= 1) { CHECK_I(g_fired[0].id, id97[0]); CHECK_I(g_fired[0].flags, PSYTL_EV_FIRED); }
+    n = eval_at(&g_tl2, 120 * M, P, 12, g_fired, 4);
+    CHECK_I(n, 2);
+    if (n >= 2) {
+        CHECK_I(g_fired[0].id, id90[1]);
+        CHECK_I(g_fired[0].flags, PSYTL_EV_FIRED | PSYTL_EV_LATE);
+        CHECK_I(g_fired[1].id, id97[1]);
+    }
+}
+
+/* Refusals change nothing; a stopped or paused base runs after a skip; an
+ * event exactly at bt is not skipped; remove of a skipped event that the
+ * channel shows recomputes the channel. */
+static void test_skip_misc(void) {
+    static psytl_timeline snap;
+    const int64_t M = MS_NS;
+    int i, a, s5, x, n;
+    int64_t bt = 0;
+
+    CHECK(open_h(&g_tl, g_store, 32, 4, NULL, 0.5));
+    for (i = 0; i < 10; i++) CHECK(add1(&g_tl, 2, i * M, PSYTL_MARK, 0, 0.0f) >= 0);
+    s5 = add1(&g_tl, 2, 5 * M, PSYTL_SET, 1, 7.0f);
+    a = add1(&g_tl, 2, 4 * M, PSYTL_SET, 1, 3.0f);
+    memcpy(&snap, &g_tl, sizeof snap);
+    memcpy(g_snap, g_store, 32 * sizeof g_store[0]);
+    CHECK_I(psytl_skip(&g_tl, 0, 0, 0), PSYTL_ERR_ARG);
+    CHECK_I(psytl_skip(&g_tl, PSYTL_MAX_BASES, 0, 0), PSYTL_ERR_ARG);
+    CHECK_I(psytl_skip(&g_tl, -1, 0, 0), PSYTL_ERR_ARG);
+    CHECK_I(psytl_skip(&g_tl, 2, 0, LIM62), PSYTL_ERR_ARG);
+    CHECK_I(psytl_skip(&g_tl, 2, 0, -LIM62), PSYTL_ERR_ARG);
+    CHECK(memcmp(&snap, &g_tl, sizeof snap) == 0);
+    CHECK(memcmp(g_snap, g_store, 32 * sizeof g_store[0]) == 0);
+    CHECK_I(psytl_skip(&g_closed, 2, 0, 0), PSYTL_ERR_CLOSED);
+    CHECK_I(psytl_skip(NULL, 2, 0, 0), PSYTL_ERR_CLOSED);
+
+    /* Base 2 was never anchored: MARKs 0..4 and the SET at 4 ms are
+     * skipped; the MARK and SET exactly at 5 ms are not. */
+    CHECK_I(psytl_skip(&g_tl, 2, 1000 * M, 5 * M), 6);
+    CHECK(psytl_base_time(&g_tl, 2, 1001 * M, &bt));
+    CHECK_I(bt, 6 * M);
+    CHECK(psytl_value(&g_tl, 1) == 3.0f);
+    CHECK(is_pending_reset(psytl_find(&g_tl, s5)));
+    x = add1(&g_tl, 2, 3 * M, PSYTL_MARK, 0, 0.0f);   /* late: the base passed it */
+    n = eval_at(&g_tl, 1000 * M, 0, 0, g_fired, 8);
+    CHECK_I(n, 3);
+    CHECK(psytl_find(&g_tl, x) && psytl_find(&g_tl, x)->flags == (PSYTL_EV_FIRED | PSYTL_EV_LATE));
+    CHECK(psytl_find(&g_tl, s5) && psytl_find(&g_tl, s5)->flags == PSYTL_EV_FIRED);
+    CHECK(psytl_value(&g_tl, 1) == 7.0f);
+
+    /* Remove the shown SET; the skipped one at 4 ms shows again. */
+    CHECK_I(psytl_remove(&g_tl, s5), 0);
+    CHECK(psytl_value(&g_tl, 1) == 3.0f);
+    CHECK_I(psytl_remove(&g_tl, a), 0);
+    CHECK(psytl_value(&g_tl, 1) == 0.0f);   /* channel free again: initial */
+
+    /* A skip runs a paused base; a paused seek is a skip and a pause. */
+    CHECK_I(psytl_anchor(&g_tl, 3, 0, 0), 0);
+    CHECK_I(psytl_pause(&g_tl, 3, 10), 0);
+    CHECK_I(psytl_skip(&g_tl, 3, 20, 50), 0);
+    CHECK(psytl_base_time(&g_tl, 3, 30, &bt));
+    CHECK_I(bt, 60);
+    CHECK_I(psytl_pause(&g_tl, 3, 20), 0);
+    CHECK(psytl_base_time(&g_tl, 3, 999, &bt));
+    CHECK_I(bt, 50);
+    /* A skip to where the base already is skips nothing more. */
+    CHECK_I(psytl_skip(&g_tl, 2, 2000 * M, 5 * M), 0);
+    check_sorted(&g_tl, __LINE__);
+}
+
+/* Tracks are a function of base time: after a skip and after an anchor to
+ * the same place the next frame's values are the same bits, a waiting
+ * tween included, which takes over from the old track at its start. */
+static void test_skip_tracks(void) {
+    static psytl_key ramp[2];
+    psytl_timeline* t[2];
+    psytl_event* st[2];
+    psytl_tween_desc d;
+    const int64_t P = P60, S = S_NS;
+    int j;
+    double from, want;
+    ramp[0] = mkkey(0, 0.0f, PSYTL_EASE_LINEAR);
+    ramp[1] = mkkey(100 * S, 10.0f, PSYTL_EASE_LINEAR);
+    t[0] = &g_tl;
+    t[1] = &g_tl2;
+    st[0] = g_store;
+    st[1] = g_store2;
+    for (j = 0; j < 2; j++) {
+        CHECK(open_h(t[j], st[j], 16, 3, NULL, 0.5));
+        CHECK_I(psytl_set_keys(t[j], 1, 1, ramp, 2), 0);
+        CHECK_I(psytl_set_keys(t[j], 2, 1, ramp, 2), 0);
+        CHECK_I(psytl_anchor(t[j], 1, S, 0), 0);
+        CHECK_I(eval_at(t[j], S, P, 0, NULL, 0), 0);
+        d = twd_at(3.0f, 20 * S, 40 * S);
+        CHECK_I(psytl_tween(t[j], 2, 1, &d), 0);
+    }
+    CHECK_I(psytl_skip(&g_tl, 1, 2 * S, 50 * S), 0);
+    CHECK_I(psytl_anchor(&g_tl2, 1, 2 * S, 50 * S), 0);
+    CHECK_I(eval_at(&g_tl, 2 * S, P, 1, NULL, 0), 0);
+    CHECK_I(eval_at(&g_tl2, 2 * S, P, 1, NULL, 0), 0);
+    CHECK(memcmp(psytl_values(&g_tl), psytl_values(&g_tl2), 3 * sizeof(float)) == 0);
+    CHECK_F(psytl_value(&g_tl, 1), 5.0, 1e-6);
+    from = 4.0;                                   /* the ramp at the tween's start */
+    want = from + (3.0 - from) * 0.5;             /* halfway through, linear */
+    CHECK_F(psytl_value(&g_tl, 2), want, 1e-5);
+}
+
+/* PEEK on fixed bases and times (the RT times of report_setup()). */
+static int g_pk[9];
+static psytl_timeline g_pk_snap;
+
+static int peek_pure(int line, int base, int64_t from, int64_t to, psytl_event* out, int cap) {
+    int r, i;
+    memcpy(&g_pk_snap, &g_tl, sizeof g_tl);
+    memcpy(g_snap, g_store, 32 * sizeof g_store[0]);
+    for (i = 0; i < 16; i++) g_fired[i].id = -999;
+    r = psytl_peek(&g_tl, base, from, to, out, cap);
+    if (memcmp(&g_pk_snap, &g_tl, sizeof g_tl) != 0) fail(line, "peek changed the handle");
+    if (memcmp(g_snap, g_store, 32 * sizeof g_store[0]) != 0) fail(line, "peek changed the storage");
+    if (out == g_fired && cap >= 0 && cap < 16 && g_fired[cap].id != -999) fail(line, "peek wrote past cap");
+    return r;
+}
+
+/* out[0..n) has the ids want[0..n) (indexes into g_pk) at RT times rt[]. */
+static void peek_expect(int line, int n, const int* want, const int64_t* rt) {
+    int i;
+    for (i = 0; i < n; i++) {
+        const psytl_event* s = psytl_find(&g_tl, g_fired[i].id);
+        if (g_fired[i].id != g_pk[want[i]]) { fail_i(line, "peek id", g_fired[i].id, g_pk[want[i]]); return; }
+        if (g_fired[i].onset != rt[i]) fail_i(line, "peek onset (RT time)", g_fired[i].onset, rt[i]);
+        if (g_fired[i].residual != 0 || g_fired[i].frame != -1 || g_fired[i].flags != 0)
+            fail(line, "peek copy: residual 0, frame -1, flags 0");
+        if (!s || s->time != g_fired[i].time || s->base != g_fired[i].base || s->kind != g_fired[i].kind
+            || s->code != g_fired[i].code || s->user != g_fired[i].user)
+            fail(line, "peek copy differs from the storage");
+    }
+}
+
+static void test_peek(void) {
+    static const int all[7] = { 6, 1, 4, 5, 0, 3, 2 };
+    static const int64_t all_rt[7] = { 1050, 1100, 1100, 1100, 1300, 1300, 1500 };
+    int i, n;
+    int ids[3];
+    int64_t rts[3];
+
+    report_setup();   /* base 1 at (1000, 0), base 2 at (2000, 500) */
+    for (i = 0; i < 8; i++) g_pk[i] = g_rep[i];
+    g_pk[8] = add1(&g_tl, 3, 10, PSYTL_MARK, 0, 0.0f);   /* base 3 stopped */
+    n = peek_pure(__LINE__, PSYTL_ALL_BASES, 0, 2000, g_fired, 16);
+    CHECK_I(n, 7);
+    if (n == 7) peek_expect(__LINE__, 7, all, all_rt);
+    /* The window is [from, to). */
+    n = peek_pure(__LINE__, PSYTL_ALL_BASES, 1100, 1300, g_fired, 16);
+    CHECK_I(n, 3);
+    if (n == 3) peek_expect(__LINE__, 3, all + 1, all_rt + 1);
+    n = peek_pure(__LINE__, PSYTL_ALL_BASES, 1101, 1301, g_fired, 16);
+    CHECK_I(n, 2);
+    if (n == 2) peek_expect(__LINE__, 2, all + 4, all_rt + 4);
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 1100, 1100, g_fired, 16), 0);
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 1099, 1100, g_fired, 16), 0);
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 1100, 1101, g_fired, 16), 3);
+    /* One base at a time; base 3 is stopped; base 1's pending event at
+     * 6000 is in a later window. */
+    n = peek_pure(__LINE__, 1, 0, 2000, g_fired, 16);
+    CHECK_I(n, 2);
+    ids[0] = 1; ids[1] = 3; rts[0] = 1100; rts[1] = 1300;
+    if (n == 2) peek_expect(__LINE__, 2, ids, rts);
+    n = peek_pure(__LINE__, 2, 0, 2000, g_fired, 16);
+    CHECK_I(n, 2);
+    ids[0] = 5; ids[1] = 2; rts[0] = 1100; rts[1] = 1500;
+    if (n == 2) peek_expect(__LINE__, 2, ids, rts);
+    n = peek_pure(__LINE__, 0, 0, 2000, g_fired, 16);
+    CHECK_I(n, 3);
+    ids[0] = 6; ids[1] = 4; ids[2] = 0; rts[0] = 1050; rts[1] = 1100; rts[2] = 1300;
+    if (n == 3) peek_expect(__LINE__, 3, ids, rts);
+    CHECK_I(peek_pure(__LINE__, 3, -LIM62 + 1, LIM62 - 1, g_fired, 16), 0);
+    CHECK_I(peek_pure(__LINE__, 1, 0, 6000, g_fired, 16), 2);
+    CHECK_I(peek_pure(__LINE__, 1, 0, 6001, g_fired, 16), 3);
+    /* The cap: the earliest, and the total. NULL with cap 0 counts. */
+    n = peek_pure(__LINE__, PSYTL_ALL_BASES, 0, 2000, g_fired, 3);
+    CHECK_I(n, 7);
+    peek_expect(__LINE__, 3, all, all_rt);
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 0, 2000, NULL, 0), 7);
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 0, 2000, g_fired, 0), 7);
+    /* Refusals. */
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 0, 2000, g_fired, -1), PSYTL_ERR_ARG);
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 0, 2000, NULL, 2), PSYTL_ERR_ARG);
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 2000, 1999, g_fired, 4), PSYTL_ERR_ARG);
+    CHECK_I(peek_pure(__LINE__, PSYTL_MAX_BASES, 0, 2000, g_fired, 4), PSYTL_ERR_ARG);
+    CHECK_I(peek_pure(__LINE__, -2, 0, 2000, g_fired, 4), PSYTL_ERR_ARG);
+    CHECK_I(peek_pure(__LINE__, 1, -LIM62, 0, g_fired, 4), PSYTL_ERR_ARG);
+    CHECK_I(peek_pure(__LINE__, 1, 0, LIM62, g_fired, 4), PSYTL_ERR_ARG);
+    CHECK_I(psytl_peek(&g_closed, 1, 0, 1, NULL, 0), PSYTL_ERR_CLOSED);
+    CHECK_I(psytl_peek(NULL, 1, 0, 1, NULL, 0), PSYTL_ERR_CLOSED);
+
+    /* Fired events are not pending: after a frame at 1100, four are gone. */
+    CHECK_I(eval_at(&g_tl, 1100, 0, 0, NULL, 0), 4);
+    n = peek_pure(__LINE__, PSYTL_ALL_BASES, 0, 2000, g_fired, 16);
+    CHECK_I(n, 3);
+    if (n == 3) peek_expect(__LINE__, 3, all + 4, all_rt + 4);
+    /* A late event is pending, at its RT time in the past. */
+    g_pk[0] = add1(&g_tl, 0, 1000, PSYTL_MARK, 0, 0.0f);
+    n = peek_pure(__LINE__, PSYTL_ALL_BASES, 0, 2000, g_fired, 16);
+    CHECK_I(n, 4);
+    ids[0] = 0; rts[0] = 1000;
+    if (n >= 1) peek_expect(__LINE__, 1, ids, rts);
+    CHECK_I(peek_pure(__LINE__, PSYTL_ALL_BASES, 1001, 2000, g_fired, 16), 3);
+    /* A paused base has no RT times; resumed, its times move. Base 2 at
+     * RT 1200 is at base time -300; resumed at 3000. */
+    CHECK_I(psytl_pause(&g_tl, 2, 1200), 0);
+    CHECK_I(peek_pure(__LINE__, 2, -LIM62 + 1, LIM62 - 1, g_fired, 16), 0);
+    CHECK_I(psytl_resume(&g_tl, 2, 3000), 0);
+    n = peek_pure(__LINE__, 2, 0, 4000, g_fired, 16);
+    CHECK_I(n, 1);   /* -400 fired at 1100; 0 is at RT 3300 */
+    ids[0] = 2; rts[0] = 3300;
+    if (n == 1) peek_expect(__LINE__, 1, ids, rts);
+    /* A skipped event is not pending: base 1 to 400 skips 300. */
+    CHECK_I(psytl_skip(&g_tl, 1, 1150, 400), 1);
+    n = peek_pure(__LINE__, 1, -LIM62 + 1, LIM62 - 1, g_fired, 16);
+    CHECK_I(n, 1);
+    ids[0] = 7; rts[0] = 1150 + 4600;
+    if (n == 1) peek_expect(__LINE__, 1, ids, rts);
+}
+
+/* The audio path's use: each 60 Hz frame peeks [last to, onset + L) with
+ * L the audio lead plus a frame, then evaluates. Every event is seen in
+ * exactly one peek, at least L - P before its RT time and before the frame
+ * that fires it, and fires exactly once. */
+static void test_peek_lookahead(void) {
+    enum { NE = 200 };
+    static int seen[NE + 8], fired_n[NE + 8];
+    static int64_t seen_at[NE + 8], rt_of[NE + 8];
+    static psytl_event out[64];
+    const int64_t P = P60, R = S_NS, L = 55 * MS_NS + P60;
+    int64_t to = R, worst = INT64_MAX;
+    int i, k, n, bad_lead = 0, bad_order = 0, bad_seen = 0, bad_fire = 0;
+    g_rng = 4242;
+    CHECK(open_h(&g_tl, g_store, NE + 8, 1, NULL, 0.5));
+    CHECK_I(psytl_anchor(&g_tl, 1, R, 0), 0);
+    memset(seen, 0, sizeof seen);
+    memset(fired_n, 0, sizeof fired_n);
+    for (i = 0; i < NE; i++) {
+        int64_t t = rnd_range(L, 20 * S_NS);
+        int id = add1(&g_tl, 1, t, PSYTL_MARK, 0, 0.0f);
+        CHECK_I(id, i);
+        rt_of[i] = R + t;
+    }
+    for (k = 0; k < 22 * 60; k++) {
+        int64_t T = R + k * P;
+        n = psytl_peek(&g_tl, 1, to, T + L, out, 64);
+        CHECK(n >= 0 && n <= 64);
+        for (i = 0; i < n && i < 64; i++) {
+            int id = out[i].id;
+            if (id < 0 || id >= NE || seen[id]) { bad_seen++; continue; }
+            seen[id] = 1;
+            seen_at[id] = T;
+            if (out[i].onset != rt_of[id]) bad_seen++;
+            if (rt_of[id] - T < L - P) bad_lead++;
+            if (rt_of[id] - T < worst) worst = rt_of[id] - T;
+        }
+        to = T + L;
+        n = eval_at(&g_tl, T, P, k, out, 64);
+        for (i = 0; i < n && i < 64; i++) {
+            int id = out[i].id;
+            if (id < 0 || id >= NE) { bad_fire++; continue; }
+            fired_n[id]++;
+            if (!seen[id] || seen_at[id] >= T) bad_order++;
+        }
+    }
+    for (i = 0; i < NE; i++) {
+        if (!seen[i]) bad_seen++;
+        if (fired_n[i] != 1) bad_fire++;
+    }
+    CHECK_I(bad_seen, 0);
+    CHECK_I(bad_lead, 0);
+    CHECK_I(bad_order, 0);
+    CHECK_I(bad_fire, 0);
+    CHECK(worst >= L - P);
+}
+
 /* -------------------------------------------- 12. the randomized model */
 
 enum { M_CAP = 48, M_NCH = 8, M_EVCH = 6 };
+
+/* Passed by the base: fired, or skipped (SKIP). */
+#define M_DONE (PSYTL_EV_FIRED | PSYTL_EV_SKIPPED)
 
 typedef struct mev {
     psytl_event e;
@@ -4130,6 +4646,7 @@ static int m_step;
  * vacuous run shows. */
 static long m_stat_eval, m_stat_fired, m_stat_late, m_stat_arew, m_stat_wrew, m_stat_unfired, m_stat_err, m_stat_wait, m_stat_trk;
 static long m_stat_tw, m_stat_twrej, m_stat_promo, m_stat_kv, m_stat_xbase, m_stat_twnow;
+static long m_stat_skip, m_stat_skipped, m_stat_skipback, m_stat_skiplate, m_stat_peek, m_stat_peeked, m_stat_peektrunc;
 static const char* m_op;
 
 static int m_fail(const char* what, long long got, long long want) {
@@ -4180,7 +4697,7 @@ static float m_chan_value(int ch) {
     int i, best = -1;
     for (i = 0; i < m_n; i++) {
         const psytl_event* e = &m_ev[i].e;
-        if (!is_chan_kind(e->kind) || e->target != ch || !(e->flags & PSYTL_EV_FIRED)) continue;
+        if (!is_chan_kind(e->kind) || e->target != ch || !(e->flags & ((g_mut & MUT_SKIP_NOCHAN) ? PSYTL_EV_FIRED : M_DONE))) continue;
         if (best < 0 || e->time > m_ev[best].e.time ||
             (e->time == m_ev[best].e.time && e->id > m_ev[best].e.id)) best = i;
     }
@@ -4208,7 +4725,7 @@ static void m_rewind(int b, int64_t bt) {
     for (i = 0; i < m_n; i++) {
         mev* m = &m_ev[i];
         if (m->e.base != b || m->e.time < bt) continue;
-        if (m->e.flags & PSYTL_EV_FIRED) { m_unfire(m); m_stat_unfired++; }
+        if (m->e.flags & ((g_mut & MUT_SKIP_UNREW) ? PSYTL_EV_FIRED : M_DONE)) { m_unfire(m); m_stat_unfired++; }
         else if (m->late) m->ambig = 1;
     }
 }
@@ -4234,7 +4751,7 @@ static void m_evaluate(int64_t onset, int64_t index) {
         if (m_b[b].evaluated && hi < m_b[b].last_hi) m_stat_wrew++;
         for (i = 0; i < m_n; i++) {
             mev* m = &m_ev[i];
-            if (m->e.base != b || (m->e.flags & PSYTL_EV_FIRED) || m->e.time > hi) continue;
+            if (m->e.base != b || (m->e.flags & M_DONE) || m->e.time > hi) continue;
             m->e.flags = (uint16_t)(PSYTL_EV_FIRED | (m->late ? PSYTL_EV_LATE : 0u));
             m->e.frame = index;
             m->e.onset = onset;
@@ -4244,7 +4761,7 @@ static void m_evaluate(int64_t onset, int64_t index) {
             if (m->late) m_stat_late++;
         }
         for (i = 0; i < m_n; i++)
-            if (m_ev[i].e.base == b && !(m_ev[i].e.flags & PSYTL_EV_FIRED) && m_ev[i].late) m_stat_wait++;
+            if (m_ev[i].e.base == b && !(m_ev[i].e.flags & M_DONE) && m_ev[i].late) m_stat_wait++;
         if (!m_b[b].evaluated || hi > m_b[b].last_hi) m_b[b].last_hi = hi;
         if (!m_b[b].evaluated || bt_on > m_b[b].last_on) m_b[b].last_on = bt_on;
         m_b[b].evaluated = 1;
@@ -4448,7 +4965,145 @@ static int m_check_add(int ret, const psytl_event* es, int n) {
     return 0;
 }
 
-static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, int steps) {
+/* SKIP, from the manual: an anchor (with its rewind), then every pending
+ * event of the base before bt is skipped (flags SKIPPED, frame -1, onset
+ * rt, residual bt - time), and the reach and the furthest evaluated onset
+ * move to just before bt when they were behind it. */
+static int m_op_skip(int64_t now) {
+    int b = rnd_int(12) == 0 ? (rnd_int(2) ? 0 : PSYTL_MAX_BASES) : 1 + rnd_int(3);
+    int ok = b > 0 && b < PSYTL_MAX_BASES;
+    int64_t rt = now + rnd_range(-2 * m_pe, 3 * m_pe), bt;
+    int q = rnd_int(5), ret, want = 0, i, rewound = 0;
+    m_op = "skip";
+    if (q == 1 && ok && m_b[b].evaluated) {
+        bt = m_b[b].last_on + rnd_range(-3, 3) * (m_pe / 3);            /* near the rewind threshold */
+    } else if (q == 2 && ok && m_b[b].state != 0) {
+        bt = m_bt(b, rt) + rnd_range(-10 * m_pe, 30 * m_pe);            /* mostly forward */
+    } else if (q == 3 && ok && m_n > 0) {
+        const mev* m = &m_ev[rnd_int(m_n)];                             /* on an event's time */
+        bt = (m->e.base == b ? m->e.time : rnd_range(0, 40 * m_pe)) + rnd_range(-1, 1);
+    } else {
+        bt = rnd_range(-5 * m_pe, 60 * m_pe);
+    }
+    ret = psytl_skip(&g_tl, b, rt, bt);
+    if (!ok) {
+        if (ret != PSYTL_ERR_ARG) return m_fail("skip bad base", ret, PSYTL_ERR_ARG);
+        m_trace("skip", b, rt, bt, ret);
+        return 0;
+    }
+    if (m_b[b].evaluated && bt <= m_b[b].last_on) {
+        m_rewind(b, bt);
+        m_b[b].last_hi = bt - 1;
+        m_b[b].last_on = bt - 1;
+        m_stat_arew++;
+        m_stat_skipback++;
+        rewound = 1;
+    }
+    m_b[b].state = 1;
+    m_b[b].art = rt;
+    m_b[b].abt = bt;
+    m_b[b].anc_bt = bt;
+    m_b[b].nowv = bt;
+    m_b[b].moved++;
+    if (!(g_mut & MUT_SKIP_FIRES)) {
+        for (i = 0; i < m_n; i++) {
+            mev* m = &m_ev[i];
+            if (m->e.base != b || (m->e.flags & M_DONE)) continue;
+            if (m->e.time > bt || (m->e.time == bt && !(g_mut & MUT_SKIP_AT))) continue;
+            if (rewound && m->late && (g_mut & MUT_SKIP_LATEW)) continue;
+            if (m->late) m_stat_skiplate++;
+            m->e.flags = PSYTL_EV_SKIPPED;
+            m->e.frame = -1;
+            m->e.onset = rt;
+            m->e.residual = bt - m->e.time;
+            m->late = 0;
+            m->ambig = 0;
+            want++;
+        }
+        if (!m_b[b].evaluated || (bt - 1 > m_b[b].last_hi && !(g_mut & MUT_SKIP_REACH))) m_b[b].last_hi = bt - 1;
+        if (!m_b[b].evaluated || (bt - 1 > m_b[b].last_on && !(g_mut & MUT_SKIP_NOW))) m_b[b].last_on = bt - 1;
+        m_b[b].evaluated = 1;
+    }
+    m_stat_skip++;
+    m_stat_skipped += want;
+    m_trace("skip", b, rt, bt, ret);
+    if (ret != want) return m_fail("skip return", ret, want);
+    return 0;
+}
+
+/* PEEK, from the manual: the pending events of running bases (base 0
+ * always runs) with RT time in [from, to), by RT time then id, onset the
+ * RT time, residual 0; and nothing in the handle or the storage changes. */
+static int m_op_peek(int64_t now) {
+    static psytl_timeline snap_tl;
+    static psytl_event snap_store[M_CAP];
+    static mev want[M_CAP + 8];
+    int r = rnd_int(20), b, cap, ret, nw = 0, i, lim;
+    int64_t from, to;
+    psytl_event* outp;
+    m_op = "peek";
+    b = r == 0 ? (rnd_int(2) ? PSYTL_MAX_BASES : -2) : r < 8 ? PSYTL_ALL_BASES : rnd_int(4);
+    from = now + rnd_range(-10 * m_pe, 10 * m_pe);
+    to = from + (rnd_int(15) == 0 ? -rnd_range(1, m_pe) : rnd_range(0, 30 * m_pe));
+    if (rnd_int(3) == 0 && m_n > 0) {
+        /* An edge on an event's RT time, or a ns either side of it. */
+        const mev* m = &m_ev[rnd_int(m_n)];
+        int eb = m->e.base;
+        if (eb == 0 || m_b[eb].state == 1) {
+            int64_t rte = eb == 0 ? m->e.time : m_b[eb].art + (m->e.time - m_b[eb].abt);
+            if (rnd_int(2)) from = rte + rnd_range(-1, 1);
+            else to = rte + rnd_range(-1, 1);
+            if (to < from && rnd_int(4) != 0) { int64_t x = to; to = from; from = x; }
+        }
+    }
+    cap = rnd_int(6);
+    outp = (cap == 0 && rnd_int(2)) ? NULL : g_fired;
+    for (i = 0; i < 16; i++) g_fired[i].id = -999;
+    memcpy(&snap_tl, &g_tl, sizeof g_tl);
+    memcpy(snap_store, g_store, sizeof snap_store);
+    ret = psytl_peek(&g_tl, b, from, to, outp, cap);
+    if (memcmp(&snap_tl, &g_tl, sizeof g_tl) != 0) return m_fail("peek changed the handle", 1, 0);
+    if (memcmp(snap_store, g_store, sizeof snap_store) != 0) return m_fail("peek changed the storage", 1, 0);
+    m_trace("peek", b, from, to, ret);
+    if (b < PSYTL_ALL_BASES || b >= PSYTL_MAX_BASES || to < from) {
+        if (ret != PSYTL_ERR_ARG) return m_fail("peek bad argument", ret, PSYTL_ERR_ARG);
+        return 0;
+    }
+    for (i = 0; i < m_n; i++) {
+        const mev* m = &m_ev[i];
+        int eb = m->e.base;
+        int64_t rte;
+        if (b != PSYTL_ALL_BASES && eb != b) continue;
+        if (eb != 0 && m_b[eb].state != 1) continue;
+        if (m->e.flags & ((g_mut & MUT_PEEK_FIRED) ? PSYTL_EV_SKIPPED : M_DONE)) continue;
+        rte = eb == 0 ? m->e.time : m_b[eb].art + (m->e.time - m_b[eb].abt);
+        if (rte < from || rte > to || (rte == to && !(g_mut & MUT_PEEK_END))) continue;
+        want[nw] = *m;
+        want[nw].e.onset = (g_mut & MUT_PEEK_ONSET) ? m->e.time : rte;
+        want[nw].e.residual = 0;
+        want[nw].ambig = 0;
+        nw++;
+    }
+    qsort(want, (size_t)nw, sizeof want[0], fired_cmp);
+    m_stat_peek++;
+    m_stat_peeked += nw;
+    if (nw > cap) m_stat_peektrunc++;
+    if (ret != nw) return m_fail("peek return", ret, nw);
+    lim = nw < cap ? nw : cap;
+    for (i = 0; i < lim; i++) {
+        const char* d = ev_diff(&g_fired[i], &want[i]);
+        if (d) {
+            print_ev("got ", &g_fired[i]);
+            print_ev("want", &want[i].e);
+            return m_fail(d, i, i);
+        }
+    }
+    if (outp && cap < 16 && g_fired[cap].id != -999) return m_fail("peek wrote past cap", cap, cap);
+    return 0;
+}
+
+/* ops: also skip and peek (v0.3.0). Off, the run is v0.2.0's, op for op. */
+static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, int steps, int ops) {
     int ch, i;
     m_seed = seed;
     m_op = "open";
@@ -4490,12 +5145,15 @@ static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, 
     m_tb[7] = 0;
     if (!open_h(&g_tl, g_store, M_CAP, M_NCH, m_init, (double)lead_num / (double)lead_den))
         return m_fail("open", 0, 1);
+    /* open_h maps 0 to PSYTL_LEAD_NONE, whose lead in use is 0. */
+    if (psytl_lead(&g_tl) != (double)lead_num / (double)lead_den)
+        return m_fail("psytl_lead x 1000", (long long)(psytl_lead(&g_tl) * 1000.0), lead_num * 1000 / lead_den);
     if (psytl_set_keys(&g_tl, 6, 1, m_k6, 6) != 0) return m_fail("set_keys 6", 0, 1);
     if (psytl_set_keys(&g_tl, 7, 0, m_k7, 5) != 0) return m_fail("set_keys 7", 0, 1);
     if (m_check()) return 1;
 
     for (m_step = 0; m_step < steps; m_step++) {
-        int r = rnd_int(110), ret;
+        int r = rnd_int(ops ? 126 : 110), ret;
         int64_t now = m_has_onset ? m_onset : T0;
         /* Near full, mostly remove, so FULL does not dominate the adds. */
         if (m_n >= M_CAP - 6 && r < 40 && rnd_int(5) != 0) r = 45;
@@ -4565,6 +5223,10 @@ static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, 
             if (want == 0) { m_b[b].frozen = m_bt(b, rt); m_b[b].state = 2; m_b[b].moved++;
                              m_b[b].nowv = m_b[b].frozen; }
             m_trace("pause", b, rt, m_b[b].frozen, ret);
+        } else if (r >= 118) {
+            if (m_op_peek(now)) return 1;
+        } else if (r >= 110) {
+            if (m_op_skip(now)) return 1;
         } else if (r >= 100) {
             /* Replace channel 6's or 7's driver: its keys again, a sampled
              * track with or without a repeat, a repeated keyed track with
@@ -4714,7 +5376,7 @@ static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, 
             for (i = 0; i < m_n; i++) {
                 const psytl_event* e = &m_ev[i].e;
                 int64_t t;
-                if (e->flags & PSYTL_EV_FIRED) continue;
+                if (e->flags & M_DONE) continue;
                 if (e->base != 0 && m_b[e->base].state != 1) continue;
                 t = e->base == 0 ? e->time : m_b[e->base].art + (e->time - m_b[e->base].abt);
                 if (!mhas || t < mdue) { mdue = t; mhas = 1; }
@@ -4737,7 +5399,11 @@ static void test_model(void) {
     const char* tr = getenv("TL_TRACE");
     m_trace_seed = tr ? (uint64_t)strtoull(tr, NULL, 10) : 0;
     for (i = 0; i < sizeof cfg / sizeof cfg[0]; i++)
-        (void)model_run(cfg[i].seed, cfg[i].num, cfg[i].den, cfg[i].period, 800);
+        (void)model_run(cfg[i].seed, cfg[i].num, cfg[i].den, cfg[i].period, 800, 0);
+    /* The same leads and periods with skip and peek among the ops; other
+     * seeds, so the v0.2.0 runs above stay as they were. */
+    for (i = 0; i < sizeof cfg / sizeof cfg[0]; i++)
+        (void)model_run(cfg[i].seed + 100, cfg[i].num, cfg[i].den, cfg[i].period, 1000, 1);
 }
 
 /* QUANTIZATION: a desc lead of 0 is the default, 0.5; PSYTL_LEAD_NONE is
@@ -4857,23 +5523,34 @@ int main(void) {
     test_remove();
     test_next_due();
     test_replay();
+    test_lead();
+    test_skip_seek();
+    test_skip_back();
+    test_skip_late_wait();
+    test_skip_misc();
+    test_skip_tracks();
+    test_peek();
+    test_peek_lookahead();
     test_model();
     if (m_stat_promo < 100 || m_stat_kv < 20 || m_stat_xbase < 20 || m_stat_twnow < 50 || m_stat_twrej < 20)
         fail(__LINE__, "model: too few tween takeovers, keep_velocity, cross-base, now or rejected tweens (vacuous)");
+    if (m_stat_skip < 300 || m_stat_skipped < 300 || m_stat_skipback < 50 || m_stat_skiplate < 20
+        || m_stat_peek < 300 || m_stat_peeked < 300 || m_stat_peektrunc < 50)
+        fail(__LINE__, "model: too few skips, skipped events, skips back, late skips or peeks (vacuous)");
+    fprintf(g_failures ? stderr : stdout,
+            "psy_timeline_test: %s (model: %ld evaluates, %ld fired, %ld late, "
+            "%ld anchor rewinds, %ld windows behind reach, %ld un-fired, %ld rejected adds, %ld late waits, "
+            "%ld track ops; tweens %ld accepted, %ld rejected, %ld took over, %ld keep_velocity, "
+            "%ld cross-base, %ld from now; %ld skips (%ld back) skipped %ld events (%ld late); "
+            "%ld peeks listed %ld events, %ld over the cap)\n",
+            g_failures ? "FAILED" : "all checks passed",
+            m_stat_eval, m_stat_fired, m_stat_late, m_stat_arew, m_stat_wrew, m_stat_unfired, m_stat_err, m_stat_wait,
+            m_stat_trk, m_stat_tw, m_stat_twrej, m_stat_promo, m_stat_kv, m_stat_xbase, m_stat_twnow,
+            m_stat_skip, m_stat_skipback, m_stat_skipped, m_stat_skiplate, m_stat_peek, m_stat_peeked,
+            m_stat_peektrunc);
     if (g_failures) {
-        fprintf(stderr, "psy_timeline_test: %d failure(s) (model: %ld evaluates, %ld fired, %ld late, "
-                "%ld anchor rewinds, %ld windows behind reach, %ld un-fired, %ld rejected adds, %ld late waits, "
-                "%ld track ops; tweens %ld accepted, %ld rejected, %ld took over, %ld keep_velocity, "
-                "%ld cross-base, %ld from now)\n", g_failures,
-                m_stat_eval, m_stat_fired, m_stat_late, m_stat_arew, m_stat_wrew, m_stat_unfired, m_stat_err, m_stat_wait,
-                m_stat_trk, m_stat_tw, m_stat_twrej, m_stat_promo, m_stat_kv, m_stat_xbase, m_stat_twnow);
+        fprintf(stderr, "psy_timeline_test: %d failure(s)\n", g_failures);
         return 1;
     }
-    printf("psy_timeline_test: all checks passed (model: %ld evaluates, %ld fired, %ld late, "
-           "%ld anchor rewinds, %ld windows behind reach, %ld un-fired, %ld rejected adds, %ld late waits, "
-           "%ld track ops; tweens %ld accepted, %ld rejected, %ld took over, %ld keep_velocity, "
-           "%ld cross-base, %ld from now)\n",
-           m_stat_eval, m_stat_fired, m_stat_late, m_stat_arew, m_stat_wrew, m_stat_unfired, m_stat_err, m_stat_wait,
-           m_stat_trk, m_stat_tw, m_stat_twrej, m_stat_promo, m_stat_kv, m_stat_xbase, m_stat_twnow);
     return 0;
 }

@@ -262,11 +262,308 @@ repeating flicker, and four Bezier channels. With gcc under WSL2 it costs
 310 ns mean and 521 ns p99 at 60 Hz, and 241 ns mean and 311 ns p99 at
 500 Hz. The p99 is 0.016% of a 2 ms frame.
 
-## No playback rate
+## Skip: a seek that does not fire what it passes over
 
-A base advances at the rate of the RT clock, or it is paused. A movie at
-another speed is a decoder problem. With a rate, a base-time conversion
-needs a multiplication, and integer exactness is lost.
+Before v0.3.0, a seek was an anchor. A forward anchor fires every event
+that the base passed over on the next frame, late by its residual. The
+psy_video.h manual-mode test fired 148 annotations on one display frame
+after a seek. On a movie base with one annotation per second, a
+30-minute seek fires 1800. Each one is a false record: a trigger sent, a
+coroutine resumed, a MARK logged, all at the wrong time.
+
+`psytl_skip(tl, base, rt, bt)` is an anchor, then a mark on every pending
+event of the base before `bt`. The mark is `PSYTL_EV_SKIPPED`. A skipped
+event never fires. The return value is the count.
+
+Decisions:
+- **The call takes `rt`.** The request was `psytl_skip(tl, base, bt)`.
+  A running base needs an RT time for its new position. Without `rt`, a
+  seek is two calls, a skip and an anchor, that must agree on `bt`.
+- **A skip back is an anchor back.** It rewinds as an anchor does, and
+  then it skips the late events before `bt` that still wait for a window.
+  The other choice was to refuse a skip back. The caller cannot read the
+  furthest evaluated base time, so it cannot know whether a seek goes
+  back. With this rule a seek calls `psytl_skip()` in both directions.
+- **A skipped event counts for its channel.** After a seek, the channels
+  show what continuous play shows at `bt`. The other choice keeps the
+  values from before the seek: a seek past an onset then shows a
+  stimulus that should be visible as hidden.
+- **Only events before `bt`.** The event at `bt` fires on its frame, as
+  the event at an anchor's `bt` fires after a rewind.
+- **The reach and the furthest onset move to just before `bt`.** If the
+  reach stays, an event added after the skip at a time before `bt` is not
+  late. If the furthest onset stays, a later anchor back does not make
+  the skipped events pending again. The model mutations `MUT_SKIP_REACH`
+  and `MUT_SKIP_NOW` are these two errors, and the test finds both.
+- **A new flag, not FIRED.** A caller that reads FIRED as "landed on a
+  frame" stays correct. A skipped event has frame -1, onset = the skip's
+  `rt` and residual = `bt` minus its time, so the record shows the seek.
+- **Prune deletes skipped events** with the fired ones. Both are behind
+  the base.
+
+Tracks need nothing: a track is a function of base time. A tween that
+waits for a start before `bt` takes over at the next evaluate, from the
+old track's value at its start. The test compares a skip with an anchor
+to the same place: the values are the same bits.
+
+A skip costs a binary search and one write per skipped event. This note
+did not time it.
+
+## Peek: the look-ahead for sound
+
+An evaluate fires an event on the frame that shows it, at most
+lead x period early. psy_audio.h needs an onset 43.5 to 54.5 ms before
+its time ([psy_audio.md](psy_audio.md)), and it places a sound at the
+event's own time, not at a frame. `psytl_peek(tl, base, from_rt, to_rt,
+out, cap)` lists the pending events whose RT time is in `[from_rt,
+to_rt)` and changes nothing.
+
+Decisions:
+- **A half-open window with a start.** The draft in rig_spec.md 4.5.1
+  had only an end (`until_rt`). With a start, the audio path peeks
+  `[last to_rt, now + lead)` on each frame. The windows follow each other
+  with no overlap and no gap, so "already scheduled" is a range.
+- **The RT time goes in `onset`, with residual 0.** In a report,
+  onset - residual is the event's RT time. In a peek copy it is the same.
+  The event is 64 bytes and has no free field for a second time.
+- **Pending events only.** A fired event has its frame's record. An
+  event added less than the audio lead before its time can be in no peek
+  before a frame fires it. It is in that evaluate's report, and the
+  caller plays it late from there.
+- **Running bases only.** A paused base has no RT time for its events.
+  The mapping gives an empty window for a paused base on its own, so the
+  state check is there for a stopped base, whose anchor is stale.
+- **The bounds are written as `bt(from_rt - 1) < time <= bt(to_rt - 1)`.**
+  At rate 1 this is the same as converting the bounds directly. It also
+  stays correct for any mapping that rounds down, which is what a rate
+  needs (see the proposal below).
+
+The test runs the audio path's use for 22 s at 60 Hz with a look-ahead of
+55 ms plus a frame. Every one of 200 events was in exactly one peek, at
+least 55 ms before its RT time and before the frame that fired it, and
+fired once.
+
+`psytl_lead()` returns 0 for `PSYTL_LEAD_NONE`, not -1. The value is the
+one that multiplies the period, and psy_video.h's own lead field uses the
+same convention, so psy_video.h can replace its read of `tl->lead` with
+`psytl_lead(tl)` and change nothing else.
+
+## No playback rate (yet)
+
+A base advances at the rate of the RT clock, or it is paused. The next
+section proposes an exact rational rate. It is not implemented.
+
+## Proposal: an exact rational base rate
+
+Status: proposal, 2026-10-05. Not implemented. The recommendation is at
+the end: later than v0.3.0.
+
+The idea: slow motion and time scaling live in the timeline. psy_video.h
+reads movie time from the movie base, so video gets rates from the base.
+A soundtrack cannot follow a rate other than 1, because psy_audio.h does
+not resample, so psy_video.h refuses that combination
+(`psyvid__base_rate()` already checks for it).
+
+### Calls
+
+```c
+/* From RT time rt on, `base` advances num/den base ns per RT ns. */
+int  psytl_rate(psytl_timeline* tl, int base, int64_t rt, int32_t num, int32_t den);
+bool psytl_get_rate(const psytl_timeline* tl, int base, int32_t* num, int32_t* den);
+```
+
+The request was `psytl_rate(tl, base, num, den)`. The call needs `rt`,
+the change point. Without it, the new rate applies from the last anchor,
+and the base time jumps at the call.
+
+Rules:
+- `num` and `den` are in [1, 2^31 - 1]. The call reduces them by their
+  greatest common divisor, so equal rates store equal bytes.
+- Rate 0 is refused (`PSYTL_ERR_ARG`). `psytl_pause()` is the one way to
+  freeze a base. A running base at rate 0 has no inverse mapping, so
+  `psytl_next_due()` and `psytl_peek()` divide by zero, and two frozen
+  states double the cases that every rule and the model must cover.
+- A negative rate is refused. See "Reverse" below.
+- Base 0 is refused, as for anchor.
+- `psytl_open()` sets every base to 1/1. Anchor, skip, pause, resume and
+  clear keep the rate. A paused or stopped base stores the rate and uses
+  it from the next resume or anchor.
+
+### Arithmetic
+
+Base time at RT time t, with the anchor (rt0, bt0):
+
+    bt(t) = bt0 + floor((t - rt0) * num / den)
+
+The RT time of base time T, the first RT ns at which the base reaches T:
+
+    rt(T) = rt0 + ceil((T - bt0) * den / num)
+
+These two are exact inverses for every rule that asks "has the base
+reached T": bt(t) >= T exactly when t >= rt(T). At 1/1 both are today's
+formulas.
+
+The product must not overflow. Split d = t - rt0 as d = q * den + r with
+0 <= r < den (floor division: C's `/` truncates, so subtract 1 from q
+when r < 0). Then
+
+    bt(t) = bt0 + q * num + floor(r * num / den)
+
+r * num < 2^31 * 2^31 = 2^62, so the second product cannot overflow.
+q * num is at most d * num / den + num in magnitude: the base time span
+itself, which the contract keeps below 2^62. The proposed call saturates it and
+does not wrap when a caller goes past the contract. The inverse splits
+by num the same way. This is the split that the sampled-track lookup
+already uses: there, d is split into seconds and ns, which is den = 1e9
+and num = the sample rate.
+
+No drift: each evaluate computes from the anchor, not from the last
+frame, so a rate held for 10 hours has the same error as one held for
+1 s: the floor, under 1 ns, never added up. A rate change re-anchors at
+(rt, bt(rt)), which takes the floor once. So n rate changes lose at most
+n ns against the exact rational time. A change is a user action, and
+1000 changes lose at most 1 us. Keeping the remainder as a carry would
+make even that exact, at the cost of a third anchor field. Replay is
+exact in both forms: the arithmetic is integers only.
+
+### Rate change mid-run
+
+`psytl_rate(tl, b, rt, num, den)` on a running base computes bt_c =
+bt(rt) with the old rate and anchors at (rt, bt_c) with the new one. The
+mapping is continuous at rt, exactly, in integers.
+
+It must not call `psytl_anchor()`. An anchor at a base time at or before
+the furthest evaluated base time rewinds, and when rt is the last onset,
+bt_c is that time: the event exactly there would fire twice. So
+`psytl_rate()` is in the pause and resume family. It changes the mapping
+and never rewinds. Only an anchor (and a skip, which is an anchor)
+rewinds. When rt is before the last evaluated onset, the next window can
+end behind the reach: nothing un-fires, as after an anchor whose rt is
+after the onset.
+
+### Quantization and the lead
+
+The window ends at RT time onset + lead x period, and in base time at
+bt(onset + lead x period). The code does this today. With a rate, an
+event lands on the first frame whose RT window end is at or after
+rt(T): the frame nearest to when the base reaches the event, in RT, at
+any rate. The lead is RT time and is not scaled.
+
+psy_video.h does not do this. It computes the due frame as the last
+frame time at or before m(onset) + L, a movie time plus an RT duration.
+At rate 1/2 and 60 Hz, L is 8.33 ms of RT, which is 4.17 ms of movie
+time. Video frames would then use a window twice as wide as the
+annotations' window, and video frames and annotations would land on
+different display frames. So "no change in psy_video.h" is not true. The
+change is small: the movie time at onset + L with a lead of 0, or the
+window end read from the timeline through `psytl_window()`, which rig_spec
+6.1 already asks for.
+
+### Lateness and the record
+
+The reach is a base time and does not change. The residual stays "base
+time at the onset minus the event's time", in base ns. It is exact, and
+it is defined on a paused base. At a rate r, the lateness in RT ns is
+about residual / r; the manual says so.
+
+The report's order, onset - residual, is the RT target only at rate 1.
+With a rate, the key is rt(T) on a running base, with the mapping in
+force at the evaluate, and onset - residual on a paused base (as now).
+The comparator reads the event's base, so it needs no storage.
+`psytl_next_due()` and the onset of a peek copy use rt(T). Peek's bounds
+are already in the form that a rate needs.
+
+### Tracks, repeats and STEP tracks
+
+A track is a function of base time, so it plays at the rate. A sampled
+track stays exact: the sample index is integer arithmetic on base time.
+At rate 1/2, a 120/s table is read at 60 samples per RT second, and
+CUBIC keeps it smooth. The table rate stays an integer.
+
+A repeat runs at f x r in RT. A flicker with its edges on frame onsets is
+no longer on frame onsets at rate 1001/1000. A flicker, an SSVEP drive
+or anything else defined in display frames goes on a base at rate 1. The
+rule of one base per channel makes this a choice per channel.
+
+A STEP track is read at bt(onset + lead x period), as an event is.
+
+### Tweens: base time
+
+A tween runs in base time. Its keys are base times, its duration is base
+ns and its "now" is a base time. At rate 1/2, a 200 ms tween on the movie
+base takes 400 ms of RT. This is GSAP's `timeScale()` on a parent
+timeline. It is also the only rule that keeps "a tween is a track" true:
+a tween in RT on a scaled base needs a second clock per channel. A fade
+that must take 200 ms of RT, whatever the movie does, goes on the trial
+base. `keep_velocity` takes the slope per base ns. When the rate changes
+during a tween, its RT velocity steps by the ratio of the two rates.
+That step is a consequence of the rate change, not of the tween.
+
+### Pause and resume
+
+No change. A pause computes the frozen time with the rate. A resume
+anchors at (rt, frozen time) with the same rate.
+
+### Reverse
+
+A negative rate is refused. Base time that decreases conflicts with "an
+evaluate never un-fires". Every window ends behind the reach, so nothing
+fires and nothing un-fires. The event channels then keep the state of the
+furthest point reached: an onset at 5 s, passed backward from 10 s to
+3 s, leaves the stimulus visible. Tracks reverse correctly; events do
+not. A correct reverse needs a rewind at each frame, which is the rule
+that v0.1.0 dropped (see "Only an anchor rewinds"). A reverse scrub is a
+series of `psytl_skip()` calls. Each one is a rewind and says so in the
+record. psy_video.h cannot decode backward in any case.
+
+### Script API
+
+Rule 2 of rig_spec.md 6.1 says a script never anchors a base. A rate on
+the trial base scales every wait, tween and duration of the trial. In
+psychophysics that is a confound, so the script gets no rate on the trial
+base. It gets a rate on a movie only:
+
+```lua
+local m = movie("clip")
+m:play{rate = 0.5}        -- from now()
+m.rate = 1                -- a change at now()
+await(m:at(12.5))         -- a MARK at movie time 12.5 s; resolves at any rate
+```
+
+| Script | Timeline |
+|---|---|
+| `m:play{rate = r}`, `m.rate = r` | `psytl_rate(tl, MOVIE, rt, num, den)`, with rt the RT time of `now()` on the trial base |
+| `m:at(t)` | `psytl_add` MARK on the movie base at `t` |
+
+A number becomes num/den with den <= 1000: exact for up to three
+decimals (0.5 is 1/2, 0.999 is 999/1000), and the log records the
+fraction. A movie with a soundtrack at a rate other than 1 is an error at
+the call. The "Left out" entry "Time scale, reverse, seek inside a
+trial" stays for the trial base.
+
+### C additions this needs
+
+- `psytl_rate()` and `psytl_get_rate()`. psy_video.h's
+  `psyvid__base_rate()` reads the second.
+- `psytl_window(tl, base, &frame, &bt_end)`: the window end in base
+  time. psy_video.h and the script scheduler use it, so neither copies
+  the rule.
+- `psytl_rt_time(tl, base, bt, &rt)`: the inverse, rt(T). The player
+  needs it to lower `now()` to an RT change point.
+
+### Recommendation: later, not v0.3.0
+
+- No experiment asks for it yet. With a soundtrack, a rate is refused.
+  The only consumer is a silent movie in slow motion.
+- It changes every conversion between base time and RT time (evaluate,
+  pause, next_due, peek, skip, the report order) and the random model.
+  Skip and peek are small and are needed now.
+- psy_video.h needs a change too (the window end above), so a rate does
+  not come without a change there. Do the rate together with
+  `psytl_window()`.
+- v0.3.0 keeps the change local. Peek's bounds already have the form
+  that a rate needs. Each function computes the RT time of an event in
+  one place.
 
 ## Storage
 
@@ -414,6 +711,50 @@ its own "now": the base time of the last evaluated onset, or the time a
 later anchor, pause or resume set. The random model uses that rule with
 no cases excluded, and fails 10 checks against the first version's rule.
 
+For v0.3.0 the writer of the implementation extended the test. This is
+weaker than the earlier rounds: the same person wrote the code, the
+manual and the model, so a misreading can be in all three. The checks:
+- Directed: the 30-minute seek against an anchor to the same place (1978
+  skipped against 1980 fired late on one frame, the same channel
+  values), a skip back against an anchor back (the same storage bytes),
+  a late event that waits behind the reach and is skipped by a skip back,
+  the reach and the rewind after a skip, prune and remove of skipped
+  events, a never-anchored and a paused base, tracks and a waiting tween
+  after a skip against an anchor (the same bits), peek's window edges,
+  order across bases, cap and total, paused, stopped, fired, skipped and
+  late events, refusals, and purity by `memcmp` of the whole handle and
+  the storage around every peek.
+- The audio look-ahead for 22 s at 60 Hz (see "Peek").
+- Ten more seeds of the random model, with skip and peek among the ops.
+  The model compares the whole storage and every value after each step,
+  and the handle and the storage are unchanged by each peek. The first
+  ten seeds run as before, op for op, and give the same counts.
+- Replay: skip and peek are among the calls hashed in both handles.
+
+Model mutations, each caught: a skip that only anchors, skipped SETs
+not counted for the channel, the reach or the furthest onset not moved,
+the event at `bt` skipped, a rewind that leaves skipped events skipped,
+peek's window closed at `to_rt`, fired events in a peek, a peek copy's
+onset as its base time, and a skip back that leaves waiting late events
+pending.
+
+Mutations of the header, made one at a time on a copy: 23. 20 are
+caught. Three cannot change any result, and the reasons are:
+- `FIRED` for `DONE` in the evaluate's advance of the lowest late index.
+  That index is a lower bound for a scan that skips done events.
+- `FIRED` for `DONE` in `psytl_next_due()`. Its scan starts at the lowest
+  late event, which is pending, and every skipped event after it in the
+  storage has a time that is not earlier. So the minimum cannot change.
+- A paused base admitted to a peek. The paused mapping gives the frozen
+  time for every RT time, so the window is empty.
+
+The v0.2.0 test, unchanged, passes against v0.3.0 with the same model
+counts. `timeline_trial` and `timeline_tracking` print the same bytes as
+with v0.2.0, except the version, on gcc 11.4, MSVC 19.44 and MinGW gcc
+16.1. One run of `timeline_bench` at 60 Hz (gcc 11.4, WSL2): trial 51 ns,
+movie 322 ns mean and 599 ns p99, script 60 ns, tracks 246 ns. These are
+inside the v0.2.0 ranges above.
+
 ## Not done
 
 - No snapshot format. The storage is the record. A resume after a crash
@@ -421,3 +762,9 @@ no cases excluded, and fails 10 checks against the first version's rule.
 - One timeline is for one display. A second display that flips on its own
   grid needs its own timeline or its own evaluate.
 - No run on macOS or on a big-endian machine.
+- psy_video.h still anchors on a seek and reads `tl->lead`. Changing it
+  to `psytl_skip()` and `psytl_lead()` is that header's change.
+- rig_spec.md 4.5.1 still shows the draft `psytl_peek(tl, base,
+  until_rt, out, cap)`. The header has a `from_rt` bound (see "Peek").
+- The cost of a skip is not timed. It is one write per skipped event.
+- No base rate (see the proposal).

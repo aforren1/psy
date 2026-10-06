@@ -205,6 +205,13 @@ the swap path and the input restamping.
 
 Includes `psy_screen.h`. GL ES 3.0 only. No compute stage.
 
+Coordinates (decided 2026-10-05; the script API of section 6.1 uses the
+same): screen pixels from the top-left corner, x right, y down; positive
+angles turn +x toward +y, clockwise on the screen; degrees are one scale
+factor with the same origin and axes. A stimulus has a `place` (the screen
+point x and y are measured from, the center by default) and an anchor (the
+point of its own box at x, y that it turns about, the center by default).
+
 - **Backend interface** of about fifteen calls: create a pipeline from
   precompiled shaders, create and update a texture, set a uniform
   block, draw a quad, draw an instanced set, begin and end a pass to a
@@ -220,6 +227,13 @@ Includes `psy_screen.h`. GL ES 3.0 only. No compute stage.
   profile sets the spatial-frequency content, so the caller states it.
   Complex vector artwork is rasterized by the pack tool at the display
   resolution and drawn as a texture. No vector drawing library.
+  The boundary (v0.3, 2026-10-05): closed-form distance functions
+  (rounded and partial shapes, regular polygons and stars, ellipses), a
+  bounded fold of at most 56 primitives, and paths of at most 224 points
+  are inside it, with effects, dashes and gradients drawn from the same
+  field. SVG, fill rules and a general path rasterizer are outside it.
+  Artwork still goes through the pack tool, as a distance texture
+  (MASK_TEX, MSDF or MTSDF).
 - **Output stage.** Gamma, CLUT, dithering for 10-bit and Bits#-style
   modes, in the final shader. SDL3 has no gamma ramps, so this is the
   only place gamma lives. Stereo on one display is an output mode
@@ -259,15 +273,26 @@ callback.
   declared format or the open fails.
 - **Strict open.** Disable miniaudio's automatic sample rate conversion,
   read back the device's internal rate after init, and fail on a
-  mismatch with a message that names the OS rate and says that
-  exclusive mode would fix it. Exclusive mode is a `desc` field.
+  mismatch with a message that names the OS rate. Exclusive mode is a
+  `desc` field.
+  Changed 2026-10-05 (from the miniaudio 0.11.25 source): with a nonzero
+  rate, miniaudio asks WASAPI shared mode to resample and then reports
+  the requested rate, so a read-back cannot see it; the header asks for
+  no format, rate or channel count and refuses what the OS gives when it
+  differs. Exclusive mode does not fix a rate mismatch: miniaudio opens
+  it at the endpoint's Default Format, the same rate as shared mode.
+  Another exclusive rate needs a WASAPI Audio device extension.
 - **Schedule.** `psyau_play_at(buffer, t)` on the `psy_rt.h` clock. The
   callback counts frames from an anchor correlated to the clock and
   starts the buffer on the right frame.
-- **Master clock.** The `psy_rt.h` clock is the master. Over a long
-  session the device clock drifts against it. The header measures the
-  drift from the frame count and nudges the stream by resampling or
-  frame insertion, and logs each nudge.
+- **Master clock.** The `psy_rt.h` clock is the master. The header fits
+  the device clock against it and plans every onset in device frames from
+  the fit. It never resamples and never inserts frames. A long buffer's
+  end follows the device clock and its record says where it ended.
+  Changed 2026-10-05: the first plan nudged the stream by resampling or
+  frame insertion, against principle 5. Locking a movie's soundtrack to
+  its video goes to `psy_video.h`, which follows the audio fit with the
+  movie base.
 - **Synthesis.** Tones, noise, envelopes, at the project rate.
 - **Latency.** Reported only as measured by the line-out to line-in
   loopback test.
@@ -456,8 +481,9 @@ Decisions (2026-10-05):
   because the audio path needs lead time. An evaluate fires an event on
   the frame that shows it. That is too late and too coarse for sound. So
   the timeline needs a look-ahead query: give the pending events of a
-  base whose RT time is at or before a given RT time, without firing
-  them, for example `psytl_peek(tl, base, until_rt, out, cap)`. The
+  base whose RT time falls in a window, without firing them:
+  `psytl_peek(tl, base, from_rt, to_rt, out, cap)`, built in
+  psy_timeline.h v0.3.0 (2026-10-05). The
   player's audio path schedules from it, and the video path keeps
   evaluate. The event's landing record stays the video frame's. The
   audio onset record comes from `psy_audio.h` (section 4.4). Which base
@@ -490,8 +516,10 @@ Decisions (2026-10-05):
 
 Open questions:
 - How far ahead must `psytl_peek()` look for audio? That is the audio
-  path's measured scheduling lead, from the line-in loopback test, plus
-  one frame. Measure it, do not choose it.
+  path's measured scheduling lead plus one frame. psy_audio.h v0.1.0
+  measured the shortest lead with no late onset at 43.5 to 54.5 ms
+  (WASAPI shared, 10 ms periods, this laptop; docs/psy_audio.md). The
+  line-in loopback test is still needed for the output latency itself.
 - How large should the arena default be when `desc.keys` is NULL: none,
   or a small inline arena in the handle, as `psy_rt.h`'s pump has an
   inline ring?
@@ -575,14 +603,15 @@ section can cite the manifest and a reviewer can rebuild the pack.
 |---|---|---|
 | Texture | Uncompressed 8-bit, 16-bit or float planes, optionally QOI or a single-file deflate or LZ4 | Block compression opt-in, recorded in the manifest. |
 | Video | Constant frame rate, fixed pixel format and resolution, closed GOPs, no B-frames, plus an index of frame to byte offset and timestamp | Produced by ffmpeg, command recorded. |
-| Audio | The project rate, channel count and sample format | Resampled offline with a high-quality resampler, recorded. |
-| Font | Glyph atlas rasterized at the sizes the experiment uses, plus a metrics table | No font engine at runtime. Text is pixel-identical across platforms. |
-| Shader | The user's fragment body wrapped in the contract, cross-compiled to every backend, with reflection | glslang and SPIRV-Cross in the tool. D3D bytecode is finished by the runner on Windows. |
+| Audio | The project rate and channel count; 16-bit, 24-bit or float samples | Resampled offline with a high-quality resampler, recorded. In memory always float, widened exactly at load (2026-10-05): one mixer path, and float holds 16- and 24-bit values exactly. |
+| Font | The font file, plus glyph atlases built from it: MSDF for scalable or animated text, and alpha coverage at the sizes the experiment uses for value-exact text. Static text is stored as laid-out glyph runs. | No platform font engine. One pinned Skribidi does layout, bidirectional text and shaping in the designer (WebAssembly, with editing), the pack tool and the player, so text is the same everywhere. Glyphs missing from an atlas (typed responses) are rasterized at run time by Skribidi's CPU rasterizer. Headers only draw glyph runs. Changed 2026-10-05: "glyph atlas plus metrics; no font engine at runtime". |
+| Shader | The user's fragment body wrapped in the contract (`psygfx_shader_wrap()`, the same function in the tool and the runtime), as GLSL ES 3.00 text, with reflection | glslang validates it in the tool. GL ES 3.0 has no portable binary, so ANGLE compiles the text on the rig when the pack loads; an ANGLE program binary may be cached per ANGLE build, adapter and driver. SPIRV-Cross is for a second backend only. Changed 2026-10-05: "D3D bytecode is finished by the runner" (docs/psy_gfx.md). |
 | Table | Typed binary columns from condition files and from ELAN, Praat or BIDS events exports | Read directly by `psy_trials.h` and `psy_timeline.h`. |
 | Calibration | The 3x3 matrix and the gamma table, with the photometer readings beside them | |
 | Experiment | The definition the player interprets | See section 6. |
 
-The canonical in-memory forms are the same as the on-disk forms, so a
+The canonical in-memory forms are the same as the on-disk forms (audio
+excepted: integer samples are widened exactly to float at load), so a
 stimulus generated per trial on the pump enters through the same API
 as one loaded from the pack.
 
@@ -911,9 +940,13 @@ There is no server. The only job that wants one is the build job.
   logic and not in timing, and the page says so.
 - **Run** talks to the native player on the rig through the runner
   protocol. A browser is never the rig.
-- **Shaders** compile in the browser with the WebAssembly builds of
-  glslang and SPIRV-Cross. D3D bytecode is finished by the runner on
-  the Windows rig at reload time.
+- **Shaders** are validated in the browser with the WebAssembly build of
+  glslang, through the same wrapper function the runtime uses. ANGLE
+  compiles them on the rig when the pack loads (5.2).
+- **Text** is edited in the designer with Skribidi compiled to
+  WebAssembly: bidirectional editing, shaping and line breaking for
+  complex scripts, laid out by the same pinned version the pack tool
+  and the player use.
 - **Operator console** is a browser tab on the runner protocol: live
   parameters, the staircase plot, the dropped-frame counter, the log.
 - **Build jobs** go to a template repository with a GitHub Actions
@@ -1077,7 +1110,10 @@ extension implements one of these kinds, each a versioned C vtable:
 - Whether the composition swapchain's present-at-time removes the need
   for the spin-wait under variable refresh.
 - miniaudio's exclusive-mode behavior per backend and the exact flag
-  set that disables its silent rate conversion.
+  set that disables its silent rate conversion. Answered for WASAPI
+  (2026-10-05, docs/psy_audio.md): ask for no format, rate or channel
+  count, so the client format is the device's; exclusive mode opens at
+  the endpoint's Default Format. Other backends: not run.
 - Whether SDL_GPU gains a browser backend, which would make it a
   candidate second implementation behind the `psy_gfx.h` interface.
 - The first stimulus that needs compute, which would move the plan to

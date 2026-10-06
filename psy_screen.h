@@ -21,6 +21,27 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.3.0 - Flip hooks for triggers. Codes (CODES): exact device values in
+ *          the frame, per flip or held, as rectangles or rows, drawn last,
+ *          with presets for VPixx Pixel Mode and pixel sync, a self test at
+ *          open, an optional read-back, record.code_risk and a CODE ring
+ *          record. Triggers (TRIGGERS): callbacks on a deadline worker at
+ *          a flip's planned vblank, armed when the present returns, moved
+ *          when the header learns the flip will be late, a TRIGGER ring
+ *          record, and an optional GPU fence check; the worker runs on the
+ *          E-cores of a hybrid CPU on Windows and arms itself for the next
+ *          vblank after a flip trigger. After flip (AFTER
+ *          FLIP): psyscr_on_flip(); psyscr_frame.done lists every
+ *          record completed since the last begin(). psyscr_native()
+ *          (NATIVE HANDLES). Fixed: after a flip shown early when the
+ *          depth fell, begin() planned the next frame for the same vblank
+ *          (DEPTH). Before present (GL STATE):
+ *          psyscr_on_present(), psyscr_gl_epoch(), psyscr_gl_generation().
+ *          OS GAMMA: a fullscreen screen on Windows takes the OS gamma ramp
+ *          to identity and gives it back at close and at exit. Breaking:
+ *          psyscr_record gains code_risk; psyscr_frame gains done, n_done
+ *          and done_lost; psyscr_present_req, the presenter
+ *          and its open struct gain fields (PSYSCR_PRESENTER_VERSION 2).
  *   v0.2.0 - The Windows 11 composition swapchain (PSYSCR_BACKEND_COMPOSITION)
  *          with present at a target time. Tiers: each flip record carries
  *          psyscr_tier, caps.worst_tier and the describe line report the
@@ -45,7 +66,7 @@
  *          groups, input restamping, mode lists and the parameter table.
  *          The other swap paths are stubs that refuse to open.
  *
- *   STATUS: v0.2.0. Two swap paths run, DXGI_FLIP and COMPOSITION, on one
+ *   STATUS: v0.3.0. Two swap paths run, DXGI_FLIP and COMPOSITION, on one
  *   machine: a Windows 11 25H2 laptop whose Intel Iris Xe drives a 1920 x
  *   1200 panel at 60.0008 Hz (60 Hz is its only rate), with the ANGLE that
  *   ships in Docker Desktop's Electron front end (2.1.23876, git
@@ -72,7 +93,12 @@
  *   drops for COMPOSITION against 27 to 67, 0 to 15 flips without a
  *   statistic against 13 to 96, no early flip against 9 to 15, 2.1 to 2.5
  *   us p99 against 4.5 to 5.4 us (the two DXGI_FLIP runs without a
- *   timeout). Fullscreen on AC, 1 minute each on the quiet machine: v0.2
+ *   timeout). These window runs, and the 10-minute run, came before the
+ *   depth rule that lowers only on evidence and before the fix for a flip
+ *   called inside the margin before a vblank, which showed one vblank
+ *   early on DXGI_FLIP. That fault may explain some of DXGI_FLIP's early
+ *   flips above. None of them was run again.
+ *   Fullscreen on AC, 1 minute each on the quiet machine: v0.2
  *   DXGI_FLIP 2.33 us p99, COMPOSITION 2.36 us, a v0.1 control 2.32 us, no
  *   drop. (While another program ran load threads on the machine, both
  *   backends gave 75 to 110 us p99 and 21 to 29 drops in fullscreen.) From
@@ -121,13 +147,51 @@
  *   from 6.2 ms before to 12.1 ms after it.
  *   The core (prediction, snap, drops, depth, estimated, skipped and
  *   canceled records, tiers, the ring record, phases, groups, errors, the
- *   mode picker, preemption) is checked without SDL or a display by
+ *   mode picker, preemption, codes, triggers and their moves, the
+ *   after-flip and present callbacks) is checked without SDL or a display by
  *   tests/adapt/psy_screen_test.c against a scripted swap path on a
  *   virtual clock, so the host's load cannot change a result, on MSVC,
  *   MinGW gcc 16.1, gcc 11.4 (WSL2; also as C99 at -O3, as C++17, and
  *   under ASan and UBSan, and 8 of 8 runs with a busy loop on its CPU) and
- *   clang (emcc, run in node); fourteen deliberate mutations of the header
+ *   clang (emcc, run in node); 29 deliberate mutations of the header
  *   each make it fail.
+ *   CODES and TRIGGERS (v0.3.0, measured on battery, Balanced plan; the
+ *   tables are in docs/psy_screen.md): the open-time self test passed on
+ *   DXGI_FLIP and COMPOSITION, and 1800 code read-backs in fullscreen
+ *   differed 0 times. Drawing a 1-pixel and an 8-pixel code cost 3.8 us
+ *   mean on the GPU context with one ClearView per pixel, 5.3 us with
+ *   UpdateSubresource, so rows of up to 8 pixels use ClearView. This
+ *   laptop runs auto color management (color=wcg in the describe line),
+ *   so every code here is at risk (CODE_RISK_ADVANCED_COLOR); no device
+ *   has read one. A trigger fired p50 1.0 to 2.1 us, p99 59 to 300 us and
+ *   at most 0.6 to 7.9 ms after its deadline (TIME_CRITICAL worker; the
+ *   larger numbers in a window), on the P-cores where psy_rt.h puts the
+ *   worker. The cause, measured: the display's vblank DPC, 50 to 400 us
+ *   from about 75 us before the vblank, ran on the P-core the worker spun
+ *   on; the trigger lock and the spin window were not the cause. The
+ *   worker now runs on the E-cores of a hybrid CPU: this machine's way
+ *   to keep it off the vblank DPC's CPU, not a rule (TRIGGERS). On AC, 1
+ *   minute each: fullscreen p99 1.6 to 2.6 us on both backends (31 and 29
+ *   us before); in a window 1.0 to 3.2 us (32 to 169 us before). The
+ *   tail is the OS's and stays: 1 to 15 triggers a minute fired over 200
+ *   us late (1 to 22 before), the largest 0.35 to 43 ms (0.37 to 12.6 ms
+ *   before), so the 200 us bar for the largest is missed. Without a
+ *   display, examples/rt_jitter.c on the same cores woke up to 2.6 and
+ *   32.6 ms late with the same 1.2 ms spin window (on the P-cores, 3.0
+ *   ms and 20 us). With 3 frames of 25 ms GPU work every
+ *   300 frames: without the GPU check 72 of 72 triggers fired a frame
+ *   early; with desc.trigger_fence 140 of 142 moved in time and 0 moved
+ *   in error, and no move in 10800 idle frames. The fence stays off by
+ *   default until it runs on more than one GPU. Arming a trigger cost the
+ *   frame thread about 8 us on battery and 3.8 us on AC in flip_at(), most
+ *   of it the worker's wake-up; the worker now arms itself for the next
+ *   vblank after each flip trigger, so a trigger every frame arms with no
+ *   wake-up: 0.6 to 0.9 us mean on AC, flip_at() 1.7 to 2.6 us in all.
+ *   The OS gamma ramp: this laptop's is the identity, so
+ *   open() set nothing; setting the same ramp again and reading it back
+ *   was exact; one GetDeviceGammaRamp costs 0.8 ms, so it is read at open
+ *   only. Whether the ramp acts on independent-flip and overlay frames,
+ *   and under Night Light, was not measured.
  *   tests/compile/psy_screen_com.cpp checks every COM slot and struct the
  *   header declares against the Windows SDK (MSVC; MinGW for DComp only).
  *   NOT done: any rate but 60 Hz, any other GPU, Windows 10 (COMPOSITION
@@ -229,9 +293,19 @@
  *     compositor copies the frame (measured, docs/psy_screen.md). The
  *     header learns it from the flips: three flips in a row at a new depth
  *     change it, so one late flip is a drop and not a new depth, and one
- *     flip is enough after the path changes. open() presents black frames
+ *     flip is enough after the path changes. A flip shown on the vblank
+ *     right after the flip before it may have waited behind that flip, so
+ *     its count says "this depth or less"; up to 3 such flips do not use up
+ *     a path change's one-flip window. open() presents black frames
  *     until three flips agree, because a window that has just gone
  *     fullscreen is composed for a few frames.
+ *     When the depth falls (composed to overlay), the flip planned at the
+ *     old depth shows a vblank early (EARLY). The next frame is planned a
+ *     vblank after the early one's plan, never on it, so the early frame
+ *     stays on the screen two vblanks; f.onset and f.vblank always rise
+ *     from one frame to the next. When the depth rises, a flip planned at
+ *     the old depth is shown late (a drop), and the next frame's f.vblank
+ *     is 2 on: begin() runs before that drop's record completes.
  *     A backend that shows a frame at its target (COMPOSITION) holds an
  *     early present back, so an on-time flip cannot show that a smaller
  *     depth would do, and a try at one less drops a frame when it fails.
@@ -302,6 +376,13 @@
  *     statistics again before a present and once per vblank while it holds
  *     a frame; a flip that is never reported still gets a record, flagged
  *     ESTIMATED. psyscr_wait_flip() waits for all of them.
+ *     f.last is the newest completed record. f.done and f.n_done list
+ *     every record completed since the begin() before, in completion
+ *     order (the ring's), whether it completed in begin(), in flip_at()
+ *     while a frame was held, or in wait_flip(); the last one is f.last.
+ *     The list is valid until the next begin(), and holds at most
+ *     PSYSCR_MAX_DONE (16; f.done_lost counts any that did not fit). A
+ *     record completed in close() reaches the ring and on_flip only.
  *
  *   PHASES
  *     phase_ns[PSYSCR_PHASE_EVALUATE, _SCRIPT, _DRAW, _UPLOAD] is the time
@@ -339,6 +420,34 @@
  *     (shown, skipped or canceled) and one of 3 buffers is free. Present at
  *     a time could queue several future frames; that is not done, so each
  *     frame is drawn against a fresh prediction and fresh input.
+ *
+ *   GL STATE (what a renderer on this header, such as psy_gfx.h, relies on)
+ *     begin() makes the context current on the calling thread with the back
+ *     buffer as framebuffer 0. caps.mode.w and caps.mode.h are the back
+ *     buffer's size in pixels, in a window too. On DXGI_FLIP and
+ *     COMPOSITION, framebuffer 0 is ANGLE's pbuffer on a D3D11 texture, and
+ *     its row 0 is the top row of the screen, not the bottom as in GL
+ *     (measured, docs/psy_gfx.md); a renderer that writes rows in screen
+ *     order must flip them. flip_at() on DXGI_FLIP and COMPOSITION changes
+ *     no GL state (the patch is a ClearView after ANGLE's flush); on a
+ *     presenter without draws_patch, the GL patch puts back what it changes
+ *     (PHOTODIODE PATCH). Nothing else here touches GL state, so a renderer
+ *     sets what it needs once per frame, except the present callback:
+ *     psyscr_on_present(fn) calls fn inside flip_at(), after your drawing
+ *     and before the header's flush and present, with the context current
+ *     and framebuffer 0 bound. fn may draw with GL and change any state;
+ *     the header puts nothing back for it. Two counters tell a renderer
+ *     that caches GL state what happened behind its back:
+ *       psyscr_gl_epoch()       changes after every present callback: GL
+ *                               state may differ from your cache. Drop the
+ *                               cache and set state again.
+ *       psyscr_gl_generation()  changes when the context is new: every GL
+ *                               object made before is gone (0 while
+ *                               closed). Today only open() makes a context,
+ *                               and a lost device ends the screen with
+ *                               PSYSCR_ERR_LOST, so it is constant from
+ *                               open to close.
+ *     PSYSCR_HAS_GL_EPOCH is defined when both exist.
  *
  *   TIERS (psyscr_tier, record.tier, caps.worst_tier, desc.min_tier)
  *     Each flip gets a tier from its backend, its path and the source of its
@@ -413,7 +522,7 @@
  *     vblank it was planned for. For tests, CI and dry runs of a timeline.
  *   PSYSCR_BACKEND_CUSTOM
  *     desc.presenter and desc.presenter_ctx: your swap path (PRESENTER).
- *   Not implemented in v0.2; open() refuses them with a message:
+ *   Not implemented in v0.3; open() refuses them with a message:
  *     PSYSCR_BACKEND_GLX_OML (Linux X11),
  *     PSYSCR_BACKEND_WAYLAND (presentation-time), PSYSCR_BACKEND_METAL
  *     (macOS through ANGLE), PSYSCR_BACKEND_WEB (requestAnimationFrame).
@@ -433,7 +542,11 @@
  *   decision when to present, the patch (unless the presenter sets
  *   draws_patch and paints the rectangle in present), drops, records and
  *   the ring. The presenter owns its OS objects and converts its times to
- *   the psy_rt clock. The core calls a presenter from the thread that calls
+ *   the psy_rt clock. Version 2 adds: psyscr_present_req.codes, n_codes and
+ *   verify (drawn after the patch by a presenter with draws_patch); in the
+ *   open struct n_codes, want_gpu_done and three counters a presenter that
+ *   reads codes back writes; and gpu_done(), the highest present id whose
+ *   GPU work has finished, called from the trigger worker thread. The core calls a presenter from the thread that calls
  *   begin and flip, never from two threads at once; acquire may block,
  *   present and completions must not block past their OS call. A presenter
  *   with native_target in its caps shows a frame on req->target_count
@@ -456,6 +569,203 @@
  *   write mask and GL_RASTERIZER_DISCARD; nothing else. The patch is for
  *   the loopback test: toggle it with the stimulus, and a photodiode on
  *   that corner measures when the frame appeared.
+ *
+ *   ---------------------------------------------------------------------
+ *   CODES (desc.codes, psyscr_code, psyscr_code_frames, psyscr_code_row)
+ *   ---------------------------------------------------------------------
+ *   A code is a pixel value a device reads from the video signal, so the
+ *   display itself times the trigger. desc.codes declares up to
+ *   PSYSCR_MAX_CODES slots at open: a SOLID rectangle of one value, or a
+ *   ROW of w pixels each with its own value (PSYSCR_CODE_ROW_PIXELS in all
+ *   ROW slots together). Values are 0xBBGGRR, red in bits 0 to 7, exact
+ *   device values (8 bits per channel). Each slot shows its rest value
+ *   until you set it: psyscr_code() for the next flip only,
+ *   psyscr_code_frames() for n flips or PSYSCR_CODE_HOLD, and
+ *   psyscr_code_row() for a ROW. Codes are drawn last, after your frame
+ *   and after the patch, on every flip.
+ *     Pixel Mode (VPixx VIEWPixx, VIEWPixx /EEG and /3D, DATAPixx and
+ *       DATAPixx3, PROPixx): the device sets its digital outputs from the
+ *       top-left pixel of each frame, bits 0 to 7 from red, 8 to 15 from
+ *       green, 16 to 23 from blue, and holds them while the pixel stays.
+ *       psyscr_slot_pixel_mode() is that pixel; psyscr_pixel_mode_bits()
+ *       gives the value for 24 output bits. Turn the mode on with VPixx's
+ *       own tools (Datapixx('EnablePixelMode') in Psychtoolbox).
+ *     Pixel sync (VPixx): a register write on the device waits for a
+ *       sequence of pixels on a chosen raster line (VPixx recommends at
+ *       least 8). psyscr_slot_psync() is where Psychtoolbox's PsychDataPixx
+ *       draws it, 8 pixels on scanline 0 from x = 10, and
+ *       psyscr_psync_pattern() its values. The USB register side is not in
+ *       this header.
+ *     Bits# T-Lock packets fit a ROW slot; this header builds no packet.
+ *   Drawing. DXGI_FLIP and COMPOSITION: a SOLID slot is one
+ *   ID3D11DeviceContext1::ClearView; a ROW of up to 8 pixels is one
+ *   ClearView per pixel, a longer one an UpdateSubresource (CODES in
+ *   STATUS has the costs); after ANGLE's flush, so no GL state changes. On
+ *   a presenter without draws_patch the core clears through GL, one
+ *   scissored clear per SOLID slot and per ROW pixel, with the patch's
+ *   save-and-restore list. open() refuses slots that overlap each other or
+ *   the patch (the default top-left patch is on the Pixel Mode pixel: move
+ *   it with desc.patch.corner), slots outside the display, and codes on a
+ *   windowed screen, which is not at the display's origin.
+ *   Exactness. At open, DXGI_FLIP and COMPOSITION draw all 256 values of
+ *   each channel through both drawing paths into a test texture and read
+ *   them back (selftest= in the describe line). desc.verify_codes = N
+ *   copies the first row of each code to a staging texture every N flips
+ *   and compares it one flip later (psyscr_code_verify()). Both check the
+ *   back buffer only. What happens after it, the header reports where it
+ *   can, in record.code_risk (and PSYSCR_FLIP_CODE_AT_RISK in the flags):
+ *     COMPOSED        this flip went through DWM
+ *     ADVANCED_COLOR  HDR or auto color management is on (Windows
+ *                     DisplayConfig); DWM and the display kernel convert
+ *                     colors then
+ *     GAMMA           the OS gamma ramp is not identity (OS GAMMA)
+ *     SCALED          the mode is not the panel's preferred mode
+ *     UNVERIFIED      the self test did not run (SIM, a custom presenter)
+ *     VERIFY_FAILED   a read-back differed (sticky)
+ *     STATE_UNKNOWN   the display state could not be read
+ *   It cannot see Night Light, accessibility color filters, the MHC
+ *   calibration pipeline (matrix and LUT at scanout), GPU dithering, or the
+ *   display's own processing; the describe line says mhc=unknown and
+ *   nightlight=unknown. Check on the rig with the device's own read-back
+ *   (VPixx: the top line through vline). desc.codes_strict makes open()
+ *   fail when a display-wide risk is set.
+ *   The ring gets one PSYSCR_EV_CODE record per flip on a screen with
+ *   codes: t_ns the onset, u.u32[0] the frame index, u.u16[2] code_risk,
+ *   u.u16[3] the slot count, u.u32[2..9] the value of each slot (a ROW's
+ *   first pixel).
+ *
+ *   ---------------------------------------------------------------------
+ *   OS GAMMA (desc.keep_os_gamma)
+ *   ---------------------------------------------------------------------
+ *   A device value is only exact if nothing changes it after the back
+ *   buffer. A fullscreen screen on Windows reads the display's gamma ramp
+ *   at open (GetDeviceGammaRamp). If it is not the 8-bit identity, it sets
+ *   the identity (SetDeviceGammaRamp) and reads it back. At close, at
+ *   exit() (atexit) and when SDL posts its quit event, it puts back the
+ *   ramp it read. A crash leaves the identity ramp until the next mode
+ *   change, logoff or another program sets one. A window never touches
+ *   the ramp; desc.keep_os_gamma = true leaves a fullscreen screen's ramp
+ *   alone too. The describe line says os_gamma=identity (it was),
+ *   set, refused (Windows did not take it), unreadable, or the same with
+ *   (kept); anything but identity or set sets CODE_RISK_GAMMA.
+ *   Microsoft documents limits on these calls: SetDeviceGammaRamp may
+ *   return success and not set a ramp, other programs and the OS may
+ *   overwrite it at any time, a display event resets it, and its behavior
+ *   is undefined in HDR. The ramp is checked at open only: one read costs
+ *   0.8 ms (measured), too much for the frame loop. Whether the ramp acts
+ *   on frames shown by independent flip or on an overlay plane, and
+ *   whether Night Light replaces it, was not measured (it needs light or
+ *   a capture card); do not rely on it there. Out of reach of this header:
+ *   the MHC calibration pipeline, Night Light, HDR and auto color
+ *   management. Later work: CGSetDisplayTransferByTable (macOS), the RandR
+ *   CRTC gamma (X11), and wlr-gamma-control on wlroots compositors
+ *   (Wayland has no general protocol).
+ *
+ *   ---------------------------------------------------------------------
+ *   TRIGGERS (desc.triggers, psyscr_trigger, psyscr_trigger_at)
+ *   ---------------------------------------------------------------------
+ *   desc.triggers declares up to PSYSCR_MAX_TRIGGERS channels: a callback,
+ *   its context and an offset. psyscr_trigger(s, channel, code), between
+ *   begin() and flip_at(), runs that callback at this flip's planned
+ *   vblank + desc.onset_offset_ns + the channel's offset, on a deadline
+ *   worker (psy_rt.h WORKER) that open() starts when desc.n_triggers > 0.
+ *   The callback runs on that thread, elevated; keep it to a port write:
+ *       static void ttl(void* port, const psyscr_trigger_info* i) {
+ *           psyp_pulse_async((psyp_port*)port, (uint8_t)i->code, 2000);
+ *       }
+ *   psyp_pulse_async() writes the leading edge on the calling thread, here
+ *   the worker at the deadline. psyscr_trigger_at(s, channel, code, t)
+ *   fires at time t, tied to no flip.
+ *   When the header learns that a flip will be late, its triggers move:
+ *     the caller was late    flip_at() planned a later vblank before the
+ *                            trigger was armed (LATE_TARGET); no move
+ *     the present returned   past the planned vblank's latch: the trigger
+ *                            is armed for the vblank the frame can still
+ *                            make (PSYSCR_TRIG_MOVED)
+ *     the record completes   before the trigger fired, on another vblank:
+ *                            it moves to that vblank (COMPOSITION's
+ *                            composed path reports before the vblank)
+ *     desc.trigger_fence     the worker checks a D3D11 fence 1 ms before
+ *                            the deadline; GPU work not done means the
+ *                            frame will miss, and the trigger moves one
+ *                            vblank (PSYSCR_TRIG_GPU_MOVED). Off by
+ *                            default (TRIGGERS in STATUS)
+ *   A miss learned only from the statistic, after the trigger fired, is a
+ *   mismatch: the result says FIRED_EARLY and by how many vblanks. A move
+ *   never fires a trigger twice: a trigger the worker has taken cannot
+ *   move, under one lock. close() stops the worker, which runs anything
+ *   still armed at once with PSYSCR_TRIG_FLUSHED: a callback should not
+ *   pulse then. A frame takes at most PSYSCR_MAX_JOBS triggers, and as
+ *   many can be pending (PSYSCR_ERR_REFUSED beyond).
+ *   Where the worker runs (desc.trigger_cpu). The rule: keep the worker
+ *   off the CPUs that service the display's vblank DPC. A DPC runs ahead
+ *   of every thread, at any priority, so a worker spinning on that CPU at
+ *   the vblank waits for it. Which CPUs those are depends on the machine:
+ *   the GPU, its driver, the interrupt affinity policy, the core types.
+ *   This header knows one machine. On the laptop of STATUS (i7-1360P,
+ *   Iris Xe) the DPC took 50 to 400 us from about 75 us before the vblank,
+ *   2 to 3% of one P-core, on the P-core the worker spun on, and made
+ *   about 1 trigger in 30 over 20 us late; on the E-cores it did not reach
+ *   the worker (p99 1 to 3 us). So the default, on Windows on a hybrid
+ *   CPU, is a hard affinity mask of the E-cores (with a soft E-core
+ *   preference Windows still ran the worker on P-cores). That is this
+ *   machine's answer, not a rule: on a CPU of one core type there are no
+ *   E-cores and the default is psy_rt.h's placement, and on another GPU or
+ *   interrupt policy the E-cores may be the busy ones. Check it: run
+ *   examples/screen_flipstats.c --trigger, which prints the late triggers
+ *   per CPU, and read "% DPC Time" per processor (typeperf) during a run.
+ *   k > 0 pins the worker to logical CPU k - 1 (a pinned worker cannot
+ *   leave a busy CPU: measured up to 48 ms late); -1 leaves it where
+ *   psy_rt.h puts it (the P-cores of a hybrid CPU). The describe line
+ *   says where: worker=TIME_CRITICAL/E-cores:cpus=0xff00, .../pinned:
+ *   cpus=0x..., or .../psy_rt. Later: at open, sample the DPC count of
+ *   each CPU for about 0.5 s and place the worker away from the busiest.
+ *   desc.trigger_spin_ns is the worker's spin window (psy_rt.h WAITS).
+ *   After a flip trigger fires, the worker arms itself 50 us before the
+ *   next vblank's deadline, so the next frame's trigger needs no wake-up
+ *   from the frame thread; when no trigger comes, that costs the worker
+ *   one spin window for nothing.
+ *   The ring gets one PSYSCR_EV_TRIGGER record per trigger when its flip
+ *   has completed and it fired or was canceled: t_ns the fired time (the
+ *   deadline if not fired), u.i64[0] the deadline, u.i64[1] the flip's
+ *   onset, u.u32[4] the code, u.u32[5] the frame index, u.u16[12] the
+ *   channel, u.u16[13] the flags, u.i32[7] the mismatch in vblanks,
+ *   u.i32[8] fired minus deadline in ns.
+ *
+ *   ---------------------------------------------------------------------
+ *   AFTER FLIP (psyscr_on_flip)
+ *   ---------------------------------------------------------------------
+ *   psyscr_on_flip(s, fn, ctx) calls fn with each completed record, oldest
+ *   first, and the results of its triggers, on the frame thread, wherever
+ *   records complete: begin(), wait_flip(), close(). For network markers
+ *   (stamp them with the record's onset, not with "now"), logs, and
+ *   trigger mismatches. It is late by design, by how long the record takes
+ *   to complete (TRIGGERS in STATUS); on COMPOSITION's composed path it
+ *   runs before the frame is on the screen, because the statistic is DWM's
+ *   plan (ONSET_PLANNED). A trigger not fired yet when its record
+ *   completes has PSYSCR_TRIG_PENDING. fn's time counts in begin().
+ *
+ *   ---------------------------------------------------------------------
+ *   NATIVE HANDLES (psyscr_native)
+ *   ---------------------------------------------------------------------
+ *   psyscr_native(s, &out) gives a DXGI_FLIP or COMPOSITION screen's
+ *   D3D11 device, its immediate context, ANGLE's EGL display and the LUID
+ *   of the adapter the device is on, for a library that shares textures
+ *   with the screen (psy_video.h's GPU path). Any other backend or
+ *   platform: PSYSCR_ERR_NOT_IMPLEMENTED and zeros.
+ *     Lifetime  the pointers are borrowed: no reference is added. They are
+ *               valid from open() to close(); keep none past close(), and
+ *               release any object you made on the device before it.
+ *     Threads   the device is free-threaded (created without
+ *               D3D11_CREATE_DEVICE_SINGLETHREADED): another thread may
+ *               create resources on it. The immediate context is the frame
+ *               thread's, shared with ANGLE: use it only on the frame
+ *               thread, between begin() and flip_at(), and leave no state
+ *               bound in it, because ANGLE caches the context's state and
+ *               does not know of your calls.
+ *     Video     the device has no D3D11_CREATE_DEVICE_VIDEO_SUPPORT and
+ *               no multithread protection (ID3D10Multithread); a decoder
+ *               that needs them makes its own device on the same LUID.
  *
  *   ---------------------------------------------------------------------
  *   INPUT
@@ -530,12 +840,14 @@
  *   ---------------------------------------------------------------------
  *   The handle holds everything; nothing is allocated after open(), and
  *   the frame loop makes no allocation of its own (measured: 0 C runtime
- *   heap calls from the header in a debug build). The handle is about 2.7
- *   KB. One thread calls begin, flip and the rest for a screen. open() and
- *   close() of different screens must not run at the same time, because
- *   ANGLE's libEGL is loaded once per process and never unloaded. No
- *   function starts a thread. Raise the frame thread with
- *   psyrt_thread_elevate() before open.
+ *   heap calls from the header in a debug build). The handle is about 22
+ *   KB, most of it the code rows and the depth evidence. One thread calls
+ *   begin, flip and the rest for a screen. open() and close() of different
+ *   screens must not run at the same time, because ANGLE's libEGL is
+ *   loaded once per process and never unloaded. open() starts one thread
+ *   only when desc.n_triggers > 0: the trigger worker (TRIGGERS), which
+ *   close() stops. Raise the frame thread with psyrt_thread_elevate()
+ *   before open.
  *
  *   ---------------------------------------------------------------------
  *   BUILDING
@@ -565,9 +877,9 @@
 #define PSY_SCREEN_H_INCLUDED
 
 #define PSYSCR_VERSION_MAJOR 0
-#define PSYSCR_VERSION_MINOR 2
+#define PSYSCR_VERSION_MINOR 3
 #define PSYSCR_VERSION_PATCH 0
-#define PSYSCR_VERSION_STRING "0.2.0"
+#define PSYSCR_VERSION_STRING "0.3.0"
 
 #include "psy_rt.h"
 
@@ -627,6 +939,8 @@ union SDL_Event;
 #define PSYSCR_FLIP_ONSET_PLANNED 0x100u /* onset is the vblank the system
                                           * planned, not one it observed    */
 #define PSYSCR_FLIP_BELOW_TIER    0x200u /* tier worse than desc.min_tier   */
+#define PSYSCR_FLIP_CODE_AT_RISK  0x400u /* record.code_risk is not 0; not in
+                                          * the ring's mode word (CODES)    */
 
 /* How far a flip's onset can be trusted, from its backend, path and the
  * source of its time (TIERS in the manual). Lower is better. */
@@ -648,6 +962,8 @@ typedef enum psyscr_tier {
 #define PSYSCR_EV_PATH      2u
 #define PSYSCR_EV_MODE      3u
 #define PSYSCR_EV_REPRESENT 4u   /* reserved for variable refresh           */
+#define PSYSCR_EV_TRIGGER   5u   /* one at-onset trigger (TRIGGERS)         */
+#define PSYSCR_EV_CODE      6u   /* the codes in one flip (CODES)           */
 
 /* Patch corners. */
 #define PSYSCR_TOP_LEFT     0
@@ -720,6 +1036,101 @@ typedef struct psyscr_patch {
     int32_t corner;            /* PSYSCR_TOP_LEFT .. PSYSCR_BOTTOM_RIGHT        */
 } psyscr_patch;
 
+/* --- codes: exact device values in the frame (CODES) ---------------------- */
+
+#define PSYSCR_MAX_CODES        8
+#define PSYSCR_CODE_ROW_PIXELS  1024   /* all ROW slots together             */
+#define PSYSCR_CODE_HOLD        (-1)   /* frames: until changed              */
+
+typedef enum psyscr_code_kind {
+    PSYSCR_CODE_SOLID = 0,     /* a rectangle of one value                     */
+    PSYSCR_CODE_ROW   = 1      /* w pixels of one row, each its own value      */
+} psyscr_code_kind;
+
+/* A code slot, declared at open. Values are 0xBBGGRR: red in bits 0 to 7. */
+typedef struct psyscr_code_slot {
+    int32_t  kind;             /* psyscr_code_kind                             */
+    int32_t  x, y;             /* display pixels, top-left origin              */
+    int32_t  w, h;             /* ROW: w pixels; h is taken as 1               */
+    uint32_t rest;             /* the value between codes, every pixel         */
+} psyscr_code_slot;
+
+/* One code as the swap path draws it this flip. */
+typedef struct psyscr_code_draw {
+    int32_t         x, y, w, h;
+    uint32_t        value;     /* SOLID                                        */
+    const uint32_t* px;        /* ROW: w values; NULL for SOLID                */
+} psyscr_code_draw;
+
+/* record.code_risk: why a code pixel may not reach the display exactly. */
+#define PSYSCR_CODE_RISK_COMPOSED       0x0001u /* this flip went through DWM */
+#define PSYSCR_CODE_RISK_ADVANCED_COLOR 0x0002u /* HDR or auto color management */
+#define PSYSCR_CODE_RISK_GAMMA          0x0004u /* the OS ramp is not identity  */
+#define PSYSCR_CODE_RISK_SCALED         0x0008u /* mode is not the panel's own  */
+#define PSYSCR_CODE_RISK_UNVERIFIED     0x0010u /* the open-time self test did not run */
+#define PSYSCR_CODE_RISK_VERIFY_FAILED  0x0020u /* a read-back differed (sticky) */
+#define PSYSCR_CODE_RISK_STATE_UNKNOWN  0x0040u /* the display state was not readable */
+
+/* --- triggers at onset (TRIGGERS) ----------------------------------------- */
+
+#define PSYSCR_MAX_TRIGGERS 8
+#define PSYSCR_MAX_JOBS     16
+
+/* psyscr_trigger_info.flags and psyscr_trigger_result.flags */
+#define PSYSCR_TRIG_MOVED       0x0001u /* armed for a later vblank than planned */
+#define PSYSCR_TRIG_FIRED_EARLY 0x0002u /* fired, then the frame was shown later */
+#define PSYSCR_TRIG_FIRED_LATE  0x0004u /* fired, then the frame was shown earlier */
+#define PSYSCR_TRIG_WORKER_LATE 0x0008u /* fired over 1 ms after its deadline    */
+#define PSYSCR_TRIG_CANCELED    0x0010u /* never fired: its flip was not shown   */
+#define PSYSCR_TRIG_FLUSHED     0x0020u /* run early by close()                  */
+#define PSYSCR_TRIG_NOT_SHOWN   0x0040u /* its flip was skipped or canceled      */
+#define PSYSCR_TRIG_PENDING     0x0080u /* not fired yet when reported           */
+#define PSYSCR_TRIG_GPU_MOVED   0x0100u /* moved: the GPU had not finished       */
+#define PSYSCR_TRIG_ESTIMATED   0x0200u /* its flip has no OS time               */
+
+typedef struct psyscr_trigger_info {
+    int64_t  deadline_ns;      /* planned vblank + onset offset + channel offset */
+    int64_t  fired_ns;         /* the clock as the callback starts            */
+    int64_t  woke_ns;          /* the clock as psy_rt.h's worker entered the
+                                * job, after its spin: woke_ns - deadline_ns
+                                * is psy_rt.h's own lateness                */
+    int64_t  lock_ns;          /* then the wait for the trigger lock         */
+    int64_t  frame;            /* flip index; -1 for psyscr_trigger_at()      */
+    uint32_t code;
+    uint16_t channel;
+    uint16_t flags;            /* MOVED, GPU_MOVED, FLUSHED                   */
+} psyscr_trigger_info;
+
+typedef void (*psyscr_trigger_fn)(void* ctx, const psyscr_trigger_info* info);
+
+typedef struct psyscr_trigger_desc {
+    psyscr_trigger_fn fn;
+    void*       ctx;
+    int64_t     offset_ns;     /* added to the planned vblank + onset offset  */
+    const char* name;
+} psyscr_trigger_desc;
+
+typedef struct psyscr_trigger_result {
+    int64_t  deadline_ns;
+    int64_t  fired_ns;         /* 0 = not fired                               */
+    int64_t  onset_ns;         /* the flip's onset; 0 = not shown             */
+    int64_t  frame;
+    uint32_t code;
+    uint16_t channel;
+    uint16_t flags;
+    int32_t  mismatch;         /* vblank shown minus vblank fired for         */
+    int32_t  reserved_;
+} psyscr_trigger_result;
+
+/* What psyscr_on_present()'s callback gets. */
+typedef struct psyscr_present_info {
+    int64_t index;             /* frame number                                */
+    int64_t onset;             /* begin()'s predicted onset                   */
+    int32_t w, h;              /* drawable pixels                             */
+    int32_t rows_top_down;     /* 1: GL row 0 is the top of the screen        */
+    int32_t reserved_;
+} psyscr_present_info;
+
 /* The record of one flip. */
 typedef struct psyscr_record {
     int64_t  index;      /* frame number                                      */
@@ -732,7 +1143,13 @@ typedef struct psyscr_record {
     uint8_t  tier;       /* psyscr_tier                                       */
     uint16_t flags;      /* PSYSCR_FLIP_*                                     */
     uint32_t phase_ns[PSYSCR_N_PHASES];
+    uint16_t code_risk;  /* PSYSCR_CODE_RISK_*; 0 on a screen with no codes   */
+    uint16_t reserved_;
 } psyscr_record;
+
+typedef void (*psyscr_flip_fn)(void* ctx, const psyscr_record* r,
+                               const psyscr_trigger_result* trig, int n_trig);
+typedef void (*psyscr_present_fn)(void* ctx, const psyscr_present_info* info);
 
 /* What the frame loop draws for. */
 typedef struct psyscr_frame {
@@ -741,7 +1158,27 @@ typedef struct psyscr_frame {
     int64_t index;       /* frame number, 0 for the first                     */
     int64_t vblank;      /* the vblank count it is planned for                */
     const psyscr_record* last; /* newest completed flip record; NULL before one */
+    /* Every flip record completed since the begin() before this one, in
+     * completion order (records complete in begin(), flip_at(),
+     * wait_flip()); last is the final one. Valid until the next begin(). */
+    const psyscr_record* done;
+    int32_t  n_done;
+    uint32_t done_lost;  /* records that did not fit (PSYSCR_MAX_DONE), since open */
 } psyscr_frame;
+
+/* The records one psyscr_frame can carry in done. One frame in flight
+ * completes at most a few per begin(); more means begin() was not called
+ * while many flips completed. */
+#define PSYSCR_MAX_DONE 16
+
+/* Native handles of a swap path on Windows (psyscr_native()). */
+typedef struct psyscr_native_info {
+    void*    d3d11_device;   /* ID3D11Device*, the device ANGLE renders with  */
+    void*    d3d11_context;  /* its immediate ID3D11DeviceContext*            */
+    void*    egl_display;    /* ANGLE's EGLDisplay                            */
+    uint32_t luid_low;       /* the adapter's LUID (DXGI_ADAPTER_DESC.AdapterLuid) */
+    int32_t  luid_high;
+} psyscr_native_info;
 
 /* --- presenter (the swap-path interface) ------------------------------- */
 
@@ -749,7 +1186,7 @@ typedef struct psyscr_frame {
  * ISO C converts between function pointer types, not to and from void*. */
 typedef void (*psyscr_proc)(void);
 
-#define PSYSCR_PRESENTER_VERSION 1
+#define PSYSCR_PRESENTER_VERSION 2
 
 typedef struct psyscr_vblank {
     uint64_t present_id;     /* the present it completes; 0 = a bare vblank */
@@ -770,6 +1207,9 @@ typedef struct psyscr_present_req {
     int32_t  patch_on;       /* paint the patch, when draws_patch            */
     int32_t  patch_x, patch_y, patch_w, patch_h;   /* pixels, top-left origin */
     float    patch_value;    /* gray, 0..1                                   */
+    int32_t  verify;         /* 1: read the codes back (draws_patch)         */
+    const psyscr_code_draw* codes;      /* drawn after the patch, when draws_patch */
+    int32_t  n_codes;
     int32_t  reserved_;
 } psyscr_present_req;
 
@@ -779,6 +1219,12 @@ typedef struct psyscr_presenter_open {
     const psyscr_mode*  mode;
     const char*         angle_dir;
     int64_t             sim_period_ns;
+    int32_t             n_codes;   /* code slots: run the code self test      */
+    int32_t             want_gpu_done;  /* desc.trigger_fence: set up gpu_done */
+    /* Written by a presenter that draws codes and reads them back: */
+    uint32_t*           code_checked;  /* codes compared                     */
+    uint32_t*           code_failed;   /* codes that differed                */
+    int32_t*            code_selftest; /* 1 passed, -1 failed, 0 not run     */
 } psyscr_presenter_open;
 
 typedef struct psyscr_presenter {
@@ -796,6 +1242,9 @@ typedef struct psyscr_presenter {
     psyscr_proc (*gl_proc)(void* ctx, const char* name); /* may be NULL        */
     void  (*bind)(void* ctx);                         /* may be NULL           */
     int   (*describe)(void* ctx, char* buf, size_t cap); /* may be NULL        */
+    /* The highest present_id whose GPU work has finished, or 0 if unknown.
+     * Called from the trigger worker thread; may be NULL. */
+    uint64_t (*gpu_done)(void* ctx);
 } psyscr_presenter;
 
 /* --- open ---------------------------------------------------------------- */
@@ -819,6 +1268,20 @@ typedef struct psyscr_desc {
     const char*    angle_dir;
     const psyscr_presenter* presenter;   /* BACKEND_CUSTOM                     */
     void*          presenter_ctx;
+    /* codes (CODES) */
+    psyscr_code_slot codes[PSYSCR_MAX_CODES];
+    int32_t        n_codes;
+    int32_t        verify_codes;     /* read the codes back every N flips; 0 = off */
+    bool           codes_strict;     /* open() fails when codes are at risk   */
+    /* the OS gamma ramp (OS GAMMA) */
+    bool           keep_os_gamma;    /* fullscreen: leave the OS ramp alone   */
+    /* triggers at onset (TRIGGERS) */
+    bool           trigger_fence;    /* move a trigger when the GPU is late   */
+    int32_t        trigger_cpu;      /* 0 = default: E-cores on a hybrid CPU (TRIGGERS);
+                                      * k > 0 = logical CPU k - 1; -1 = psy_rt.h's */
+    uint32_t       trigger_spin_ns;  /* the worker's spin window; 0 = psy_rt's default */
+    const psyscr_trigger_desc* triggers;  /* copied at open                   */
+    int32_t        n_triggers;
 } psyscr_desc;
 
 /* Private. One flip between flip_at() and its completion. */
@@ -828,6 +1291,7 @@ typedef struct psyscr__pend {
     int64_t     planned_count;
     int64_t     count_at_present;
     int64_t     t_ret;            /* when the present call returned         */
+    uint32_t    code_vals[PSYSCR_MAX_CODES];  /* for the CODE record        */
     int32_t     asap;
     int32_t     used;
 } psyscr__pend;
@@ -838,7 +1302,25 @@ typedef struct psyscr__pend {
 #define PSYSCR__SLACK_BINS  128
 #define PSYSCR__SLACK_PATHS 5
 #define PSYSCR__SLACK_DECAY 4096   /* flips between halvings of the counts  */
-#define PSYSCR__BACKEND_WORDS 128
+#define PSYSCR__BACKEND_WORDS 192
+
+/* Private. One at-onset trigger job. */
+typedef struct psyscr__job {
+    int32_t  state;            /* 0 free, 1 armed, 2 firing, 3 fired, 4 canceled */
+    uint16_t channel, flags;
+    uint32_t code;
+    int32_t  mismatch;
+    uint64_t pend_id;          /* the flip's present id; 0 = trigger_at        */
+    int64_t  frame;
+    int64_t  count;            /* the vblank it fires for                      */
+    int64_t  deadline;
+    int64_t  wake;             /* deadline, or the GPU check before it         */
+    int64_t  fired;
+    int64_t  onset;
+    int64_t  period;           /* for a move the worker makes                  */
+    int32_t  flip_done;
+    int32_t  check;            /* 1: check the GPU at wake, then fire          */
+} psyscr__job;
 
 /* The screen. Caller-allocated and zeroed; every field is private. */
 typedef struct psyscr_screen {
@@ -871,6 +1353,7 @@ typedef struct psyscr_screen {
     double                  nominal_f;
     int64_t                 margin_ns;
     int32_t                 depth, depth_cand, depth_votes, depth_need;
+    int32_t                 adopt_left;   /* queued flips a path change's window survives */
     int32_t                 last_obs, obs_streak;
     int32_t                 depth_of[PSYSCR__SLACK_PATHS];   /* 0 = not known yet */
     int32_t                 lower_streak, fresh_lower;
@@ -882,6 +1365,11 @@ typedef struct psyscr_screen {
     int32_t                 min_tier;
     int32_t                 worst_tier;
     int64_t                 prev_shown;
+    int64_t                 last_planned; /* the vblank flip_at() last planned */
+    psyscr_record           fin[PSYSCR_MAX_DONE];   /* completed since begin() returned */
+    psyscr_record           fin_out[PSYSCR_MAX_DONE]; /* the list the frame shows */
+    int32_t                 n_fin, n_fin_out;
+    uint32_t                fin_lost;
     /* this frame */
     int64_t                 index;
     int64_t                 pred_count;
@@ -896,6 +1384,46 @@ typedef struct psyscr_screen {
     uint64_t                sdl_width;
     /* GL, through the presenter */
     psyscr_proc             gl[16];
+    /* hooks */
+    psyscr_flip_fn          on_flip;
+    void*                   on_flip_ctx;
+    psyscr_present_fn       on_present;
+    void*                   on_present_ctx;
+    uint32_t                gl_epoch;
+    uint32_t                gl_generation;
+    /* codes */
+    int32_t                 n_codes;
+    psyscr_code_slot        code_slot[PSYSCR_MAX_CODES];
+    uint32_t                code_val[PSYSCR_MAX_CODES];
+    int32_t                 code_left[PSYSCR_MAX_CODES];  /* flips; -1 hold; 0 rest */
+    int32_t                 code_off[PSYSCR_MAX_CODES];   /* ROW: start in code_px */
+    int32_t                 code_buf;                     /* which frame buffer   */
+    uint32_t                code_px[PSYSCR_CODE_ROW_PIXELS];
+    uint32_t                code_frame_px[2][PSYSCR_CODE_ROW_PIXELS];
+    psyscr_code_draw        code_draw[2][PSYSCR_MAX_CODES];
+    int32_t                 verify_every, code_selftest;
+    uint32_t                code_checked, code_failed;
+    uint16_t                code_risk;    /* display-wide part                  */
+    char                    os_color[160]; /* for the describe line             */
+    int32_t                 gamma_owned;
+    /* triggers */
+    int32_t                 n_trig, trig_on, trig_fence, worker_on, trig_cpu;
+    char                    trig_cores;   /* 'E' E-cores, 'N' pinned, 0 psy_rt.h's choice */
+    uint64_t                trig_mask;    /* the worker's CPUs when trig_cores is set */
+    uint32_t                trig_spin;
+    psyscr_trigger_desc     trig[PSYSCR_MAX_TRIGGERS];
+    psyscr__job             job[PSYSCR_MAX_JOBS];
+    int32_t                 n_req;
+    uint32_t                req_code[PSYSCR_MAX_JOBS];
+    uint16_t                req_ch[PSYSCR_MAX_JOBS];
+    int64_t                 armed_wake;
+    int64_t                 woke;           /* the worker's wake, for its callback */
+    uint32_t                trig_lost;      /* no free job at arm time         */
+    uint64_t                lock_mem[16];   /* a CRITICAL_SECTION or a mutex   */
+    int32_t                 lock_ok;
+#if !defined(PSYRT_NO_THREADS)
+    psyrt_worker            worker;
+#endif
     char                    error[256];
     uint64_t                backend_mem[PSYSCR__BACKEND_WORDS];
 } psyscr_screen;
@@ -997,6 +1525,59 @@ PSYSCR_API int  psyscr_wait_flip(psyscr_screen* s, psyscr_record* out);
 /* The patch's gray level for this and the next frames, clamped to 0..1. */
 PSYSCR_API void psyscr_set_patch(psyscr_screen* s, float v);
 
+/* --- codes (CODES) ---------------------------------------------------------
+ * A value for code slot `slot` (desc.codes[slot]), 0xBBGGRR, drawn on the
+ * next `frames` flips and then the slot's rest value. psyscr_code() is one
+ * flip; PSYSCR_CODE_HOLD holds it until the next call; 0 returns to rest
+ * now. psyscr_code_row() sets the n pixels of a ROW slot (the rest of the
+ * row takes the rest value). They return PSYSCR_OK or PSYSCR_ERR_ARG. */
+PSYSCR_API int psyscr_code(psyscr_screen* s, int slot, uint32_t rgb);
+PSYSCR_API int psyscr_code_frames(psyscr_screen* s, int slot, uint32_t rgb, int frames);
+PSYSCR_API int psyscr_code_row(psyscr_screen* s, int slot, const uint32_t* px, int n, int frames);
+/* VPixx Pixel Mode: the display's top-left pixel; digital out bits 0 to 7
+ * are red, 8 to 15 green, 16 to 23 blue, so the code is the 24-bit value. */
+PSYSCR_API psyscr_code_slot psyscr_slot_pixel_mode(void);
+PSYSCR_API uint32_t psyscr_pixel_mode_bits(uint32_t ttl24);   /* the code for 24 output bits */
+/* VPixx pixel sync as Psychtoolbox's PsychDataPixx draws it: 8 pixels on
+ * scanline 0 from x = 10. psyscr_psync_pattern() fills its 8 values. */
+PSYSCR_API psyscr_code_slot psyscr_slot_psync(void);
+PSYSCR_API void psyscr_psync_pattern(uint32_t out[8], uint8_t counter);
+/* The display-wide code risk (PSYSCR_CODE_RISK_*) and the read-back counts. */
+PSYSCR_API uint16_t psyscr_code_risk(const psyscr_screen* s);
+PSYSCR_API void psyscr_code_verify(const psyscr_screen* s, uint32_t* checked, uint32_t* failed);
+
+/* --- triggers (TRIGGERS) ---------------------------------------------------
+ * Fires desc.triggers[channel] for this frame's flip, at its planned vblank
+ * + desc.onset_offset_ns + the channel's offset, on the screen's deadline
+ * worker. Call between begin() and flip_at(). PSYSCR_ERR_REFUSED when the
+ * frame already has PSYSCR_MAX_JOBS triggers or the queue is full. */
+PSYSCR_API int psyscr_trigger(psyscr_screen* s, int channel, uint32_t code);
+/* The same at time t on the psy_rt clock, not tied to a flip. */
+PSYSCR_API int psyscr_trigger_at(psyscr_screen* s, int channel, uint32_t code, int64_t t);
+
+/* --- hooks -----------------------------------------------------------------
+ * After flip: fn gets each completed record, oldest first, with the results
+ * of its triggers, on the frame thread (AFTER FLIP). NULL removes it. */
+PSYSCR_API void psyscr_on_flip(psyscr_screen* s, psyscr_flip_fn fn, void* ctx);
+/* Before present: fn may draw into the back buffer with GL (PRESENT
+ * CALLBACK). NULL removes it. */
+PSYSCR_API void psyscr_on_present(psyscr_screen* s, psyscr_present_fn fn, void* ctx);
+/* Changes after every psyscr_on_present() callback, so a renderer that
+ * caches GL state knows to drop it. */
+PSYSCR_API uint32_t psyscr_gl_epoch(const psyscr_screen* s);
+/* Changes when the GL context is new: every GL object made before is gone.
+ * 0 while closed. Today only open() makes a context, so it is constant
+ * from open to close (a lost device ends the screen: PSYSCR_ERR_LOST). */
+PSYSCR_API uint32_t psyscr_gl_generation(const psyscr_screen* s);
+#define PSYSCR_HAS_GL_EPOCH 1
+
+/* --- native handles ---------------------------------------------------------
+ * The D3D11 device and immediate context, ANGLE's EGL display and the
+ * adapter LUID of a DXGI_FLIP or COMPOSITION screen (NATIVE HANDLES).
+ * PSYSCR_OK; PSYSCR_ERR_NOT_IMPLEMENTED on any other backend and platform,
+ * PSYSCR_ERR_CLOSED on a closed screen; out is zeroed then. */
+PSYSCR_API int psyscr_native(const psyscr_screen* s, psyscr_native_info* out);
+
 /* begin() and flip_at() on n screens. Each screen keeps its own grid, so
  * f[i].onset differ unless the displays are genlocked; flip_group_at snaps
  * t on each grid. PSYSCR_ERR_NOT_IMPLEMENTED for a swap path whose wait
@@ -1054,6 +1635,14 @@ PSYSCR_API const psyscr_param* psyscr_params(int* n);
     #define PSY_RT_IMPLEMENTATION
     #include "psy_rt.h"
 #endif
+#if defined(_WIN32)
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+#elif !defined(PSYRT_NO_THREADS)
+    #include <pthread.h>
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -1071,7 +1660,7 @@ PSYSCR_API const psyscr_param* psyscr_params(int* n);
         #define WIN32_LEAN_AND_MEAN
     #endif
     #include <windows.h>
-    #include <d3d11_1.h>
+    #include <d3d11_4.h>
     #include <dxgi1_5.h>
 #endif
 
@@ -1135,6 +1724,49 @@ enum {
 #define PSYSCR__SLEEP_UNTIL(t, spin) psyrt_sleep_until((uint64_t)(t), (spin))
 #endif
 static int64_t psyscr__now(void) { return PSYSCR__NOW(); }
+
+
+static void psyscr__push_code(psyscr_screen* s, const psyscr__pend* p);
+static void psyscr__trig_flip_done(psyscr_screen* s, const psyscr__pend* p, int64_t shown);
+static void psyscr__trig_emit(psyscr_screen* s);
+
+/* The trigger lock: frame thread and trigger worker. Stored in the handle's
+ * lock_mem, so the public header needs no OS type. */
+#if defined(PSYRT_NO_THREADS)
+static int  psyscr__lock_init(psyscr_screen* s) { (void)s; return 1; }
+static void psyscr__lock_free(psyscr_screen* s) { (void)s; }
+static void psyscr__lock(psyscr_screen* s) { (void)s; }
+static void psyscr__unlock(psyscr_screen* s) { (void)s; }
+#elif defined(_WIN32)
+typedef char psyscr__cs_fits[sizeof(CRITICAL_SECTION) <= sizeof(((psyscr_screen*)0)->lock_mem) ? 1 : -1];
+static int  psyscr__lock_init(psyscr_screen* s) { InitializeCriticalSection((CRITICAL_SECTION*)(void*)s->lock_mem); return 1; }
+static void psyscr__lock_free(psyscr_screen* s) { DeleteCriticalSection((CRITICAL_SECTION*)(void*)s->lock_mem); }
+/* A wait for the lock is a zone, so a trace shows who held whom up. */
+static void psyscr__lock(psyscr_screen* s) {
+    CRITICAL_SECTION* cs = (CRITICAL_SECTION*)(void*)s->lock_mem;
+    if (!s->lock_ok || TryEnterCriticalSection(cs)) return;
+    {
+        PSYRT_ZONE(z_wait, "psyscr.lockwait");
+        EnterCriticalSection(cs);
+        PSYRT_ZONE_END(z_wait);
+    }
+}
+static void psyscr__unlock(psyscr_screen* s) { if (s->lock_ok) LeaveCriticalSection((CRITICAL_SECTION*)(void*)s->lock_mem); }
+#else
+typedef char psyscr__mx_fits[sizeof(pthread_mutex_t) <= sizeof(((psyscr_screen*)0)->lock_mem) ? 1 : -1];
+static int  psyscr__lock_init(psyscr_screen* s) { return pthread_mutex_init((pthread_mutex_t*)(void*)s->lock_mem, NULL) == 0; }
+static void psyscr__lock_free(psyscr_screen* s) { pthread_mutex_destroy((pthread_mutex_t*)(void*)s->lock_mem); }
+static void psyscr__lock(psyscr_screen* s) {
+    pthread_mutex_t* m = (pthread_mutex_t*)(void*)s->lock_mem;
+    if (!s->lock_ok || pthread_mutex_trylock(m) == 0) return;
+    {
+        PSYRT_ZONE(z_wait, "psyscr.lockwait");
+        pthread_mutex_lock(m);
+        PSYRT_ZONE_END(z_wait);
+    }
+}
+static void psyscr__unlock(psyscr_screen* s) { if (s->lock_ok) pthread_mutex_unlock((pthread_mutex_t*)(void*)s->lock_mem); }
+#endif
 
 static void psyscr__set_error(char* buf, size_t cap, const char* fmt, ...) {
     va_list ap;
@@ -1409,7 +2041,7 @@ static int psyscr__sim_describe(void* ctx, char* buf, size_t cap) {
 static const psyscr_presenter psyscr__sim_presenter = {
     PSYSCR_PRESENTER_VERSION, "sim", false, false, false,
     psyscr__sim_open, psyscr__sim_close, psyscr__sim_acquire, psyscr__sim_present,
-    psyscr__sim_completions, NULL, NULL, psyscr__sim_describe
+    psyscr__sim_completions, NULL, NULL, psyscr__sim_describe, NULL
 };
 
 /* --- DXGI flip presenter (Windows 10 and 11) ------------------------------ */
@@ -1438,6 +2070,209 @@ static const IID psyscr__IID_IDXGISwapChain2 = {0xa8be2ac4,0x199f,0x4946,{0xb3,0
 static const IID psyscr__IID_IDXGISwapChainMedia = {0xdd95b90b,0xf05f,0x4f6a,{0xbd,0x65,0x25,0xbf,0xb2,0x64,0xbd,0x84}};
 static const IID psyscr__IID_ID3D11DeviceContext1 = {0xbb2c6faa,0xb5fb,0x4082,{0x8e,0x6b,0x38,0x8b,0x8c,0xfa,0x90,0xe1}};
 static const IID psyscr__IID_ID3D11Texture2D = {0x6f15aaf2,0xd208,0x4e89,{0x9a,0xb4,0x48,0x95,0x35,0xd3,0x4f,0x9c}};
+
+static const IID psyscr__IID_ID3D11Device5 = {0x8ffde202,0xa0e7,0x45df,{0x9e,0x01,0xe8,0x37,0x80,0x1b,0x5e,0xa0}};
+static const IID psyscr__IID_ID3D11DeviceContext4 = {0x917600da,0xf58c,0x4c33,{0x98,0xd8,0x3e,0x15,0xb3,0x90,0xfa,0x24}};
+static const IID psyscr__IID_ID3D11Fence = {0xaffde9d1,0x1df7,0x4bb7,{0x8a,0x34,0x0f,0x46,0x25,0x1d,0xab,0x80}};
+
+/* Codes, the read-back and the GPU fence: the same on both Windows swap
+ * paths, so one copy. */
+#define PSYSCR__STAGE_W 8192
+typedef struct psyscr__d3dcodes {
+    ID3D11DeviceContext4*   dctx4;
+    ID3D11Fence*            fence;
+    ID3D11Texture2D*        staging;         /* PSYSCR__STAGE_W x 1, read back */
+    const psyscr_code_draw* staged;          /* what was copied last present   */
+    int32_t                 n_staged;
+    uint32_t*               checked;
+    uint32_t*               failed;
+} psyscr__d3dcodes;
+
+/* Rows of up to this many pixels are drawn one ClearView per pixel; longer
+ * ones with one UpdateSubresource (measured: see CODES in STATUS). */
+static int psyscr__row_clear_max = 8;
+
+static void psyscr__d3d_color(uint32_t v, float c[4]) {
+    /* code / 255 in double, rounded once to float: the conversion back to
+     * UNORM8 rounds to the code (checked at open by the self test) */
+    c[0] = (float)((double)(v & 0xFFu) / 255.0);
+    c[1] = (float)((double)((v >> 8) & 0xFFu) / 255.0);
+    c[2] = (float)((double)((v >> 16) & 0xFFu) / 255.0);
+    c[3] = 1.0f;
+}
+
+static void psyscr__d3d_draw_codes(ID3D11DeviceContext* dc, ID3D11DeviceContext1* dc1, ID3D11RenderTargetView* rtv,
+                                   ID3D11Resource* tex, const psyscr_code_draw* codes, int n) {
+    int i, k;
+    for (i = 0; i < n; i++) {
+        const psyscr_code_draw* c = &codes[i];
+        D3D11_RECT r;
+        float col[4];
+        if (!c->px) {
+            r.left = c->x; r.top = c->y; r.right = c->x + c->w; r.bottom = c->y + c->h;
+            psyscr__d3d_color(c->value, col);
+            PSYSCR__CALL(dc1, ClearView, (ID3D11View*)rtv, col, &r, 1);
+        } else if (c->w <= psyscr__row_clear_max || !tex) {
+            for (k = 0; k < c->w; k++) {
+                r.left = c->x + k; r.top = c->y; r.right = c->x + k + 1; r.bottom = c->y + 1;
+                psyscr__d3d_color(c->px[k], col);
+                PSYSCR__CALL(dc1, ClearView, (ID3D11View*)rtv, col, &r, 1);
+            }
+        } else {
+            uint32_t row[PSYSCR_CODE_ROW_PIXELS];
+            D3D11_BOX b;
+            int w = c->w < PSYSCR_CODE_ROW_PIXELS ? c->w : PSYSCR_CODE_ROW_PIXELS;
+            for (k = 0; k < w; k++) row[k] = 0xFF000000u | (c->px[k] & 0xFFFFFFu);   /* RGBA8 in memory */
+            b.left = (UINT)c->x; b.right = (UINT)(c->x + w); b.top = (UINT)c->y; b.bottom = (UINT)(c->y + 1);
+            b.front = 0; b.back = 1;
+            PSYSCR__CALL(dc, UpdateSubresource, tex, 0, &b, row, (UINT)(w * 4), 0);
+        }
+    }
+}
+
+/* The read-back: the first row of each code is copied to a staging texture
+ * on one present and mapped on the next, when the GPU has long finished,
+ * so the frame loop never waits on it. */
+static void psyscr__d3d_verify_check(ID3D11DeviceContext* dc, psyscr__d3dcodes* q) {
+    D3D11_MAPPED_SUBRESOURCE m;
+    int i, k, x = 0;
+    if (!q->staged || !q->staging) return;
+    if (SUCCEEDED(PSYSCR__CALL(dc, Map, (ID3D11Resource*)q->staging, 0, D3D11_MAP_READ, 0, &m))) {
+        const uint32_t* row = (const uint32_t*)m.pData;
+        for (i = 0; i < q->n_staged; i++) {
+            const psyscr_code_draw* c = &q->staged[i];
+            int w = c->px ? c->w : (c->w < 64 ? c->w : 64), bad = 0;
+            for (k = 0; k < w && x + k < PSYSCR__STAGE_W; k++) {
+                uint32_t want = c->px ? c->px[k] : c->value;
+                if ((row[x + k] & 0xFFFFFFu) != (want & 0xFFFFFFu)) bad = 1;
+            }
+            x += w;
+            if (q->checked) (*q->checked)++;
+            if (bad && q->failed) (*q->failed)++;
+        }
+        PSYSCR__CALL(dc, Unmap, (ID3D11Resource*)q->staging, 0);
+    }
+    q->staged = NULL;
+}
+
+static void psyscr__d3d_verify_copy(ID3D11DeviceContext* dc, psyscr__d3dcodes* q, ID3D11Resource* tex,
+                                    const psyscr_code_draw* codes, int n) {
+    int i, x = 0;
+    if (!q->staging || !tex || n < 1) return;
+    for (i = 0; i < n; i++) {
+        const psyscr_code_draw* c = &codes[i];
+        int w = c->px ? c->w : (c->w < 64 ? c->w : 64);
+        D3D11_BOX b;
+        if (x + w > PSYSCR__STAGE_W) w = PSYSCR__STAGE_W - x;
+        if (w <= 0) break;
+        b.left = (UINT)c->x; b.right = (UINT)(c->x + w); b.top = (UINT)c->y; b.bottom = (UINT)(c->y + 1);
+        b.front = 0; b.back = 1;
+        PSYSCR__CALL(dc, CopySubresourceRegion, (ID3D11Resource*)q->staging, 0, (UINT)x, 0, 0, tex, 0, &b);
+        x += w;
+    }
+    q->staged = codes;
+    q->n_staged = n;
+}
+
+/* Open: the fence, the staging texture, and the self test: every value of
+ * every channel through both drawing paths, read back. */
+static void psyscr__d3d_codes_open(ID3D11Device* dev, ID3D11DeviceContext* dc, ID3D11DeviceContext1* dc1,
+                                   const psyscr_presenter_open* in, psyscr__d3dcodes* q) {
+    ID3D11Device5* dev5 = NULL;
+    memset(q, 0, sizeof *q);
+    q->checked = in->code_checked;
+    q->failed = in->code_failed;
+    if (in->want_gpu_done) {
+        PSYSCR__CALL(dev, QueryInterface, PSYSCR__IID(psyscr__IID_ID3D11Device5), (void**)&dev5);
+        PSYSCR__CALL(dc, QueryInterface, PSYSCR__IID(psyscr__IID_ID3D11DeviceContext4), (void**)&q->dctx4);
+        if (dev5 && q->dctx4)
+            PSYSCR__CALL(dev5, CreateFence, 0, D3D11_FENCE_FLAG_NONE, PSYSCR__IID(psyscr__IID_ID3D11Fence), (void**)&q->fence);
+        PSYSCR__RELEASE(dev5);
+        if (!q->fence) PSYSCR__RELEASE(q->dctx4);
+    }
+    if (in->n_codes > 0 && dc1) {
+        D3D11_TEXTURE2D_DESC td;
+        ID3D11Texture2D *t = NULL, *st = NULL;
+        ID3D11RenderTargetView* rv = NULL;
+        memset(&td, 0, sizeof td);
+        td.Width = PSYSCR__STAGE_W; td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        PSYSCR__CALL(dev, CreateTexture2D, &td, NULL, &q->staging);
+        /* self test on a 256 x 2 target: row 0 by ClearView, row 1 by
+         * UpdateSubresource, each pixel a different value per channel */
+        td.Width = 256; td.Height = 2; td.Usage = D3D11_USAGE_DEFAULT; td.CPUAccessFlags = 0;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        PSYSCR__CALL(dev, CreateTexture2D, &td, NULL, &t);
+        td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.BindFlags = 0;
+        PSYSCR__CALL(dev, CreateTexture2D, &td, NULL, &st);
+        if (t) PSYSCR__CALL(dev, CreateRenderTargetView, (ID3D11Resource*)t, NULL, &rv);
+        if (t && st && rv && in->code_selftest) {
+            uint32_t px[256];
+            psyscr_code_draw d[2];
+            D3D11_MAPPED_SUBRESOURCE m;
+            int i, bad = 0, keep = psyscr__row_clear_max;
+            for (i = 0; i < 256; i++)
+                px[i] = (uint32_t)i | ((uint32_t)(255 - i) << 8) | ((uint32_t)((i * 37 + 11) & 255) << 16);
+            d[0].x = 0; d[0].y = 0; d[0].w = 256; d[0].h = 1; d[0].value = 0; d[0].px = px;
+            d[1] = d[0]; d[1].y = 1;
+            psyscr__row_clear_max = 256;   /* row 0 by ClearView           */
+            psyscr__d3d_draw_codes(dc, dc1, rv, (ID3D11Resource*)t, &d[0], 1);
+            psyscr__row_clear_max = 0;     /* row 1 by UpdateSubresource   */
+            psyscr__d3d_draw_codes(dc, dc1, rv, (ID3D11Resource*)t, &d[1], 1);
+            psyscr__row_clear_max = keep;
+            PSYSCR__CALL(dc, CopyResource, (ID3D11Resource*)st, (ID3D11Resource*)t);
+            if (SUCCEEDED(PSYSCR__CALL(dc, Map, (ID3D11Resource*)st, 0, D3D11_MAP_READ, 0, &m))) {
+                const unsigned char* b = (const unsigned char*)m.pData;
+                int y;
+                for (y = 0; y < 2; y++) {
+                    const uint32_t* row = (const uint32_t*)(b + (size_t)y * m.RowPitch);
+                    for (i = 0; i < 256; i++) if ((row[i] & 0xFFFFFFu) != px[i]) bad++;
+                }
+                PSYSCR__CALL(dc, Unmap, (ID3D11Resource*)st, 0);
+                *in->code_selftest = bad ? -1 : 1;
+            } else {
+                *in->code_selftest = -1;
+            }
+        }
+        PSYSCR__RELEASE(rv);
+        PSYSCR__RELEASE(st);
+        PSYSCR__RELEASE(t);
+    }
+}
+
+static void psyscr__d3d_codes_close(psyscr__d3dcodes* q) {
+    PSYSCR__RELEASE(q->staging);
+    PSYSCR__RELEASE(q->fence);
+    PSYSCR__RELEASE(q->dctx4);
+    q->staged = NULL;
+}
+
+/* After ANGLE's flush: the patch, then the codes, the read-back, and the
+ * fence that tells the trigger worker this present's GPU work is done. */
+static void psyscr__d3d_finish_frame(ID3D11DeviceContext* dc, ID3D11DeviceContext1* dc1, ID3D11RenderTargetView* rtv,
+                                     ID3D11Resource* tex, psyscr__d3dcodes* q, const psyscr_present_req* req) {
+    psyscr__d3d_verify_check(dc, q);
+    if (req->patch_on && dc1 && rtv) {
+        D3D11_RECT r;
+        float c[4];
+        r.left = req->patch_x; r.top = req->patch_y;
+        r.right = req->patch_x + req->patch_w; r.bottom = req->patch_y + req->patch_h;
+        c[0] = c[1] = c[2] = req->patch_value; c[3] = 1.0f;
+        PSYSCR__CALL(dc1, ClearView, (ID3D11View*)rtv, c, &r, 1);
+    }
+    if (req->n_codes > 0 && dc1 && rtv) {
+        PSYRT_ZONE(z_codes, "psyscr.codes");
+        psyscr__d3d_draw_codes(dc, dc1, rtv, tex, req->codes, req->n_codes);
+        if (req->verify) psyscr__d3d_verify_copy(dc, q, tex, req->codes, req->n_codes);
+        PSYRT_ZONE_END(z_codes);
+    }
+    if (q->fence) PSYSCR__CALL(q->dctx4, Signal, q->fence, req->present_id);
+}
+
+static uint64_t psyscr__d3d_gpu_done(psyscr__d3dcodes* q) {
+    return q->fence ? (uint64_t)PSYSCR__CALL0(q->fence, GetCompletedValue) : 0;
+}
 
 typedef HRESULT (WINAPI *psyscr__D3D11CreateDevice_fn)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
     const D3D_FEATURE_LEVEL*, UINT, UINT, ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**);
@@ -1556,6 +2391,8 @@ typedef struct psyscr__dxgi {
     ID3D11DeviceContext* dctx;
     ID3D11DeviceContext1* dctx1;
     ID3D11RenderTargetView* rtv;
+    ID3D11Texture2D*     tex;      /* buffer 0: the current back buffer      */
+    psyscr__d3dcodes     q;
     IDXGISwapChain1*     sc;
     IDXGISwapChainMedia* media;
     HANDLE               waitable;
@@ -1743,7 +2580,8 @@ static int psyscr__dxgi_open(void* vctx, const psyscr_presenter_open* in, psyscr
     if (tex && d->dctx1) PSYSCR__CALL(d->dev, CreateRenderTargetView, (ID3D11Resource*)tex, NULL, &d->rtv);
     attrs[0] = PSYSCR__EGL_NONE;
     d->pb = (d->ctx && tex) ? psyscr__egl.CreatePbufferFromClientBuffer(d->dpy, PSYSCR__EGL_D3D_TEXTURE_ANGLE, tex, cfg, attrs) : NULL;
-    PSYSCR__RELEASE(tex);
+    d->tex = tex;   /* kept: a ROW code is an UpdateSubresource on it */
+    tex = NULL;
     if (!d->ctx || !d->pb || !psyscr__egl.MakeCurrent(d->dpy, d->pb, d->pb, d->ctx)) {
         int e = psyscr__egl.GetError();
         psyscr__dxgi_close(d);
@@ -1768,6 +2606,7 @@ static int psyscr__dxgi_open(void* vctx, const psyscr_presenter_open* in, psyscr
     caps->native_target = false;
     caps->max_in_flight = 1;
     d->path = PSYSCR_PATH_UNKNOWN;
+    psyscr__d3d_codes_open(d->dev, d->dctx, d->dctx1, in, &d->q);
     return PSYSCR_OK;
 }
 
@@ -1781,6 +2620,8 @@ static void psyscr__dxgi_close(void* vctx) {
     }
     if (d->edev && psyscr__egl.ReleaseDeviceANGLE) psyscr__egl.ReleaseDeviceANGLE(d->edev);
     if (d->waitable) CloseHandle(d->waitable);
+    psyscr__d3d_codes_close(&d->q);
+    PSYSCR__RELEASE(d->tex);
     PSYSCR__RELEASE(d->rtv);
     PSYSCR__RELEASE(d->dctx1);
     PSYSCR__RELEASE(d->media);
@@ -1810,14 +2651,7 @@ static int psyscr__dxgi_present(void* vctx, const psyscr_present_req* req) {
     UINT count = 0, hold = req->hold < 1 ? 1u : (req->hold > 4 ? 4u : (UINT)req->hold);
     HRESULT hr;
     if (d->flush) d->flush();
-    if (req->patch_on && d->dctx1 && d->rtv) {
-        D3D11_RECT r;
-        float c[4];
-        r.left = req->patch_x; r.top = req->patch_y;
-        r.right = req->patch_x + req->patch_w; r.bottom = req->patch_y + req->patch_h;
-        c[0] = c[1] = c[2] = req->patch_value; c[3] = 1.0f;
-        PSYSCR__CALL(d->dctx1, ClearView, (ID3D11View*)d->rtv, c, &r, 1);
-    }
+    psyscr__d3d_finish_frame(d->dctx, d->dctx1, d->rtv, (ID3D11Resource*)d->tex, &d->q, req);
     hr = PSYSCR__CALL(d->sc, Present, hold, 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) return PSYSCR_ERR_LOST;
     d->occluded = hr == DXGI_STATUS_OCCLUDED;
@@ -1888,10 +2722,13 @@ static psyscr_proc psyscr__dxgi_gl_proc(void* vctx, const char* name) {
     return psyscr__egl_sym(name);
 }
 
+static uint64_t psyscr__dxgi_gpu_done(void* vctx) { return psyscr__d3d_gpu_done(&((psyscr__dxgi*)vctx)->q); }
+
 static const psyscr_presenter psyscr__dxgi_presenter = {
     PSYSCR_PRESENTER_VERSION, "dxgi_flip", true, false, true,
     psyscr__dxgi_open, psyscr__dxgi_close, psyscr__dxgi_acquire, psyscr__dxgi_present,
-    psyscr__dxgi_completions, psyscr__dxgi_gl_proc, psyscr__dxgi_bind, psyscr__dxgi_describe
+    psyscr__dxgi_completions, psyscr__dxgi_gl_proc, psyscr__dxgi_bind, psyscr__dxgi_describe,
+    psyscr__dxgi_gpu_done
 };
 
 /* --- composition swapchain presenter (Windows 11) ------------------------- */
@@ -2112,6 +2949,7 @@ typedef struct psyscr__comp {
     int64_t               period_ns;
     uint8_t               path;
     int                   w, h;
+    psyscr__d3dcodes      q;
     char                  adapter[64];
     char                  angle[64];
 } psyscr__comp;
@@ -2411,6 +3249,7 @@ static int psyscr__comp_open(void* vctx, const psyscr_presenter_open* in, psyscr
     caps->hw_onset = true;
     caps->max_in_flight = 1;
     c->last_resolved = 1;
+    psyscr__d3d_codes_open(c->dev, c->dctx, c->dctx1, in, &c->q);
     return PSYSCR_OK;
 #endif
 }
@@ -2419,6 +3258,7 @@ static void psyscr__comp_close(void* vctx) {
     psyscr__comp* c = (psyscr__comp*)vctx;
     int i;
     if (c->pm && c->last_sys_id) PSYSCR__C(c->pm, CancelPresentsFrom, c->last_sys_id + 1);
+    psyscr__d3d_codes_close(&c->q);
     if (c->dpy) {
         psyscr__egl.MakeCurrent(c->dpy, NULL, NULL, NULL);
         for (i = 0; i < PSYSCR__COMP_BUFFERS; i++) if (c->pb[i]) psyscr__egl.DestroySurface(c->dpy, c->pb[i]);
@@ -2506,14 +3346,7 @@ static int psyscr__comp_present(void* vctx, const psyscr_present_req* req) {
     psyscr__SIT target;
     uint64_t sys;
     if (c->flush) c->flush();
-    if (req->patch_on && c->dctx1 && c->rtv[c->cur]) {
-        D3D11_RECT r;
-        float col[4];
-        r.left = req->patch_x; r.top = req->patch_y;
-        r.right = req->patch_x + req->patch_w; r.bottom = req->patch_y + req->patch_h;
-        col[0] = col[1] = col[2] = req->patch_value; col[3] = 1.0f;
-        PSYSCR__CALL(c->dctx1, ClearView, (ID3D11View*)c->rtv[c->cur], col, &r, 1);
-    }
+    psyscr__d3d_finish_frame(c->dctx, c->dctx1, c->rtv[c->cur], (ID3D11Resource*)c->tex[c->cur], &c->q, req);
     if (FAILED(PSYSCR__C(c->ps, SetBuffer, (void*)c->buf[c->cur]))) return PSYSCR_ERR_LOST;
     /* QPC time in 100 ns units (measured: interrupt time is 20 ms off on
      * this machine and puts every frame 1.2 periods early). The target
@@ -2547,11 +3380,282 @@ static int psyscr__comp_describe(void* vctx, char* buf, size_t cap) {
     return snprintf(buf, cap, "adapter=\"%s\" angle=%s", c->adapter, c->angle);
 }
 
+static uint64_t psyscr__comp_gpu_done(void* vctx) { return psyscr__d3d_gpu_done(&((psyscr__comp*)vctx)->q); }
+
 static const psyscr_presenter psyscr__comp_presenter = {
     PSYSCR_PRESENTER_VERSION, "composition", true, false, true,
     psyscr__comp_open, psyscr__comp_close, psyscr__comp_acquire, psyscr__comp_present,
-    psyscr__comp_completions, psyscr__dxgi_gl_proc, psyscr__comp_bind, psyscr__comp_describe
+    psyscr__comp_completions, psyscr__dxgi_gl_proc, psyscr__comp_bind, psyscr__comp_describe,
+    psyscr__comp_gpu_done
 };
+
+
+/* --- the display's color state and the OS gamma ramp (Windows) ------------ */
+
+/* Own layouts of the display config structs (wingdi.h, Windows 7 and
+ * later), so neither the SDK version nor a _WIN32_WINNT another header set
+ * decides whether this compiles. tests/compile/psy_screen_com.cpp checks
+ * them against the SDK. */
+typedef struct psyscr__dci_header {
+    UINT32 type, size;
+    LUID   adapterId;
+    UINT32 id;
+} psyscr__dci_header;
+typedef struct psyscr__dc_path {      /* DISPLAYCONFIG_PATH_INFO           */
+    LUID   src_adapter;
+    UINT32 src_id, src_mode, src_status;
+    LUID   tgt_adapter;
+    UINT32 tgt_id;
+    UINT32 tgt_rest[9];
+    UINT32 flags;
+} psyscr__dc_path;
+typedef struct psyscr__dc_mode {      /* DISPLAYCONFIG_MODE_INFO           */
+    UINT32 bytes[16];
+} psyscr__dc_mode;
+typedef struct psyscr__dc_source_name {
+    psyscr__dci_header header;
+    WCHAR  viewGdiDeviceName[32];
+} psyscr__dc_source_name;
+typedef struct psyscr__dc_preferred {
+    psyscr__dci_header header;
+    UINT32 width, height;
+    UINT32 pad_;           /* targetMode holds a UINT64: 8-byte aligned */
+    UINT32 targetMode[12];
+} psyscr__dc_preferred;
+typedef struct psyscr__aci {
+    psyscr__dci_header header;
+    UINT32 value;                /* bit 1: advanced color enabled; bit 2: wide color enforced */
+    UINT32 colorEncoding;
+    UINT32 bitsPerColorChannel;
+} psyscr__aci;
+typedef struct psyscr__aci2 {
+    psyscr__dci_header header;
+    UINT32 value;
+    UINT32 colorEncoding;
+    UINT32 bitsPerColorChannel;
+    UINT32 activeColorMode;      /* 0 SDR, 1 WCG (auto color management), 2 HDR */
+} psyscr__aci2;
+#define PSYSCR__DCI_SOURCE_NAME      1
+#define PSYSCR__DCI_PREFERRED_MODE   3
+#define PSYSCR__DCI_ADVANCED_COLOR   9
+#define PSYSCR__DCI_ADVANCED_COLOR_2 15
+
+typedef LONG (WINAPI *psyscr__GetDisplayConfigBufferSizes_fn)(UINT32, UINT32*, UINT32*);
+typedef LONG (WINAPI *psyscr__QueryDisplayConfig_fn)(UINT32, UINT32*, psyscr__dc_path*, UINT32*,
+                                                     psyscr__dc_mode*, void*);
+typedef LONG (WINAPI *psyscr__DisplayConfigGetDeviceInfo_fn)(psyscr__dci_header*);
+typedef BOOL (WINAPI *psyscr__GetMonitorInfoW_fn)(HMONITOR, LPMONITORINFO);
+typedef BOOL (WINAPI *psyscr__GammaRamp_fn)(HDC, LPVOID);
+typedef HDC  (WINAPI *psyscr__CreateDCW_fn)(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW*);
+typedef BOOL (WINAPI *psyscr__DeleteDC_fn)(HDC);
+
+/* gdi32 and user32 by name, so nothing extra is linked (MinGW links no
+ * gdi32 by default). */
+static struct psyscr__winapi {
+    int tried;
+    psyscr__GetDisplayConfigBufferSizes_fn sizes;
+    psyscr__QueryDisplayConfig_fn          query;
+    psyscr__DisplayConfigGetDeviceInfo_fn  info;
+    psyscr__GetMonitorInfoW_fn             monitor_info;
+    psyscr__MonitorFromWindow_fn           monitor_from_window;
+    psyscr__GammaRamp_fn                   get_ramp, set_ramp;
+    psyscr__CreateDCW_fn                   create_dc;
+    psyscr__DeleteDC_fn                    delete_dc;
+} psyscr__win;
+
+static void psyscr__win_load(void) {
+    HMODULE u, g;
+    if (psyscr__win.tried) return;
+    psyscr__win.tried = 1;
+    u = LoadLibraryW(L"user32.dll");
+    g = LoadLibraryW(L"gdi32.dll");
+    if (u) {
+        psyscr__win.sizes = (psyscr__GetDisplayConfigBufferSizes_fn)(psyscr_proc)GetProcAddress(u, "GetDisplayConfigBufferSizes");
+        psyscr__win.query = (psyscr__QueryDisplayConfig_fn)(psyscr_proc)GetProcAddress(u, "QueryDisplayConfig");
+        psyscr__win.info = (psyscr__DisplayConfigGetDeviceInfo_fn)(psyscr_proc)GetProcAddress(u, "DisplayConfigGetDeviceInfo");
+        psyscr__win.monitor_info = (psyscr__GetMonitorInfoW_fn)(psyscr_proc)GetProcAddress(u, "GetMonitorInfoW");
+        psyscr__win.monitor_from_window = (psyscr__MonitorFromWindow_fn)(psyscr_proc)GetProcAddress(u, "MonitorFromWindow");
+    }
+    if (g) {
+        psyscr__win.get_ramp = (psyscr__GammaRamp_fn)(psyscr_proc)GetProcAddress(g, "GetDeviceGammaRamp");
+        psyscr__win.set_ramp = (psyscr__GammaRamp_fn)(psyscr_proc)GetProcAddress(g, "SetDeviceGammaRamp");
+        psyscr__win.create_dc = (psyscr__CreateDCW_fn)(psyscr_proc)GetProcAddress(g, "CreateDCW");
+        psyscr__win.delete_dc = (psyscr__DeleteDC_fn)(psyscr_proc)GetProcAddress(g, "DeleteDC");
+    }
+}
+
+/* An 8-bit identity: every entry's high byte is its index. */
+static int psyscr__ramp_identity(const WORD* r) {   /* 3 x 256, red first */
+    int i;
+    for (i = 0; i < 768; i++) if ((r[i] >> 8) != (i & 255)) return 0;
+    return 1;
+}
+
+/* Ramps this process set, to restore at close, at exit and on SDL's quit. */
+#define PSYSCR__GAMMA_MAX 8
+static struct psyscr__gamma_entry {
+    int   used;
+    WCHAR dev[32];
+    WORD  saved[3][256];
+} psyscr__gamma[PSYSCR__GAMMA_MAX];
+static int psyscr__gamma_atexit, psyscr__gamma_watch;
+
+static void psyscr__gamma_restore(int k) {
+    HDC dc;
+    if (k < 0 || k >= PSYSCR__GAMMA_MAX || !psyscr__gamma[k].used) return;
+    psyscr__gamma[k].used = 0;
+    if (!psyscr__win.create_dc || !psyscr__win.set_ramp) return;
+    dc = psyscr__win.create_dc(psyscr__gamma[k].dev, NULL, NULL, NULL);
+    if (!dc) return;
+    psyscr__win.set_ramp(dc, psyscr__gamma[k].saved);
+    psyscr__win.delete_dc(dc);
+}
+
+static void psyscr__gamma_restore_all(void) {
+    int k;
+    for (k = 0; k < PSYSCR__GAMMA_MAX; k++) psyscr__gamma_restore(k);
+}
+
+static bool SDLCALL psyscr__gamma_quit_watch(void* ud, SDL_Event* e) {
+    (void)ud;
+    if (e && e->type == SDL_EVENT_QUIT) psyscr__gamma_restore_all();
+    return true;
+}
+
+static void psyscr__copy_w(char* dst, size_t cap, const WCHAR* w) {
+    size_t i;
+    for (i = 0; i + 1 < cap && w[i]; i++) dst[i] = (char)(w[i] < 128 ? w[i] : '?');
+    dst[i] = '\0';
+}
+
+/* Read what the header can of the display's color path, and take the OS
+ * gamma ramp for a fullscreen screen unless desc.keep_os_gamma. */
+static void psyscr__win_display_state(psyscr_screen* s, const psyscr_desc* desc) {
+    HWND hwnd;
+    HMONITOR mon;
+    MONITORINFOEXW mi;
+    psyscr__dc_path paths[32];
+    psyscr__dc_mode modes[64];
+    UINT32 np = 32, nm = 64, i;
+    int found = 0, cm = -1, bpc = 0, pw = 0, ph = 0;
+    const char* gamma = "kept";
+    char dev[40];
+    s->code_risk = 0;
+    psyscr__win_load();
+    hwnd = s->window ? (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(s->window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL) : NULL;
+    mon = (hwnd && psyscr__win.monitor_from_window) ? psyscr__win.monitor_from_window(hwnd, MONITOR_DEFAULTTONEAREST) : NULL;
+    memset(&mi, 0, sizeof mi);
+    mi.cbSize = sizeof mi;
+    if (!mon || !psyscr__win.monitor_info || !psyscr__win.monitor_info(mon, (LPMONITORINFO)&mi)) {
+        s->code_risk |= PSYSCR_CODE_RISK_STATE_UNKNOWN;
+        psyscr__copy(s->os_color, sizeof s->os_color, "os_color=unknown");
+        return;
+    }
+    psyscr__copy_w(dev, sizeof dev, mi.szDevice);
+    /* advanced color and the panel's own mode, through the display config */
+    if (psyscr__win.query && psyscr__win.info &&
+        psyscr__win.query(2u /* QDC_ONLY_ACTIVE_PATHS */, &np, paths, &nm, modes, NULL) == ERROR_SUCCESS) {
+        for (i = 0; i < np && !found; i++) {
+            psyscr__dc_source_name src;
+            memset(&src, 0, sizeof src);
+            src.header.type = PSYSCR__DCI_SOURCE_NAME;
+            src.header.size = sizeof src;
+            src.header.adapterId = paths[i].src_adapter;
+            src.header.id = paths[i].src_id;
+            if (psyscr__win.info(&src.header) != ERROR_SUCCESS || wcscmp(src.viewGdiDeviceName, mi.szDevice) != 0) continue;
+            found = 1;
+            {
+                psyscr__aci2 a2;
+                psyscr__aci a1;
+                psyscr__dc_preferred pm;
+                memset(&a2, 0, sizeof a2);
+                a2.header.type = PSYSCR__DCI_ADVANCED_COLOR_2;
+                a2.header.size = sizeof a2;
+                a2.header.adapterId = paths[i].tgt_adapter;
+                a2.header.id = paths[i].tgt_id;
+                if (psyscr__win.info(&a2.header) == ERROR_SUCCESS) {
+                    cm = (int)a2.activeColorMode;
+                    bpc = (int)a2.bitsPerColorChannel;
+                } else {
+                    memset(&a1, 0, sizeof a1);
+                    a1.header.type = PSYSCR__DCI_ADVANCED_COLOR;
+                    a1.header.size = sizeof a1;
+                    a1.header.adapterId = paths[i].tgt_adapter;
+                    a1.header.id = paths[i].tgt_id;
+                    if (psyscr__win.info(&a1.header) == ERROR_SUCCESS) {
+                        cm = (a1.value & 2u) ? 2 : ((a1.value & 4u) ? 1 : 0);
+                        bpc = (int)a1.bitsPerColorChannel;
+                    }
+                }
+                memset(&pm, 0, sizeof pm);
+                pm.header.type = PSYSCR__DCI_PREFERRED_MODE;
+                pm.header.size = sizeof pm;
+                pm.header.adapterId = paths[i].tgt_adapter;
+                pm.header.id = paths[i].tgt_id;
+                if (psyscr__win.info(&pm.header) == ERROR_SUCCESS) { pw = (int)pm.width; ph = (int)pm.height; }
+            }
+        }
+    }
+    if (cm < 0) s->code_risk |= PSYSCR_CODE_RISK_STATE_UNKNOWN;
+    if (cm > 0) s->code_risk |= PSYSCR_CODE_RISK_ADVANCED_COLOR;
+    if (!desc->windowed && pw && ph && (pw != s->caps.mode.w || ph != s->caps.mode.h)) s->code_risk |= PSYSCR_CODE_RISK_SCALED;
+    /* the OS ramp: fullscreen only, never a window's, which shares the
+     * display with everything else */
+    if (!desc->windowed && !desc->keep_os_gamma) {
+        HDC dc = psyscr__win.create_dc ? psyscr__win.create_dc(mi.szDevice, NULL, NULL, NULL) : NULL;
+        WORD cur[3][256], id[3][256], back[3][256];
+        int k, c;
+        gamma = "unreadable";
+        if (dc && psyscr__win.get_ramp && psyscr__win.get_ramp(dc, cur)) {
+            if (psyscr__ramp_identity(&cur[0][0])) {
+                gamma = "identity";
+            } else {
+                for (c = 0; c < 3; c++) for (k = 0; k < 256; k++) id[c][k] = (WORD)(k * 257);
+                for (k = 0; k < PSYSCR__GAMMA_MAX && psyscr__gamma[k].used; k++) { }
+                gamma = "refused";
+                if (k < PSYSCR__GAMMA_MAX && psyscr__win.set_ramp) {
+                    /* registered before the set, so an exit at any point
+                     * puts the user's ramp back */
+                    memcpy(psyscr__gamma[k].saved, cur, sizeof cur);
+                    memcpy(psyscr__gamma[k].dev, mi.szDevice, sizeof psyscr__gamma[k].dev);
+                    psyscr__gamma[k].used = 1;
+                    if (!psyscr__gamma_atexit) { psyscr__gamma_atexit = 1; atexit(psyscr__gamma_restore_all); }
+                    if (!psyscr__gamma_watch) { psyscr__gamma_watch = SDL_AddEventWatch(psyscr__gamma_quit_watch, NULL) ? 1 : 0; }
+                    if (psyscr__win.set_ramp(dc, id) && psyscr__win.get_ramp(dc, back) && psyscr__ramp_identity(&back[0][0])) {
+                        s->gamma_owned = k + 1;
+                        gamma = "set";
+                    } else {
+                        psyscr__gamma_restore(k);   /* Windows may accept and ignore a ramp */
+                    }
+                }
+            }
+        }
+        if (dc) psyscr__win.delete_dc(dc);
+        if (strcmp(gamma, "identity") != 0 && strcmp(gamma, "set") != 0) s->code_risk |= PSYSCR_CODE_RISK_GAMMA;
+    } else {
+        /* not ours to change: report it */
+        HDC dc = psyscr__win.create_dc ? psyscr__win.create_dc(mi.szDevice, NULL, NULL, NULL) : NULL;
+        WORD cur[3][256];
+        if (dc && psyscr__win.get_ramp && psyscr__win.get_ramp(dc, cur)) {
+            gamma = psyscr__ramp_identity(&cur[0][0]) ? "identity(kept)" : "not-identity(kept)";
+            if (!psyscr__ramp_identity(&cur[0][0])) s->code_risk |= PSYSCR_CODE_RISK_GAMMA;
+        } else {
+            gamma = "unreadable(kept)";
+            s->code_risk |= PSYSCR_CODE_RISK_GAMMA;
+        }
+        if (dc) psyscr__win.delete_dc(dc);
+    }
+    snprintf(s->os_color, sizeof s->os_color, "display=%s color=%s wire_bpc=%d panel=%dx%d os_gamma=%s mhc=unknown "
+             "nightlight=unknown", dev, cm == 0 ? "sdr" : cm == 1 ? "wcg" : cm == 2 ? "hdr" : "unknown", bpc, pw, ph, gamma);
+}
+
+static void psyscr__win_gamma_release(psyscr_screen* s) {
+    int k, any = 0;
+    if (s->gamma_owned) psyscr__gamma_restore(s->gamma_owned - 1);
+    s->gamma_owned = 0;
+    for (k = 0; k < PSYSCR__GAMMA_MAX; k++) any |= psyscr__gamma[k].used;
+    if (!any && psyscr__gamma_watch) { SDL_RemoveEventWatch(psyscr__gamma_quit_watch, NULL); psyscr__gamma_watch = 0; }
+}
 
 #endif /* PSYSCR__DXGI */
 
@@ -2642,11 +3746,24 @@ static void psyscr__finish(psyscr_screen* s, psyscr__pend* p, int64_t shown) {
         if (r->tier > s->worst_tier) s->worst_tier = r->tier;
         if (s->min_tier && r->tier > s->min_tier) r->flags |= PSYSCR_FLIP_BELOW_TIER;
     }
+    if (s->n_codes > 0) {
+        r->code_risk = psyscr_code_risk(s);
+        if (r->path == PSYSCR_PATH_COMPOSED) r->code_risk |= PSYSCR_CODE_RISK_COMPOSED;
+        if (r->code_risk) r->flags |= PSYSCR_FLIP_CODE_AT_RISK;
+    }
     psyscr__push_flip(s, r);
+    psyscr__push_code(s, p);
+    if (s->trig_on || s->on_flip) psyscr__trig_flip_done(s, p, shown);
     PSYRT_FRAME_MARK();
     PSYRT_PLOT("psyscr residual us", (double)r->residual / 1000.0);
     s->last = *r;
     s->have_last = 1;
+    if (s->n_fin < PSYSCR_MAX_DONE) s->fin[s->n_fin++] = *r;
+    else {   /* keep the newest */
+        memmove(s->fin, s->fin + 1, sizeof(psyscr_record) * (PSYSCR_MAX_DONE - 1));
+        s->fin[PSYSCR_MAX_DONE - 1] = *r;
+        s->fin_lost++;
+    }
 }
 
 static void psyscr__estimate(psyscr_screen* s, psyscr__pend* p) {
@@ -2794,6 +3911,7 @@ static void psyscr__complete(psyscr_screen* s, const psyscr_vblank* v) {
             s->fresh_lower = 0;
         } else {
             s->depth_need = 1;   /* a new path may have a new depth: adopt it */
+            s->adopt_left = 3;
         }
     }
     if (v->flags & (PSYSCR_FLIP_SKIPPED | PSYSCR_FLIP_CANCELED)) {
@@ -2847,8 +3965,16 @@ static void psyscr__complete(psyscr_screen* s, const psyscr_vblank* v) {
                 PSYRT_PLOT("psyscr depth", (double)obs);
             }
         } else if (obs == s->depth) {
-            s->depth_votes = 0;
-            s->depth_need = 3;
+            /* Shown on the vblank after the flip before it, it may have
+             * waited behind that flip: then its obs says "this depth or
+             * less", and must not close a path change's one-vote window
+             * (at a fall from 2 to 1 it did, and 3 flips showed early). */
+            if (s->depth_need == 1 && s->adopt_left > 0 && count == s->prev_shown + 1) {
+                if (--s->adopt_left == 0) s->depth_need = 3;
+            } else {
+                s->depth_votes = 0;
+                s->depth_need = 3;
+            }
         }
     }
     psyscr__finish(s, p, count);
@@ -2945,6 +4071,458 @@ static void psyscr__draw_patch(psyscr_screen* s) {
     if (discard) en(PSYSCR__GL_RASTERIZER_DISCARD);
     if (!scissor) dis(PSYSCR__GL_SCISSOR_TEST);
     if (fb) bind(PSYSCR__GL_DRAW_FRAMEBUFFER, (unsigned int)fb);
+}
+
+
+/* --- codes ------------------------------------------------------------------ */
+
+static int psyscr__rects_meet(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
+    return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+}
+
+/* Checks and copies desc.codes once the mode is known. 0, or a message. */
+static const char* psyscr__codes_open(psyscr_screen* s, const psyscr_desc* desc) {
+    int i, k, off = 0;
+    if (desc->n_codes < 0 || desc->n_codes > PSYSCR_MAX_CODES) return "desc.n_codes must be 0 to PSYSCR_MAX_CODES";
+    if (desc->n_codes == 0) return NULL;
+    if (desc->windowed && s->pr->needs_window)
+        return "codes need a fullscreen screen: a device reads display pixels, and a window is not at the display origin";
+    for (i = 0; i < desc->n_codes; i++) {
+        psyscr_code_slot c = desc->codes[i];
+        if (c.kind == PSYSCR_CODE_ROW) c.h = 1;
+        if ((c.kind != PSYSCR_CODE_SOLID && c.kind != PSYSCR_CODE_ROW) || c.w < 1 || c.h < 1 || c.x < 0 || c.y < 0 ||
+            (s->caps.mode.w > 0 && (c.x + c.w > s->caps.mode.w || c.y + c.h > s->caps.mode.h)))   /* SIM has no pixels */
+            return "a code slot is empty, of an unknown kind, or outside the display";
+        if (c.kind == PSYSCR_CODE_ROW) {
+            if (off + c.w > PSYSCR_CODE_ROW_PIXELS) return "ROW code slots hold more than PSYSCR_CODE_ROW_PIXELS pixels";
+            s->code_off[i] = off;
+            for (k = 0; k < c.w; k++) s->code_px[off + k] = c.rest & 0xFFFFFFu;
+            off += c.w;
+        }
+        for (k = 0; k < i; k++) {
+            const psyscr_code_slot* o = &s->code_slot[k];
+            if (psyscr__rects_meet(c.x, c.y, c.w, c.h, o->x, o->y, o->w, o->h)) return "two code slots overlap";
+        }
+        if (desc->patch.on) {
+            int px, py, ps;
+            psyscr__patch_rect(s, &px, &py, &ps);
+            if (psyscr__rects_meet(c.x, c.y, c.w, c.h, px, py, ps, ps))
+                return "a code slot overlaps the photodiode patch (move the patch: desc.patch.corner)";
+        }
+        s->code_slot[i] = c;
+        s->code_val[i] = c.rest & 0xFFFFFFu;
+        s->code_left[i] = 0;
+    }
+    s->n_codes = desc->n_codes;
+    s->verify_every = desc->verify_codes > 0 ? desc->verify_codes : 0;
+    return NULL;
+}
+
+/* This flip's code list, in one of two buffers, so the list the swap path
+ * read back on the previous present is still whole on this one. */
+static const psyscr_code_draw* psyscr__codes_build(psyscr_screen* s, uint32_t* vals) {
+    int i, b = s->code_buf;
+    psyscr_code_draw* d = s->code_draw[b];
+    uint32_t* px = s->code_frame_px[b];
+    for (i = 0; i < s->n_codes; i++) {
+        const psyscr_code_slot* c = &s->code_slot[i];
+        int active = s->code_left[i] != 0;
+        d[i].x = c->x; d[i].y = c->y; d[i].w = c->w; d[i].h = c->h;
+        if (c->kind == PSYSCR_CODE_ROW) {
+            int k, off = s->code_off[i];
+            for (k = 0; k < c->w; k++) px[off + k] = active ? s->code_px[off + k] : (c->rest & 0xFFFFFFu);
+            d[i].px = px + off;
+            d[i].value = 0;
+            vals[i] = px[off];
+        } else {
+            d[i].px = NULL;
+            d[i].value = active ? s->code_val[i] : (c->rest & 0xFFFFFFu);
+            vals[i] = d[i].value;
+        }
+    }
+    return d;
+}
+
+/* After a present that went out: one flip less for each timed code. */
+static void psyscr__codes_advance(psyscr_screen* s) {
+    int i;
+    for (i = 0; i < s->n_codes; i++) if (s->code_left[i] > 0) s->code_left[i]--;
+    s->code_buf ^= 1;
+}
+
+/* Codes through GL, for a presenter that does not draw them: one
+ * scissored clear per SOLID slot and per ROW pixel, with the patch's
+ * save-and-restore list. glClearColor's float converts to the code. */
+static void psyscr__gl_codes(psyscr_screen* s, const psyscr_code_draw* d, int n) {
+    int box[4], fb = 0, i, k, h = s->caps.mode.h;
+    float cc[4];
+    unsigned char mask[4], scissor, discard;
+    psyscr__glEnable_fn en = (psyscr__glEnable_fn)s->gl[PSYSCR__GL_ENABLE];
+    psyscr__glEnable_fn dis = (psyscr__glEnable_fn)s->gl[PSYSCR__GL_DISABLE];
+    psyscr__glIsEnabled_fn is = (psyscr__glIsEnabled_fn)s->gl[PSYSCR__GL_ISENABLED];
+    psyscr__glGetIntegerv_fn geti = (psyscr__glGetIntegerv_fn)s->gl[PSYSCR__GL_GETINTEGERV];
+    psyscr__glBindFramebuffer_fn bind = (psyscr__glBindFramebuffer_fn)s->gl[PSYSCR__GL_BINDFRAMEBUFFER];
+    psyscr__glColorMask_fn cmask = (psyscr__glColorMask_fn)s->gl[PSYSCR__GL_COLORMASK];
+    psyscr__glScissor_fn sc = (psyscr__glScissor_fn)s->gl[PSYSCR__GL_SCISSOR];
+    psyscr__glClearColor_fn ccol = (psyscr__glClearColor_fn)s->gl[PSYSCR__GL_CLEARCOLOR];
+    psyscr__glClear_fn clr = (psyscr__glClear_fn)s->gl[PSYSCR__GL_CLEAR];
+    if (n < 1 || !clr) return;
+    scissor = is(PSYSCR__GL_SCISSOR_TEST);
+    discard = is(PSYSCR__GL_RASTERIZER_DISCARD);
+    geti(PSYSCR__GL_SCISSOR_BOX, box);
+    geti(PSYSCR__GL_DRAW_FB_BINDING, &fb);
+    ((psyscr__glGetFloatv_fn)s->gl[PSYSCR__GL_GETFLOATV])(PSYSCR__GL_COLOR_CLEAR_VALUE, cc);
+    ((psyscr__glGetBooleanv_fn)s->gl[PSYSCR__GL_GETBOOLEANV])(PSYSCR__GL_COLOR_WRITEMASK, mask);
+    if (fb) bind(PSYSCR__GL_DRAW_FRAMEBUFFER, 0);
+    if (!scissor) en(PSYSCR__GL_SCISSOR_TEST);
+    if (discard) dis(PSYSCR__GL_RASTERIZER_DISCARD);
+    cmask(1, 1, 1, 1);
+    for (i = 0; i < n; i++) {
+        int cnt = d[i].px ? d[i].w : 1;
+        for (k = 0; k < cnt; k++) {
+            uint32_t v = d[i].px ? d[i].px[k] : d[i].value;
+            if (d[i].px) sc(d[i].x + k, h - d[i].y - 1, 1, 1);
+            else sc(d[i].x, h - d[i].y - d[i].h, d[i].w, d[i].h);   /* GL's origin is the bottom left */
+            ccol((float)((double)(v & 0xFFu) / 255.0), (float)((double)((v >> 8) & 0xFFu) / 255.0),
+                 (float)((double)((v >> 16) & 0xFFu) / 255.0), 1.0f);
+            clr(PSYSCR__GL_COLOR_BUFFER_BIT);
+        }
+    }
+    ccol(cc[0], cc[1], cc[2], cc[3]);
+    sc(box[0], box[1], box[2], box[3]);
+    cmask(mask[0], mask[1], mask[2], mask[3]);
+    if (discard) en(PSYSCR__GL_RASTERIZER_DISCARD);
+    if (!scissor) dis(PSYSCR__GL_SCISSOR_TEST);
+    if (fb) bind(PSYSCR__GL_DRAW_FRAMEBUFFER, (unsigned int)fb);
+}
+
+/* One CODE record per flip on a screen with codes: what was in the frame. */
+static void psyscr__push_code(psyscr_screen* s, const psyscr__pend* p) {
+    psyrt_event ev;
+    int i;
+    if (!s->ring || s->n_codes < 1) return;
+    memset(&ev, 0, sizeof ev);
+    ev.t_ns = (uint64_t)(p->rec.onset ? p->rec.onset : p->rec.planned);
+    ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+    ev.kind = (uint16_t)PSYSCR_EV_CODE;
+    ev.aux = s->display_index;
+    ev.u.u32[0] = (uint32_t)(p->rec.index & 0xFFFFFFFF);
+    ev.u.u16[2] = p->rec.code_risk;
+    ev.u.u16[3] = (uint16_t)s->n_codes;
+    for (i = 0; i < s->n_codes && i < 8; i++) ev.u.u32[2 + i] = p->code_vals[i];
+    psyscr__push(s, &ev);
+}
+
+/* --- triggers ---------------------------------------------------------------- */
+
+#define PSYSCR__J_FREE     0
+#define PSYSCR__J_ARMED    1
+#define PSYSCR__J_FIRING   2
+#define PSYSCR__J_FIRED    3
+#define PSYSCR__J_CANCELED 4
+#define PSYSCR__FENCE_GUARD_NS 1000000   /* the GPU check runs this long before */
+#define PSYSCR__WORKER_LATE_NS 1000000
+/* The worker re-arms itself this long before the next vblank's deadline
+ * after a flip trigger fires, so the frame thread's arm for that vblank
+ * finds the worker armed early enough and needs no submit (TRIGGERS in
+ * STATUS: the submit was most of the arming cost). Wider than the drift
+ * of the grid from one frame to the next. */
+#define PSYSCR__SPEC_EARLY_NS 50000
+
+static void psyscr__trig_run(psyscr_screen* s, int64_t now, int flushed);
+
+#if !defined(PSYRT_NO_THREADS) && !defined(PSYSCR__ARM)
+#define PSYSCR__REAL_WORKER 1
+static void psyscr__trig_job(void* ctx, const psyrt_job_info* info) {
+    psyscr_screen* s = (psyscr_screen*)ctx;
+    s->woke = (int64_t)info->at_ns;
+    psyscr__trig_run(s, psyscr__now(), info->flushed ? 1 : 0);
+}
+#if defined(_WIN32)
+/* The logical CPUs of group 0 below the highest efficiency class: the
+ * E-cores of a hybrid CPU. 0 on a CPU with one class, or without CPU sets. */
+static DWORD_PTR psyscr__ecore_mask(void) {
+    typedef BOOL (WINAPI *info_fn)(void*, ULONG, PULONG, HANDLE, ULONG);
+    unsigned char buf[256 * 32];   /* SYSTEM_CPU_SET_INFORMATION is 32 bytes */
+    ULONG len = (ULONG)sizeof buf, off;
+    BYTE top = 0, eff;
+    DWORD_PTR mask = 0;
+    HMODULE k = GetModuleHandleW(L"kernel32.dll");
+    info_fn info = k ? (info_fn)(void (*)(void))GetProcAddress(k, "GetSystemCpuSetInformation") : NULL;
+    if (!info || !info(buf, len, &len, GetCurrentProcess(), 0)) return 0;
+    for (off = 0; off + 32 <= len && *(DWORD*)(void*)(buf + off) >= 32; off += *(DWORD*)(void*)(buf + off))
+        if (*(DWORD*)(void*)(buf + off + 4) == 0 && buf[off + 18] > top) top = buf[off + 18];
+    for (off = 0; off + 32 <= len && *(DWORD*)(void*)(buf + off) >= 32; off += *(DWORD*)(void*)(buf + off)) {
+        eff = buf[off + 18];
+        if (*(DWORD*)(void*)(buf + off + 4) == 0 && *(WORD*)(void*)(buf + off + 12) == 0 &&
+            buf[off + 14] < 8 * sizeof(DWORD_PTR) && eff < top)
+            mask |= (DWORD_PTR)1 << buf[off + 14];
+    }
+    return mask;
+}
+#endif
+static bool psyscr__worker_on_start(void* ctx, char* err, size_t cap) {
+    psyscr_screen* s = (psyscr_screen*)ctx;
+    if (s->trig_cpu > 0) {
+        if (!psyrt_thread_pin(s->trig_cpu - 1)) {
+            snprintf(err, cap, "psy_screen: the trigger worker could not be pinned to CPU %d", s->trig_cpu - 1);
+            return false;
+        }
+        s->trig_cores = 'N';
+        s->trig_mask = (uint64_t)1 << ((s->trig_cpu - 1) & 63);
+        return true;
+    }
+#if defined(_WIN32)
+    /* Off the P-cores: there the display's vblank DPC took the CPU the
+     * worker spun on, 50 to 400 us at the deadline (TRIGGERS in STATUS).
+     * A hard mask, because Windows ran the worker on P-cores with E-core
+     * CPU sets selected; a set of cores, not one, so a busy core does not
+     * hold it. */
+    if (s->trig_cpu == 0) {
+        typedef BOOL (WINAPI *sel_fn)(HANDLE, const ULONG*, ULONG);
+        HMODULE k = GetModuleHandleW(L"kernel32.dll");
+        sel_fn sel = k ? (sel_fn)(void (*)(void))GetProcAddress(k, "SetThreadSelectedCpuSets") : NULL;
+        DWORD_PTR m = psyscr__ecore_mask();
+        if (m && SetThreadAffinityMask(GetCurrentThread(), m)) {
+            /* psy_rt.h's P-core preference must not compete with the mask */
+            if (sel) (void)sel(GetCurrentThread(), NULL, 0);
+            s->trig_cores = 'E';
+            s->trig_mask = (uint64_t)m;
+        }
+    }
+#endif
+    return true;
+}
+static int psyscr__worker_start(psyscr_screen* s) {
+    psyrt_worker_desc wd;
+    memset(&wd, 0, sizeof wd);
+    wd.on_start = psyscr__worker_on_start;
+    wd.start_ctx = s;
+    wd.spin_ns = s->trig_spin;
+    memset(&s->worker, 0, sizeof s->worker);
+    return psyrt_worker_start(&s->worker, &wd) ? 1 : 0;
+}
+static void psyscr__worker_stop(psyscr_screen* s) { psyrt_worker_stop(&s->worker); }
+static void psyscr__worker_arm(psyscr_screen* s, int64_t t) {
+    psyrt_worker_submit(&s->worker, (uint64_t)(t > 0 ? t : 0), psyscr__trig_job, s);
+}
+#define PSYSCR__ARM(s, t)        psyscr__worker_arm((s), (t))
+#define PSYSCR__WORKER_START(s)  psyscr__worker_start(s)
+#define PSYSCR__WORKER_STOP(s)   psyscr__worker_stop(s)
+#elif !defined(PSYSCR__ARM)
+#define PSYSCR__ARM(s, t)        ((void)(s), (void)(t))
+#define PSYSCR__WORKER_START(s)  ((void)(s), 0)
+#define PSYSCR__WORKER_STOP(s)   ((void)(s))
+#endif
+
+/* Under the lock: keep the worker armed no later than the earliest wake.
+ * An earlier wake is enough: the worker then fires nothing and re-arms for
+ * the real one itself, off the frame thread. spec is a wake to arm when no
+ * job is armed (0 for none). */
+static void psyscr__trig_rearm_spec(psyscr_screen* s, int64_t spec) {
+    int64_t w = INT64_MAX;
+    int i;
+    for (i = 0; i < PSYSCR_MAX_JOBS; i++)
+        if (s->job[i].state == PSYSCR__J_ARMED && s->job[i].wake < w) w = s->job[i].wake;
+    if (w == INT64_MAX && spec > 0) w = spec;
+    if (w != INT64_MAX && w < s->armed_wake) {
+        PSYRT_ZONE(z_sub, "psyscr.trigsubmit");
+        s->armed_wake = w;
+        PSYSCR__ARM(s, w);
+        PSYRT_ZONE_END(z_sub);
+    }
+}
+static void psyscr__trig_rearm(psyscr_screen* s) { psyscr__trig_rearm_spec(s, 0); }
+
+static void psyscr__trig_set_count(psyscr_screen* s, psyscr__job* j, int64_t count) {
+    j->count = count;
+    j->deadline = psyscr__time_of(s, count) + s->offset + s->trig[j->channel].offset_ns;
+    j->wake = j->check ? j->deadline - PSYSCR__FENCE_GUARD_NS : j->deadline;
+}
+
+/* The worker's callback, and the test's: fire what is due. A job chosen
+ * here is FIRING under the lock, so a move from the frame thread cannot
+ * touch it; the callbacks run with the lock released. */
+static void psyscr__trig_run(psyscr_screen* s, int64_t now, int flushed) {
+    int idx[PSYSCR_MAX_JOBS], n = 0, i, k;
+    psyscr_trigger_info info[PSYSCR_MAX_JOBS];
+    int64_t fired[PSYSCR_MAX_JOBS], woke = s->woke ? s->woke : now, t_lock, spec = 0;
+    s->woke = 0;
+    psyscr__lock(s);
+    t_lock = psyscr__now() - now;
+    s->armed_wake = INT64_MAX;
+    for (i = 0; i < PSYSCR_MAX_JOBS; i++) {
+        psyscr__job* j = &s->job[i];
+        if (j->state != PSYSCR__J_ARMED) continue;
+        if (!flushed && j->wake > now) continue;
+        if (j->check && !flushed) {
+            uint64_t done = s->pr && s->pr->gpu_done ? s->pr->gpu_done(s->pr_ctx) : UINT64_MAX;
+            if (done < j->pend_id) {   /* not finished: the frame will miss */
+                j->count++;
+                j->deadline += j->period;
+                j->wake = j->deadline - PSYSCR__FENCE_GUARD_NS;
+                j->flags |= (uint16_t)(PSYSCR_TRIG_MOVED | PSYSCR_TRIG_GPU_MOVED);
+                continue;
+            }
+            j->check = 0;
+            j->wake = j->deadline;
+            if (j->wake > now) continue;
+        }
+        j->state = PSYSCR__J_FIRING;
+        if (flushed) j->flags |= PSYSCR_TRIG_FLUSHED;
+        k = n++;
+        while (k > 0 && s->job[idx[k - 1]].deadline > j->deadline) { idx[k] = idx[k - 1]; k--; }
+        idx[k] = i;
+    }
+    for (k = 0; k < n; k++) {
+        const psyscr__job* j = &s->job[idx[k]];
+        info[k].deadline_ns = j->deadline;
+        info[k].fired_ns = 0;
+        info[k].woke_ns = woke;
+        info[k].lock_ns = t_lock;
+        info[k].frame = j->frame;
+        info[k].code = j->code;
+        info[k].channel = j->channel;
+        info[k].flags = j->flags;
+    }
+    psyscr__unlock(s);
+    for (k = 0; k < n; k++) {
+        const psyscr_trigger_desc* t = &s->trig[info[k].channel];
+        fired[k] = psyscr__now();
+        info[k].fired_ns = fired[k];
+        if (t->fn) t->fn(t->ctx, &info[k]);
+    }
+    psyscr__lock(s);
+    for (k = 0; k < n; k++) {
+        psyscr__job* j = &s->job[idx[k]];
+        j->fired = fired[k];
+        j->state = PSYSCR__J_FIRED;
+        if (!flushed && fired[k] - j->deadline > PSYSCR__WORKER_LATE_NS) j->flags |= PSYSCR_TRIG_WORKER_LATE;
+        /* a flip trigger: the next frame's trigger is likely one period on */
+        if (!flushed && j->pend_id) {
+            int64_t w = j->deadline + j->period - PSYSCR__SPEC_EARLY_NS;
+            if (s->trig_fence && s->pr && s->pr->gpu_done) w -= PSYSCR__FENCE_GUARD_NS;
+            if (w > spec) spec = w;
+        }
+    }
+    psyscr__trig_rearm_spec(s, spec);
+    psyscr__unlock(s);
+}
+
+/* After the present returned: arm this frame's triggers. A present that
+ * returned past the planned vblank's latch cannot be shown on it, so its
+ * triggers go to the first vblank it can still make (MOVED). */
+static void psyscr__trig_arm_flip(psyscr_screen* s, const psyscr__pend* p) {
+    int64_t c = p->planned_count, e;
+    uint16_t moved = 0;
+    int r, i;
+    if (s->n_req < 1) return;
+    e = psyscr__count_at(s, p->t_ret + s->margin_ns) + s->depth;
+    if (e > c) { c = e; moved = PSYSCR_TRIG_MOVED; }
+    psyscr__lock(s);
+    for (r = 0; r < s->n_req; r++) {
+        psyscr__job* j = NULL;
+        for (i = 0; i < PSYSCR_MAX_JOBS; i++) if (s->job[i].state == PSYSCR__J_FREE) { j = &s->job[i]; break; }
+        if (!j) { s->trig_lost++; continue; }
+        memset(j, 0, sizeof *j);
+        j->state = PSYSCR__J_ARMED;
+        j->channel = s->req_ch[r];
+        j->code = s->req_code[r];
+        j->pend_id = p->id;
+        j->frame = p->rec.index;
+        j->period = (int64_t)llround(s->period_f);
+        j->flags = moved;
+        j->check = s->trig_fence && s->pr->gpu_done != NULL;
+        psyscr__trig_set_count(s, j, c);
+    }
+    s->n_req = 0;
+    psyscr__trig_rearm(s);
+    psyscr__unlock(s);
+}
+
+/* Final jobs (fired or canceled, and their flip known) go to the ring and
+ * free their slot. */
+static void psyscr__trig_emit(psyscr_screen* s) {
+    psyscr__job out[PSYSCR_MAX_JOBS];
+    int i, n = 0;
+    if (!s->trig_on) return;
+    psyscr__lock(s);
+    for (i = 0; i < PSYSCR_MAX_JOBS; i++) {
+        psyscr__job* j = &s->job[i];
+        if ((j->state == PSYSCR__J_FIRED || j->state == PSYSCR__J_CANCELED) && j->flip_done) {
+            out[n++] = *j;
+            j->state = PSYSCR__J_FREE;
+        }
+    }
+    psyscr__unlock(s);
+    for (i = 0; i < n; i++) {
+        psyrt_event ev;
+        if (!s->ring) break;
+        memset(&ev, 0, sizeof ev);
+        ev.t_ns = (uint64_t)(out[i].fired ? out[i].fired : out[i].deadline);
+        ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+        ev.kind = (uint16_t)PSYSCR_EV_TRIGGER;
+        ev.aux = s->display_index;
+        ev.u.i64[0] = out[i].deadline;
+        ev.u.i64[1] = out[i].onset;
+        ev.u.u32[4] = out[i].code;
+        ev.u.u32[5] = (uint32_t)(out[i].frame & 0xFFFFFFFF);
+        ev.u.u16[12] = out[i].channel;
+        ev.u.u16[13] = out[i].flags;
+        ev.u.i32[7] = out[i].mismatch;
+        ev.u.i32[8] = out[i].fired ? (int32_t)psyscr__sat32(out[i].fired - out[i].deadline) : 0;
+        psyscr__push(s, &ev);
+    }
+}
+
+/* A flip's record is complete: settle its triggers against the vblank it
+ * was shown on, then the after-flip callback. A trigger not fired yet moves
+ * to that vblank; one already fired is a mismatch. */
+static void psyscr__trig_flip_done(psyscr_screen* s, const psyscr__pend* p, int64_t shown) {
+    psyscr_trigger_result res[PSYSCR_MAX_JOBS];
+    const psyscr_record* r = &p->rec;
+    int i, n = 0, moved = 0;
+    if (s->trig_on) {
+        psyscr__lock(s);
+        for (i = 0; i < PSYSCR_MAX_JOBS; i++) {
+            psyscr__job* j = &s->job[i];
+            if (j->state == PSYSCR__J_FREE || j->pend_id != p->id || j->flip_done) continue;
+            j->flip_done = 1;
+            if (r->flags & (PSYSCR_FLIP_SKIPPED | PSYSCR_FLIP_CANCELED)) {
+                j->flags |= PSYSCR_TRIG_NOT_SHOWN;
+                if (j->state == PSYSCR__J_ARMED) { j->state = PSYSCR__J_CANCELED; j->flags |= PSYSCR_TRIG_CANCELED; }
+            } else {
+                j->onset = r->onset;
+                if (r->flags & PSYSCR_FLIP_ESTIMATED) {
+                    j->flags |= PSYSCR_TRIG_ESTIMATED;
+                } else if (shown != j->count) {
+                    if (j->state == PSYSCR__J_ARMED) {
+                        psyscr__trig_set_count(s, j, shown);
+                        j->flags |= PSYSCR_TRIG_MOVED;
+                        moved = 1;
+                    } else {
+                        j->mismatch = (int32_t)(shown - j->count);
+                        j->flags |= (uint16_t)(shown > j->count ? PSYSCR_TRIG_FIRED_EARLY : PSYSCR_TRIG_FIRED_LATE);
+                    }
+                }
+            }
+            res[n].deadline_ns = j->deadline;
+            res[n].fired_ns = j->state == PSYSCR__J_FIRED ? j->fired : 0;
+            res[n].onset_ns = (r->flags & (PSYSCR_FLIP_SKIPPED | PSYSCR_FLIP_CANCELED)) ? 0 : r->onset;
+            res[n].frame = j->frame;
+            res[n].code = j->code;
+            res[n].channel = j->channel;
+            res[n].flags = (uint16_t)(j->flags | ((j->state == PSYSCR__J_ARMED || j->state == PSYSCR__J_FIRING)
+                                                  ? PSYSCR_TRIG_PENDING : 0));
+            res[n].mismatch = j->mismatch;
+            res[n].reserved_ = 0;
+            n++;
+        }
+        if (moved) psyscr__trig_rearm(s);
+        psyscr__unlock(s);
+    }
+    if (s->on_flip) s->on_flip(s->on_flip_ctx, r, res, n);
+    psyscr__trig_emit(s);
 }
 
 /* Present a few black frames at open, so the first begin() has a vblank
@@ -3104,6 +4682,11 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
     in.angle_dir = desc->angle_dir;
     in.sim_period_ns = desc->sim_period_ns;
     in.mode = &want;
+    in.n_codes = desc->n_codes;
+    in.want_gpu_done = desc->trigger_fence ? 1 : 0;
+    in.code_checked = &s->code_checked;
+    in.code_failed = &s->code_failed;
+    in.code_selftest = &s->code_selftest;
     s->caps.backend = s->backend;
 
 #if !defined(PSYSCR_NO_SDL)
@@ -3226,6 +4809,41 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
     psyscr__update_lead(s);
     psyscr__gl_load(s);
     {
+        static uint32_t generation;
+        s->gl_generation = ++generation;
+    }
+    s->lock_ok = psyscr__lock_init(s);
+    s->armed_wake = INT64_MAX;
+    {
+        const char* e = psyscr__codes_open(s, desc);
+        if (!e && (desc->n_triggers < 0 || desc->n_triggers > PSYSCR_MAX_TRIGGERS || (desc->n_triggers && !desc->triggers)))
+            e = "desc.n_triggers must be 0 to PSYSCR_MAX_TRIGGERS, with desc.triggers";
+        if (!e && desc->n_triggers > 0) {
+            int i;
+            for (i = 0; i < desc->n_triggers; i++) s->trig[i] = desc->triggers[i];
+            s->n_trig = desc->n_triggers;
+            s->trig_fence = desc->trigger_fence ? 1 : 0;
+            s->trig_cpu = desc->trigger_cpu > 0 ? desc->trigger_cpu : desc->trigger_cpu < 0 ? -1 : 0;
+            s->trig_spin = desc->trigger_spin_ns;
+            s->worker_on = PSYSCR__WORKER_START(s);
+            if (!s->worker_on) e = "the trigger worker did not start (built with PSYRT_NO_THREADS?)";
+            s->trig_on = s->worker_on;
+        }
+#if defined(PSYSCR__DXGI)
+        if (!e && (s->backend == PSYSCR_BACKEND_DXGI_FLIP || s->backend == PSYSCR_BACKEND_COMPOSITION)) {
+            psyscr__win_display_state(s, desc);
+            if (desc->codes_strict && s->n_codes &&
+                (psyscr_code_risk(s) & ~(uint16_t)PSYSCR_CODE_RISK_COMPOSED))
+                e = "desc.codes_strict: the display may change code pixels (see the describe line)";
+        }
+#endif
+        if (e) {
+            psyscr__set_error(s->error, sizeof s->error, "psy_screen: %s", e);
+            psyscr_close(s);
+            return false;
+        }
+    }
+    {
         psyrt_event ev;
         memset(&ev, 0, sizeof ev);
         ev.source = (uint16_t)PSYRT_SRC_SCREEN;
@@ -3259,6 +4877,21 @@ PSYSCR_API void psyscr_close(psyscr_screen* s) {
             for (i = 0; i < PSYSCR__MAX_PEND; i++) if (s->pend[i].used) psyscr__estimate(s, &s->pend[i]);
         }
     }
+    if (s->worker_on) {
+        PSYSCR__WORKER_STOP(s);
+        psyscr__trig_run(s, psyscr__now(), 1);   /* anything still armed */
+        s->worker_on = 0;
+    }
+    if (s->trig_on) {
+        int i;
+        for (i = 0; i < PSYSCR_MAX_JOBS; i++) s->job[i].flip_done = 1;
+        psyscr__trig_emit(s);
+        s->trig_on = 0;
+    }
+    if (s->lock_ok) { psyscr__lock_free(s); s->lock_ok = 0; }
+#if defined(PSYSCR__DXGI)
+    psyscr__win_gamma_release(s);
+#endif
     if (s->pr && s->pr_open && s->pr->close) s->pr->close(s->pr_ctx);
     s->pr = NULL;
     s->pr_open = 0;
@@ -3295,7 +4928,7 @@ static const char* psyscr__path_name(uint16_t p) {
 }
 
 PSYSCR_API int psyscr_describe(const psyscr_screen* s, char* buf, size_t cap) {
-    char extra[192];
+    char extra[448];
     double hz, ppm;
     if (!s || !buf || cap == 0) return PSYSCR_ERR_ARG;
     if (!s->open) return snprintf(buf, cap, "psy_screen: closed");
@@ -3303,6 +4936,27 @@ PSYSCR_API int psyscr_describe(const psyscr_screen* s, char* buf, size_t cap) {
     if (s->pr->describe) s->pr->describe(s->pr_ctx, extra, sizeof extra);
     hz = s->period_f > 0 ? 1e9 / s->period_f : 0;
     ppm = (s->period_f / s->nominal_f - 1.0) * 1e6;
+    if (s->n_codes > 0 || s->n_trig > 0 || s->os_color[0]) {
+        size_t n = strlen(extra);
+        uint16_t risk = psyscr_code_risk(s);
+        if (s->os_color[0]) n += (size_t)snprintf(extra + n, n < sizeof extra ? sizeof extra - n : 0, " %s", s->os_color);
+        if (s->n_codes > 0 && n < sizeof extra)
+            n += (size_t)snprintf(extra + n, sizeof extra - n, " codes=%d selftest=%s%s", s->n_codes,
+                                  s->code_selftest > 0 ? "pass" : s->code_selftest < 0 ? "FAIL" : "not-run",
+                                  risk ? " WARNING=codes-at-risk" : "");
+        if (s->n_trig > 0 && n < sizeof extra) {
+            char cpus[32] = "";
+            if (s->trig_cores) snprintf(cpus, sizeof cpus, ":cpus=0x%llx", (unsigned long long)s->trig_mask);
+            snprintf(extra + n, sizeof extra - n, " triggers=%d worker=%s%s%s fence=%s", s->n_trig,
+#if defined(PSYSCR__REAL_WORKER)
+                     psyrt_policy_name(psyrt_worker_policy(&s->worker)),
+#else
+                     "test",
+#endif
+                     s->trig_cores == 'E' ? "/E-cores" : s->trig_cores == 'N' ? "/pinned" : "/psy_rt",
+                     cpus, !s->trig_fence ? "off" : (s->pr->gpu_done ? "on" : "unavailable"));
+        }
+    }
     return snprintf(buf, cap, "psy_screen %s: backend=%s %s mode=%dx%d@%d/%d measured=%.4fHz(%+.0fppm) "
                     "path=%s depth=%d lead=%.2f worst_tier=%d%s%s",
                     PSYSCR_VERSION_STRING, s->pr->name, extra, s->caps.mode.w, s->caps.mode.h,
@@ -3364,12 +5018,18 @@ PSYSCR_API int psyscr_begin(psyscr_screen* s, psyscr_frame* f) {
         int i;
         for (i = 0; i < PSYSCR__MAX_PEND; i++) if (s->pend[i].used) psyscr__estimate(s, &s->pend[i]);
     }
+    psyscr__trig_emit(s);
 #if !defined(PSYSCR_NO_SDL)
     if (s->window && t0 - s->sdl_corr_t > 10000000000LL) psyscr__restamp_correlate(s);
 #endif
     now = psyscr__now();
     s->pred_count = psyscr__count_at(s, now + s->margin_ns) + s->depth;
     if (s->pred_count <= s->prev_shown) s->pred_count = s->prev_shown + 1;
+    /* Never the vblank the last frame was planned for, even when that
+     * frame is done: one shown a vblank early (EARLY, when the composed
+     * path's depth falls) has left its planned vblank, and the next frame
+     * planned there got the same onset (docs/psy_screen.md). */
+    if (s->pred_count <= s->last_planned) s->pred_count = s->last_planned + 1;
     {   /* one frame per vblank, as flip_at() plans it */
         int i;
         for (i = 0; i < PSYSCR__MAX_PEND; i++)
@@ -3380,6 +5040,12 @@ PSYSCR_API int psyscr_begin(psyscr_screen* s, psyscr_frame* f) {
     f->index = s->index;
     f->vblank = s->pred_count;
     f->last = s->have_last ? &s->last : NULL;
+    memcpy(s->fin_out, s->fin, sizeof(psyscr_record) * (size_t)s->n_fin);
+    s->n_fin_out = s->n_fin;
+    s->n_fin = 0;
+    f->done = s->fin_out;
+    f->n_done = s->n_fin_out;
+    f->done_lost = s->fin_lost;
     memset(s->acc, 0, sizeof s->acc);
     s->acc[PSYSCR_PHASE_SWAP] = psyscr__sat32(wait);
     s->acc[PSYSCR_PHASE_GPU] = PSYSCR_PHASE_UNKNOWN;
@@ -3401,6 +5067,8 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
     int64_t now, tg, count_t, earliest, planned, t_call;
     psyscr__pend* p = NULL;
     psyscr_present_req req;
+    const psyscr_code_draw* codes = NULL;
+    uint32_t code_vals[PSYSCR_MAX_CODES];
     int i, rc;
     uint16_t flags = PSYSCR_FLIP_PENDING;
     PSYRT_ZONE(z_flip, "psyscr.flip");
@@ -3409,9 +5077,24 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
     if (!s->begun) { PSYRT_ZONE_END(z_flip); return PSYSCR_ERR_ORDER; }
     now = psyscr__now();
     s->acc[PSYSCR_PHASE_DRAW] = psyscr__sat32((int64_t)s->acc[PSYSCR_PHASE_DRAW] + (now - s->mark_t));
+    if (s->on_present) {
+        psyscr_present_info pi;
+        memset(&pi, 0, sizeof pi);
+        pi.index = s->index;
+        pi.onset = psyscr__time_of(s, s->pred_count) + s->offset;
+        pi.w = s->caps.mode.w;
+        pi.h = s->caps.mode.h;
+        pi.rows_top_down = s->backend == PSYSCR_BACKEND_DXGI_FLIP || s->backend == PSYSCR_BACKEND_COMPOSITION;
+        s->on_present(s->on_present_ctx, &pi);
+        s->gl_epoch++;
+    }
     {
         PSYRT_ZONE(z_patch, "psyscr.patch");
-        if (!s->pr->draws_patch) psyscr__draw_patch(s);
+        if (s->n_codes > 0) codes = psyscr__codes_build(s, code_vals);
+        if (!s->pr->draws_patch) {
+            psyscr__draw_patch(s);
+            if (codes) psyscr__gl_codes(s, codes, s->n_codes);
+        }
         PSYRT_ZONE_END(z_patch);
     }
 
@@ -3419,6 +5102,7 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
     count_t = psyscr__snap(s, tg);
     earliest = psyscr__count_at(s, psyscr__now() + s->margin_ns) + s->depth;
     if (earliest <= s->prev_shown) earliest = s->prev_shown + 1;
+    if (earliest <= s->last_planned) earliest = s->last_planned + 1;
     for (i = 0; i < PSYSCR__MAX_PEND; i++)   /* one frame per vblank */
         if (s->pend[i].used && s->pend[i].planned_count >= earliest) earliest = s->pend[i].planned_count + 1;
     planned = count_t;
@@ -3463,6 +5147,7 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
     p->used = 1;
     p->id = ++s->next_id;
     p->planned_count = planned;
+    s->last_planned = planned;
     p->rec.index = s->index;
     p->rec.target = t;
     p->rec.planned = psyscr__time_of(s, planned) + s->offset;
@@ -3484,6 +5169,12 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
         req.patch_x = px; req.patch_y = py; req.patch_w = ps; req.patch_h = ps;
         req.patch_value = s->patch_value;
     }
+    if (codes && s->pr->draws_patch) {
+        req.codes = codes;
+        req.n_codes = s->n_codes;
+        req.verify = s->verify_every > 0 && (s->index % s->verify_every) == 0;
+    }
+    if (codes) memcpy(p->code_vals, code_vals, sizeof(uint32_t) * (size_t)s->n_codes);
     psyscr__drain_overdue(s);
     t_call = psyscr__now();
     p->count_at_present = psyscr__count_at(s, t_call);
@@ -3498,9 +5189,16 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
     if (rc < 0) {
         p->used = 0;
         s->begun = 0;
+        s->n_req = 0;
         s->index++;
         PSYRT_ZONE_END(z_flip);
         return rc;
+    }
+    if (s->n_codes > 0) psyscr__codes_advance(s);
+    if (s->n_req > 0) {
+        PSYRT_ZONE(z_arm, "psyscr.trigarm");
+        psyscr__trig_arm_flip(s, p);
+        PSYRT_ZONE_END(z_arm);
     }
     if (out) *out = p->rec;
     s->begun = 0;
@@ -3550,6 +5248,162 @@ PSYSCR_API int psyscr_wait_flip(psyscr_screen* s, psyscr_record* out) {
 PSYSCR_API void psyscr_set_patch(psyscr_screen* s, float v) {
     if (!s) return;
     s->patch_value = v < 0 ? 0.0f : (v > 1 ? 1.0f : v);
+}
+
+/* --- codes, triggers and hooks: the API -------------------------------------- */
+
+PSYSCR_API int psyscr_code_frames(psyscr_screen* s, int slot, uint32_t rgb, int frames) {
+    if (!s || !s->open || slot < 0 || slot >= s->n_codes || frames < PSYSCR_CODE_HOLD) return PSYSCR_ERR_ARG;
+    if (s->code_slot[slot].kind == PSYSCR_CODE_ROW) {
+        int k, off = s->code_off[slot];
+        for (k = 0; k < s->code_slot[slot].w; k++) s->code_px[off + k] = rgb & 0xFFFFFFu;
+    }
+    s->code_val[slot] = rgb & 0xFFFFFFu;
+    s->code_left[slot] = frames;
+    return PSYSCR_OK;
+}
+
+PSYSCR_API int psyscr_code(psyscr_screen* s, int slot, uint32_t rgb) {
+    return psyscr_code_frames(s, slot, rgb, 1);
+}
+
+PSYSCR_API int psyscr_code_row(psyscr_screen* s, int slot, const uint32_t* px, int n, int frames) {
+    int k, off;
+    const psyscr_code_slot* c;
+    if (!s || !s->open || slot < 0 || slot >= s->n_codes || !px || n < 0 || frames < PSYSCR_CODE_HOLD) return PSYSCR_ERR_ARG;
+    c = &s->code_slot[slot];
+    if (c->kind != PSYSCR_CODE_ROW || n > c->w) return PSYSCR_ERR_ARG;
+    off = s->code_off[slot];
+    for (k = 0; k < c->w; k++) s->code_px[off + k] = (k < n ? px[k] : c->rest) & 0xFFFFFFu;
+    s->code_left[slot] = frames;
+    return PSYSCR_OK;
+}
+
+PSYSCR_API psyscr_code_slot psyscr_slot_pixel_mode(void) {
+    psyscr_code_slot c;
+    memset(&c, 0, sizeof c);
+    c.kind = PSYSCR_CODE_SOLID;
+    c.w = 1; c.h = 1;
+    return c;
+}
+
+PSYSCR_API uint32_t psyscr_pixel_mode_bits(uint32_t ttl24) { return ttl24 & 0xFFFFFFu; }
+
+PSYSCR_API psyscr_code_slot psyscr_slot_psync(void) {
+    psyscr_code_slot c;
+    memset(&c, 0, sizeof c);
+    c.kind = PSYSCR_CODE_ROW;
+    c.x = 10; c.y = 0; c.w = 8; c.h = 1;
+    return c;
+}
+
+PSYSCR_API void psyscr_psync_pattern(uint32_t out[8], uint8_t counter) {
+    /* red, green, blue, yellow, magenta, cyan, white, then the counter in
+     * green: Psychtoolbox's PsychDataPixx sequence */
+    static const uint32_t seq[7] = { 0x0000FFu, 0x00FF00u, 0xFF0000u, 0x00FFFFu, 0xFF00FFu, 0xFFFF00u, 0xFFFFFFu };
+    int i;
+    if (!out) return;
+    for (i = 0; i < 7; i++) out[i] = seq[i];
+    out[7] = (uint32_t)counter << 8;
+}
+
+PSYSCR_API uint16_t psyscr_code_risk(const psyscr_screen* s) {
+    uint16_t r;
+    if (!s || !s->open) return 0;
+    r = s->code_risk;
+    if (s->code_selftest <= 0) r |= PSYSCR_CODE_RISK_UNVERIFIED;
+    if (s->code_failed) r |= PSYSCR_CODE_RISK_VERIFY_FAILED;
+    return r;
+}
+
+PSYSCR_API void psyscr_code_verify(const psyscr_screen* s, uint32_t* checked, uint32_t* failed) {
+    if (checked) *checked = s ? s->code_checked : 0;
+    if (failed) *failed = s ? s->code_failed : 0;
+}
+
+PSYSCR_API int psyscr_trigger(psyscr_screen* s, int channel, uint32_t code) {
+    if (!s || !s->open || channel < 0 || channel >= s->n_trig) return PSYSCR_ERR_ARG;
+    if (!s->begun) return PSYSCR_ERR_ORDER;
+    if (s->n_req >= PSYSCR_MAX_JOBS) return PSYSCR_ERR_REFUSED;
+    s->req_ch[s->n_req] = (uint16_t)channel;
+    s->req_code[s->n_req] = code;
+    s->n_req++;
+    return PSYSCR_OK;
+}
+
+PSYSCR_API int psyscr_trigger_at(psyscr_screen* s, int channel, uint32_t code, int64_t t) {
+    psyscr__job* j = NULL;
+    int i;
+    if (!s || !s->open || channel < 0 || channel >= s->n_trig) return PSYSCR_ERR_ARG;
+    psyscr__lock(s);
+    for (i = 0; i < PSYSCR_MAX_JOBS; i++) if (s->job[i].state == PSYSCR__J_FREE) { j = &s->job[i]; break; }
+    if (!j) { psyscr__unlock(s); return PSYSCR_ERR_REFUSED; }
+    memset(j, 0, sizeof *j);
+    j->state = PSYSCR__J_ARMED;
+    j->channel = (uint16_t)channel;
+    j->code = code;
+    j->frame = -1;
+    j->flip_done = 1;   /* no flip to wait for */
+    j->deadline = t + s->trig[channel].offset_ns;
+    j->wake = j->deadline;
+    psyscr__trig_rearm(s);
+    psyscr__unlock(s);
+    return PSYSCR_OK;
+}
+
+PSYSCR_API void psyscr_on_flip(psyscr_screen* s, psyscr_flip_fn fn, void* ctx) {
+    if (!s) return;
+    s->on_flip = fn;
+    s->on_flip_ctx = ctx;
+}
+
+PSYSCR_API void psyscr_on_present(psyscr_screen* s, psyscr_present_fn fn, void* ctx) {
+    if (!s) return;
+    s->on_present = fn;
+    s->on_present_ctx = ctx;
+}
+
+PSYSCR_API uint32_t psyscr_gl_epoch(const psyscr_screen* s) { return s ? s->gl_epoch : 0; }
+PSYSCR_API uint32_t psyscr_gl_generation(const psyscr_screen* s) { return s && s->open ? s->gl_generation : 0; }
+
+PSYSCR_API int psyscr_native(const psyscr_screen* s, psyscr_native_info* out) {
+    if (!out) return PSYSCR_ERR_ARG;
+    memset(out, 0, sizeof *out);
+    if (!s || !s->open) return PSYSCR_ERR_CLOSED;
+#if defined(PSYSCR__DXGI)
+    if (s->backend == PSYSCR_BACKEND_DXGI_FLIP || s->backend == PSYSCR_BACKEND_COMPOSITION) {
+        ID3D11Device* dev;
+        IDXGIDevice* xd = NULL;
+        IDXGIAdapter* ad = NULL;
+        if (s->backend == PSYSCR_BACKEND_DXGI_FLIP) {
+            const psyscr__dxgi* d = (const psyscr__dxgi*)(const void*)s->backend_mem;
+            dev = d->dev;
+            out->d3d11_context = d->dctx;
+            out->egl_display = d->dpy;
+        } else {
+            const psyscr__comp* c = (const psyscr__comp*)(const void*)s->backend_mem;
+            dev = c->dev;
+            out->d3d11_context = c->dctx;
+            out->egl_display = c->dpy;
+        }
+        out->d3d11_device = dev;
+        /* asked of the device, so it is the adapter the device is on even
+         * when open() found no adapter for the monitor */
+        if (dev && SUCCEEDED(PSYSCR__CALL(dev, QueryInterface, PSYSCR__IID(psyscr__IID_IDXGIDevice), (void**)&xd))) {
+            if (SUCCEEDED(PSYSCR__CALL(xd, GetAdapter, &ad))) {
+                DXGI_ADAPTER_DESC desc;
+                if (SUCCEEDED(PSYSCR__CALL(ad, GetDesc, &desc))) {
+                    out->luid_low = (uint32_t)desc.AdapterLuid.LowPart;
+                    out->luid_high = (int32_t)desc.AdapterLuid.HighPart;
+                }
+                PSYSCR__RELEASE(ad);
+            }
+            PSYSCR__RELEASE(xd);
+        }
+        return PSYSCR_OK;
+    }
+#endif
+    return PSYSCR_ERR_NOT_IMPLEMENTED;
 }
 
 PSYSCR_API int psyscr_begin_group(psyscr_screen* const* s, int n, psyscr_frame* f) {

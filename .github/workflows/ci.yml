@@ -30,7 +30,7 @@ jobs:
       # On Linux only, also fetch Tracy and build psy_rt.h's PSYRT_TRACY
       # compile check against the real TracyC.h.
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.os == 'ubuntu-latest' && '-DPSY_TRACY_CHECK=ON' || '' }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DPSY_FETCH_MINIAUDIO=ON -DPSY_FETCH_PL_MPEG=ON ${{ matrix.os == 'ubuntu-latest' && '-DPSY_TRACY_CHECK=ON' || '' }}
 
       - name: Build
         run: cmake --build build --config Release
@@ -43,7 +43,7 @@ jobs:
       - name: Build loopback tests (build only)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cmake -B build-loopback -DCMAKE_BUILD_TYPE=Release -DPSY_BUILD_LOOPBACK=ON
+          cmake -B build-loopback -DCMAKE_BUILD_TYPE=Release -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_MINIAUDIO=ON
           cmake --build build-loopback
 
       # No hardware on CI. Each example must fail with its documented exit
@@ -96,6 +96,9 @@ jobs:
           expect 0 "$bin/timeline_trial"
           expect 0 "$bin/timeline_tracking"    # checks its own errors
           expect 0 "$bin/timeline_bench" 500   # a 2 ms frame budget
+          # The audio example on miniaudio's null device: no sound hardware.
+          expect 0 "$bin/audio_tone" --null
+          expect 2 "$bin/audio_tone" --bogus
 
   # --------------------------------------------------------------------- #
   # Extra Linux toolchains and flag sets, one matrix entry each:           #
@@ -147,7 +150,7 @@ jobs:
 
       - name: Configure
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DPSY_FETCH_MINIAUDIO=ON -DPSY_FETCH_PL_MPEG=ON \
             -DCMAKE_C_FLAGS="${{ matrix.cflags }}" \
             -DCMAKE_CXX_FLAGS="${{ matrix.cxxflags }}"
 
@@ -185,6 +188,7 @@ jobs:
           expect 0 build/trials_interleave
           expect 0 build/timeline_trial
           expect 0 build/timeline_tracking
+          expect 0 build/audio_tone --null
 
   # --------------------------------------------------------------------- #
   # MinGW: the headers carry explicit MinGW handling (no #pragma           #
@@ -210,7 +214,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Configure
-        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DPSY_BUILD_EXAMPLES=OFF
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DPSY_BUILD_EXAMPLES=OFF -DPSY_FETCH_MINIAUDIO=ON -DPSY_FETCH_PL_MPEG=ON
 
       - name: Build compile checks
         run: cmake --build build
@@ -258,6 +262,25 @@ jobs:
           # The async layers on the pump, the point of the psy_rt.h branch.
           emcc $W $T -DPSYQ_ASYNC  -o test_quest_async.js tests/adapt/psy_quest_test.c && node test_quest_async.js
           emcc $W $T -DPSYGP_ASYNC -o test_gp_async.js    tests/adapt/psy_gp_test.c    && node test_gp_async.js
+          # psy_audio.h: the core test runs (it has a device thread); the
+          # header with miniaudio's Web Audio backend is compiled, not run,
+          # because node has no Web Audio. miniaudio's EM_ASM needs -std=gnu11.
+          emcc $W $T -o test_audio.js tests/adapt/psy_audio_test.c && node test_audio.js
+          curl -sL -o miniaudio.h https://raw.githubusercontent.com/mackron/miniaudio/0.11.25/miniaudio.h
+          echo "ac7af4de748b7e26b777f37e01cee313a308a7296a3eb080e2906b320cc55c89  miniaudio.h" | sha256sum -c -
+          emcc -O2 -std=gnu11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. -c -o compile_audio.o tests/compile/psy_audio.c
+          # psy_gfx.h without SDL: the compile check on the simulated display
+          # and the test's CPU half run; node has no GL, so its GL half says so.
+          emcc $W -DPSYSCR_NO_SDL -o compile_gfx.js tests/compile/psy_gfx.c && node compile_gfx.js
+          emcc $W -o test_gfx.js tests/adapt/psy_gfx_test.c && node test_gfx.js
+          # psy_video.h on the simulated display: with a decode thread, without
+          # one (it decodes inside the frame call), and with pl_mpeg compiled.
+          emcc $W $T -DPSYSCR_NO_SDL -DPSYVID_NO_PL_MPEG -o compile_video.js tests/compile/psy_video.c && node compile_video.js
+          emcc $W -DPSYSCR_NO_SDL -DPSYVID_NO_PL_MPEG -o compile_video_inline.js tests/compile/psy_video.c && node compile_video_inline.js
+          emcc $W $T -o test_video.js tests/adapt/psy_video_test.c && node test_video.js
+          curl -sL -o pl_mpeg.h https://raw.githubusercontent.com/phoboslab/pl_mpeg/c871f2be022ece7ef4f64230b4fb8e1fb9eb6023/pl_mpeg.h
+          echo "3a8cb30c83c2a1147719c30fe0c8b93da2987aa43140077c575b39aaa75fc2c9  pl_mpeg.h" | sha256sum -c -
+          emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. -DPSYSCR_NO_SDL -c -o compile_video_plm.o tests/compile/psy_video.c
 
   # --------------------------------------------------------------------- #
   # Python: cibuildwheel builds one abi3 wheel (Limited API, cp38+) per     #
@@ -485,9 +508,12 @@ jobs:
   # pinned (Windows: the release zips, checked by SHA-256; Linux and      #
   # macOS: the release-3.4.0 tag, built once and cached) and builds the   #
   # compile checks, the test and the examples, and on Windows the MinGW   #
-  # compile checks too. No runner has ANGLE or a display worth timing, so #
-  # the examples run on the simulated display. Nothing here is a timing   #
-  # claim.                                                                #
+  # compile checks too. No runner has a display worth timing, so the      #
+  # examples run on the simulated display. psy_gfx.h, on psy_screen.h,    #
+  # builds here too, and its pixel test renders offscreen on software GL: #
+  # Mesa llvmpipe on Linux, ANGLE's WARP and SwiftShader on Windows (from #
+  # a pinned Electron zip, checked by SHA-256, cached). Nothing here is a  #
+  # timing claim.                                                         #
   # --------------------------------------------------------------------- #
   screen:
     name: Screen (${{ matrix.os }})
@@ -498,8 +524,39 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       SDL_VERSION: 3.4.0
+      ELECTRON_VERSION: v38.8.6   # ANGLE 2.1.25848 (git 85cc0e0b9cc3)
     steps:
       - uses: actions/checkout@v7
+
+      # psy_gfx.h's test loads EGL at run time: Mesa's, with llvmpipe.
+      - name: Mesa EGL (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgl1-mesa-dri
+
+      - name: ANGLE cache (Windows)
+        if: runner.os == 'Windows'
+        id: anglecache
+        uses: actions/cache@v4
+        with:
+          path: ~/angle
+          key: angle-electron-${{ env.ELECTRON_VERSION }}-v1
+
+      - name: ANGLE (Windows, from the Electron release zip by checksum)
+        if: runner.os == 'Windows' && steps.anglecache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -eu
+          curl -sfLo electron.zip "https://github.com/electron/electron/releases/download/$ELECTRON_VERSION/electron-$ELECTRON_VERSION-win32-x64.zip"
+          echo "366ae2b4aa9e6bc89b98c8b5831d46303e45cd49b2970c2b3921de5f2fcfc2e1  electron.zip" | sha256sum -c -
+          unzip -q -o electron.zip libEGL.dll libGLESv2.dll d3dcompiler_47.dll vk_swiftshader.dll vk_swiftshader_icd.json vulkan-1.dll -d ~/angle
+          rm electron.zip
+
+      - name: ANGLE path (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "PSYSCR_ANGLE_DIR=$(cygpath -w ~/angle)" >> "$GITHUB_ENV"
+          echo "PSYGFX_TEST_DEVICES=warp,swiftshader" >> "$GITHUB_ENV"
 
       - name: SDL3 (Windows, release zips by checksum)
         if: runner.os == 'Windows'
@@ -547,13 +604,18 @@ jobs:
 
       - name: Configure
         shell: bash
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DPSY_BUILD_LOOPBACK=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_PL_MPEG=ON
 
       - name: Build
-        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input psy_screen_loopback
+        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench compile_psy_video_c compile_psy_video_cxx test_psy_video video_play video_bench
 
+      # psy_gfx.h's pixel checks must run where software GL exists; macOS has
+      # no EGL, so its test runs the CPU checks only.
       - name: Compile checks and test
-        run: ctest --test-dir build -C Release -R screen --output-on-failure
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" != macOS ]; then export PSYGFX_TEST_REQUIRE_GL=1; fi
+          ctest --test-dir build -C Release -R "screen|gfx|video" --output-on-failure
 
       - name: Run examples (simulated display)
         shell: bash
@@ -570,6 +632,19 @@ jobs:
           expect 0 "$bin/screen_flipstats" --sim --frames 120
           expect 2 "$bin/screen_hello" --bogus
           expect 2 "$bin/psy_screen_loopback"       # no args: usage
+          # psy_gfx.h on the simulated display: its null backend draws nothing.
+          expect 0 "$bin/gfx_hello" --sim --frames 30
+          expect 0 "$bin/gfx_trial" --sim
+          expect 0 "$bin/gfx_load" --sim --gabors 10 --dots 100 --seconds 1
+          expect 0 "$bin/gfx_calib"                 # no args: the synthetic display
+          expect 2 "$bin/gfx_hello" --bogus
+          expect 2 "$bin/gfx_bench" --device bogus
+          # psy_video.h: a generated frame sequence, plain, QOI and I420.
+          expect 0 "$bin/video_play" --sim
+          expect 0 "$bin/video_play" --sim --qoi --frames 20
+          expect 0 "$bin/video_play" --sim --yuv --size 64x48 --frames 20
+          expect 0 "$bin/video_bench" --size 64x48 --reps 3
+          expect 2 "$bin/video_play" --bogus
 
       # The runner's MinGW-w64 gcc, warnings as errors, on the same sources.
       - name: MinGW compile checks (Windows)
@@ -583,5 +658,13 @@ jobs:
           g++ -std=c++17 $W -o mingw_cxx.exe tests/compile/psy_screen.cpp -L"$SDL3_MINGW/lib" -lSDL3
           gcc -std=c11 $W -o mingw_test.exe tests/adapt/psy_screen_test.c
           g++ -std=c++17 $W -o mingw_com.exe tests/compile/psy_screen_com.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          gcc -std=c11 $W -o mingw_gfx_c.exe tests/compile/psy_gfx.c -L"$SDL3_MINGW/lib" -lSDL3
+          g++ -std=c++17 $W -o mingw_gfx_cxx.exe tests/compile/psy_gfx.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          gcc -std=c11 $W -o mingw_gfx_test.exe tests/adapt/psy_gfx_test.c
           cp "$SDL3_MINGW/bin/SDL3.dll" .
           ./mingw_c.exe && ./mingw_cxx.exe && ./mingw_test.exe && ./mingw_com.exe
+          ./mingw_gfx_c.exe && ./mingw_gfx_cxx.exe && PSYGFX_TEST_REQUIRE_GL=1 ./mingw_gfx_test.exe
+          gcc -std=c11 $W -DPSYVID_NO_PL_MPEG -o mingw_video_c.exe tests/compile/psy_video.c -L"$SDL3_MINGW/lib" -lSDL3
+          g++ -std=c++17 $W -DPSYVID_NO_PL_MPEG -o mingw_video_cxx.exe tests/compile/psy_video.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          gcc -std=c11 $W -o mingw_video_test.exe tests/adapt/psy_video_test.c
+          ./mingw_video_c.exe && ./mingw_video_cxx.exe && ./mingw_video_test.exe

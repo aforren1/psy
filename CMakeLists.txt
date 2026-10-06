@@ -37,6 +37,61 @@ option(PSY_TRACY_CHECK "Fetch Tracy and build the PSYRT_TRACY compile check" OFF
 find_package(SDL3 3.2 CONFIG QUIET)
 set(PSY_ANGLE_DIR "" CACHE PATH "ANGLE's libEGL.dll and libGLESv2.dll, copied beside the psy_screen.h programs")
 
+# psy_audio.h needs miniaudio.h (0.11.25, one file). PSY_MINIAUDIO_DIR names a
+# directory that holds it; else PSY_FETCH_MINIAUDIO downloads the pinned file,
+# checked by its hash. Off by default because it downloads, as
+# PSY_TRACY_CHECK is; CI turns it on. Without either, only psy_audio.h's
+# miniaudio-free test is built.
+set(PSY_MINIAUDIO_DIR "" CACHE PATH "Directory with miniaudio.h for psy_audio.h")
+option(PSY_FETCH_MINIAUDIO "Download miniaudio.h 0.11.25 for psy_audio.h" OFF)
+if(NOT PSY_MINIAUDIO_DIR AND PSY_FETCH_MINIAUDIO)
+    include(FetchContent)
+    FetchContent_Declare(miniaudio
+        URL      https://raw.githubusercontent.com/mackron/miniaudio/0.11.25/miniaudio.h
+        URL_HASH SHA256=ac7af4de748b7e26b777f37e01cee313a308a7296a3eb080e2906b320cc55c89
+        DOWNLOAD_NO_EXTRACT TRUE)
+    FetchContent_MakeAvailable(miniaudio)
+    set(PSY_MINIAUDIO_DIR ${miniaudio_SOURCE_DIR})
+endif()
+if(PSY_MINIAUDIO_DIR AND EXISTS ${PSY_MINIAUDIO_DIR}/miniaudio.h)
+    add_library(psy_miniaudio INTERFACE)
+    add_library(psy::miniaudio ALIAS psy_miniaudio)
+    target_include_directories(psy_miniaudio INTERFACE ${PSY_MINIAUDIO_DIR})
+    target_link_libraries(psy_miniaudio INTERFACE ${CMAKE_DL_LIBS})
+else()
+    message(STATUS "psy_audio.h: miniaudio.h not found; set PSY_MINIAUDIO_DIR or PSY_FETCH_MINIAUDIO=ON")
+endif()
+
+# psy_video.h decodes MPEG-1 with pl_mpeg.h (one MIT file). It has no release
+# tags, so the pin is a commit and the file's SHA-256. PSY_PL_MPEG_DIR names a
+# directory that holds it; else PSY_FETCH_PL_MPEG downloads it, and qoi.h,
+# which psy_video.h's test compares its own QOI encoder with. Off by default
+# because it downloads; CI turns it on. Without it psy_video.h builds with
+# PSYVID_NO_PL_MPEG: frame sequences only.
+set(PSY_PL_MPEG_DIR "" CACHE PATH "Directory with pl_mpeg.h for psy_video.h")
+option(PSY_FETCH_PL_MPEG "Download pl_mpeg.h (c871f2b) and qoi.h (ffb2d2c) for psy_video.h" OFF)
+if(NOT PSY_PL_MPEG_DIR AND PSY_FETCH_PL_MPEG)
+    include(FetchContent)
+    FetchContent_Declare(pl_mpeg
+        URL      https://raw.githubusercontent.com/phoboslab/pl_mpeg/c871f2be022ece7ef4f64230b4fb8e1fb9eb6023/pl_mpeg.h
+        URL_HASH SHA256=3a8cb30c83c2a1147719c30fe0c8b93da2987aa43140077c575b39aaa75fc2c9
+        DOWNLOAD_NO_EXTRACT TRUE)
+    FetchContent_Declare(qoi
+        URL      https://raw.githubusercontent.com/phoboslab/qoi/ffb2d2cb74a1de60819b21b939f7209aa53e91c1/qoi.h
+        URL_HASH SHA256=7de6fca1a285b1c20d38f2723dec8b774eb9f144edb9710800a95feeea09375a
+        DOWNLOAD_NO_EXTRACT TRUE)
+    FetchContent_MakeAvailable(pl_mpeg qoi)
+    set(PSY_PL_MPEG_DIR ${pl_mpeg_SOURCE_DIR})
+    set(PSY_QOI_DIR ${qoi_SOURCE_DIR})
+endif()
+if(PSY_PL_MPEG_DIR AND EXISTS ${PSY_PL_MPEG_DIR}/pl_mpeg.h)
+    add_library(psy_pl_mpeg INTERFACE)
+    add_library(psy::pl_mpeg ALIAS psy_pl_mpeg)
+    target_include_directories(psy_pl_mpeg INTERFACE ${PSY_PL_MPEG_DIR})
+else()
+    message(STATUS "psy_video.h: pl_mpeg.h not found, so no MPEG-1; set PSY_PL_MPEG_DIR or PSY_FETCH_PL_MPEG=ON")
+endif()
+
 # --- library registry ---------------------------------------------------------
 # This list is the single source for what gets built. To add psy_<name>.h:
 # append <name>, set its macro prefix, the platforms it supports, and whether
@@ -53,7 +108,7 @@ set(PSY_ANGLE_DIR "" CACHE PATH "ANGLE's libEGL.dll and libGLESv2.dll, copied be
 # program registered with ctest too, and one with PSY_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
 # PSY<X>_ASYNC defined, which is the opt-in layer that pulls in psy_rt.h.
-set(PSY_LIBS rt parallel serial stair quest gp trials timeline screen)
+set(PSY_LIBS rt parallel serial stair quest gp trials timeline screen audio gfx video)
 
 set(PSY_PREFIX_rt          PSYRT)
 set(PSY_PLATFORMS_rt       Windows Linux Darwin)
@@ -101,6 +156,27 @@ set(PSY_PREFIX_screen      PSYSCR)
 set(PSY_PLATFORMS_screen   Windows Linux Darwin)
 set(PSY_THREADS_screen     OFF)
 set(PSY_DEPS_screen        SDL3::SDL3)
+
+# The audio header's one dependency is miniaudio.h, a header (see above).
+set(PSY_PREFIX_audio       PSYAU)
+set(PSY_PLATFORMS_audio    Windows Linux Darwin)
+set(PSY_THREADS_audio      OFF)
+set(PSY_DEPS_audio         psy::miniaudio)
+
+# The stimulus header sits on psy_screen.h, so it needs what that needs. Its
+# test builds without SDL and finds a GL ES 3.0 renderer at run time.
+set(PSY_PREFIX_gfx         PSYGFX)
+set(PSY_PLATFORMS_gfx      Windows Linux Darwin)
+set(PSY_THREADS_gfx        OFF)
+set(PSY_DEPS_gfx           SDL3::SDL3)
+
+# The video header sits on psy_gfx.h and psy_timeline.h; pl_mpeg is optional
+# (see above and the block after the loop). Its test needs neither SDL3 nor
+# pl_mpeg.
+set(PSY_PREFIX_video       PSYVID)
+set(PSY_PLATFORMS_video    Windows Linux Darwin)
+set(PSY_THREADS_video      OFF)
+set(PSY_DEPS_video         SDL3::SDL3)
 
 if(MSVC)
     set(PSY_WARNINGS /W4 /WX)
@@ -204,6 +280,35 @@ foreach(lib IN LISTS PSY_LIBS)
             get_filename_component(name ${src} NAME_WE)
             psy_add_program(${name} ${src})
         endforeach()
+    endif()
+endforeach()
+
+# The audio loopback test opens WASAPI's loopback capture itself.
+if(TARGET psy_audio_loopback AND WIN32)
+    target_link_libraries(psy_audio_loopback PRIVATE ole32)
+endif()
+
+# psy_video.h: pl_mpeg when it was found, else the build without MPEG-1. The
+# test has its own scripted decoder; it compares QOI bytes with qoi.h when
+# that was fetched.
+foreach(t compile_psy_video_c compile_psy_video_cxx video_play video_bench)
+    if(TARGET ${t})
+        if(TARGET psy::pl_mpeg)
+            target_link_libraries(${t} PRIVATE psy::pl_mpeg)
+        else()
+            target_compile_definitions(${t} PRIVATE PSYVID_NO_PL_MPEG)
+        endif()
+    endif()
+endforeach()
+if(TARGET test_psy_video AND PSY_QOI_DIR)
+    target_include_directories(test_psy_video PRIVATE ${PSY_QOI_DIR})
+    target_compile_definitions(test_psy_video PRIVATE PSYVID_TEST_QOI_REF)
+endif()
+
+# psy_gfx.h's headless presenter loads libEGL with dlopen on POSIX.
+foreach(t test_psy_gfx gfx_bench)
+    if(TARGET ${t})
+        target_link_libraries(${t} PRIVATE ${CMAKE_DL_LIBS})
     endif()
 endforeach()
 

@@ -3,6 +3,8 @@
  *     screen_flipstats [--sim | --backend dxgi|composition] [--windowed] [--topmost]
  *                      [--cover N] [--frames N] [--load N]
  *                      [--overrun MS] [--miss N] [--hold] [--patch]
+ *                      [--codes] [--row clear|update] [--verify N]
+ *                      [--trigger] [--fence]
  *                      [--group] [--allocs | --allocs-control] [--csv FILE]
  *
  *   --sim        the simulated display: no window, no GPU (CI runs this)
@@ -22,6 +24,20 @@
  *                the swap path's own lateness, which raises the depth
  *   --hold       ask for a vblank 0 to 4 frames ahead, between grid points
  *   --patch      the photodiode patch, alternating between two dark grays
+ *                (bottom left with --codes)
+ *   --codes      a VPixx Pixel Mode code (the frame number) and an 8-pixel
+ *                pixel-sync row (Psychtoolbox's pattern) on every frame
+ *   --row M      draw ROW codes by ClearView per pixel (clear) or one
+ *                UpdateSubresource (update); default: the header's choice
+ *   --verify N   read the codes back every N flips
+ *   --trigger    one at-onset trigger per frame (a no-op callback): the
+ *                worker's lateness, moves and mismatches
+ *   --fence      with --trigger: move a trigger when the GPU is late
+ *   --trigger-offset US  the trigger channel's offset from the onset
+ *   --trigger-cpu N      pin the trigger worker to logical CPU N
+ *   --trigger-rt-cores   leave the trigger worker where psy_rt.h puts it
+ *                        (the P-cores on a hybrid CPU), not on the E-cores
+ *   --trigger-spin US    the trigger worker's spin window
  *   --group      two windows flipped as a group (implies --windowed)
  *   --allocs     count C runtime heap calls in the frame loop (MSVC debug)
  *   --allocs-control  the same, with one malloc per frame the count must see
@@ -136,6 +152,8 @@ static psyrt_ring g_ring;
 
 static psyscr_record g_rec[MAX_FRAMES];
 static int64_t g_pred[MAX_FRAMES];
+static int64_t g_vb_prev;
+static int g_same_vb, g_done_n;   /* frames planned at or before the last one's vblank; records via f.done */
 static int64_t g_expect[MAX_FRAMES];   /* --hold: the vblank time asked for */
 static unsigned char g_overran[MAX_FRAMES];
 static unsigned char g_heavy[MAX_FRAMES];   /* --miss: GPU-heavy frame */
@@ -145,10 +163,46 @@ static double g_cost_begin[MAX_FRAMES], g_cost_flip[MAX_FRAMES];
 static int g_ncb, g_ncf;
 static double g_last_wait, g_last_present, g_last_hold;
 static FILE* g_csv;
+/* --trigger: what the callback saw, and what the after-flip hook reported */
+static double g_trig_late_us[MAX_FRAMES], g_trig_wake_us[MAX_FRAMES], g_trig_lock_us[MAX_FRAMES],
+              g_trig_disp_us[MAX_FRAMES];
+static unsigned char g_trig_cpu[MAX_FRAMES];   /* where the callback ran */
+static int g_ntl;
+static int g_tr_n, g_tr_moved, g_tr_gpu_moved, g_tr_early, g_tr_late, g_tr_pending, g_tr_gpu_caught;
+static void trig_fn(void* ctx, const psyscr_trigger_info* i) {
+    (void)ctx;
+    if (g_ntl < MAX_FRAMES && !(i->flags & PSYSCR_TRIG_FLUSHED)) {
+        /* fired - deadline = wake (the worker's own lateness) + lock wait +
+         * dispatch (the rest of the header's path) */
+        g_trig_late_us[g_ntl] = (double)(i->fired_ns - i->deadline_ns) / 1000.0;
+        g_trig_wake_us[g_ntl] = (double)(i->woke_ns - i->deadline_ns) / 1000.0;
+        g_trig_lock_us[g_ntl] = (double)i->lock_ns / 1000.0;
+        g_trig_disp_us[g_ntl] = (double)(i->fired_ns - i->woke_ns - i->lock_ns) / 1000.0;
+#if defined(_WIN32)
+        g_trig_cpu[g_ntl] = (unsigned char)GetCurrentProcessorNumber();
+#endif
+        g_ntl++;
+    }
+}
+static void flip_fn(void* ctx, const psyscr_record* r, const psyscr_trigger_result* t, int n) {
+    int k;
+    (void)ctx;
+    for (k = 0; k < n; k++) {
+        g_tr_n++;
+        if (t[k].flags & PSYSCR_TRIG_MOVED) g_tr_moved++;
+        if (t[k].flags & PSYSCR_TRIG_GPU_MOVED) {
+            g_tr_gpu_moved++;
+            if (t[k].mismatch == 0 && r->dropped > 0) g_tr_gpu_caught++;   /* moved, and the frame was late */
+        }
+        if (t[k].flags & PSYSCR_TRIG_FIRED_EARLY) g_tr_early++;
+        if (t[k].flags & PSYSCR_TRIG_FIRED_LATE) g_tr_late++;   /* a move that was not needed */
+        if (t[k].flags & PSYSCR_TRIG_PENDING) g_tr_pending++;
+    }
+}
 static int g_timeouts;   /* begin() timeouts survived: the swap path stalled */
 
 /* Every zone's durations by name, for the cost breakdown. */
-#define MAX_ZONES 16
+#define MAX_ZONES 24
 static const char* g_zname[MAX_ZONES];
 static double* g_zdur[MAX_ZONES];
 static int g_zn[MAX_ZONES];
@@ -271,6 +325,12 @@ int main(int argc, char** argv) {
 #endif
     double overrun = 0;
     int miss_every = 0;
+    int codes = 0, row_method = -1, verify = 0, trigger = 0, fence = 0;
+    double trig_offset_us = 0;
+    int trig_cpu = 0;
+    double trig_spin_us = 0;
+    uint16_t code_risk = 0;
+    psyscr_trigger_desc tdesc;
     const char* csv = NULL;
     static psyscr_screen scr[2];
     psyscr_screen* sp[2] = { &scr[0], &scr[1] };
@@ -296,6 +356,15 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--overrun") && i + 1 < argc) overrun = atof(argv[++i]);
         else if (!strcmp(argv[i], "--miss") && i + 1 < argc) miss_every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--hold")) hold = 1;
+        else if (!strcmp(argv[i], "--codes")) codes = 1;
+        else if (!strcmp(argv[i], "--row") && i + 1 < argc) { i++; row_method = !strcmp(argv[i], "update") ? 0 : 8; }
+        else if (!strcmp(argv[i], "--verify") && i + 1 < argc) verify = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--trigger")) trigger = 1;
+        else if (!strcmp(argv[i], "--fence")) fence = 1;
+        else if (!strcmp(argv[i], "--trigger-offset") && i + 1 < argc) trig_offset_us = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--trigger-cpu") && i + 1 < argc) trig_cpu = atoi(argv[++i]) + 1;
+        else if (!strcmp(argv[i], "--trigger-rt-cores")) trig_cpu = -1;
+        else if (!strcmp(argv[i], "--trigger-spin") && i + 1 < argc) trig_spin_us = atof(argv[++i]);
         else if (!strcmp(argv[i], "--patch")) patch = 1;
         else if (!strcmp(argv[i], "--group")) group = 1, windowed = 1;
         else if (!strcmp(argv[i], "--allocs")) allocs = 1;
@@ -330,6 +399,29 @@ int main(int argc, char** argv) {
         d.ring = &g_ring;
         d.display_index = (uint32_t)i;
         d.patch.on = patch != 0;
+        if (codes) {
+            d.patch.corner = PSYSCR_BOTTOM_LEFT;
+            d.codes[0] = psyscr_slot_pixel_mode();
+            d.codes[1] = psyscr_slot_psync();
+            d.n_codes = 2;
+            d.verify_codes = verify;
+        }
+        if (trigger) {
+            memset(&tdesc, 0, sizeof tdesc);
+            tdesc.fn = trig_fn;
+            tdesc.name = "noop";
+            tdesc.offset_ns = (int64_t)(trig_offset_us * 1000.0);
+            d.triggers = &tdesc;
+            d.n_triggers = 1;
+            d.trigger_fence = fence != 0;
+            d.trigger_cpu = trig_cpu;
+            d.trigger_spin_ns = (uint32_t)(trig_spin_us * 1000.0);
+        }
+#if defined(PSYSCR__DXGI)
+        if (row_method >= 0) psyscr__row_clear_max = row_method;
+#else
+        (void)row_method;   /* --row picks a D3D11 code path; nothing to pick elsewhere */
+#endif
         if (!psyscr_open(&scr[i], &d)) {
             fprintf(stderr, "screen_flipstats: %s\n", psyscr_error(&scr[i]));
             if (i) psyscr_close(&scr[0]);
@@ -339,6 +431,7 @@ int main(int argc, char** argv) {
 #if defined(_WIN32)
         if ((topmost || cover) && psyscr_window(&scr[i])) take_foreground(psyscr_window(&scr[i]), topmost && !cover);
 #endif
+        if (trigger) psyscr_on_flip(&scr[i], flip_fn, NULL);
         psyscr_describe(&scr[i], line, sizeof line);
         printf("%s\n", line);
     }
@@ -348,6 +441,15 @@ int main(int argc, char** argv) {
         if (GetSystemPowerStatus(&ps))
             printf("power: %s, battery %d%%\n", ps.ACLineStatus == 1 ? "AC" : ps.ACLineStatus == 0 ? "battery" : "unknown",
                    ps.BatteryLifePercent == 255 ? -1 : (int)ps.BatteryLifePercent);
+    }
+#endif
+#if defined(PSYSCR_MAX_DONE)
+    {
+        psyscr_native_info nat;
+        int nrc = psyscr_native(&scr[0], &nat);
+        printf("native: %s, device %s, context %s, egl display %s, adapter LUID %08lx:%08lx\n", psyscr_strerror(nrc),
+               nat.d3d11_device ? "set" : "null", nat.d3d11_context ? "set" : "null", nat.egl_display ? "set" : "null",
+               (unsigned long)(uint32_t)nat.luid_high, (unsigned long)nat.luid_low);
     }
 #endif
     printf("frame thread: %s; load threads %d; overrun %.1f ms in 1 of 30; hold %d; patch %d; frames %d\n",
@@ -379,14 +481,27 @@ int main(int argc, char** argv) {
          * index, which only a flip advances. */
         if (rc == PSYSCR_ERR_TIMEOUT && g_timeouts < 10) { g_timeouts++; i--; continue; }
         if (rc < 0) { fprintf(stderr, "begin: %s\n", psyscr_strerror(rc)); break; }
+        if (i > 0 && f[0].vblank <= g_vb_prev) g_same_vb++;
+        g_vb_prev = f[0].vblank;
+#if defined(PSYSCR_MAX_DONE)
+        g_done_n += f[0].n_done;
+#endif
         for (k = 0; k < n_screens; k++) {
             int w = scr[k].caps.mode.w, h = scr[k].caps.mode.h;
+            if (codes) {
+                uint32_t pat[8];
+                psyscr_psync_pattern(pat, (uint8_t)i);
+                psyscr_code(&scr[k], 0, psyscr_pixel_mode_bits((uint32_t)i));
+                psyscr_code_row(&scr[k], 1, pat, 8, 1);
+            }
+            if (trigger && k == 0) psyscr_trigger(&scr[k], 0, (uint32_t)i);
             if (!gl[k].Clear) continue;
             psyscr_bind(&scr[k]);
             gl[k].Viewport(0, 0, w, h);
             gl[k].ClearColor(0.2f, 0.2f, 0.2f, 1.0f);
             gl[k].Clear(0x4000u);
             if (patch) psyscr_set_patch(&scr[k], (i & 1) ? 0.3f : 0.2f);
+
             if (miss_every >= 10 && i >= 60 && i % miss_every >= miss_every - 3) {
                 int q;
                 for (q = 0; q < 1500; q++) gl[k].Clear(0x4000u);
@@ -415,6 +530,7 @@ int main(int argc, char** argv) {
 #if defined(_WIN32)
     if (cover_window) DestroyWindow(cover_window);
 #endif
+    code_risk = psyscr_code_risk(&scr[0]);
     for (i = 0; i < n_screens; i++) {
         psyscr_describe(&scr[i], line, sizeof line);
         printf("%s\n", line);
@@ -491,9 +607,44 @@ int main(int argc, char** argv) {
         }
         for (i = 0; i < g_ncb; i++) dd[nd++] = g_cost_begin[i];
         for (i = 0; i < g_ncf; i++) e[ne++] = g_cost_flip[i];
+        printf("planned at or before the previous frame's vblank: %d; records seen in f.done %d\n", g_same_vb, g_done_n);
         printf("records %d (frames run %d): late targets %d, dropped %d, early %d, estimated %d, off-grid %d, "
                "occluded %d\n", g_nrec, ran, late, dropped, early, est, unstable, occl);
         if (g_timeouts) printf("begin timeouts (the swap path freed no slot in time): %d\n", g_timeouts);
+        if (codes) {
+            uint32_t chk = 0, bad = 0;
+            psyscr_code_verify(&scr[0], &chk, &bad);
+            printf("codes: risk 0x%04x, read back %u, differed %u\n", (unsigned)code_risk, chk, bad);
+        }
+        if (trigger) {
+            printf("triggers: %d reported, moved %d (GPU %d, of which the frame was late %d), fired a vblank early %d, "
+                   "fired a vblank late %d, pending at report %d\n", g_tr_n, g_tr_moved, g_tr_gpu_moved, g_tr_gpu_caught,
+                   g_tr_early, g_tr_late, g_tr_pending);
+            row("trigger fired - deadline us", g_trig_late_us, g_ntl);
+            {   /* "late" is the worker's: fired minus deadline, not a mismatch */
+                int over20 = 0, over200 = 0, q;
+                for (q = 0; q < g_ntl; q++) {
+                    if (g_trig_late_us[q] > 20.0) over20++;
+                    if (g_trig_late_us[q] > 200.0) over200++;
+                }
+                printf("  fired over 20 us after the deadline %d, over 200 us %d\n", over20, over200);
+            }
+            row("  of which worker wake us", g_trig_wake_us, g_ntl);
+            row("  of which trigger lock us", g_trig_lock_us, g_ntl);
+            row("  of which dispatch us", g_trig_disp_us, g_ntl);
+#if defined(_WIN32)
+            {   /* a tail that sits on some CPUs is the OS's work on them */
+                int on_cpu[64] = { 0 }, late_on[64] = { 0 }, q;
+                for (q = 0; q < g_ntl; q++) {
+                    on_cpu[g_trig_cpu[q] & 63]++;
+                    if (g_trig_late_us[q] > 20.0) late_on[g_trig_cpu[q] & 63]++;
+                }
+                printf("  trigger CPU (fired / over 20 us late):");
+                for (q = 0; q < 64; q++) if (on_cpu[q]) printf(" %d:%d/%d", q, on_cpu[q], late_on[q]);
+                printf("\n");
+            }
+#endif
+        }
         printf("paths: composed %d, overlay %d, independent %d, simulated %d, unknown %d\n",
                paths[1], paths[2], paths[3], paths[4], paths[0]);
         printf("tiers: 1 %d, 2 %d, 3 %d, sim %d, unknown %d; skipped %d, canceled %d, onset planned %d\n",

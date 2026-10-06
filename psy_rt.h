@@ -1548,8 +1548,9 @@ typedef struct psyrt_event {
 
 /* Sources. A record's kind means nothing without its source. 1 to 255 are
  * the psy headers', assigned here so no two collide; 256 to 32767 belong to
- * extensions, which the host assigns at load; 32768 to 65535 are yours. Only
- * PSYRT_SRC_RT pushes today; the rest are reserved names. */
+ * extensions, which the host assigns at load; 32768 to 65535 are yours.
+ * Numbers for headers that do not exist yet are reserved, so a log written
+ * today keeps its meaning when they arrive. */
 #define PSYRT_SRC_NONE       0u
 #define PSYRT_SRC_RT         1u
 #define PSYRT_SRC_SCREEN     2u
@@ -1561,6 +1562,7 @@ typedef struct psyrt_event {
 #define PSYRT_SRC_INPUT      8u
 #define PSYRT_SRC_TRIALS     9u
 #define PSYRT_SRC_NET       10u
+#define PSYRT_SRC_GFX       11u
 #define PSYRT_SRC_EXTENSION 256u   /* first extension source           */
 #define PSYRT_SRC_USER    32768u   /* first source for your own program */
 
