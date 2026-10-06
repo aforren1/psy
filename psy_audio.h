@@ -1965,6 +1965,11 @@ static int psyau__ma_out(ma_format f) {
     }
 }
 
+#if defined(MA_SUPPORT_COREAUDIO) && defined(MA_APPLE_DESKTOP)
+/* Defined after psyau__ma_open, beside the CoreAudio property code it uses. */
+static void psyau__coreaudio_claims(psyau__ma* m, psyau_device_caps* caps);
+#endif
+
 static int psyau__ma_open(void* ctx, const psyau_device_open* in, psyau_device_caps* caps,
                           char* err, size_t err_cap) {
     psyau__ma* m = (psyau__ma*)ctx;

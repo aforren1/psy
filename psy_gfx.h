@@ -241,8 +241,8 @@
  *
  *       static psygfx_stim grating;
  *       static const psygfx_bind binds[] = {
- *           { &grating, PSYGFX_P_VISIBLE,  GRATING_ON, NULL },  // onset, offset
- *           { &grating, PSYGFX_P_CONTRAST, CONTRAST,   NULL },  // a tween or keys
+ *           { .stim = &grating, .param = PSYGFX_P_VISIBLE,  .channel = GRATING_ON }, // onset, offset
+ *           { .stim = &grating, .param = PSYGFX_P_CONTRAST, .channel = CONTRAST   }, // a tween or keys
  *       };
  *       ...
  *       psyscr_begin(&scr, &f);

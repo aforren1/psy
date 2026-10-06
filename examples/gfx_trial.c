@@ -37,9 +37,9 @@ static psyscr_screen scr;
 static psygfx_gfx gfx;
 static psygfx_stim fix, grating;
 static const psygfx_bind binds[] = {
-    { &fix,     PSYGFX_P_VISIBLE,  FIX_ON,     NULL },
-    { &grating, PSYGFX_P_VISIBLE,  GRATING_ON, NULL },
-    { &grating, PSYGFX_P_CONTRAST, CONTRAST,   NULL },
+    { .stim = &fix,     .param = PSYGFX_P_VISIBLE,  .channel = FIX_ON     },
+    { .stim = &grating, .param = PSYGFX_P_VISIBLE,  .channel = GRATING_ON },
+    { .stim = &grating, .param = PSYGFX_P_CONTRAST, .channel = CONTRAST   },
 };
 
 static psytl_event ev(int64_t t, int kind, int target, int code) {
