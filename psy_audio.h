@@ -1688,7 +1688,12 @@ PSYAU_API void psyau_render(void* host, void* out, int32_t frames, const psyau_t
         }
     } else if (tk->flags & PSYAU_TICK_XRUN) {
         psyau__xrun(au, now_t, 0, 1);
-    } else if (au->dcaps.pos_source != PSYAU_POS_DEVICE && au->last_entry > 0 && au->dcaps.buffer > 0) {
+    } else if (au->dcaps.pos_source != PSYAU_POS_DEVICE && au->dcaps.tier != PSYAU_TIER_SIM
+               && au->last_entry > 0 && au->dcaps.buffer > 0) {
+        /* Not for the null device: it is a timer thread with no hardware
+         * buffer, so a long gap is its scheduling jitter and drops nothing.
+         * On a loaded CI VM every gap restarted the fit, which then never
+         * warmed up. */
         int64_t gap = now_t - au->last_entry;
         if ((double)gap > (double)au->dcaps.buffer * psyau__k_nom(au) * 1.5) psyau__xrun(au, now_t, 0, 1);
     }

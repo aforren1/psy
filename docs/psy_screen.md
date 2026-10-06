@@ -1074,3 +1074,19 @@ begin()).
   identity), and its effect on independent-flip and overlay frames.
 - How late the after-flip hook runs, per backend (derived only, in the
   design note).
+
+## Left out on purpose
+
+- **Partial presents** (EGL_KHR_swap_buffers_with_damage,
+  EGL_KHR_partial_update, DXGI Present1 dirty rectangles). Decided
+  2026-10-06. The Windows backends do not swap through EGL, so the EGL
+  extensions do not apply there. Dirty rectangles reduce only the
+  compositor's work on a composed path; a fullscreen independent flip or
+  overlay frame gains nothing, and onset timing does not change. psy_gfx
+  redraws every pixel every frame (the output stage and its noise dither
+  run on the full screen), so there is no small damage region to report.
+  A partial update also needs the previous frame's pixels to survive, and
+  the swapchains here are flip-discard. One wrong rectangle would leave
+  stale stimulus pixels on the screen with no error and no record. A
+  later Wayland backend reports the full frame as damaged, which equals a
+  plain swap.

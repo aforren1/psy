@@ -639,6 +639,29 @@ static void test_callback_source(void) {
     psyau_update(&g_au);
     CHECK(g_au.xruns_ft >= 1);
     psyau_close(&g_au);
+
+    /* The null device's case: callback times only and no hardware buffer
+     * (tier SIM). The same 100 ms gap is timer jitter there, not an
+     * underrun: no XRUN, and the fit keeps its points (on a loaded macOS
+     * CI VM every gap restarted the fit, so open() never returned). */
+    {
+        uint32_t n_before;
+        sd_default(s);
+        s->pos_source = PSYAU_POS_CALLBACK;
+        s->tier = PSYAU_TIER_SIM;
+        CHECK(open_dev(s, NULL));
+        sd_run_s(s, 2.0);
+        psyau_update(&g_au);
+        n_before = g_au.fit_ft.n;
+        CHECK(g_au.fit_ft.ready);
+        s->stall_ns = 100000000;
+        sd_run_s(s, 0.2);
+        psyau_update(&g_au);
+        CHECK_I(g_au.xruns_ft, 0);
+        CHECK(g_au.fit_ft.ready);
+        CHECK(g_au.fit_ft.n >= n_before);
+        psyau_close(&g_au);
+    }
 }
 
 /* The records in the ring, field by field. */
