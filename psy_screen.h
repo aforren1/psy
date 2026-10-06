@@ -4946,13 +4946,14 @@ PSYSCR_API int psyscr_describe(const psyscr_screen* s, char* buf, size_t cap) {
                                   risk ? " WARNING=codes-at-risk" : "");
         if (s->n_trig > 0 && n < sizeof extra) {
             char cpus[32] = "";
-            if (s->trig_cores) snprintf(cpus, sizeof cpus, ":cpus=0x%llx", (unsigned long long)s->trig_mask);
-            snprintf(extra + n, sizeof extra - n, " triggers=%d worker=%s%s%s fence=%s", s->n_trig,
+            /* chosen before the call: a directive inside macro arguments is undefined (clang) */
 #if defined(PSYSCR__REAL_WORKER)
-                     psyrt_policy_name(psyrt_worker_policy(&s->worker)),
+            const char* wpol = psyrt_policy_name(psyrt_worker_policy(&s->worker));
 #else
-                     "test",
+            const char* wpol = "test";
 #endif
+            if (s->trig_cores) snprintf(cpus, sizeof cpus, ":cpus=0x%llx", (unsigned long long)s->trig_mask);
+            snprintf(extra + n, sizeof extra - n, " triggers=%d worker=%s%s%s fence=%s", s->n_trig, wpol,
                      s->trig_cores == 'E' ? "/E-cores" : s->trig_cores == 'N' ? "/pinned" : "/psy_rt",
                      cpus, !s->trig_fence ? "off" : (s->pr->gpu_done ? "on" : "unavailable"));
         }

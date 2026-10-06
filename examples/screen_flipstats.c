@@ -166,7 +166,9 @@ static FILE* g_csv;
 /* --trigger: what the callback saw, and what the after-flip hook reported */
 static double g_trig_late_us[MAX_FRAMES], g_trig_wake_us[MAX_FRAMES], g_trig_lock_us[MAX_FRAMES],
               g_trig_disp_us[MAX_FRAMES];
-static unsigned char g_trig_cpu[MAX_FRAMES];   /* where the callback ran */
+#if defined(_WIN32)
+static unsigned char g_trig_cpu[MAX_FRAMES];   /* where the callback ran: only Windows names the CPU */
+#endif
 static int g_ntl;
 static int g_tr_n, g_tr_moved, g_tr_gpu_moved, g_tr_early, g_tr_late, g_tr_pending, g_tr_gpu_caught;
 static void trig_fn(void* ctx, const psyscr_trigger_info* i) {

@@ -2746,7 +2746,7 @@ static void gl_v03_paint(stats* st) {
                         ok_to_rgb(&cal, m, want);
                     } else {   /* DKL polar about the background, through psygfx_cal_dir_dkl */
                         double ea[3], eb[3], dk[3], inv[9], M[9];
-                        float dir[3], unit[3];
+                        float dir[3] = { 0, 0, 0 }, unit[3];   /* newer gcc cannot see the call fill it */
                         int c2, r2;
                         for (c2 = 0; c2 < 3; c2++) {   /* the RGB increment of each DKL unit axis, then its inverse */
                             unit[0] = unit[1] = unit[2] = 0; unit[c2] = 1;

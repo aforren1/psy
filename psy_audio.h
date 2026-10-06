@@ -1020,11 +1020,13 @@ PSYAU_API const psyau_param* psyau_params(int* n);
      * clang's pedantic warnings reject; they are about that JavaScript */
     #if defined(__clang__)
         #pragma clang diagnostic push
+        /* first: older clang lacks some of the groups below, and must not
+         * fail on their names */
+        #pragma clang diagnostic ignored "-Wunknown-warning-option"
         #pragma clang diagnostic ignored "-Wdollar-in-identifier-extension"
         #pragma clang diagnostic ignored "-Wstrict-prototypes"
         #pragma clang diagnostic ignored "-Wgnu-zero-variadic-macro-arguments"
         #pragma clang diagnostic ignored "-Wvariadic-macro-arguments-omitted"
-        #pragma clang diagnostic ignored "-Wunknown-warning-option"
         #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     #endif
     #ifdef PSYAU_MINIAUDIO_HEADER
