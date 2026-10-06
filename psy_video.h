@@ -842,6 +842,10 @@ PSYVID_API int64_t  psyvid_qoi_encode(const uint8_t* rgba, int32_t w, int32_t h,
                                       uint8_t* out, size_t cap);
 PSYVID_API int      psyvid_qoi_decode(const uint8_t* in, size_t n, uint8_t* rgba, int32_t w, int32_t h);
 PSYVID_API size_t   psyvid_qoi_max_bytes(int32_t w, int32_t h, int32_t channels);
+/* rgba and stride must be 4-byte aligned, and rows 2-byte aligned (at least
+ * psyvid_yuv_rows_bytes(w) bytes): the conversion stores whole pixels and
+ * returns PSYVID_ERR_ARG otherwise. A uint8_t array has no such alignment;
+ * use a uint32_t array or malloc. */
 PSYVID_API int      psyvid_yuv_to_rgba(const psyvid_planes* p, int32_t format, int32_t w, int32_t h,
                                        int32_t matrix, int32_t range, int32_t siting, int32_t chroma,
                                        uint8_t* rgba, int32_t stride, int16_t* rows);

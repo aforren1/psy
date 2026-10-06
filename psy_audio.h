@@ -2553,7 +2553,11 @@ PSYAU_API bool psyau_open(psyau_audio* au, const psyau_desc* desc) {
             (void)psyau_update(au);
             if (au->fit_ft.ready) break;
             if (psyau__ld32(&au->lost) || PSYAU__NOW() > end) {
-                psyau__err(au, "psy_audio: device '%s' gave no steady callbacks within 3 s", au->dcaps.name);
+                /* which of three failures: a lost device, no callbacks at
+                 * all, or callbacks too irregular for the fit to warm up */
+                psyau__err(au, "psy_audio: device '%s' gave no steady callbacks within 3 s "
+                           "(lost=%u, fit points=%u, fits=%u)", au->dcaps.name,
+                           (unsigned)psyau__ld32(&au->lost), (unsigned)au->fit_ft.n, (unsigned)au->fit_ft.gen);
                 psyau_close(au);
                 return false;
             }

@@ -550,7 +550,12 @@ static void test_qoi(void) {
 
 /* The conversion against the same chroma weights and matrix in double. */
 static void test_yuv(void) {
-    static uint8_t planes[37 * 23 * 2], rgba[37 * 23 * 4];
+    /* rgba through a uint32_t array: the conversion stores whole pixels and
+     * refuses an unaligned buffer, and a uint8_t array has no 4-byte
+     * alignment (it happened to have it everywhere but macOS) */
+    static uint32_t rgba32[37 * 23];
+    static uint8_t planes[37 * 23 * 2];
+    uint8_t* rgba = (uint8_t*)rgba32;
     static int16_t rows[256];
     int fm, mx, rg, st, ch, worst = 0;
     g_case = "yuv";
@@ -1574,7 +1579,8 @@ static void test_seq(void) {
         PSYVID_FMT_RGBA8 };
     static uint8_t frames[12][21 * 13 * 16 + 64];
     static uint8_t padded[21 * 13 * 16 * 2];
-    static uint8_t expect[21 * 13 * 16];
+    static uint32_t expect32[21 * 13 * 4];   /* the conversion needs 4-byte alignment */
+    uint8_t* expect = (uint8_t*)expect32;
     static int16_t rows[1024];   /* >= psyvid_yuv_rows_bytes(21) */
     const char* path = "psy_video_test.psyseq";
     int t;
@@ -1649,7 +1655,8 @@ static void test_seq(void) {
                 if (psyvid__is_yuv(fmt)) {
                     psyvid_planes in;
                     psyvid__planes_layout(fmt, W, H, frames[i], &in);
-                    psyvid_yuv_to_rgba(&in, fmt, W, H, sd.matrix, sd.range, sd.siting, 0, expect, W * 4, rows);
+                    CHECK_I(psyvid_yuv_to_rgba(&in, fmt, W, H, sd.matrix, sd.range, sd.siting, 0, expect, W * 4, rows),
+                            PSYVID_OK);
                     CHECK(memcmp(g_up_copy, expect, g_up_bytes) == 0);
                 } else {
                     CHECK(memcmp(g_up_copy, frames[i], g_up_bytes) == 0);
