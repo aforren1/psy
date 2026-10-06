@@ -264,7 +264,7 @@ static void test_cal_published(void) {
     e = 0;
     for (k = 0; k < 3; k++) {
         float unit[3] = { 0, 0, 0 }, dir[3];
-        double inc[3], lb[3], v;
+        double inc[3], lb[3] = { 0, 0, 0 }, v;
         int j;
         unit[k] = 1.0f;
         CHECK(psycol_cal_dir_dkl(&cal_bm, bg, unit, dir) == PSYCOL_OK);
@@ -785,7 +785,7 @@ static void test_device(void) {
         for (k = 0; k < 256; k++) {
             psycol_gamut g;
             psycol_rgb r = psycol_to_rgb(&cx, PSYCOL_DEVICE(k / 255.0, k / 255.0, k / 255.0), &g);
-            uint32_t code[3];
+            uint32_t code[3] = { 0, 0, 0 };
             CHECK(g.in);
             CHECK(psycol_output_code(&cs[i], r, 8, code) == PSYCOL_OK);
             for (gun = 0; gun < 3; gun++) if (code[gun] != (uint32_t)k) nbad++;
@@ -1024,8 +1024,8 @@ static void test_values(void) {
     c = PSYCOL_DKL(.elev = 0, .azim = 90, .contrast = 0.1);
     CHECK(c.space == PSYCOL_SPACE_DKL && c.u.dkl.azim == 90 && c.u.dkl.contrast == 0.1 && c.flags == 0);
     CHECK(psycol_format(c, buf, sizeof buf) > 0 && strcmp(buf, "dkl(0 90 0.10000000000000001)") == 0);
-    CHECK(psycol_format(c, buf, 5) == PSYCOL_ERR_FULL);
-    c = PSYCOL_RGB(0.25, 0.5);
+    { volatile size_t small = 5; CHECK(psycol_format(c, buf, small) == PSYCOL_ERR_FULL); }
+    c = PSYCOL_RGB(.r = 0.25, .g = 0.5);
     CHECK(c.u.rgb.r == 0.25 && c.u.rgb.g == 0.5 && c.u.rgb.b == 0);
     CHECK(n == PSYCOL_SPACE_COUNT - 1);
     for (i = 0; i < n; i++) {

@@ -620,7 +620,7 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_PL_MPEG=ON
 
       - name: Build
-        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input screen_abort psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery compile_psy_video_c compile_psy_video_cxx test_psy_video video_play video_bench
+        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input screen_abort psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery compile_psy_video_c compile_psy_video_cxx compile_psy_video_com test_psy_video video_play video_bench
 
       # psy_gfx.h's pixel checks must run where software GL exists; macOS has
       # no EGL, so its test runs the CPU checks only.

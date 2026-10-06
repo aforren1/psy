@@ -271,8 +271,9 @@ point of its own box at x, y that it turns about, the center by default).
   bounded fold of at most 56 primitives, and paths of at most 224 points
   are inside it, with effects, dashes and gradients drawn from the same
   field. SVG, fill rules and a general path rasterizer are outside it.
-  Artwork still goes through the pack tool, as a distance texture
-  (MASK_TEX, MSDF or MTSDF).
+  Artwork goes through the pack tool as Slug paths, the same form as
+  glyph outlines (5.2). Changed 2026-10-06: "as a distance texture
+  (MASK_TEX, MSDF or MTSDF)".
 - **Output stage.** Gamma, CLUT, dithering for 10-bit and Bits#-style
   modes, in the final shader. SDL3 has no gamma ramps, so this is the
   only place gamma lives. Stereo on one display is an output mode
@@ -680,6 +681,7 @@ section can cite the manifest and a reviewer can rebuild the pack.
 | Video | Constant frame rate, fixed pixel format and resolution, closed GOPs, no B-frames, plus an index of frame to byte offset and timestamp | Produced by ffmpeg, command recorded. |
 | Audio | The project rate and channel count; 16-bit, 24-bit or float samples | Resampled offline with a high-quality resampler, recorded. In memory always float, widened exactly at load (2026-10-05): one mixer path, and float holds 16- and 24-bit values exactly. |
 | Font | The font file, plus the glyph outlines built from it in the Slug form (quadratic curves and bands; cubic outlines converted within a stated tolerance), and alpha coverage at the sizes the experiment uses for value-exact text. Static text is stored as laid-out glyph runs. | No platform font engine. One pinned Skribidi does layout, bidirectional text and shaping in the designer (WebAssembly, with editing), the pack tool and the player, so text is the same everywhere. Scalable text is drawn from the outlines by the Slug algorithm (Lengyel, JCGT 2017; patent dedicated to the public domain 2026-03-17; reference shaders need attribution). A whole font fits in the pack (about 65 MB for a CJK font, against 212 to 762 MB as MSDF atlases), and a glyph missing from it is built from the font's outline in 17 to 66 us, so the player rasterizes nothing at run time. Value-exact alpha coverage comes from an exact-area rasterizer in the pack tool, not Skribidi's (max error 0.24 to 0.32 of full scale), and is drawn on the pixel grid only. Effects: outlines and faux bold by stroke expansion of the curves, filled the same way; hard shadows by an offset copy; soft shadows, glow and blurred text by a Gaussian blur pass on a render target (numbers in docs/text_probe.md). Headers only draw glyph runs. Changed 2026-10-06: MSDF atlases dropped from the pack, after a probe on the Iris Xe (docs/text_probe.md; MSDF failed on dense CJK and overlapping contours, and a distance soft edge is a true blur only on straight edges). Changed 2026-10-05: "glyph atlas plus metrics; no font engine at runtime". |
+| Artwork | Filled paths in the Slug form, one solid color per layer, with the fill rule; strokes expanded to fills in the tool | The tool reads a subset of SVG: paths, basic shapes, transforms, solid fills and strokes. Filters, text, CSS, masks and gradients are refused by name, not ignored. Decided 2026-10-06, replacing MSDF artwork; the subset grows only when an experiment needs it. |
 | Shader | The user's fragment body wrapped in the contract (`psygfx_shader_wrap()`, the same function in the tool and the runtime), as GLSL ES 3.00 text, with reflection | glslang validates it in the tool. GL ES 3.0 has no portable binary, so ANGLE compiles the text on the rig when the pack loads; `psy_gfx.h` caches each program's binary per ANGLE build, adapter and driver (`desc.cache`, v0.4.0), checked by its own hash before the driver sees it. SPIRV-Cross is for a second backend only. Changed 2026-10-05: "D3D bytecode is finished by the runner" (docs/psy_gfx.md). |
 | Table | Typed binary columns from condition files and from ELAN, Praat or BIDS events exports | Read directly by `psy_trials.h` and `psy_timeline.h`. |
 | Calibration | The 3x3 matrix and the gamma table, with the photometer readings beside them | `psy_color.h`'s `.psycal` file (62528 bytes, CRC-32; the same bytes as `psy_gfx.h` v0.4's), rebuilt from its readings on load. A participant's luminance from flicker photometry is session data, not pack data: `psy_color.h`'s `.psylum` file (changed 2026-10-06). |
@@ -1141,10 +1143,10 @@ the one development machine, and Windows 10 became best effort
 |---|---|
 | 1. `psy_rt.h`: event ring, clock correlation | Done, v0.5.0, with the instrumentation macros. |
 | 2. `psy_timeline.h` | v0.4.0: events, tracks, tweens, `psytl_skip`, `psytl_lead`, `psytl_peek`, exact rational base rates (`psytl_rate`), `psytl_window`, `psytl_rt_time`, the `psytl_seq` builder with op tables, `psytl_run`, `psytl_check_ops` and the key arena (4.5.1). |
-| 3. `psy_screen.h` | v0.3.0 on Windows: DXGI_FLIP and COMPOSITION, flip hooks (codes, triggers, after-flip callbacks), the OS gamma ramp. X11, Wayland, macOS and web are stubs. No photodiode run. |
+| 3. `psy_screen.h` | v0.3.1 on Windows: DXGI_FLIP and COMPOSITION, flip hooks (codes, triggers, after-flip callbacks), the OS gamma ramp, the Shift+Esc abort and the triple-press panic, the window icon, D3D11 video support on the device. X11, Wayland, macOS and web are stubs. No photodiode run. |
 | 4. `psy_audio.h` | v0.2.0 on WASAPI shared mode: onsets from a fit of device positions, tier 2. Streams (ring-fed voices, the soundtrack path) and WAV streaming. The other backends compile and have never run. No line-in run. |
-| 5. `psy_gfx.h` | v0.4.0: stimuli, the signed-distance vector program, strokes, sprites, groups, render targets, MSDF glyph runs, the output stage; a program binary cache (open 11 to 35 ms warm), NV12 and I420 video converted to linear light, texture import (GL, D3D11 through ANGLE), instanced stimuli, and draws reordered where they do not overlap. Text layout (Skribidi) and atlases belong to the pack tool and the player (5.2), not to the header. Missed bars: four of v0.3's GPU bars, and the video program's 1.5x of an RGBA8 image (docs/psy_gfx.md). |
-| 6. `psy_video.h` | v0.1.0: scheduler, frame sequence, pl_mpeg, decode-ahead, YUV conversion on the pump. Not built: the planar shader path, Media Foundation, the shared GPU path, the soundtrack source, AVFoundation, capture. |
+| 5. `psy_gfx.h` | v0.5.0: stimuli, the signed-distance vector program, strokes, sprites, groups, render targets, MSDF glyph runs, the output stage; a program binary cache (open 11 to 35 ms warm), NV12 and I420 video converted to linear light, texture import (GL, D3D11 through ANGLE), instanced stimuli, and draws reordered where they do not overlap. v0.5.0 moved the calibration and color conversions to `psy_color.h` (v0.1.0), which it now requires. Text layout (Skribidi) and atlases belong to the pack tool and the player (5.2), not to the header. Missed bars: four of v0.3's GPU bars, and the video program's 1.5x of an RGBA8 image (docs/psy_gfx.md). |
+| 6. `psy_video.h` | v0.2.0: scheduler, frame sequence, pl_mpeg, decode-ahead; Media Foundation (DXVA by default), planar upload to the gfx shader by default, the shared D3D11 GPU path as an option, the soundtrack on `psy_audio.h` streams, base rates. Not built: AVFoundation, capture. |
 | 7 to 10 | Not started. |
 
 ### Next, in order
@@ -1156,11 +1158,14 @@ the one development machine, and Windows 10 became best effort
    step builds on onset claims that are software timestamps until this
    step is done. It needs the photodiode and a line-out to line-in
    cable on the development machine.
-2. **`psy_gfx.h`**: the program binary cache, planar YUV and texture
-   import, instanced stimuli: done (v0.4.0). Next, docs/psy_gfx.md "Next".
-3. **`psy_video.h`**: the planar shader path, Media Foundation, the
-   shared GPU path, the soundtrack source. Needs the planar formats and
-   texture import from item 2.
+2. **`psy_gfx.h`**: Slug glyph runs and paths, and the blur pass
+   (v0.6), then sampler-filtered chroma as the video default.
+   Kind-specialized vector programs only where the harness shows they
+   close half of a missed bar's gap (docs/psy_gfx.md "Next").
+3. **The outline builder**: curves and bands in the Slug form from font
+   outlines and paths, stroke expansion, the exact-area alpha
+   rasterizer. It is the core of the pack tool's text and artwork
+   (item 6) and runs in parallel with item 2.
 4. **`psy_timeline.h`**: done for now (v0.4.0: base rates,
    `psytl_window()`, sequences). `psy_video.h` applies the rates for any
    rate other than 1.
@@ -1169,14 +1174,13 @@ the one development machine, and Windows 10 became best effort
    backend. `psy_audio.h` on ALSA, PulseAudio and CoreAudio. A platform
    gets its tier from a photodiode or line-in run on that platform, not
    from CI.
-6. The pack tool as a library, and its CLI, with Skribidi, the Slug
-   outline builder and the exact-area alpha rasterizer. Before it:
-   Slug glyph runs and the blur pass in `psy_gfx.h`, after instancing.
+6. The pack tool as a library, and its CLI, with Skribidi, the outline
+   builder (item 3) and the SVG subset reader (5.2, Artwork).
 7. The player, native and WebAssembly, and the runner protocol.
 8. The designer.
 9. Build jobs, `psy_net.h`.
 
-Items 2, 3 and 4 can run in parallel. Measurements on the development
+Items 2 and 3 run in parallel. Measurements on the development
 machine run one at a time: on 2026-10-05 a second measuring job's load
 showed up as a false regression in the first.
 
