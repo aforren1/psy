@@ -1046,13 +1046,188 @@ evidence, the window runs only confirm that nothing else broke.
   display, the adapter LUID. Borrowed pointers, valid until close(); the
   device is free-threaded, the context is the frame thread's and ANGLE's.
   In the windowed runs all three were set and the LUID was
-  00000000:0001e8e6. Not done: a device with VIDEO_SUPPORT and
-  multithread protection (psy_video.h's zero-copy request).
+  00000000:0001e8e6. v0.3.1 adds the device with VIDEO_SUPPORT and
+  multithread protection (`desc.d3d11_video`, below).
 
 Mutations now caught: 29 (the 24 above, plus begin() and flip_at()
 planning the last planned vblank again, a queued flip closing the
 window, completed records not listed, and the list not cleared per
 begin()).
+
+## Aborts, the panic watchdog, the icon, the video device (v0.3.1)
+
+Measured on 2026-10-06, on AC. Keys were sent with SendInput only while
+the test's own window (or its ghost) was the foreground window.
+
+### The abort combination
+
+Psychtoolbox has no abort key by default. PsychoPy ends on Esc alone,
+which participants press by accident. v0.3.0 also ended on Esc alone.
+The default is now Shift+Esc, which the user chose: an operator presses
+it with one hand, and a participant does not press it by accident. The
+other reserved Esc combinations are taken by Windows: Ctrl+Esc opens
+Start, Alt+Esc switches windows, and Ctrl+Shift+Esc opens Task Manager.
+
+An abort is reported once (an edge), not while it lasts. The caller can
+ask the operator and then continue, and `while (psyscr_begin(...) ==
+PSYSCR_OK)` still ends at the first abort.
+
+v0.3.0 peeked at SDL's queue in begin(). A loop that read its events
+with `psyscr_poll()` before begin() removed the Esc before begin() saw
+it. v0.3.1 uses `SDL_AddEventWatch`, which SDL calls for each event as it
+is queued, so the header sees every event. The watch can run on SDL's
+raw-input thread, so the abort state is a lock-free log of 16 entries
+with atomic sequence numbers. begin() reads it with one atomic load when
+nothing is new.
+
+Found while testing: with `SDL_HINT_WINDOWS_RAW_KEYBOARD` on, SDL 3.4
+reports each key twice. One report comes from its raw-input thread and
+one from the message loop, 0.1 to 11 ms apart. A probe with 8 F24 keys
+gave 8 key-downs from each thread and 16 from `SDL_PollEvent`. With the
+hint off, the probe gave 8. The tree's v0.3.0 header behaves the same,
+so `examples/screen_input.c`'s raw-path table matched the first report
+of each key. The header counts a press only after a key-up of the same
+key, and treats reports within 30 ms as one press.
+
+`examples/screen_abort.c` (a child process with a 320 x 200 window that
+reads its events with `psyscr_poll()` before begin()):
+
+| Case | Result |
+|---|---|
+| Esc alone | no abort |
+| Shift+Esc | one abort; stamped 0.12 to 0.70 ms after SendInput (5 runs) |
+| Shift+Esc held with 8 repeats | one abort |
+| 3 presses after the loop reported press 1 | 3 more aborts, 1 press each; no panic; exit 0 |
+
+Alt+F4 was not sent: if the focus moved, it would close another program.
+The core test checks it through the feed. The header sets
+`SDL_HINT_WINDOWS_CLOSE_ON_ALT_F4` to "0", so SDL does not turn Alt+F4
+into a close request. The header reports it as its own reason, and the
+caller can ignore it.
+
+### The panic watchdog
+
+The user chose the gesture: Shift+Esc three times within 2 s, which is
+what people do when a program seems stuck. The abort and the panic use
+one combination.
+
+The watchdog uses a low-level keyboard hook (`WH_KEYBOARD_LL`) on its
+own thread, not `RegisterHotKey`. RegisterHotKey takes the combination
+for the whole system, hides it from SDL (so press 1 would not be an
+abort), fails when another program holds it, and fires whatever window
+has the focus. The hook sees every key, passes every key on, and
+consumes nothing. It counts a press only while a window of this process
+is in front. The thread sleeps in GetMessage; the hook does a few
+compares and posts the panic to its own thread.
+
+Two of the design's open questions were decided by measurement
+(`probe.c` in the worker's scratch, not in the tree):
+
+- **Ghost windows.** A window that pumps no messages for 4.5 s is
+  marked hung. At 5.0 s the foreground window became a window of class
+  "Ghost" owned by another process (dwm). A foreground check by process
+  alone would then miss every press. The hook also accepts a "Ghost"
+  window while one of the screens' windows is hung. The header does not
+  call `DisableProcessWindowsGhosting()`, which would change the process
+  for its whole life.
+- **Hook removal.** `LowLevelHooksTimeout` is not set on this machine
+  (the default applies). A test hook that stalled for 1.5 s on one key
+  was still called for the next two keys. The header does not reinstall
+  the hook.
+
+The rule against data loss: no panic while a begin() has reported an
+abort within the last 10 s. A begin() heartbeat was considered: it would
+kill a program that is outside its frame loop (loading, saving) at the
+wrong moment, and that program is not hung. The acknowledgement shows
+whether the program answers the abort itself.
+
+The display mode: ChangeDisplaySettingsExW from the watchdog thread
+blocked for more than 1 s. A display change sends to every window, and
+the hung window does not answer. The desktop mode came back 1.21 s
+after press 3 with that call, and 1.16 and 1.18 s after press 3 without
+it. In both cases Windows put the mode back while the process was ending
+(the end itself takes about 1.2 s with a D3D11 device). The call was
+taken out.
+
+| Case (`screen_abort.c`) | Result |
+|---|---|
+| hung window, 3 presses 300 ms apart | exit code 99, 28 to 85 ms after press 3 (5 runs); panic_fn ran; the gamma entry was put back |
+| hung 7 s (ghost window in front), 3 presses | the same, 35 to 79 ms (4 runs) |
+| hung, Shift+Esc held with 8 repeats | no panic; then 3 presses: exit 99 |
+| fullscreen 1680 x 1050 on the 1920 x 1200 desktop, hung, 3 presses | exit 99; desktop mode back 1.16 and 1.18 s after press 3 (2 runs of this build, 1.21 s with the removed call; about 3 s of a dark gray screen each) |
+
+The gamma entry was the display's current ramp (the identity), so the
+restore changed nothing that could be seen. The ramp of a real switch
+was not set on hardware (see "The OS gamma ramp").
+
+Keys on SDL's raw path with the hook armed and not armed, interleaved,
+`screen_input.c --panic`, 199 F24 keys each (restamped minus sent, ms):
+
+| Run | Hook | mean | p50 | p99 | max |
+|---|---|---|---|---|---|
+| 1 | off | 0.492 | 0.459 | 1.019 | 2.441 |
+| 1 | armed | 0.310 | 0.303 | 0.696 | 0.730 |
+| 2 | off | 0.365 | 0.347 | 1.074 | 1.075 |
+| 2 | armed | 0.326 | 0.311 | 0.555 | 0.625 |
+| 3 | off | 0.464 | 0.367 | 1.826 | 3.197 |
+| 3 | armed | 0.327 | 0.305 | 0.669 | 0.851 |
+
+The hook did not make keys later. They were earlier and tighter with it,
+which this test cannot explain; the hook thread may keep the input path
+busy.
+
+### The video device
+
+`desc.d3d11_video` follows the psy_video worker's design:
+`D3D11_CREATE_DEVICE_VIDEO_SUPPORT` on both device creations, and
+`SetMultithreadProtected(TRUE)` through `ID3D11Multithread`
+(ID3D10Multithread has the same IID). `psyscr_native()` reads
+`video` and `mt_protected` from the device, not from the desc. With the
+flag, both were 1 on DXGI_FLIP and on COMPOSITION; without it, both were
+0.
+
+The header's CPU time per frame, under the measurement lock,
+`screen_flipstats --windowed --topmost --frames 1800`, AC. Three rounds,
+interleaved: flag off, flag on, and the v0.3.0 header (its peek at the
+queue instead of the watch). "begin" is begin() minus its wait; the
+window was on the overlay path:
+
+| Round | Build | begin mean us | p50 | p99 | flip mean us | pump zone mean us |
+|---|---|---|---|---|---|---|
+| 1 | off | 25.2 | 23.8 | 62.8 | 1.96 | 9.2 |
+| 1 | on | 26.3 | 23.8 | 51.6 | 2.01 | 10.2 |
+| 1 | v0.3.0 | 29.5 | 27.5 | 53.2 | 2.23 | 11.6 |
+| 2 | off | 22.5 | 20.3 | 92.5 | 1.71 | 8.9 |
+| 2 | on | 24.5 | 19.2 | 38.3 | 1.54 | 12.0 |
+| 2 | v0.3.0 | 21.6 | 20.0 | 40.7 | 1.54 | 8.0 |
+| 3 | off | 23.5 | 21.7 | 41.9 | 1.72 | 9.2 |
+| 3 | on | 19.6 | 18.5 | 37.8 | 1.54 | 7.2 |
+| 3 | v0.3.0 | 20.0 | 18.1 | 43.0 | 1.41 | 7.9 |
+
+Other workers' compilers ran during round 1 (each run waited for none to
+be running at its start). No difference shows beyond the spread between
+rounds. The psy_video worker's own interleaved runs agree: begin 21.0 to
+22.0 us off against 21.2 to 21.9 us on, p99 43 to 45 us both. With no
+decoder on the device, the protection costs nothing measurable. The
+header still misses its 20 us bar, on the OS calls, as before. The case
+with a decoder on the device belongs to psy_video.h's measurements.
+
+### The window icon
+
+The icon is Escher's impossible cube, which the user picked over a brain
+and a Penrose tribar. The 48 pixel size is ray-cast from 3D square beams
+with three face shades, and one pair of beams overlaps the wrong way
+round. The 16 and 32 pixel sizes are drawn as line art, because the
+ray-cast was a dark blob at 16. The palette has 5 colors, stored as runs
+of 4-bit indices: 1292 bytes of runs and 20 of palette.
+
+SDL 3.4's `SDL_SetWindowIcon` with alternate images gave the window one
+32 pixel icon for both ICON_SMALL and ICON_BIG (read back with
+WM_GETICON at 96 dpi), so Windows would shrink it for the title bar. On
+Windows the header sets ICON_SMALL and ICON_BIG itself: the smallest of
+its sizes at least as large as the window's icon metric at its dpi. Read
+back, ICON_SMALL was the 16 pixel art and ICON_BIG the 32, every pixel
+equal to the header's.
 
 ## Not measured
 
@@ -1074,8 +1249,35 @@ begin()).
   identity), and its effect on independent-flip and overlay frames.
 - How late the after-flip hook runs, per backend (derived only, in the
   design note).
+- Alt+F4 sent to a screen's window (not sent: it would close another
+  program if the focus moved).
+- The panic on COMPOSITION in fullscreen, on Windows 10, and with a real
+  non-identity gamma ramp set.
+- `desc.d3d11_video` with a decoder on the device (psy_video.h measures
+  it).
+- The icons at a display scale above 100%.
+- Early flips in a composed window (open finding, from the psy_video
+  worker, 2026-10-06). In every real-device run of psy_video.h (DXGI_FLIP
+  in a composed window, Iris Xe, AC), about 1.3 s after the start, three
+  flips were shown one vblank before psy_screen's predicted onset, then
+  one flip a vblank late. In one run the compositor showed 3.6 s of flips
+  1 to 2 vblanks late. psy_video's records report them as they happened.
+  This resembles the early flips of windowed DXGI_FLIP runs before the
+  flip_at fix of 2026-10-05. The composed path is tier 2 at best. To
+  investigate in a later screen round.
 
 ## Left out on purpose
+
+- **RegisterHotKey for the panic** (v0.3.1): it takes the combination
+  for the whole system and hides it from SDL. The low-level hook
+  observes it instead (see above).
+- **Escape held for a time as the abort**: slow for an operator under
+  stress, and it needs state polled every frame. The user chose
+  Shift+Esc.
+- **The watchdog's own display-mode restore**: measured, it blocked for
+  more than 1 s and the mode came back no sooner (see above).
+- **Reinstalling the keyboard hook** and **DisableProcessWindowsGhosting**:
+  measured, neither is needed on this machine (see above).
 
 - **Partial presents** (EGL_KHR_swap_buffers_with_damage,
   EGL_KHR_partial_update, DXGI Present1 dirty rectangles). Decided

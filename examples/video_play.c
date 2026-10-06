@@ -10,6 +10,7 @@
  * Usage: video_play [--sim] [--file PATH [--index]] [--size WxH] [--frames N]
  *                   [--fps N] [--qoi] [--yuv] [--loop] [--seconds S]
  *                   [--window WxH] [--display ID] [--ahead N] [--csv PATH]
+ *                   [--hw sw|dxva] [--gpu]
  *   --sim       no window and no GL: the simulated display, for CI
  *   --size      generated frames, pixels (default 320x180)
  *   --frames    generated frames (default 60)
@@ -19,6 +20,12 @@
  *   --window    window size (default 640x360)
  *   --csv       one line per display frame: index, decision, why, frame, the
  *               update's ns
+ *   --hw        Media Foundation's decoder for an MP4 file (desc.hw_decode)
+ *   --gpu       decode and draw on the GPU (desc.gpu_path PSYVID_PATH_GPU;
+ *               the screen opens with desc.d3d11_video)
+ * It prints psyvid_update()'s cost on frames that uploaded a new frame and
+ * on repeats separately, the draw and flip's cost, and the process's CPU,
+ * after frame 120. Shift+Esc ends it (psy_screen.h's default abort).
  * Exit code: 0; 1 when the screen, the gfx or the movie did not open, or a
  * frame update failed; 2 for a bad argument.
  */
@@ -31,10 +38,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static psyscr_screen scr;
 static psygfx_gfx gfx;
 static psyvid_movie mv;
+
+/* The process's CPU time, ns: the decode thread and the decoder's own
+ * threads count too, which a per-call timer does not see. */
+static int64_t cpu_ns(void) {
+#ifdef _WIN32
+    FILETIME c, e, k, u;
+    if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
+    return (int64_t)((((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime) +
+                     (((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime)) * 100;
+#else
+    return (int64_t)((double)clock() * 1e9 / CLOCKS_PER_SEC);
+#endif
+}
 
 /* A low-contrast frame: the display may be somebody's working screen. */
 static void make_frame(uint8_t* rgba, int w, int h, int i, int n) {
@@ -108,11 +129,14 @@ int main(int argc, char** argv) {
     const char* csv = NULL;
     const char* gen = "video_play_demo.psyseq";
     int w = 320, h = 180, n = 60, fps = 30, qoi = 0, yuv = 0, loop = 0, index = 0, ahead = 0;
-    int ww = 640, wh = 360, i, rc = PSYVID_OK, failed = 0;
+    int ww = 640, wh = 360, i, rc = PSYVID_OK, failed = 0, hw = 0, gpu = 0;
     unsigned display = 0;
     double seconds = 0;
     int64_t* cost = NULL;
-    int64_t n_cost = 0, cap_cost = 0, t_start = 0;
+    int64_t* rcost = NULL;   /* repeats */
+    int64_t* dcost = NULL;   /* draw + flip, every display frame */
+    int64_t n_dcost = 0, cap_dcost = 0, cpu0 = 0, wall0 = 0;
+    int64_t n_cost = 0, cap_cost = 0, n_rcost = 0, cap_rcost = 0, t_start = 0;
     uint64_t heap0 = 0;
     FILE* out = NULL;
     char line[1024];
@@ -134,10 +158,16 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--display") && i + 1 < argc) display = (unsigned)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--ahead") && i + 1 < argc) ahead = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--csv") && i + 1 < argc) csv = argv[++i];
+        else if (!strcmp(argv[i], "--gpu")) gpu = 1;
+        else if (!strcmp(argv[i], "--hw") && i + 1 < argc) {
+            const char* v = argv[++i];
+            hw = !strcmp(v, "sw") ? PSYVID_HW_OFF : !strcmp(v, "dxva") ? PSYVID_HW_DXVA : -1;
+            if (hw < 0) { fprintf(stderr, "video_play: --hw sw or dxva\n"); return 2; }
+        }
         else {
             fprintf(stderr, "usage: video_play [--sim] [--file PATH [--index]] [--size WxH] [--frames N] [--fps N]\n"
                             "                  [--qoi] [--yuv] [--loop] [--seconds S] [--window WxH] [--display ID]\n"
-                            "                  [--ahead N] [--csv PATH]\n");
+                            "                  [--ahead N] [--csv PATH] [--hw sw|dxva] [--gpu]\n");
             return 2;
         }
     }
@@ -159,6 +189,7 @@ int main(int argc, char** argv) {
     sd.window_w = ww;
     sd.window_h = wh;
     sd.display = display;
+    sd.d3d11_video = gpu != 0;
     if (!psyscr_open(&scr, &sd)) { fprintf(stderr, "video_play: %s\n", psyscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
@@ -168,6 +199,8 @@ int main(int argc, char** argv) {
     vd.path = file;
     vd.loop = loop != 0;
     vd.ahead = ahead;
+    vd.hw_decode = (psyvid_hw)hw;
+    if (gpu) vd.gpu_path = PSYVID_PATH_GPU;
     if (!psyvid_open(&mv, &gfx, &vd)) { fprintf(stderr, "video_play: %s\n", psyvid_error(&mv)); return 1; }
     memset(&st, 0, sizeof st);
     film = psyvid_stim(&mv, &st);
@@ -180,23 +213,31 @@ int main(int argc, char** argv) {
     }
     psyvid_play_at(&mv, PSYVID_ASAP);
 
-    while (psyscr_begin(&scr, &f) == PSYSCR_OK) {   /* Esc ends it */
+    while (psyscr_begin(&scr, &f) == PSYSCR_OK) {   /* Shift+Esc ends it */
         int64_t t0 = (int64_t)psyrt_now_ns(), dt;
         psyvid_record r;
         rc = psyvid_update(&mv, &f);
         dt = (int64_t)psyrt_now_ns() - t0;
         if (rc < 0) { fprintf(stderr, "video_play: %s (%s)\n", psyvid_strerror(rc), psyvid_error(&mv)); failed = 1; break; }
         if (!t_start) t_start = f.onset;
-        if (f.index == 120) heap0 = psyvid_heap_calls();
+        if (f.index == 120) {
+            heap0 = psyvid_heap_calls();
+            cpu0 = cpu_ns();
+            wall0 = (int64_t)psyrt_now_ns();
+        }
         if (psyvid_last(&mv, &r) == PSYVID_OK && r.display == f.index) {
-            if (n_cost == cap_cost) {
+            int shown = r.decision == PSYVID_SHOWN;
+            int64_t** cv = shown ? &cost : &rcost;
+            int64_t* nv = shown ? &n_cost : &n_rcost;
+            int64_t* cp = shown ? &cap_cost : &cap_rcost;
+            if (*nv == *cp) {
                 int64_t* nc;
-                cap_cost = cap_cost ? cap_cost * 2 : 4096;
-                nc = (int64_t*)realloc(cost, (size_t)cap_cost * sizeof *cost);
+                *cp = *cp ? *cp * 2 : 4096;
+                nc = (int64_t*)realloc(*cv, (size_t)*cp * sizeof **cv);
                 if (!nc) break;
-                cost = nc;
+                *cv = nc;
             }
-            if (f.index >= 120) cost[n_cost++] = dt;
+            if (f.index >= 120) (*cv)[(*nv)++] = dt;
             /* the flip record that arrived with this frame is the previous
              * frame's: its onset, vblanks dropped and flags */
             if (out) fprintf(out, "%lld,%lld,%lld,%d,%d,%lld,%lld,%lld,%lld,%lld,%u,%u,%d\n", (long long)f.index, (long long)f.vblank,
@@ -204,10 +245,25 @@ int main(int argc, char** argv) {
                              f.last ? (long long)f.last->index : -1LL, f.last ? (long long)f.last->onset : 0LL,
                              f.last ? (unsigned)f.last->dropped : 0u, f.last ? (unsigned)f.last->flags : 0u, (int)f.n_done);
         }
-        psygfx_begin(&gfx, &f);
-        psygfx_draw(&gfx, &film);
-        psygfx_end(&gfx);
-        psyscr_flip(&scr);
+        {
+            /* on the GPU path a decoder shares the screen's device and
+             * context, so the GL and present calls may wait for it */
+            int64_t d0 = (int64_t)psyrt_now_ns();
+            psygfx_begin(&gfx, &f);
+            psygfx_draw(&gfx, &film);
+            psygfx_end(&gfx);
+            psyscr_flip(&scr);
+            if (f.index >= 120) {
+                if (n_dcost == cap_dcost) {
+                    int64_t* nc;
+                    cap_dcost = cap_dcost ? cap_dcost * 2 : 4096;
+                    nc = (int64_t*)realloc(dcost, (size_t)cap_dcost * sizeof *dcost);
+                    if (!nc) break;
+                    dcost = nc;
+                }
+                dcost[n_dcost++] = (int64_t)psyrt_now_ns() - d0;
+            }
+        }
         if (rc == PSYVID_ENDED) break;
         if (seconds > 0 && (double)(f.onset - t_start) * 1e-9 >= seconds) break;
     }
@@ -223,18 +279,28 @@ int main(int argc, char** argv) {
     }
     psyvid_describe(&mv, line, sizeof line);
     printf("%s\n", line);
-    if (n_cost > 0) {
-        double mean = 0;
-        int64_t k;
-        for (k = 0; k < n_cost; k++) mean += (double)cost[k];
-        mean /= (double)n_cost;
-        qsort(cost, (size_t)n_cost, sizeof *cost, cmp_i64);
-        printf("video_play: psyvid_update() on the frame thread, %lld frames after 120: mean %.3f ms, p50 %.3f, p99 %.3f, max %.3f; heap calls %llu\n",
-               (long long)n_cost, mean / 1e6, (double)cost[n_cost / 2] / 1e6, (double)cost[(n_cost * 99) / 100] / 1e6,
-               (double)cost[n_cost - 1] / 1e6, (unsigned long long)(psyvid_heap_calls() - heap0));
+    if (wall0) {
+        int64_t dc = cpu_ns() - cpu0, dw = (int64_t)psyrt_now_ns() - wall0;
+        printf("video_play: process CPU after frame 120: %.1f%% of one core (%.3f s over %.3f s)\n",
+               100.0 * (double)dc / (double)dw, (double)dc / 1e9, (double)dw / 1e9);
     }
+    for (i = 0; i < 3; i++) {
+        int64_t* cv = i == 2 ? dcost : i ? rcost : cost;
+        int64_t nv = i == 2 ? n_dcost : i ? n_rcost : n_cost, k;
+        double mean = 0;
+        if (nv <= 0) continue;
+        for (k = 0; k < nv; k++) mean += (double)cv[k];
+        mean /= (double)nv;
+        qsort(cv, (size_t)nv, sizeof *cv, cmp_i64);
+        printf("video_play: %s on the frame thread, %s, %lld frames after 120: mean %.3f ms, p50 %.3f, p99 %.3f, max %.3f\n",
+               i == 2 ? "draw + flip" : "psyvid_update()", i == 2 ? "every display frame" : i ? "repeats" : "with an upload", (long long)nv, mean / 1e6, (double)cv[nv / 2] / 1e6, (double)cv[(nv * 99) / 100] / 1e6,
+               (double)cv[nv - 1] / 1e6);
+    }
+    printf("video_play: heap calls after frame 120: %llu\n", (unsigned long long)(psyvid_heap_calls() - heap0));
     if (out) fclose(out);
     free(cost);
+    free(rcost);
+    free(dcost);
     psyvid_close(&mv);
     psygfx_close(&gfx);
     psyscr_close(&scr);

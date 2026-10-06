@@ -16,11 +16,15 @@
  * another program. To get the foreground, the program sends one zero-size
  * mouse move, which does not move the pointer.
  *
- * Usage: screen_input [--timer-res] [injections]   (default 200 per path)
+ * Usage: screen_input [--timer-res] [--panic] [injections]   (default 200 per path)
  *   --timer-res  call psyrt_timer_resolution_begin() first (timeBeginPeriod)
+ *   --panic      arm the panic watchdog (its keyboard hook sees every key of
+ *                the session) and test the raw path only: the hook's cost
  * Esc or closing the window ends the run at once.
  * Exit code: 0, 1 when the screen did not open, 2 for a bad argument.
  */
+/* --panic arms the watchdog in this program's window (a test seam). */
+#define PSYSCR__PANIC_WINDOWED 1
 #define PSY_SCREEN_IMPLEMENTATION
 #include "psy_screen.h"
 
@@ -118,14 +122,15 @@ static int run_path(psyscr_screen* s, int mode, int count) {
 int main(int argc, char** argv) {
     psyscr_screen s;
     psyscr_desc d;
-    int i, count = 200, timer_res = 0;
+    int i, count = 200, timer_res = 0, panic = 0;
     char line[512];
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--timer-res")) timer_res = 1;
+        else if (!strcmp(argv[i], "--panic")) panic = 1;
         else {
             count = atoi(argv[i]);
             if (count < 1 || count > 4000) {
-                fprintf(stderr, "usage: screen_input [--timer-res] [injections 1..4000]\n");
+                fprintf(stderr, "usage: screen_input [--timer-res] [--panic] [injections 1..4000]\n");
                 return 2;
             }
         }
@@ -136,6 +141,7 @@ int main(int argc, char** argv) {
     d.windowed = true;
     d.window_w = 400;
     d.window_h = 300;
+    d.panic = panic != 0;
     if (!psyscr_open(&s, &d)) { fprintf(stderr, "screen_input: %s\n", psyscr_error(&s)); return 1; }
     psyscr_describe(&s, line, sizeof line);
     printf("%s\n", line);
@@ -175,7 +181,8 @@ int main(int argc, char** argv) {
             psyscr_flip(&s);
         }
         if (SDL_GetKeyboardFocus() == psyscr_window(&s)) {
-            if (!run_path(&s, 0, count)) run_path(&s, 1, count);
+            if (panic) run_path(&s, 1, count);
+            else if (!run_path(&s, 0, count)) run_path(&s, 1, count);
         } else {
             printf("the window has no keyboard focus: raw input is not tested, posted messages are\n");
             run_path(&s, 2, count);

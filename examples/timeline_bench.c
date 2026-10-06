@@ -14,6 +14,9 @@
  *   movie   a two-hour movie base: 10000 annotations, 32 keyed channels of
  *           256 keys each, 8 SET-driven channels with 128 events each;
  *           two hours of frames (432000 at 60 Hz, 3.6 million at 500 Hz)
+ *   rate    the movie at a base rate of 1001/1000 (v0.4.0 and later), so
+ *           every conversion between RT and base time on that base takes
+ *           the scaled path: the cost of a rate against `movie`
  *   tracks  ten minutes of a sampled CUBIC path at 120 samples/s, the
  *           same length as 600001 keys, a repeating flicker and four
  *           BEZIER keyed channels
@@ -198,7 +201,7 @@ static int bench_trial(void) {
     return 0;
 }
 
-static int bench_movie(void) {
+static int bench_movie(const char* name, int32_t num, int32_t den) {
     const int64_t len = 2 * 3600 * S;
     int64_t fired = 0;
     int i, j, movie_frames = (int)(2 * 3600 * g_hz);
@@ -221,12 +224,17 @@ static int bench_movie(void) {
         if (psytl_set_keys(&tl, j, 2, keys[j], N_KEYS) < 0) return 1;
     }
     psytl_anchor(&tl, 2, grid(0), 0);
+#if PSYTL_VERSION_MAJOR > 0 || PSYTL_VERSION_MINOR >= 4
+    if (psytl_rate(&tl, 2, grid(0), num, den) < 0) return 1;
+#else
+    if (num != den) return 0;
+#endif
     for (i = 0; i < movie_frames; i++) {
         int dt = frame(i, &fired);
         if (dt < 0) return 1;
         record(dt);
     }
-    report("movie", fired);
+    report(name, fired);
     return 0;
 }
 
@@ -378,7 +386,7 @@ int main(int argc, char** argv) {
            psytl_version(), (unsigned)sizeof(psytl_timeline), (unsigned long long)best,
            (long long)g_hz, 1e3 / (double)g_hz);
     bench_floor();
-    if (bench_trial() || bench_movie() || bench_tracks() || bench_script() || bench_loads()) {
+    if (bench_trial() || bench_movie("movie", 1, 1) || bench_movie("rate", 1001, 1000) || bench_tracks() || bench_script() || bench_loads()) {
         fprintf(stderr, "a call failed\n");
         return 1;
     }

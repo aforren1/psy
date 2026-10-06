@@ -1691,6 +1691,295 @@ static void test_sim(void) {
     if (late || onset_ok < completed) printf("  sim: %d of 120 frames late, %d of %d on the prediction\n", late, onset_ok, completed);
 }
 
+/* ------------------------------------------------------------ abort, panic */
+
+/* One frame; the begin() result. */
+static int one_frame(psyscr_screen* s, psyscr_frame* f) {
+    int rc = psyscr_begin(s, f);
+    if (rc == PSYSCR_OK) CHECK_I(psyscr_flip(s), PSYSCR_OK);
+    return rc;
+}
+
+#define SDLK_F4_ 0x4000003Du
+#define SDLK_F13_ 0x40000068u
+
+/* The detector, the edge report and its ring record, the reasons. The
+ * key feed is the one SDL's event watch and the Windows hook call. */
+static void test_abort(void) {
+    static script c;
+    static psyscr_screen s, s2;
+    static psyscr_frame f;
+    psyscr_desc d;
+    int i, n, found = 0;
+    int32_t held = 0;
+    int64_t t;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    /* an abort from before open is not this screen's */
+    psyscr_request_abort();
+    CHECK(open_scripted(&s, &c, 0, 5));
+    if (!psyscr_is_open(&s)) return;
+    CHECK_I(one_frame(&s, &f), PSYSCR_OK);
+    ring_drain();
+
+    /* Shift+Esc, the default: once, then the loop goes on */
+    t = vnow() - 1234;
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_SDL), 0);
+    f.index = 77;
+    CHECK_I(psyscr_begin(&s, &f), PSYSCR_QUIT);
+    CHECK_I(f.abort, PSYSCR_ABORT_KEY);
+    CHECK_I(f.abort_presses, 1);
+    CHECK_I(f.abort_ns, t);
+    CHECK_I(f.index, 0);                           /* the rest of f is 0 */
+    CHECK(f.last == NULL);
+    CHECK_I(psyscr_flip(&s), PSYSCR_ERR_ORDER);    /* no frame begun */
+    CHECK_I(one_frame(&s, &f), PSYSCR_OK);         /* reported once */
+    n = ring_drain();
+    for (i = 0; i < n; i++)
+        if (g_ev[i].source == PSYRT_SRC_SCREEN && g_ev[i].kind == PSYSCR_EV_ABORT) {
+            found++;
+            CHECK_I((int64_t)g_ev[i].t_ns, t);      /* the press, not the report */
+            CHECK_I(g_ev[i].aux, 5);
+            CHECK_I(g_ev[i].u.u32[0], PSYSCR_ABORT_KEY);
+            CHECK_I(g_ev[i].u.u32[1], PSYSCR__AB_SDL);
+            CHECK_I(g_ev[i].u.u32[2], PSYSCR_KEY_ESCAPE);
+            CHECK_I(g_ev[i].u.u32[3], PSYSCR_MOD_SHIFT);
+            CHECK(g_ev[i].u.i64[2] > t);
+        }
+    CHECK_I(found, 1);
+
+    /* Esc alone, another key: nothing; extra modifiers: still the combination */
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, 0, vnow(), PSYSCR__AB_SDL);
+    psyscr__abort_key('q', PSYSCR_MOD_SHIFT, vnow() + 100000000, PSYSCR__AB_SDL);
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_CTRL, vnow() + 200000000, PSYSCR__AB_SDL);
+    CHECK_I(one_frame(&s, &f), PSYSCR_OK);
+    vlose(400000000);
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT | PSYSCR_MOD_CTRL, vnow(), PSYSCR__AB_SDL);
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);
+    CHECK_I(f.abort_presses, 1);
+
+    /* one press seen by the hook and by SDL (twice: its raw and its message
+     * path) is one press; 200 ms later is two */
+    vlose(400000000);
+    t = vnow();
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_HOOK);
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 400000, PSYSCR__AB_SDL);
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 11000000, PSYSCR__AB_SDL);
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 200000000, PSYSCR__AB_SDL);
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 200000000 - 5000000, PSYSCR__AB_HOOK);
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);
+    CHECK_I(f.abort_presses, 2);
+    CHECK_I(f.abort_ns, t);
+
+    /* repeats: a key-down only after an up */
+    CHECK_I(psyscr__abort_edge(&held, 1), 1);
+    CHECK_I(psyscr__abort_edge(&held, 1), 0);
+    CHECK_I(psyscr__abort_edge(&held, 1), 0);
+    CHECK_I(psyscr__abort_edge(&held, 0), 0);
+    CHECK_I(psyscr__abort_edge(&held, 1), 1);
+
+    /* every reason, in one report */
+    vlose(400000000);
+    psyscr__abort_push(PSYSCR_ABORT_CLOSE, PSYSCR__AB_SDL, 0, 0, vnow());
+    psyscr__abort_push(PSYSCR_ABORT_ALT_F4, PSYSCR__AB_SDL, SDLK_F4_, PSYSCR_MOD_ALT, vnow());
+    psyscr__abort_push(PSYSCR_ABORT_QUIT, PSYSCR__AB_SDL, 0, 0, vnow());
+    psyscr_request_abort();
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);
+    CHECK_I(f.abort, PSYSCR_ABORT_CLOSE | PSYSCR_ABORT_ALT_F4 | PSYSCR_ABORT_QUIT | PSYSCR_ABORT_REQUEST);
+    CHECK_I(f.abort_presses, 0);
+    CHECK_I(one_frame(&s, &f), PSYSCR_OK);
+
+    /* more than the log holds between two begin()s: the newest are reported */
+    for (i = 0; i < PSYSCR__ABORT_LOG; i++) psyscr_request_abort();
+    for (i = 0; i < 4; i++) {
+        vlose(100000000);
+        psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, vnow(), PSYSCR__AB_SDL);
+    }
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);
+    CHECK_I(f.abort, PSYSCR_ABORT_REQUEST | PSYSCR_ABORT_KEY);
+    CHECK_I(f.abort_presses, 4);                   /* the lost 4 are not read twice */
+    CHECK_I(one_frame(&s, &f), PSYSCR_OK);
+
+    /* one combination per process */
+    memset(&d, 0, sizeof d);
+    d.backend = PSYSCR_BACKEND_SIM;
+    d.abort_keys.mods = PSYSCR_MOD_CTRL;
+    memset(&s2, 0, sizeof s2);
+    CHECK(!psyscr_open(&s2, &d));
+    CHECK(strstr(psyscr_error(&s2), "abort_keys") != NULL);
+    d.abort_keys.mods = PSYSCR_MOD_SHIFT;          /* the same as the default */
+    CHECK(psyscr_open(&s2, &d));
+    psyscr_close(&s2);
+    psyscr_close(&s);
+
+    /* the key alone, and off */
+    memset(&d, 0, sizeof d);
+    d.backend = PSYSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted;
+    d.presenter_ctx = &c;
+    d.abort_keys.mods = PSYSCR_MOD_NONE;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    memset(&s, 0, sizeof s);
+    CHECK(psyscr_open(&s, &d));
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, 0, vnow(), PSYSCR__AB_SDL);
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);
+    CHECK_I(f.abort, PSYSCR_ABORT_KEY);
+    psyscr_close(&s);
+    d.abort_keys.mods = 0;
+    d.abort_keys.off = true;
+    d.abort_keys.key = SDLK_F4_ - 3;               /* F1 */
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    memset(&s, 0, sizeof s);
+    CHECK(psyscr_open(&s, &d));
+    vlose(400000000);
+    psyscr__abort_key(SDLK_F4_ - 3, PSYSCR_MOD_SHIFT, vnow(), PSYSCR__AB_SDL);
+    CHECK_I(one_frame(&s, &f), PSYSCR_OK);
+    psyscr_request_abort();                        /* requests still abort */
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);
+    psyscr_close(&s);
+    d.abort_keys.off = false;
+    d.abort_keys.mods = 0x40;                      /* not a PSYSCR_MOD_* */
+    memset(&s, 0, sizeof s);
+    CHECK(!psyscr_open(&s, &d));
+}
+
+/* An abort on a group: reported on every member, and none begins. */
+static void test_abort_group(void) {
+    static script c[2];
+    static psyscr_screen s[2];
+    psyscr_screen* sp[2];
+    static psyscr_frame f[2];
+    int i;
+    memset(c, 0, sizeof c);
+    c[0].depth = 1; c[1].depth = 1;
+    ring_reset();
+    CHECK(open_scripted(&s[0], &c[0], 0, 1));
+    CHECK(open_scripted(&s[1], &c[1], 0, 2));
+    sp[0] = &s[0]; sp[1] = &s[1];
+    for (i = 0; i < 5; i++) {
+        CHECK_I(psyscr_begin_group(sp, 2, f), PSYSCR_OK);
+        CHECK_I(psyscr_flip_group_at(sp, 2, f[0].onset), PSYSCR_OK);
+    }
+    psyscr_request_abort();
+    CHECK_I(psyscr_begin_group(sp, 2, f), PSYSCR_QUIT);
+    CHECK_I(f[0].abort, PSYSCR_ABORT_REQUEST);
+    CHECK_I(f[1].abort, PSYSCR_ABORT_REQUEST);
+    CHECK(!s[0].begun && !s[1].begun);
+    CHECK_I(psyscr_begin_group(sp, 2, f), PSYSCR_OK);
+    CHECK_I(psyscr_flip_group_at(sp, 2, f[0].onset), PSYSCR_OK);
+    psyscr_close(&s[0]);
+    psyscr_close(&s[1]);
+}
+
+/* The panic rule: 3 presses in 2 s, and no abort reported for 10 s. */
+static void test_panic_rule(void) {
+    static script c;
+    static psyscr_screen s;
+    static psyscr_frame f;
+    psyscr_desc d;
+    int64_t t;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 1));
+    psyscr__panic_config(3, 2000, 10000);
+    vlose(20000000000LL);                          /* any earlier report is old */
+    /* a hung loop: nothing reports */
+    t = vnow();
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_HOOK), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 500000000, PSYSCR__AB_HOOK), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 1000000000, PSYSCR__AB_HOOK), 1);
+    /* spread over 2.5 s: not three in the window */
+    vlose(20000000000LL);
+    t = vnow();
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_HOOK), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 1250000000, PSYSCR__AB_HOOK), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 2500000000LL, PSYSCR__AB_HOOK), 0);
+    /* a live loop reports press 1: presses 2 and 3 are aborts, not a panic */
+    vlose(20000000000LL);
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);       /* the presses above */
+    vlose(20000000000LL);
+    t = vnow();
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_HOOK), 0);
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);
+    vlose(400000000);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, vnow(), PSYSCR__AB_HOOK), 0);
+    vlose(400000000);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, vnow(), PSYSCR__AB_HOOK), 0);
+    CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);
+    CHECK_I(f.abort_presses, 2);
+    /* the loop reported, then hung for longer than the grace */
+    vlose(10500000000LL);
+    t = vnow();
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_HOOK), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 300000000, PSYSCR__AB_HOOK), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 600000000, PSYSCR__AB_HOOK), 1);
+    /* off without an armed watchdog */
+    psyscr__panic_config(0, 0, 0);
+    vlose(20000000000LL);
+    t = vnow();
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_HOOK);
+    psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 300000000, PSYSCR__AB_HOOK);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 600000000, PSYSCR__AB_HOOK), 0);
+    psyscr_close(&s);
+    /* refusals at open */
+    memset(&d, 0, sizeof d);
+    d.backend = PSYSCR_BACKEND_SIM;
+    d.panic = true;
+    d.abort_keys.off = true;
+    memset(&s, 0, sizeof s);
+    CHECK(!psyscr_open(&s, &d));
+    d.abort_keys.off = false;
+    d.abort_keys.key = SDLK_F13_;                  /* the hook cannot name it */
+    CHECK(!psyscr_open(&s, &d));
+    d.abort_keys.key = 0;
+    d.panic_presses = -1;
+    CHECK(!psyscr_open(&s, &d));
+    d.panic_presses = 0;
+    CHECK(psyscr_open(&s, &d));                    /* SIM: nothing to arm */
+    {
+        char line[512];
+        psyscr_describe(&s, line, sizeof line);
+        CHECK(strstr(line, "abort=shift+esc panic=n/a") != NULL);
+    }
+    psyscr_close(&s);
+}
+
+/* The icon: each size fills its square, matches the art (FNV-1a of the
+ * RGBA, from the previews' script) and has transparent corners. */
+static void test_icon(void) {
+    static uint8_t px[48 * 48 * 4];
+    static const uint32_t fnv[3] = { 0xF62F93D2u, 0xC53A724Fu, 0x4DECB55Bu };
+    psyscr_screen s;
+    psyscr_desc d;
+    static const uint8_t one[4] = { 1, 2, 3, 255 };
+    int k, i;
+    for (k = 0; k < 3; k++) {
+        int side = psyscr__icon_size[k][0];
+        uint32_t h = 0x811C9DC5u;
+        memset(px, 0xAB, sizeof px);
+        CHECK(psyscr__icon_decode(k, px, side * 4));
+        for (i = 0; i < side * side * 4; i++) { h ^= px[i]; h *= 0x01000193u; }
+        CHECK_I(h, fnv[k]);
+        CHECK_I(px[3], 0);
+        CHECK_I(px[(side * side - 1) * 4 + 3], 0);
+    }
+    memset(&s, 0, sizeof s);
+    memset(&d, 0, sizeof d);
+    d.backend = PSYSCR_BACKEND_SIM;
+    d.icon_rgba = one;
+    CHECK(!psyscr_open(&s, &d));                   /* no size */
+    d.icon_w = 1; d.icon_h = 257;
+    CHECK(!psyscr_open(&s, &d));
+    d.icon_h = 1;
+    CHECK(psyscr_open(&s, &d));                    /* no window: not used */
+    psyscr_close(&s);
+}
+
 int main(void) {
     psyrt_thread_elevate(NULL);
     test_errors();
@@ -1724,6 +2013,10 @@ int main(void) {
     test_phases_and_wait();
     test_group();
     test_unshown_and_tiers();
+    test_abort();
+    test_abort_group();
+    test_panic_rule();
+    test_icon();
     test_sim();
     if (g_failures) {
         fprintf(stderr, "psy_screen_test: %d failure(s)\n", g_failures);

@@ -15,6 +15,7 @@ never reused, so a handle kept past its `close` always raises
 | `psy_quest.c` | [psy_quest.h](../../psy_quest.h) | [example_quest.m](example_quest.m) |
 | `psy_gp.c` | [psy_gp.h](../../psy_gp.h) | [example_gp.m](example_gp.m) |
 | `psy_trials.c` | [psy_trials.h](../../psy_trials.h) | [example_trials.m](example_trials.m) |
+| `psy_color.c` | [psy_color.h](../../psy_color.h) | [test_mex_color.m](test_mex_color.m); the command reference is in [docs/psy_color.md](../../docs/psy_color.md) |
 
 The two transport headers build on the shared [psy_rt.h](../../psy_rt.h), so
 both MEX functions compile it too. `psy_quest.c` and `psy_gp.c` define
@@ -25,7 +26,10 @@ their header. The four adaptive-method sources also include
 argument helpers; a copy of one of those sources needs that file beside it.
 
 [test_mex.m](test_mex.m) runs the key checks of the four adaptive modules in
-MATLAB or Octave and prints `PASS`.
+MATLAB or Octave and prints `PASS`. [test_mex_color.m](test_mex_color.m) does
+the same for `psy_color` (compiles nothing but psy_color.h and
+`psy_mex_util.h`); `tests/compare/psy_color_ptb.m` compares it with
+Psychtoolbox's colorimetric code.
 
 ## Build
 

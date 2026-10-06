@@ -21,6 +21,7 @@
 
 #if defined(_WIN32) && defined(PSYSCR__DXGI)
 #include <dcomp.h>
+#include <d3d10.h>   /* ID3D10Multithread */
 #if __has_include(<Presentation.h>) && defined(_MSC_VER)
 #include <Presentation.h>
 #define HAVE_PRESENTATION 1
@@ -111,6 +112,9 @@ static void check_dcomp(void) {
     g_hit = -1; g_arg = 0; v->lpVtbl->SetContent(v, (void*)(uintptr_t)0x9753); CHECK(g_hit == 15 && g_arg == 0x9753);
 #if defined(_MSC_VER)
     CHECK(memcmp(&psyscr__IID_IDCompositionDevice, &__uuidof(IDCompositionDevice), sizeof(IID)) == 0);
+    /* desc.d3d11_video: the one IID serves ID3D10Multithread and ID3D11Multithread */
+    CHECK(memcmp(&psyscr__IID_ID3D11Multithread, &__uuidof(ID3D11Multithread), sizeof(IID)) == 0);
+    CHECK(memcmp(&psyscr__IID_ID3D11Multithread, &__uuidof(ID3D10Multithread), sizeof(IID)) == 0);
 #endif
 }
 

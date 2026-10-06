@@ -1,4 +1,4 @@
-/* psy_screen.h - v0.2.0 - public domain single-header display library
+/* psy_screen.h - v0.3.1 - public domain single-header display library
  *
  *   The window, the GL ES 3.0 context, the display mode and the swap path
  *   of a stimulus display, with flip at a time: each frame learns the
@@ -21,6 +21,27 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.3.1 - Aborts (ABORT): Shift+Esc, a close request, Alt+F4, SDL's
+ *          quit event and psyscr_request_abort() each make one begin()
+ *          return PSYSCR_QUIT with f.abort, f.abort_presses and f.abort_ns,
+ *          and a PSYSCR_EV_ABORT ring record; the header sees them through
+ *          an SDL event watch, also when the caller reads the events first.
+ *          The panic watchdog (PANIC, desc.panic, off by default): Shift+Esc
+ *          3 times in 2 s while the frame loop reports no abort puts back
+ *          the gamma ramps and ends the process (exit code 99); Windows
+ *          puts back a switched mode as it ends. The window icon
+ *          (WINDOW ICON): Escher's impossible cube at 16, 32 and 48
+ *          pixels; desc.icon_rgba, desc.icon_sdl.
+ *          desc.d3d11_video (NATIVE HANDLES): a D3D11 device with video
+ *          support and multithread protection; psyscr_native_info gains
+ *          video and mt_protected. psyscr_begin_group() reports an abort on
+ *          every member and begins none. close(), exit and the watchdog
+ *          claim a gamma entry atomically, so one of them puts it back.
+ *          Breaking: Esc alone no longer
+ *          ends the loop; desc.no_esc_quit is gone (desc.abort_keys);
+ *          psyscr_frame gains abort, abort_presses and abort_ns;
+ *          psyscr_presenter_open gains d3d11_video (the presenter version
+ *          stays 2).
  *   v0.3.0 - Flip hooks for triggers. Codes (CODES): exact device values in
  *          the frame, per flip or held, as rectangles or rows, drawn last,
  *          with presets for VPixx Pixel Mode and pixel sync, a self test at
@@ -66,7 +87,7 @@
  *          groups, input restamping, mode lists and the parameter table.
  *          The other swap paths are stubs that refuse to open.
  *
- *   STATUS: v0.3.0. Two swap paths run, DXGI_FLIP and COMPOSITION, on one
+ *   STATUS: v0.3.1. Two swap paths run, DXGI_FLIP and COMPOSITION, on one
  *   machine: a Windows 11 25H2 laptop whose Intel Iris Xe drives a 1920 x
  *   1200 panel at 60.0008 Hz (60 Hz is its only rate), with the ANGLE that
  *   ships in Docker Desktop's Electron front end (2.1.23876, git
@@ -148,13 +169,14 @@
  *   The core (prediction, snap, drops, depth, estimated, skipped and
  *   canceled records, tiers, the ring record, phases, groups, errors, the
  *   mode picker, preemption, codes, triggers and their moves, the
- *   after-flip and present callbacks) is checked without SDL or a display by
+ *   after-flip and present callbacks, aborts, the panic rule, the icon
+ *   data) is checked without SDL or a display by
  *   tests/adapt/psy_screen_test.c against a scripted swap path on a
  *   virtual clock, so the host's load cannot change a result, on MSVC,
  *   MinGW gcc 16.1, gcc 11.4 (WSL2; also as C99 at -O3, as C++17, and
  *   under ASan and UBSan, and 8 of 8 runs with a busy loop on its CPU) and
- *   clang (emcc, run in node); 29 deliberate mutations of the header
- *   each make it fail.
+ *   clang (emcc, run in node); 41 deliberate mutations of the header
+ *   each make it fail (v0.3.1's 12 checked with MinGW only).
  *   CODES and TRIGGERS (v0.3.0, measured on battery, Balanced plan; the
  *   tables are in docs/psy_screen.md): the open-time self test passed on
  *   DXGI_FLIP and COMPOSITION, and 1800 code read-backs in fullscreen
@@ -192,6 +214,28 @@
  *   was exact; one GetDeviceGammaRamp costs 0.8 ms, so it is read at open
  *   only. Whether the ramp acts on independent-flip and overlay frames,
  *   and under Night Light, was not measured.
+ *   ABORT, PANIC, ICON and d3d11_video (v0.3.1, AC, keys sent with
+ *   SendInput; docs/psy_screen.md has the tables): Shift+Esc gave one
+ *   abort per press, stamped 0.12 to 0.70 ms after the call, also when the
+ *   loop read its events before begin(); Esc alone gave none; a held
+ *   Shift+Esc gave one. SDL 3.4 reports each key twice on the raw path
+ *   (INPUT); the header counts one. A hung program ended 28 to 85 ms after
+ *   the third press, after its panic_fn ran and a gamma entry was put
+ *   back; after a 7 s hang, with Windows' ghost window in front, too; a
+ *   held Shift+Esc did not panic; a responsive loop got 5 aborts for 5
+ *   presses and no panic. Fullscreen at 1680 x 1050 on the 1920 x 1200
+ *   desktop, hung: the desktop mode was back 1.2 s after press 3, as the
+ *   process ended. With the watchdog's hook armed, keys on the raw path
+ *   were stamped no later (p50 0.30 to
+ *   0.31 ms against 0.35 to 0.46 ms, 3 interleaved runs of 199 keys). The
+ *   header's CPU time per frame, begin() without its wait, 3 interleaved
+ *   rounds of 1800 frames in a window on top: 22.5 to 25.2 us mean with
+ *   d3d11_video off, 19.6 to 26.3 us with it on, 20.0 to 29.5 us for the
+ *   v0.3.0 header; flip_at() 1.5 to 2.2 us in all. No difference shows
+ *   beyond the spread between rounds. Alt+F4 was not sent (if the focus
+ *   moved, it would close another program); the core test checks it
+ *   through the feed. The icons reach the window at 16 and 32 pixels as
+ *   drawn (read back, 96 dpi).
  *   tests/compile/psy_screen_com.cpp checks every COM slot and struct the
  *   header declares against the Windows SDK (MSVC; MinGW for DComp only).
  *   NOT done: any rate but 60 Hz, any other GPU, Windows 10 (COMPOSITION
@@ -224,7 +268,7 @@
  *       if (!psyscr_open(&scr, &(psyscr_desc){ .ring = &ring }))
  *           die(psyscr_error(&scr));              // fullscreen, primary display
  *       psyscr_frame f;
- *       while (psyscr_begin(&scr, &f) == PSYSCR_OK) {         // Esc ends it
+ *       while (psyscr_begin(&scr, &f) == PSYSCR_OK) {   // Shift+Esc ends it
  *           if (f.index == 0) psytl_anchor(&tl, TRIAL, f.onset, 0);
  *           int n = psytl_evaluate(&tl, &(psytl_frame){ f.onset, f.period, f.index },
  *                                  fired, 8);
@@ -645,7 +689,8 @@
  *   ramp it read. A crash leaves the identity ramp until the next mode
  *   change, logoff or another program sets one. A window never touches
  *   the ramp; desc.keep_os_gamma = true leaves a fullscreen screen's ramp
- *   alone too. The describe line says os_gamma=identity (it was),
+ *   alone too. The panic watchdog puts the ramp back before it ends a hung
+ *   process (PANIC). The describe line says os_gamma=identity (it was),
  *   set, refused (Windows did not take it), unreadable, or the same with
  *   (kept); anything but identity or set sets CODE_RISK_GAMMA.
  *   Microsoft documents limits on these calls: SetDeviceGammaRamp may
@@ -763,9 +808,22 @@
  *               thread, between begin() and flip_at(), and leave no state
  *               bound in it, because ANGLE caches the context's state and
  *               does not know of your calls.
- *     Video     the device has no D3D11_CREATE_DEVICE_VIDEO_SUPPORT and
- *               no multithread protection (ID3D10Multithread); a decoder
- *               that needs them makes its own device on the same LUID.
+ *     Video     desc.d3d11_video makes the device with
+ *               D3D11_CREATE_DEVICE_VIDEO_SUPPORT and turns on multithread
+ *               protection (ID3D11Multithread::SetMultithreadProtected), so
+ *               a decoder thread can use the device's video interfaces and
+ *               its calls on the immediate context take turns with the
+ *               frame thread's and ANGLE's. out.video and out.mt_protected
+ *               say what the device has, read from the device. An adapter
+ *               without D3D11 video support makes open() fail with a
+ *               message; there is no fallback. The frame thread may queue
+ *               ID3D11DeviceContext4::Wait() on a fence the decoder
+ *               signals, between begin() and flip_at(): it holds back the
+ *               GPU queue, not the thread. Cost, measured with no decoder
+ *               on the device: no difference in the header's CPU time per
+ *               frame (STATUS). With a decoder, each immediate-context call
+ *               takes a lock the decoder may hold; psy_video.h measures
+ *               that. Off by default.
  *
  *   ---------------------------------------------------------------------
  *   INPUT
@@ -788,6 +846,129 @@
  *   before to 12.1 ms after the call. On X11 the server's 1 ms
  *   time, on Wayland the compositor's. Keyboards are not response boxes;
  *   use psy_serial.h for reaction times.
+ *   With the raw path on, SDL 3.4 reports each key twice: once from its
+ *   raw-input thread and once from the message loop, 0.1 to 11 ms apart
+ *   (measured with SendInput, docs/psy_screen.md). To count presses, count
+ *   a key-down only after a key-up of the same key.
+ *
+ *   ---------------------------------------------------------------------
+ *   ABORT (desc.abort_keys, psyscr_request_abort, f.abort)
+ *   ---------------------------------------------------------------------
+ *   An abort asks the frame loop to stop; the header never stops it. Each
+ *   abort is reported once: the next begin() returns PSYSCR_QUIT with
+ *   f.abort (the reasons, ORed), f.abort_presses and f.abort_ns (the first
+ *   one's time), and every other field of f 0. The begin() after that
+ *   starts a frame again. The caller decides: save and close, or ask the
+ *   operator and go on. The header calls no exit() and closes no window.
+ *     PSYSCR_ABORT_KEY      the abort combination, Shift+Esc by default.
+ *                           Esc alone does nothing, so a participant who
+ *                           hits Esc does not end the session. A held key
+ *                           is one press: repeats do not count
+ *     PSYSCR_ABORT_CLOSE    a close request for a screen's window: the
+ *                           close button, the taskbar, Task Manager's "End
+ *                           task"
+ *     PSYSCR_ABORT_ALT_F4   Alt+F4. The header sets
+ *                           SDL_HINT_WINDOWS_CLOSE_ON_ALT_F4 to "0" (at
+ *                           default priority), so it is not a close request
+ *     PSYSCR_ABORT_QUIT     SDL's quit event: Ctrl+C in the console, a
+ *                           logoff, the last window closed (with CLOSE)
+ *     PSYSCR_ABORT_REQUEST  psyscr_request_abort(), from any thread: an
+ *                           operator console, a response-box button
+ *   desc.abort_keys sets the combination: .key is an SDL keycode (0 =
+ *   Esc); .mods are the PSYSCR_MOD_* that must be held (0 = Shift;
+ *   PSYSCR_MOD_NONE = the key alone, for development; more modifiers held
+ *   still count); .off turns the key off (the other reasons stay). There is
+ *   one combination per process: open() refuses a desc that differs from
+ *   an open screen's. The describe line says abort=shift+esc.
+ *   The header sees each event as SDL queues it (SDL_AddEventWatch), so
+ *   an abort counts although your code read the event first with
+ *   psyscr_poll() or SDL_PollEvent(). An SDL event filter that drops the
+ *   event hides it. Reports of one press within 30 ms (SDL's two, INPUT,
+ *   and the panic watchdog's) are one press. The aborts wait in a log of
+ *   16 per process; a screen opened later does not see the earlier ones.
+ *   A group reports an abort in every f[i], and no member begins a frame.
+ *   The ring gets one PSYSCR_EV_ABORT record per abort, when begin()
+ *   reports it: t_ns the press (or the request), aux desc.display_index,
+ *   u.u32[0] the reason, u.u32[1] who saw it (1 the watchdog's hook, 2
+ *   injected input, 4 SDL), u.u32[2] the key, u.u32[3] the modifiers,
+ *   u.i64[2] when begin() reported it.
+ *
+ *   ---------------------------------------------------------------------
+ *   PANIC (desc.panic): Shift+Esc 3 times when the program hangs
+ *   ---------------------------------------------------------------------
+ *   An abort works only while the frame loop calls begin(). A program that
+ *   hangs in fullscreen leaves a fullscreen window, a switched display
+ *   mode and the OS gamma ramp the header set. desc.panic arms a watchdog
+ *   for that: a thread with a low-level keyboard hook (WH_KEYBOARD_LL),
+ *   which sees the abort combination whatever the frame thread does. The
+ *   hook passes every key on, so SDL still sees the same keys, and press 1
+ *   is an abort either way.
+ *   The rule: desc.panic_presses (0 = 3) presses within
+ *   desc.panic_window_ms (0 = 2000), with a window of this process in
+ *   front (or the "Ghost" window Windows puts in front of a hung one after
+ *   about 5 s, measured), and no abort reported by a begin() for
+ *   desc.panic_grace_ms (0 = 10000). A responsive loop reports press 1
+ *   within a frame, so presses 2 and 3 are more aborts, and a program that
+ *   saves after press 1 is not killed. A program outside its frame loop
+ *   (loading, saving) for longer than the grace time looks hung.
+ *   The panic, on the watchdog thread: it removes the hook, so no key of
+ *   the session waits on it; writes a PSYSCR_EV_PANIC record to each armed
+ *   screen's ring (t_ns the panic, u.u32[0] the presses needed, u.i64[1]
+ *   the last report); puts back each gamma ramp the header set; calls
+ *   desc.panic_fn(desc.panic_ctx) on a thread of its own, at most 1 s; and
+ *   ends the process with TerminateProcess(PSYSCR_PANIC_EXIT_CODE = 99).
+ *   Windows puts back a display mode the screen switched as the process
+ *   ends (measured: 1.2 s after press 3, teardown included).
+ *   ChangeDisplaySettingsExW from the watchdog was measured too: it waited
+ *   over 1 s on the hung window and brought the mode back no sooner, so
+ *   the watchdog does not call it.
+ *   Not exit(): exit runs atexit handlers and DLL detach, which can wait
+ *   on locks the hung thread holds, and only the end of the process takes
+ *   down a window and a swapchain that a hung thread owns.
+ *   What another thread can put back: the gamma ramps (GDI, by the
+ *   display's name) and ring records. What it cannot: the window,
+ *   fullscreen and the display mode (a call on a window, or a display
+ *   change, waits for the hung thread; the end of the process ends them);
+ *   the D3D11 device, ANGLE and
+ *   SDL (not safe while the frame thread is inside them); data not yet
+ *   written (panic_fn may save some, but runs while the frame thread holds
+ *   what it holds, so it must take no lock the frame loop uses); hardware
+ *   a trigger left set (panic_fn may reset it).
+ *   When it is armed: DXGI_FLIP and COMPOSITION in fullscreen, on
+ *   Windows. A window has no ramp or mode to put back and its user has the
+ *   desktop: the describe line says panic=idle(windowed); on SIM, CUSTOM
+ *   and other platforms, panic=n/a. open() refuses desc.panic with
+ *   abort_keys.off and with a key the hook cannot name (it takes Esc, F1
+ *   to F12, a letter or a digit). The first armed screen's numbers hold
+ *   until the last armed screen closes.
+ *   Cost: while it is armed, every key of the session goes through the
+ *   watchdog thread, which otherwise sleeps in GetMessage. Windows skips a
+ *   hook that takes longer than LowLevelHooksTimeout (at most 1 s); this
+ *   hook does a few compares and takes no lock the frame thread holds. A
+ *   test hook that stalled for 1.5 s once was still called afterwards, so
+ *   the header does not install it again. Keys on SDL's raw path were not
+ *   stamped later with the hook armed (STATUS).
+ *   Measured (examples/screen_abort.c; a window armed through a test
+ *   seam, and fullscreen in a switched mode): see STATUS.
+ *   Later, X11: the watchdog opens its own display connection and selects
+ *   XI_RawKeyPress and XI_RawKeyRelease on the root window (XInput 2.1),
+ *   which arrive whatever has the focus and are not consumed. It checks
+ *   _NET_ACTIVE_WINDOW, puts back the CRTC gamma through RandR on its own
+ *   connection (and the mode, unless the X server does as the process
+ *   ends, to be measured), and ends with _exit(). Wayland has no global key
+ *   events: no panic there; the compositor undoes a dead client's
+ *   fullscreen.
+ *
+ *   ---------------------------------------------------------------------
+ *   WINDOW ICON (desc.icon_rgba, desc.icon_sdl)
+ *   ---------------------------------------------------------------------
+ *   open() gives each window the header's own icon, Escher's impossible
+ *   cube, drawn for this header (public domain, like the rest), at 16, 32
+ *   and 48 pixels: SDL_SetWindowIcon with alternate images, so Windows
+ *   takes the size its display scale needs. It is stored as a 5-color
+ *   palette and runs of 4-bit indices (1312 bytes in all), decoded at
+ *   open. desc.icon_rgba (icon_w x icon_h RGBA, top row first, 1 to 256 a
+ *   side) sets yours; desc.icon_sdl keeps SDL's.
  *
  *   ---------------------------------------------------------------------
  *   DISPLAYS AND MODES
@@ -844,10 +1025,12 @@
  *   KB, most of it the code rows and the depth evidence. One thread calls
  *   begin, flip and the rest for a screen. open() and close() of different
  *   screens must not run at the same time, because ANGLE's libEGL is
- *   loaded once per process and never unloaded. open() starts one thread
+ *   loaded once per process and never unloaded. open() starts a thread
  *   only when desc.n_triggers > 0: the trigger worker (TRIGGERS), which
- *   close() stops. Raise the frame thread with psyrt_thread_elevate()
- *   before open.
+ *   close() stops; and, once per process, the panic watchdog when an armed
+ *   screen opens (PANIC), which the last armed screen's close() stops. The
+ *   abort state is one per process (ABORT). Raise the frame thread with
+ *   psyrt_thread_elevate() before open.
  *
  *   ---------------------------------------------------------------------
  *   BUILDING
@@ -878,8 +1061,8 @@
 
 #define PSYSCR_VERSION_MAJOR 0
 #define PSYSCR_VERSION_MINOR 3
-#define PSYSCR_VERSION_PATCH 0
-#define PSYSCR_VERSION_STRING "0.3.0"
+#define PSYSCR_VERSION_PATCH 1
+#define PSYSCR_VERSION_STRING "0.3.1"
 
 #include "psy_rt.h"
 
@@ -903,7 +1086,7 @@ union SDL_Event;
 /* --- codes -------------------------------------------------------------- */
 
 #define PSYSCR_OK                    0
-#define PSYSCR_QUIT                  1  /* psyscr_begin: close, quit or Esc  */
+#define PSYSCR_QUIT                  1  /* psyscr_begin: an abort; f.abort says why (ABORT) */
 #define PSYSCR_ERR_ARG             (-1)
 #define PSYSCR_ERR_CLOSED          (-2)  /* the screen is not open           */
 #define PSYSCR_ERR_TIMEOUT         (-3)  /* the swap path freed no slot      */
@@ -964,6 +1147,40 @@ typedef enum psyscr_tier {
 #define PSYSCR_EV_REPRESENT 4u   /* reserved for variable refresh           */
 #define PSYSCR_EV_TRIGGER   5u   /* one at-onset trigger (TRIGGERS)         */
 #define PSYSCR_EV_CODE      6u   /* the codes in one flip (CODES)           */
+#define PSYSCR_EV_ABORT     7u   /* one abort, as begin() reports it (ABORT) */
+#define PSYSCR_EV_PANIC     8u   /* the watchdog ends the process (PANIC)   */
+
+/* --- abort and panic (ABORT, PANIC) --------------------------------------- */
+
+/* psyscr_frame.abort: why begin() returned PSYSCR_QUIT. Several can be set. */
+#define PSYSCR_ABORT_KEY     0x01u /* the abort combination (desc.abort_keys)  */
+#define PSYSCR_ABORT_CLOSE   0x02u /* the window's close request: close button,
+                                    * taskbar, Task Manager's "End task"     */
+#define PSYSCR_ABORT_ALT_F4  0x04u /* Alt+F4                                   */
+#define PSYSCR_ABORT_QUIT    0x08u /* SDL's quit event: Ctrl+C in the console,
+                                    * logoff, the last window closed          */
+#define PSYSCR_ABORT_REQUEST 0x10u /* psyscr_request_abort()                   */
+
+/* psyscr_abort_keys.mods. Either side's key counts. */
+#define PSYSCR_MOD_SHIFT 0x01u
+#define PSYSCR_MOD_CTRL  0x02u
+#define PSYSCR_MOD_ALT   0x04u
+#define PSYSCR_MOD_GUI   0x08u
+#define PSYSCR_MOD_NONE  0x80u     /* the key alone: no modifier needed        */
+
+#define PSYSCR_KEY_ESCAPE 0x1Bu    /* SDLK_ESCAPE, so this header needs no SDL */
+
+/* The exit code of a process the panic watchdog ends. */
+#define PSYSCR_PANIC_EXIT_CODE 99
+
+/* The abort combination. Zero: Shift+Esc. */
+typedef struct psyscr_abort_keys {
+    bool     off;   /* no key aborts; close, Alt+F4, quit and requests still do */
+    uint32_t key;   /* an SDL keycode (SDL_Keycode); 0 = PSYSCR_KEY_ESCAPE      */
+    uint32_t mods;  /* PSYSCR_MOD_* that must all be held; 0 = PSYSCR_MOD_SHIFT */
+} psyscr_abort_keys;
+
+typedef void (*psyscr_panic_fn)(void* ctx);
 
 /* Patch corners. */
 #define PSYSCR_TOP_LEFT     0
@@ -1164,6 +1381,11 @@ typedef struct psyscr_frame {
     const psyscr_record* done;
     int32_t  n_done;
     uint32_t done_lost;  /* records that did not fit (PSYSCR_MAX_DONE), since open */
+    /* Set only when begin() returns PSYSCR_QUIT (every other field is then
+     * 0): the aborts since the last report (ABORT). */
+    uint32_t abort;          /* PSYSCR_ABORT_*                               */
+    int32_t  abort_presses;  /* presses of the abort combination in it       */
+    int64_t  abort_ns;       /* the first one's time, RT ns                  */
 } psyscr_frame;
 
 /* The records one psyscr_frame can carry in done. One frame in flight
@@ -1178,6 +1400,8 @@ typedef struct psyscr_native_info {
     void*    egl_display;    /* ANGLE's EGLDisplay                            */
     uint32_t luid_low;       /* the adapter's LUID (DXGI_ADAPTER_DESC.AdapterLuid) */
     int32_t  luid_high;
+    int32_t  video;          /* 1: made with D3D11_CREATE_DEVICE_VIDEO_SUPPORT */
+    int32_t  mt_protected;   /* 1: multithread protection is on               */
 } psyscr_native_info;
 
 /* --- presenter (the swap-path interface) ------------------------------- */
@@ -1225,6 +1449,7 @@ typedef struct psyscr_presenter_open {
     uint32_t*           code_checked;  /* codes compared                     */
     uint32_t*           code_failed;   /* codes that differed                */
     int32_t*            code_selftest; /* 1 passed, -1 failed, 0 not run     */
+    int32_t             d3d11_video;   /* desc.d3d11_video                   */
 } psyscr_presenter_open;
 
 typedef struct psyscr_presenter {
@@ -1260,7 +1485,7 @@ typedef struct psyscr_desc {
     uint32_t       display_index;    /* aux of every record                    */
     psyscr_patch   patch;
     bool           show_cursor;
-    bool           no_esc_quit;      /* Esc does not end psyscr_begin()        */
+    psyscr_abort_keys abort_keys;    /* zero: Shift+Esc (ABORT)                */
     bool           vrr;              /* refused                                */
     int32_t        min_tier;         /* 0 = off; else flag flips worse than it */
     int64_t        onset_offset_ns;
@@ -1282,6 +1507,21 @@ typedef struct psyscr_desc {
     uint32_t       trigger_spin_ns;  /* the worker's spin window; 0 = psy_rt's default */
     const psyscr_trigger_desc* triggers;  /* copied at open                   */
     int32_t        n_triggers;
+    /* the panic watchdog (PANIC); Windows, fullscreen */
+    bool           panic;            /* arm it; off by default                 */
+    int32_t        panic_presses;    /* abort presses that panic; 0 = 3        */
+    int32_t        panic_window_ms;  /* ... within this time; 0 = 2000         */
+    int32_t        panic_grace_ms;   /* no panic this long after begin()
+                                      * reported an abort; 0 = 10000          */
+    psyscr_panic_fn panic_fn;        /* last words, on another thread; NULL = none */
+    void*          panic_ctx;
+    /* the window icon (WINDOW ICON) */
+    const uint8_t* icon_rgba;        /* icon_w x icon_h RGBA, top row first;
+                                      * NULL = the header's impossible cube   */
+    int32_t        icon_w, icon_h;   /* 1 to 256                               */
+    bool           icon_sdl;         /* keep SDL's own icon                    */
+    /* the D3D11 device for a video decoder (NATIVE HANDLES) */
+    bool           d3d11_video;      /* VIDEO_SUPPORT and multithread protection */
 } psyscr_desc;
 
 /* Private. One flip between flip_at() and its completion. */
@@ -1344,7 +1584,13 @@ typedef struct psyscr_screen {
     int64_t                 offset;
     psyscr_patch            patch;
     float                   patch_value;
-    bool                    esc_quits;
+    /* abort and panic */
+    int32_t                 abort_seen;   /* the last abort log entry reported */
+    int32_t                 abort_user;   /* holds the process's abort state   */
+    int32_t                 abort_slot;   /* + 1: in the window and panic table */
+    int32_t                 panic_armed;
+    void*                   hwnd;         /* the window's HWND, for the watchdog */
+    void*                   win_icon[2];  /* HICONs the header set: small, big */
     /* the grid */
     int                     have_anchor;
     int64_t                 vb_t, vb_count;
@@ -1490,12 +1736,13 @@ PSYSCR_API int         psyscr_describe(const psyscr_screen* s, char* buf, size_t
  * until the swap path takes a frame (at most one is in flight), completes
  * the records of the flips that happened, binds the context and its back
  * buffer, and fills *f with the predicted onset of the first vblank this
- * frame can make. Returns PSYSCR_OK; PSYSCR_QUIT when the window was closed,
- * the program was asked to quit, or Esc is pending (unless desc.no_esc_quit),
- * without starting a frame. It sees only the events still queued: after a
- * frame that read events with psyscr_poll(), it does not pump again, and
- * the Esc or close you read is yours to act on. PSYSCR_ERR_ORDER after a
- * begin without a flip;
+ * frame can make. Returns PSYSCR_OK; PSYSCR_QUIT, without starting a frame,
+ * once for each abort since the last report (ABORT): the abort
+ * combination (Shift+Esc unless desc.abort_keys), a close request, Alt+F4,
+ * SDL's quit event or psyscr_request_abort(). f.abort says which; every
+ * other field of *f is 0. The next begin() starts a frame: you decide how
+ * to stop. Aborts read with psyscr_poll() or SDL_PollEvent() before begin()
+ * count too. PSYSCR_ERR_ORDER after a begin without a flip;
  * PSYSCR_ERR_TIMEOUT or PSYSCR_ERR_LOST from the swap path. */
 PSYSCR_API int  psyscr_begin(psyscr_screen* s, psyscr_frame* f);
 
@@ -1581,7 +1828,8 @@ PSYSCR_API int psyscr_native(const psyscr_screen* s, psyscr_native_info* out);
 /* begin() and flip_at() on n screens. Each screen keeps its own grid, so
  * f[i].onset differ unless the displays are genlocked; flip_group_at snaps
  * t on each grid. PSYSCR_ERR_NOT_IMPLEMENTED for a swap path whose wait
- * blocks a thread (none in v0.1). */
+ * blocks a thread (none in v0.1). An abort pending is reported in every
+ * f[i] with PSYSCR_QUIT, and no member begins a frame. */
 PSYSCR_API int  psyscr_begin_group(psyscr_screen* const* s, int n, psyscr_frame* f);
 PSYSCR_API int  psyscr_flip_group_at(psyscr_screen* const* s, int n, int64_t t);
 
@@ -1604,13 +1852,18 @@ PSYSCR_API bool    psyscr_poll(psyscr_screen* s, union SDL_Event* ev, int64_t* t
  * window. */
 PSYSCR_API int64_t psyscr_restamp(const psyscr_screen* s, uint64_t sdl_ticks_ns);
 
+/* Asks every open screen to abort: the next begin() of each returns
+ * PSYSCR_QUIT with PSYSCR_ABORT_REQUEST. Any thread; no screen needed (a
+ * network command, a response box button). Not a panic. */
+PSYSCR_API void    psyscr_request_abort(void);
+
 /* One desc field a designer sets. */
 typedef struct psyscr_param {
     const char* name;     /* the desc field, dotted for nested fields       */
     const char* type;     /* "u32", "i32", "i64", "f64", "bool", "enum"      */
     double      min, max; /* inclusive                                      */
     double      def;      /* the value a zero field means                   */
-    const char* unit;     /* "", "px", "ns", "Hz", "frame"                  */
+    const char* unit;     /* "", "px", "ns", "ms", "Hz", "frame"            */
     const char* doc;      /* one line                                       */
 } psyscr_param;
 
@@ -1723,6 +1976,11 @@ enum {
 #ifndef PSYSCR__SLEEP_UNTIL
 #define PSYSCR__SLEEP_UNTIL(t, spin) psyrt_sleep_until((uint64_t)(t), (spin))
 #endif
+/* examples/screen_abort.c sets it to 1 to arm the panic watchdog in a
+ * window, so its test needs no fullscreen. */
+#ifndef PSYSCR__PANIC_WINDOWED
+#define PSYSCR__PANIC_WINDOWED 0
+#endif
 static int64_t psyscr__now(void) { return PSYSCR__NOW(); }
 
 
@@ -1790,6 +2048,302 @@ static uint32_t psyscr__sat32(int64_t v) {
     if (v < 0) return 0;
     if (v > (int64_t)0xFFFFFFFEu) return 0xFFFFFFFEu;
     return (uint32_t)v;
+}
+
+/* --- abort (ABORT) ---------------------------------------------------------
+ * One state per process: SDL's event watch (on the frame thread or on SDL's
+ * raw-input thread), the panic watchdog's keyboard hook and
+ * psyscr_request_abort() write it from any thread, and each screen's begin()
+ * reads it. */
+#if defined(_WIN32)
+static int32_t psyscr__a_inc(volatile int32_t* p) { return (int32_t)InterlockedIncrement((volatile LONG*)p); }
+static int32_t psyscr__a_load(volatile int32_t* p) { return (int32_t)InterlockedCompareExchange((volatile LONG*)p, 0, 0); }
+static void psyscr__a_store(volatile int32_t* p, int32_t v) { (void)InterlockedExchange((volatile LONG*)p, (LONG)v); }
+static int psyscr__a_cas(volatile int32_t* p, int32_t want, int32_t v) {
+    return InterlockedCompareExchange((volatile LONG*)p, (LONG)v, (LONG)want) == (LONG)want;
+}
+static int64_t psyscr__a_load64(volatile int64_t* p) { return (int64_t)InterlockedCompareExchange64((volatile LONG64*)p, 0, 0); }
+static void psyscr__a_store64(volatile int64_t* p, int64_t v) { (void)InterlockedExchange64((volatile LONG64*)p, (LONG64)v); }
+#else
+static int32_t psyscr__a_inc(volatile int32_t* p) { return __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST); }
+static int32_t psyscr__a_load(volatile int32_t* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+static void psyscr__a_store(volatile int32_t* p, int32_t v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
+static int psyscr__a_cas(volatile int32_t* p, int32_t want, int32_t v) {
+    return __atomic_compare_exchange_n(p, &want, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+static int64_t psyscr__a_load64(volatile int64_t* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+static void psyscr__a_store64(volatile int64_t* p, int64_t v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
+#endif
+
+/* psyscr__abort_entry.flags: who saw it */
+#define PSYSCR__AB_HOOK     0x1u   /* the panic watchdog's keyboard hook         */
+#define PSYSCR__AB_INJECTED 0x2u   /* the key came from SendInput or the like    */
+#define PSYSCR__AB_SDL      0x4u   /* SDL's event watch                          */
+#define PSYSCR__ABORT_LOG   16
+/* Reports of one key press: the hook sees it as Windows reads it, SDL's
+ * raw path 0.1 to 0.7 ms later, and SDL's message path, which with the raw
+ * keyboard on reports each key a second time (measured, docs/psy_screen.md),
+ * up to 12 ms either side (INPUT). A person cannot press twice within this. */
+#define PSYSCR__AB_SAME_NS  30000000
+
+typedef struct psyscr__abort_entry {
+    volatile int32_t seq;      /* the entry's number, written last; 0 while written */
+    uint32_t reason, flags, key, mods;
+    int64_t  t;                /* RT ns                                          */
+} psyscr__abort_entry;
+
+static struct {
+    psyscr__abort_entry log[PSYSCR__ABORT_LOG];
+    volatile int32_t seq;      /* the last entry's number                        */
+    volatile int32_t lock;     /* writers of last_t and press[]                  */
+    volatile int64_t ack;      /* when a begin() last reported an abort          */
+    volatile int64_t sdl_off;  /* RT ns minus SDL ticks                          */
+    int32_t  users;            /* open screens                                   */
+    int32_t  off;
+    uint32_t key, mods;        /* the combination; mods 0 = the key alone        */
+    int64_t  last_t;           /* the last press counted                         */
+    int64_t  press[8];         /* the last presses, for the panic rule           */
+    int32_t  n_press;
+    int32_t  sdl_held;         /* the abort key, as SDL's events say          */
+    int32_t  presses;          /* the panic rule; 0 = no watchdog armed          */
+    int64_t  window_ns, grace_ns;
+} psyscr__ab;
+
+static int32_t psyscr__abort_push(uint32_t reason, uint32_t flags, uint32_t key, uint32_t mods, int64_t t) {
+    int32_t n = psyscr__a_inc(&psyscr__ab.seq);
+    psyscr__abort_entry* e = &psyscr__ab.log[(uint32_t)n % PSYSCR__ABORT_LOG];
+    psyscr__a_store(&e->seq, 0);
+    e->reason = reason;
+    e->flags = flags;
+    e->key = key;
+    e->mods = mods;
+    e->t = t;
+    psyscr__a_store(&e->seq, n);
+    return n;
+}
+
+/* The panic rule on a press at t: enough presses within the window, and no
+ * begin() has reported an abort for the grace time, so the frame loop looks
+ * hung. A loop that reported press 1 is saving, and must not be killed. */
+static int psyscr__panic_due(int64_t t) {
+    int i, n = 0;
+    int64_t ack = psyscr__a_load64(&psyscr__ab.ack);
+    psyscr__ab.press[(uint32_t)psyscr__ab.n_press++ % 8u] = t;
+    if (psyscr__ab.presses <= 0) return 0;
+    for (i = 0; i < 8; i++)
+        if (psyscr__ab.press[i] && psyscr__ab.press[i] <= t && t - psyscr__ab.press[i] < psyscr__ab.window_ns) n++;
+    return n >= psyscr__ab.presses && (ack == 0 || t - ack > psyscr__ab.grace_ns);
+}
+
+/* A press is a key-down after an up: Windows repeats key-downs while a key
+ * is held, and a held combination must not count as several presses. */
+static int psyscr__abort_edge(int32_t* held, int down) {
+    int press = down && !*held;
+    *held = down ? 1 : 0;
+    return press;
+}
+
+/* A key-down that is not a repeat, at RT time t, with mods (PSYSCR_MOD_*)
+ * held, from the source in flags. Returns 1 when the panic rule is met. */
+static int psyscr__abort_key(uint32_t key, uint32_t mods, int64_t t, uint32_t flags) {
+    int panic = 0;
+    if (psyscr__ab.users <= 0 || psyscr__ab.off || key != psyscr__ab.key) return 0;
+    if ((mods & psyscr__ab.mods) != psyscr__ab.mods) return 0;
+    while (!psyscr__a_cas(&psyscr__ab.lock, 0, 1)) { }
+    if (!(psyscr__ab.last_t && t - psyscr__ab.last_t < PSYSCR__AB_SAME_NS && psyscr__ab.last_t - t < PSYSCR__AB_SAME_NS)) {
+        psyscr__ab.last_t = t;
+        psyscr__abort_push(PSYSCR_ABORT_KEY, flags, key, mods, t);
+        panic = psyscr__panic_due(t);
+    }
+    psyscr__a_store(&psyscr__ab.lock, 0);
+    return panic;
+}
+
+/* The panic rule's numbers (desc.panic_*); presses 0 turns it off. */
+static void psyscr__panic_config(int32_t presses, int32_t window_ms, int32_t grace_ms) {
+    psyscr__ab.presses = presses;
+    psyscr__ab.window_ns = (int64_t)window_ms * 1000000;
+    psyscr__ab.grace_ns = (int64_t)grace_ms * 1000000;
+    memset(psyscr__ab.press, 0, sizeof psyscr__ab.press);
+}
+
+static const char* psyscr__abort_open(psyscr_screen* s, const psyscr_desc* d) {
+    uint32_t key = d->abort_keys.key ? d->abort_keys.key : PSYSCR_KEY_ESCAPE;
+    uint32_t m = d->abort_keys.mods;
+    int32_t off = d->abort_keys.off ? 1 : 0;
+    if (m & ~(PSYSCR_MOD_SHIFT | PSYSCR_MOD_CTRL | PSYSCR_MOD_ALT | PSYSCR_MOD_GUI | PSYSCR_MOD_NONE))
+        return "desc.abort_keys.mods has bits that are not PSYSCR_MOD_*";
+    m = m == 0 ? PSYSCR_MOD_SHIFT : (m & PSYSCR_MOD_NONE) ? 0u : m;
+    if (psyscr__ab.users > 0 && (psyscr__ab.key != key || psyscr__ab.mods != m || psyscr__ab.off != off))
+        return "desc.abort_keys differs from another open screen's: there is one combination per process";
+    psyscr__ab.key = key;
+    psyscr__ab.mods = m;
+    psyscr__ab.off = off;
+    psyscr__ab.users++;
+    s->abort_user = 1;
+    s->abort_seen = psyscr__a_load(&psyscr__ab.seq);   /* not the aborts of before */
+    return NULL;
+}
+
+/* Keys the panic watchdog's hook can name from an SDL keycode: Esc, F1 to
+ * F12 (SDLK_F1 is 0x4000003A), a letter, a digit. */
+static int psyscr__vk_known(uint32_t key) {
+    return key == PSYSCR_KEY_ESCAPE || (key >= 0x4000003Au && key <= 0x40000045u) ||
+           (key >= 'a' && key <= 'z') || (key >= '0' && key <= '9');
+}
+
+static void psyscr__abort_close(psyscr_screen* s) {
+    if (s->abort_user && --psyscr__ab.users == 0) psyscr__panic_config(0, 0, 0);
+    s->abort_user = 0;
+}
+
+static int psyscr__abort_pending(const psyscr_screen* s) {
+    return psyscr__a_load(&psyscr__ab.seq) != s->abort_seen;
+}
+
+/* Reports the log entries after the screen's last one: f gets the reasons,
+ * the ring one PSYSCR_EV_ABORT record each. Returns 1 if there were any. */
+static int psyscr__abort_take(psyscr_screen* s, psyscr_frame* f) {
+    int32_t cur = psyscr__a_load(&psyscr__ab.seq), k;
+    uint32_t mask = 0;
+    int32_t presses = 0;
+    int64_t first = 0, now;
+    if (cur == s->abort_seen) return 0;
+    now = psyscr__now();
+    for (k = s->abort_seen + 1; k - cur <= 0; k++) {
+        psyscr__abort_entry* e = &psyscr__ab.log[(uint32_t)k % PSYSCR__ABORT_LOG];
+        psyscr__abort_entry c;
+        int32_t s1 = psyscr__a_load(&e->seq);
+        if (s1 - k < 0) break;              /* still being written: the next begin() */
+        c.reason = e->reason; c.flags = e->flags; c.key = e->key; c.mods = e->mods; c.t = e->t;
+        if (s1 != k || psyscr__a_load(&e->seq) != k) continue;   /* written over: lost */
+        mask |= c.reason;
+        if (c.reason & PSYSCR_ABORT_KEY) presses++;
+        if (!first) first = c.t ? c.t : now;
+        if (s->ring) {
+            psyrt_event ev;
+            memset(&ev, 0, sizeof ev);
+            ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+            ev.kind = (uint16_t)PSYSCR_EV_ABORT;
+            ev.t_ns = (uint64_t)(c.t ? c.t : now);
+            ev.aux = s->display_index;
+            ev.u.u32[0] = c.reason;
+            ev.u.u32[1] = c.flags;
+            ev.u.u32[2] = c.key;
+            ev.u.u32[3] = c.mods;
+            ev.u.i64[2] = now;
+            psyrt_ring_push(s->ring, &ev);
+        }
+    }
+    s->abort_seen = k - 1;
+    if (!mask) return 0;
+    psyscr__a_store64(&psyscr__ab.ack, now);
+    memset(f, 0, sizeof *f);
+    f->abort = mask;
+    f->abort_presses = presses;
+    f->abort_ns = first;
+    return 1;
+}
+
+/* Open screens with a window, for the close request's window id and for
+ * the panic watchdog. Written by open() and close(), read on other threads
+ * only to compare ids and, in a panic, to find rings and switched modes. */
+#define PSYSCR__SLOTS 8
+static struct { psyscr_screen* s; uint32_t win; } psyscr__slot[PSYSCR__SLOTS];
+
+static void psyscr__slot_take(psyscr_screen* s, uint32_t win) {
+    int i;
+    for (i = 0; i < PSYSCR__SLOTS; i++)
+        if (!psyscr__slot[i].s) { psyscr__slot[i].win = win; psyscr__slot[i].s = s; s->abort_slot = i + 1; return; }
+}
+
+static void psyscr__slot_free(psyscr_screen* s) {
+    if (s->abort_slot) { psyscr__slot[s->abort_slot - 1].s = NULL; psyscr__slot[s->abort_slot - 1].win = 0; }
+    s->abort_slot = 0;
+}
+
+PSYSCR_API void psyscr_request_abort(void) {
+    psyscr__abort_push(PSYSCR_ABORT_REQUEST, 0, 0, 0, psyscr__now());
+}
+
+/* --- the default window icon (WINDOW ICON) ---------------------------------
+ * Escher's impossible cube, drawn for this header: public domain like the
+ * rest. Each byte is a run, (length - 1) << 4 | palette index; index 0 is
+ * transparent. */
+static const uint8_t psyscr__icon_pal[5][4] = {
+    {0,0,0,0}, {38,42,56,255}, {232,234,240,255}, {150,162,186,255}, {84,96,126,255}
+};
+static const uint8_t psyscr__icon_rle[1292] = {
+    0x40,0x03,0x01,0x13,0x90,0x23,0x11,0x43,0x40,0x13,0x01,0x03,0x01,0x00,0x41,0x13,0x01,0x00,0x13,0x01,0x00,0x03,0x01,0x50,
+    0x03,0x11,0x00,0x23,0x00,0x03,0x01,0x30,0x13,0x01,0x03,0x01,0x00,0x21,0x00,0x03,0x01,0x00,0x33,0x01,0x00,0x03,0x01,0x00,
+    0x03,0x01,0x10,0x03,0x01,0x00,0x01,0x13,0x01,0x10,0x03,0x01,0x00,0x03,0x01,0x10,0x03,0x01,0x10,0x01,0x03,0x01,0x10,0x03,
+    0x01,0x00,0x03,0x01,0x10,0x03,0x01,0x20,0x03,0x01,0x10,0x03,0x01,0x00,0x03,0x01,0x10,0x03,0x01,0x20,0x03,0x01,0x10,0x03,
+    0x01,0x00,0x03,0x01,0x00,0x43,0x00,0x03,0x01,0x10,0x03,0x01,0x00,0x03,0x01,0x03,0x41,0x00,0x03,0x01,0x00,0x13,0x01,0x00,
+    0x03,0x11,0x50,0x03,0x01,0x00,0x13,0x10,0x13,0x60,0x03,0x01,0x13,0x01,0x10,0x11,0x43,0x10,0x03,0x01,0x03,0x01,0x40,0x31,
+    0x33,0x11,0x20,0xa0,0x21,0xf0,0xb0,0x01,0x02,0x03,0x51,0xf0,0x40,0x21,0x02,0x03,0x01,0x42,0x41,0xe0,0x01,0x12,0x01,0x02,
+    0x03,0x01,0x43,0x42,0x41,0x80,0x01,0x02,0x13,0x01,0x02,0x03,0x41,0x53,0x32,0x11,0x60,0x01,0x02,0x13,0x11,0x02,0x03,0x01,
+    0x30,0x41,0x33,0x01,0x12,0x03,0x01,0x20,0x11,0x02,0x13,0x01,0x00,0x01,0x02,0x03,0x01,0x80,0x31,0x02,0x23,0x01,0x10,0x11,
+    0x02,0x03,0x11,0x10,0x01,0x02,0x03,0x01,0x90,0x01,0x12,0x03,0x11,0x03,0x01,0x00,0x01,0x12,0x41,0x00,0x01,0x02,0x03,0x01,
+    0x80,0x01,0x02,0x13,0x11,0x02,0x03,0x01,0x00,0x01,0x13,0x42,0x00,0x01,0x02,0x03,0x01,0x70,0x01,0x02,0x13,0x01,0x00,0x01,
+    0x02,0x03,0x01,0x00,0x21,0x43,0x00,0x01,0x02,0x03,0x01,0x00,0x31,0x00,0x11,0x02,0x13,0x01,0x10,0x01,0x02,0x03,0x01,0x00,
+    0x01,0x02,0x03,0x41,0x00,0x01,0x02,0x03,0x01,0x00,0x32,0x11,0x02,0x03,0x11,0x20,0x01,0x02,0x03,0x01,0x00,0x01,0x02,0x03,
+    0x01,0x40,0x01,0x02,0x03,0x01,0x00,0x33,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,0x40,0x01,
+    0x02,0x03,0x01,0x00,0x21,0x03,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,
+    0x01,0x30,0x11,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x40,0x01,0x02,
+    0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x40,0x01,
+    0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x00,
+    0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,
+    0x40,0x01,0x02,0x03,0x41,0x00,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,0x30,0x01,0x02,0x23,
+    0x32,0x00,0x01,0x02,0x03,0x01,0x40,0x01,0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,0x10,0x11,0x02,0x13,0x01,0x43,0x00,0x01,
+    0x02,0x03,0x01,0x00,0x41,0x02,0x03,0x01,0x00,0x01,0x02,0x03,0x01,0x00,0x01,0x12,0x03,0x11,0x00,0x41,0x00,0x01,0x02,0x03,
+    0x01,0x00,0x32,0x11,0x03,0x01,0x00,0x01,0x02,0x03,0x11,0x02,0x13,0x01,0x80,0x01,0x02,0x03,0x01,0x00,0x23,0x01,0x12,0x03,
+    0x01,0x00,0x01,0x02,0x03,0x01,0x02,0x13,0x01,0x90,0x01,0x02,0x03,0x01,0x00,0x21,0x02,0x13,0x20,0x31,0x13,0x01,0xa0,0x01,
+    0x02,0x03,0x01,0x00,0x11,0x02,0x13,0x01,0x20,0x01,0x12,0x41,0x90,0x01,0x02,0x03,0x11,0x12,0x03,0x11,0x40,0x13,0x42,0x41,
+    0x40,0x01,0x02,0x03,0x01,0x02,0x13,0x01,0x60,0x01,0x53,0x42,0x31,0x00,0x01,0x02,0x03,0x01,0x13,0x01,0x80,0x41,0x53,0x32,
+    0x11,0x02,0x03,0x01,0x03,0x01,0xe0,0x41,0x43,0x02,0x01,0x02,0x03,0x11,0xf0,0x40,0x41,0x23,0x01,0x90,0xf0,0xf0,0xf0,0xf0,
+    0x00,0x01,0xf0,0xf0,0xd0,0x01,0x02,0x41,0xf0,0xf0,0x60,0x11,0x62,0x41,0xf0,0xf0,0x00,0x01,0x32,0x04,0x33,0x42,0x41,0xf0,
+    0xa0,0x01,0x32,0x14,0x83,0x42,0x41,0xf0,0x40,0x01,0x32,0x24,0xd3,0x42,0x41,0xd0,0x11,0x22,0x44,0x31,0xe3,0x42,0x11,0xa0,
+    0x01,0x32,0x34,0x11,0x04,0x01,0x10,0x41,0x83,0x11,0x32,0x04,0x01,0x90,0x01,0x32,0x34,0x11,0x03,0x04,0x01,0x60,0x41,0x23,
+    0x11,0x32,0x14,0x01,0x80,0x01,0x32,0x24,0x11,0x23,0x04,0x01,0xb0,0x31,0x32,0x24,0x01,0x70,0x01,0x32,0x01,0x14,0x01,0x00,
+    0x01,0x23,0x04,0x01,0xc0,0x11,0x22,0x44,0x01,0x50,0x11,0x32,0x31,0x10,0x01,0x23,0x04,0x01,0xb0,0x01,0x32,0x54,0x01,0x50,
+    0x01,0x23,0x52,0x11,0x33,0x04,0x01,0xa0,0x01,0x32,0x34,0x11,0x04,0x01,0x50,0x01,0x73,0x22,0x33,0x04,0x11,0x80,0x01,0x32,
+    0x24,0x11,0x13,0x04,0x01,0x50,0x01,0xe3,0x14,0x02,0x41,0x20,0x01,0x22,0x34,0x11,0x23,0x04,0x01,0x50,0x01,0xe3,0x14,0x03,
+    0x42,0x21,0x22,0x34,0x01,0x00,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x41,0x63,0x14,0x53,0x42,0x34,0x01,0x10,0x01,0x23,0x04,
+    0x01,0x50,0x01,0x23,0x04,0x01,0x20,0x21,0x33,0x14,0x93,0x24,0x11,0x20,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,
+    0x01,0x23,0x14,0x01,0x83,0x14,0x01,0x40,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x00,0x41,
+    0x33,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,
+    0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,
+    0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,
+    0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,
+    0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,
+    0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x02,0x41,0x00,0x01,0x23,0x04,0x01,
+    0x50,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x40,0x01,0x22,0x04,0x13,0x42,0x11,0x23,0x04,0x01,0x50,0x01,0x23,0x04,
+    0x01,0x50,0x01,0x23,0x04,0x01,0x20,0x11,0x22,0x14,0x63,0x11,0x23,0x04,0x31,0x20,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,
+    0x01,0x10,0x01,0x32,0x24,0x63,0x11,0x23,0x04,0x11,0x12,0x31,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x01,0x00,0x01,0x32,0x24,
+    0x21,0x43,0x11,0x23,0x04,0x11,0x13,0x22,0x01,0x23,0x04,0x01,0x50,0x01,0x23,0x04,0x11,0x32,0x24,0x01,0x20,0x61,0x23,0x04,
+    0x11,0x33,0x01,0x12,0x13,0x04,0x01,0x50,0x01,0x23,0x04,0x11,0x12,0x34,0x01,0x80,0x11,0x23,0x04,0x11,0x13,0x11,0x32,0x14,
+    0x01,0x50,0x01,0x23,0x04,0x11,0x02,0x34,0x01,0xa0,0x01,0x23,0x04,0x41,0x32,0x24,0x01,0x50,0x01,0x23,0x04,0x11,0x34,0x01,
+    0xb0,0x01,0x23,0x04,0x01,0x10,0x01,0x32,0x24,0x11,0x50,0x01,0x23,0x14,0x41,0xc0,0x01,0x23,0x04,0x01,0x00,0x01,0x32,0x24,
+    0x01,0x70,0x01,0x23,0x32,0x31,0xb0,0x01,0x23,0x04,0x11,0x22,0x34,0x01,0x80,0x01,0x53,0x42,0x41,0x60,0x01,0x23,0x04,0x11,
+    0x12,0x34,0x01,0x90,0x01,0xa3,0x42,0x41,0x10,0x01,0x23,0x04,0x11,0x02,0x34,0x01,0xa0,0x11,0xe3,0x42,0x21,0x23,0x04,0x01,
+    0x02,0x24,0x11,0xd0,0x41,0xe3,0x12,0x33,0x44,0x01,0xf0,0x40,0x41,0xf3,0x34,0x01,0xf0,0xa0,0x41,0xa3,0x24,0x01,0xf0,0xf0,
+    0x00,0x41,0x53,0x04,0x11,0xf0,0xf0,0x60,0x41,0x03,0x01,0xf0,0xf0,0xd0,0x01,0xf0,0xf0,0xf0,0xf0,0x00
+};
+/* side, offset and length of each size in psyscr__icon_rle */
+static const uint16_t psyscr__icon_size[3][3] = { { 16, 0, 147 }, { 32, 147, 497 }, { 48, 644, 648 } };
+
+/* Size k of the icon (0: 16, 1: 32, 2: 48 pixels) as RGBA rows of pitch
+ * bytes. Returns 1 when the runs fill the square exactly. */
+static int psyscr__icon_decode(int k, uint8_t* px, int pitch) {
+    int side = psyscr__icon_size[k][0], i, n = 0;
+    const uint8_t* r = psyscr__icon_rle + psyscr__icon_size[k][1];
+    for (i = 0; i < psyscr__icon_size[k][2]; i++) {
+        int run = (r[i] >> 4) + 1, j;
+        const uint8_t* c = psyscr__icon_pal[r[i] & 15u];
+        if ((r[i] & 15u) >= sizeof psyscr__icon_pal / sizeof psyscr__icon_pal[0] || n + run > side * side) return 0;
+        for (j = 0; j < run; j++, n++) memcpy(px + (n / side) * pitch + (n % side) * 4, c, 4);
+    }
+    return n == side * side;
 }
 
 PSYSCR_API const char* psyscr_version(void) { return PSYSCR_VERSION_STRING; }
@@ -2074,6 +2628,32 @@ static const IID psyscr__IID_ID3D11Texture2D = {0x6f15aaf2,0xd208,0x4e89,{0x9a,0
 static const IID psyscr__IID_ID3D11Device5 = {0x8ffde202,0xa0e7,0x45df,{0x9e,0x01,0xe8,0x37,0x80,0x1b,0x5e,0xa0}};
 static const IID psyscr__IID_ID3D11DeviceContext4 = {0x917600da,0xf58c,0x4c33,{0x98,0xd8,0x3e,0x15,0xb3,0x90,0xfa,0x24}};
 static const IID psyscr__IID_ID3D11Fence = {0xaffde9d1,0x1df7,0x4bb7,{0x8a,0x34,0x0f,0x46,0x25,0x1d,0xab,0x80}};
+/* ID3D10Multithread has the same IID and the same slots. */
+static const IID psyscr__IID_ID3D11Multithread = {0x9b7e4e00,0x342c,0x4106,{0xa1,0x9f,0x4f,0x27,0x04,0xf6,0x89,0xf0}};
+
+/* desc.d3d11_video: a device a decoder can share (NATIVE HANDLES). */
+static UINT psyscr__device_flags(const psyscr_presenter_open* in) {
+    return (UINT)D3D11_CREATE_DEVICE_BGRA_SUPPORT | (in->d3d11_video ? (UINT)D3D11_CREATE_DEVICE_VIDEO_SUPPORT : 0u);
+}
+
+static void psyscr__device_error(const psyscr_presenter_open* in, HRESULT hr, char* err, size_t err_cap) {
+    if (in->d3d11_video)
+        psyscr__set_error(err, err_cap, "psy_screen: desc.d3d11_video: D3D11CreateDevice with VIDEO_SUPPORT failed "
+                          "0x%08lx; the adapter may have no D3D11 video support", (unsigned long)hr);
+    else
+        psyscr__set_error(err, err_cap, "psy_screen: D3D11CreateDevice 0x%08lx", (unsigned long)hr);
+}
+
+/* A decoder thread then shares the immediate context with the frame
+ * thread; protection takes a lock on each call of either. */
+static void psyscr__device_protect(const psyscr_presenter_open* in, ID3D11Device* dev) {
+    ID3D11Multithread* mt = NULL;
+    if (!in->d3d11_video) return;
+    if (SUCCEEDED(PSYSCR__CALL(dev, QueryInterface, PSYSCR__IID(psyscr__IID_ID3D11Multithread), (void**)&mt)) && mt) {
+        PSYSCR__CALL(mt, SetMultithreadProtected, TRUE);
+        PSYSCR__RELEASE(mt);
+    }
+}
 
 /* Codes, the read-back and the GPU fence: the same on both Windows swap
  * paths, so one copy. */
@@ -2486,16 +3066,17 @@ static int psyscr__dxgi_open(void* vctx, const psyscr_presenter_open* in, psyscr
     levels[0] = D3D_FEATURE_LEVEL_11_1; levels[1] = D3D_FEATURE_LEVEL_11_0;
     levels[2] = D3D_FEATURE_LEVEL_10_1; levels[3] = D3D_FEATURE_LEVEL_10_0;
     hr = create_device((IDXGIAdapter*)pick, pick ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, NULL,
-                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 4, D3D11_SDK_VERSION, &d->dev, NULL, &d->dctx);
+                       psyscr__device_flags(in), levels, 4, D3D11_SDK_VERSION, &d->dev, NULL, &d->dctx);
     if (hr == E_INVALIDARG)   /* 11.1 unknown to the runtime */
         hr = create_device((IDXGIAdapter*)pick, pick ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, NULL,
-                           D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels + 1, 3, D3D11_SDK_VERSION, &d->dev, NULL, &d->dctx);
+                           psyscr__device_flags(in), levels + 1, 3, D3D11_SDK_VERSION, &d->dev, NULL, &d->dctx);
     PSYSCR__RELEASE(pick);
     if (FAILED(hr)) {
         PSYSCR__RELEASE(fac1);
-        psyscr__set_error(err, err_cap, "psy_screen: D3D11CreateDevice 0x%08lx", (unsigned long)hr);
+        psyscr__device_error(in, hr, err, err_cap);
         return PSYSCR_ERR_LOST;
     }
+    psyscr__device_protect(in, d->dev);
     {   /* the factory that owns the device's adapter */
         IDXGIDevice* dd = NULL;
         IDXGIAdapter* a = NULL;
@@ -3142,9 +3723,10 @@ static int psyscr__comp_open(void* vctx, const psyscr_presenter_open* in, psyscr
     }
     levels[0] = D3D_FEATURE_LEVEL_11_1; levels[1] = D3D_FEATURE_LEVEL_11_0;
     hr = create_device((IDXGIAdapter*)pick, pick ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, NULL,
-                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2, D3D11_SDK_VERSION, &c->dev, NULL, &c->dctx);
+                       psyscr__device_flags(in), levels, 2, D3D11_SDK_VERSION, &c->dev, NULL, &c->dctx);
     PSYSCR__RELEASE(pick);
-    if (FAILED(hr)) { psyscr__set_error(err, err_cap, "psy_screen: D3D11CreateDevice 0x%08lx", (unsigned long)hr); return PSYSCR_ERR_LOST; }
+    if (FAILED(hr)) { psyscr__device_error(in, hr, err, err_cap); return PSYSCR_ERR_LOST; }
+    psyscr__device_protect(in, c->dev);
     PSYSCR__CALL(c->dctx, QueryInterface, PSYSCR__IID(psyscr__IID_ID3D11DeviceContext1), (void**)&c->dctx1);
 
     hr = create_pf(c->dev, &psyscr__IID_IPresentationFactory, (void**)&c->pf);
@@ -3448,6 +4030,25 @@ typedef BOOL (WINAPI *psyscr__GetMonitorInfoW_fn)(HMONITOR, LPMONITORINFO);
 typedef BOOL (WINAPI *psyscr__GammaRamp_fn)(HDC, LPVOID);
 typedef HDC  (WINAPI *psyscr__CreateDCW_fn)(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW*);
 typedef BOOL (WINAPI *psyscr__DeleteDC_fn)(HDC);
+typedef HHOOK (WINAPI *psyscr__SetWindowsHookExW_fn)(int, HOOKPROC, HINSTANCE, DWORD);
+typedef BOOL (WINAPI *psyscr__UnhookWindowsHookEx_fn)(HHOOK);
+typedef LRESULT (WINAPI *psyscr__CallNextHookEx_fn)(HHOOK, int, WPARAM, LPARAM);
+typedef BOOL (WINAPI *psyscr__GetMessageW_fn)(LPMSG, HWND, UINT, UINT);
+typedef BOOL (WINAPI *psyscr__PeekMessageW_fn)(LPMSG, HWND, UINT, UINT, UINT);
+typedef BOOL (WINAPI *psyscr__PostThreadMessageW_fn)(DWORD, UINT, WPARAM, LPARAM);
+typedef SHORT (WINAPI *psyscr__GetAsyncKeyState_fn)(int);
+typedef HWND (WINAPI *psyscr__GetForegroundWindow_fn)(void);
+typedef DWORD (WINAPI *psyscr__GetWindowThreadProcessId_fn)(HWND, LPDWORD);
+typedef BOOL (WINAPI *psyscr__IsHungAppWindow_fn)(HWND);
+typedef HICON (WINAPI *psyscr__CreateIconIndirect_fn)(PICONINFO);
+typedef BOOL (WINAPI *psyscr__DestroyIcon_fn)(HICON);
+typedef LRESULT (WINAPI *psyscr__SendMessageW_fn)(HWND, UINT, WPARAM, LPARAM);
+typedef UINT (WINAPI *psyscr__GetDpiForWindow_fn)(HWND);
+typedef int (WINAPI *psyscr__GetSystemMetricsForDpi_fn)(int, UINT);
+typedef HBITMAP (WINAPI *psyscr__CreateDIBSection_fn)(HDC, const BITMAPINFO*, UINT, void**, HANDLE, DWORD);
+typedef HBITMAP (WINAPI *psyscr__CreateBitmap_fn)(int, int, UINT, UINT, const void*);
+typedef BOOL (WINAPI *psyscr__DeleteObject_fn)(HGDIOBJ);
+typedef int (WINAPI *psyscr__GetClassNameW_fn)(HWND, LPWSTR, int);
 
 /* gdi32 and user32 by name, so nothing extra is linked (MinGW links no
  * gdi32 by default). */
@@ -3461,6 +4062,27 @@ static struct psyscr__winapi {
     psyscr__GammaRamp_fn                   get_ramp, set_ramp;
     psyscr__CreateDCW_fn                   create_dc;
     psyscr__DeleteDC_fn                    delete_dc;
+    /* the panic watchdog */
+    psyscr__SetWindowsHookExW_fn           set_hook;
+    psyscr__UnhookWindowsHookEx_fn         unhook;
+    psyscr__CallNextHookEx_fn              next_hook;
+    psyscr__GetMessageW_fn                 get_message;
+    psyscr__PeekMessageW_fn                peek_message;
+    psyscr__PostThreadMessageW_fn          post_thread;
+    psyscr__GetAsyncKeyState_fn            key_state;
+    psyscr__GetForegroundWindow_fn         foreground;
+    psyscr__GetWindowThreadProcessId_fn    window_pid;
+    psyscr__IsHungAppWindow_fn             is_hung;
+    psyscr__GetClassNameW_fn               class_name;
+    /* the window icons */
+    psyscr__CreateIconIndirect_fn          create_icon;
+    psyscr__DestroyIcon_fn                 destroy_icon;
+    psyscr__SendMessageW_fn                send_message;
+    psyscr__GetDpiForWindow_fn             window_dpi;
+    psyscr__GetSystemMetricsForDpi_fn      metrics_dpi;
+    psyscr__CreateDIBSection_fn            create_dib;
+    psyscr__CreateBitmap_fn                create_bitmap;
+    psyscr__DeleteObject_fn                delete_object;
 } psyscr__win;
 
 static void psyscr__win_load(void) {
@@ -3475,12 +4097,31 @@ static void psyscr__win_load(void) {
         psyscr__win.info = (psyscr__DisplayConfigGetDeviceInfo_fn)(psyscr_proc)GetProcAddress(u, "DisplayConfigGetDeviceInfo");
         psyscr__win.monitor_info = (psyscr__GetMonitorInfoW_fn)(psyscr_proc)GetProcAddress(u, "GetMonitorInfoW");
         psyscr__win.monitor_from_window = (psyscr__MonitorFromWindow_fn)(psyscr_proc)GetProcAddress(u, "MonitorFromWindow");
+        psyscr__win.set_hook = (psyscr__SetWindowsHookExW_fn)(psyscr_proc)GetProcAddress(u, "SetWindowsHookExW");
+        psyscr__win.unhook = (psyscr__UnhookWindowsHookEx_fn)(psyscr_proc)GetProcAddress(u, "UnhookWindowsHookEx");
+        psyscr__win.next_hook = (psyscr__CallNextHookEx_fn)(psyscr_proc)GetProcAddress(u, "CallNextHookEx");
+        psyscr__win.get_message = (psyscr__GetMessageW_fn)(psyscr_proc)GetProcAddress(u, "GetMessageW");
+        psyscr__win.peek_message = (psyscr__PeekMessageW_fn)(psyscr_proc)GetProcAddress(u, "PeekMessageW");
+        psyscr__win.post_thread = (psyscr__PostThreadMessageW_fn)(psyscr_proc)GetProcAddress(u, "PostThreadMessageW");
+        psyscr__win.key_state = (psyscr__GetAsyncKeyState_fn)(psyscr_proc)GetProcAddress(u, "GetAsyncKeyState");
+        psyscr__win.foreground = (psyscr__GetForegroundWindow_fn)(psyscr_proc)GetProcAddress(u, "GetForegroundWindow");
+        psyscr__win.window_pid = (psyscr__GetWindowThreadProcessId_fn)(psyscr_proc)GetProcAddress(u, "GetWindowThreadProcessId");
+        psyscr__win.is_hung = (psyscr__IsHungAppWindow_fn)(psyscr_proc)GetProcAddress(u, "IsHungAppWindow");
+        psyscr__win.class_name = (psyscr__GetClassNameW_fn)(psyscr_proc)GetProcAddress(u, "GetClassNameW");
+        psyscr__win.create_icon = (psyscr__CreateIconIndirect_fn)(psyscr_proc)GetProcAddress(u, "CreateIconIndirect");
+        psyscr__win.destroy_icon = (psyscr__DestroyIcon_fn)(psyscr_proc)GetProcAddress(u, "DestroyIcon");
+        psyscr__win.send_message = (psyscr__SendMessageW_fn)(psyscr_proc)GetProcAddress(u, "SendMessageW");
+        psyscr__win.window_dpi = (psyscr__GetDpiForWindow_fn)(psyscr_proc)GetProcAddress(u, "GetDpiForWindow");
+        psyscr__win.metrics_dpi = (psyscr__GetSystemMetricsForDpi_fn)(psyscr_proc)GetProcAddress(u, "GetSystemMetricsForDpi");
     }
     if (g) {
         psyscr__win.get_ramp = (psyscr__GammaRamp_fn)(psyscr_proc)GetProcAddress(g, "GetDeviceGammaRamp");
         psyscr__win.set_ramp = (psyscr__GammaRamp_fn)(psyscr_proc)GetProcAddress(g, "SetDeviceGammaRamp");
         psyscr__win.create_dc = (psyscr__CreateDCW_fn)(psyscr_proc)GetProcAddress(g, "CreateDCW");
         psyscr__win.delete_dc = (psyscr__DeleteDC_fn)(psyscr_proc)GetProcAddress(g, "DeleteDC");
+        psyscr__win.create_dib = (psyscr__CreateDIBSection_fn)(psyscr_proc)GetProcAddress(g, "CreateDIBSection");
+        psyscr__win.create_bitmap = (psyscr__CreateBitmap_fn)(psyscr_proc)GetProcAddress(g, "CreateBitmap");
+        psyscr__win.delete_object = (psyscr__DeleteObject_fn)(psyscr_proc)GetProcAddress(g, "DeleteObject");
     }
 }
 
@@ -3494,16 +4135,18 @@ static int psyscr__ramp_identity(const WORD* r) {   /* 3 x 256, red first */
 /* Ramps this process set, to restore at close, at exit and on SDL's quit. */
 #define PSYSCR__GAMMA_MAX 8
 static struct psyscr__gamma_entry {
-    int   used;
+    volatile int32_t used;
     WCHAR dev[32];
     WORD  saved[3][256];
 } psyscr__gamma[PSYSCR__GAMMA_MAX];
 static int psyscr__gamma_atexit, psyscr__gamma_watch;
 
+/* close(), exit and the panic watchdog's thread can each get here: the
+ * exchange lets one of them restore an entry. */
 static void psyscr__gamma_restore(int k) {
     HDC dc;
-    if (k < 0 || k >= PSYSCR__GAMMA_MAX || !psyscr__gamma[k].used) return;
-    psyscr__gamma[k].used = 0;
+    if (k < 0 || k >= PSYSCR__GAMMA_MAX) return;
+    if (InterlockedExchange((volatile LONG*)&psyscr__gamma[k].used, 0) == 0) return;
     if (!psyscr__win.create_dc || !psyscr__win.set_ramp) return;
     dc = psyscr__win.create_dc(psyscr__gamma[k].dev, NULL, NULL, NULL);
     if (!dc) return;
@@ -3618,7 +4261,7 @@ static void psyscr__win_display_state(psyscr_screen* s, const psyscr_desc* desc)
                      * puts the user's ramp back */
                     memcpy(psyscr__gamma[k].saved, cur, sizeof cur);
                     memcpy(psyscr__gamma[k].dev, mi.szDevice, sizeof psyscr__gamma[k].dev);
-                    psyscr__gamma[k].used = 1;
+                    (void)InterlockedExchange((volatile LONG*)&psyscr__gamma[k].used, 1);
                     if (!psyscr__gamma_atexit) { psyscr__gamma_atexit = 1; atexit(psyscr__gamma_restore_all); }
                     if (!psyscr__gamma_watch) { psyscr__gamma_watch = SDL_AddEventWatch(psyscr__gamma_quit_watch, NULL) ? 1 : 0; }
                     if (psyscr__win.set_ramp(dc, id) && psyscr__win.get_ramp(dc, back) && psyscr__ramp_identity(&back[0][0])) {
@@ -3655,6 +4298,236 @@ static void psyscr__win_gamma_release(psyscr_screen* s) {
     s->gamma_owned = 0;
     for (k = 0; k < PSYSCR__GAMMA_MAX; k++) any |= psyscr__gamma[k].used;
     if (!any && psyscr__gamma_watch) { SDL_RemoveEventWatch(psyscr__gamma_quit_watch, NULL); psyscr__gamma_watch = 0; }
+}
+
+/* Size k of the header's icon as an HICON, or NULL. */
+static HICON psyscr__win_icon(int k) {
+    int side = psyscr__icon_size[k][0], i;
+    BITMAPINFO bi;
+    void* bits = NULL;
+    HBITMAP color, mask;
+    ICONINFO ii;
+    HICON ic = NULL;
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = side;
+    bi.bmiHeader.biHeight = -side;   /* top row first */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    color = psyscr__win.create_dib(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    mask = psyscr__win.create_bitmap(side, side, 1, 1, NULL);
+    if (color && mask && bits && psyscr__icon_decode(k, (uint8_t*)bits, side * 4)) {
+        uint8_t* p = (uint8_t*)bits;
+        for (i = 0; i < side * side; i++) { uint8_t t = p[i * 4]; p[i * 4] = p[i * 4 + 2]; p[i * 4 + 2] = t; }   /* BGRA */
+        memset(&ii, 0, sizeof ii);
+        ii.fIcon = TRUE;
+        ii.hbmColor = color;
+        ii.hbmMask = mask;
+        ic = psyscr__win.create_icon(&ii);
+    }
+    if (color) psyscr__win.delete_object(color);
+    if (mask) psyscr__win.delete_object(mask);
+    return ic;
+}
+
+/* SDL gives a window one icon at its base size, 32 pixels, for the title
+ * bar too, where Windows shrinks it (measured, docs/psy_screen.md); the
+ * header's icon has a size drawn for each. The smallest size at least as
+ * large as the window's icon metric. */
+static void psyscr__win_icons(psyscr_screen* s) {
+    HWND hwnd = (HWND)s->hwnd;
+    UINT dpi;
+    int which, k;
+    psyscr__win_load();
+    if (!hwnd || !psyscr__win.create_icon || !psyscr__win.send_message || !psyscr__win.create_dib ||
+        !psyscr__win.create_bitmap || !psyscr__win.delete_object) return;
+    dpi = psyscr__win.window_dpi ? psyscr__win.window_dpi(hwnd) : 96;
+    for (which = 0; which < 2; which++) {
+        int metric = which == 0 ? SM_CXSMICON : SM_CXICON;
+        int want = psyscr__win.metrics_dpi ? psyscr__win.metrics_dpi(metric, dpi) : (which == 0 ? 16 : 32);
+        HICON ic;
+        for (k = 0; k < 2 && psyscr__icon_size[k][0] < want; k++) { }
+        ic = psyscr__win_icon(k);
+        if (!ic) continue;
+        psyscr__win.send_message(hwnd, WM_SETICON, which == 0 ? ICON_SMALL : ICON_BIG, (LPARAM)ic);
+        s->win_icon[which] = ic;
+    }
+}
+
+/* --- the panic watchdog (PANIC) ------------------------------------------- */
+
+static struct {
+    HANDLE          thread;
+    DWORD           tid;
+    HHOOK           hook;
+    HANDLE          ready;
+    volatile LONG   panicking;
+    int             armed;          /* screens armed                           */
+    UINT            vk;
+    int32_t         key_down;       /* the hook's own state of the key: repeats */
+    psyscr_panic_fn fn;
+    void*           ctx;
+    volatile int64_t t_panic;       /* when the panic began, for a test        */
+} psyscr__wd;
+
+/* A key the hook can name: Esc, F1 to F12, a letter or a digit. */
+static UINT psyscr__vk_of(uint32_t key) {
+    if (!psyscr__vk_known(key)) return 0;
+    if (key == PSYSCR_KEY_ESCAPE) return VK_ESCAPE;
+    if (key >= 0x4000003Au && key <= 0x40000045u) return VK_F1 + (key - 0x4000003Au);   /* SDLK_F1..F12 */
+    if (key >= 'a' && key <= 'z') return 'A' + (key - 'a');
+    if (key >= '0' && key <= '9') return key;
+    return 0;
+}
+
+/* Is the foreground window this process's? About 5 s into a hang Windows
+ * puts a "Ghost" window of another process in front of a hung one
+ * (measured, docs/psy_screen.md), so a ghost counts while one of the
+ * screens' windows is hung. */
+static int psyscr__wd_ours(void) {
+    HWND h = psyscr__win.foreground();
+    DWORD pid = 0;
+    WCHAR cls[8];
+    int i;
+    if (!h) return 0;
+    psyscr__win.window_pid(h, &pid);
+    if (pid == GetCurrentProcessId()) return 1;
+    if (!psyscr__win.class_name || !psyscr__win.is_hung || psyscr__win.class_name(h, cls, 8) != 5 ||
+        wcscmp(cls, L"Ghost") != 0) return 0;
+    for (i = 0; i < PSYSCR__SLOTS; i++) {
+        psyscr_screen* s = psyscr__slot[i].s;
+        if (s && s->hwnd && psyscr__win.is_hung((HWND)s->hwnd)) return 1;
+    }
+    return 0;
+}
+
+/* Every key of the session passes through here while the watchdog is
+ * armed, and Windows skips a hook that takes longer than
+ * LowLevelHooksTimeout: no lock but the abort state's, no I/O, no wait. */
+static LRESULT CALLBACK psyscr__wd_hook(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION && lp) {
+        const KBDLLHOOKSTRUCT* k = (const KBDLLHOOKSTRUCT*)lp;
+        if (k->vkCode == psyscr__wd.vk) {
+            if (psyscr__abort_edge(&psyscr__wd.key_down, wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) && psyscr__wd_ours()) {
+                uint32_t m = 0;
+                if (psyscr__win.key_state(VK_SHIFT) < 0) m |= PSYSCR_MOD_SHIFT;
+                if (psyscr__win.key_state(VK_CONTROL) < 0) m |= PSYSCR_MOD_CTRL;
+                if (psyscr__win.key_state(VK_MENU) < 0) m |= PSYSCR_MOD_ALT;
+                if (psyscr__win.key_state(VK_LWIN) < 0 || psyscr__win.key_state(VK_RWIN) < 0) m |= PSYSCR_MOD_GUI;
+                if (psyscr__abort_key(psyscr__ab.key, m, psyscr__now(),
+                                      PSYSCR__AB_HOOK | ((k->flags & LLKHF_INJECTED) ? PSYSCR__AB_INJECTED : 0u)))
+                    psyscr__win.post_thread(psyscr__wd.tid, WM_APP, 0, 0);
+            }
+        }
+    }
+    return psyscr__win.next_hook(NULL, code, wp, lp);
+}
+
+static DWORD WINAPI psyscr__wd_last_words(LPVOID arg) {
+    (void)arg;
+    if (psyscr__wd.fn) psyscr__wd.fn(psyscr__wd.ctx);
+    return 0;
+}
+
+/* The caller's last words run on their own thread, for at most 1 s: they
+ * may wait on something the hung thread holds. */
+static void psyscr__wd_bounded(LPTHREAD_START_ROUTINE fn) {
+    HANDLE h = CreateThread(NULL, 0, fn, NULL, 0, NULL);
+    if (h) { WaitForSingleObject(h, 1000); CloseHandle(h); }
+}
+
+/* The frame loop looks hung: put back the gamma ramps, then end the
+ * process. TerminateProcess, not exit(): exit runs atexit handlers and DLL
+ * detach, which can wait on locks the hung thread holds, and only the end
+ * of the process takes down a window and a swapchain that another thread
+ * owns. Windows puts back a switched display mode as the process ends
+ * (measured: ChangeDisplaySettingsExW from here blocked over 1 s on the
+ * hung window and the mode came back no sooner). */
+static void psyscr__panic(void) {
+    int i;
+    int64_t now = psyscr__now();
+    if (InterlockedCompareExchange(&psyscr__wd.panicking, 1, 0) != 0) return;
+    psyscr__wd.t_panic = now;
+    /* no key of the session waits on this thread from here */
+    if (psyscr__wd.hook) { psyscr__win.unhook(psyscr__wd.hook); psyscr__wd.hook = NULL; }
+    for (i = 0; i < PSYSCR__SLOTS; i++) {
+        psyscr_screen* s = psyscr__slot[i].s;
+        if (s && s->panic_armed == 1 && s->ring) {
+            psyrt_event ev;
+            memset(&ev, 0, sizeof ev);
+            ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+            ev.kind = (uint16_t)PSYSCR_EV_PANIC;
+            ev.t_ns = (uint64_t)now;
+            ev.aux = s->display_index;
+            ev.u.u32[0] = (uint32_t)psyscr__ab.presses;
+            ev.u.i64[1] = psyscr__a_load64(&psyscr__ab.ack);
+            psyrt_ring_push(s->ring, &ev);
+        }
+    }
+    psyscr__gamma_restore_all();
+    if (psyscr__wd.fn) psyscr__wd_bounded(psyscr__wd_last_words);
+    TerminateProcess(GetCurrentProcess(), PSYSCR_PANIC_EXIT_CODE);
+}
+
+static DWORD WINAPI psyscr__wd_main(LPVOID arg) {
+    MSG m;
+    HMODULE self = NULL;
+    (void)arg;
+    psyscr__win.peek_message(&m, NULL, WM_USER, WM_USER, PM_NOREMOVE);   /* the queue, before ready */
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCWSTR)(void*)&psyscr__wd, &self);
+    psyscr__wd.hook = psyscr__win.set_hook(WH_KEYBOARD_LL, psyscr__wd_hook, self, 0);
+    SetEvent(psyscr__wd.ready);
+    if (!psyscr__wd.hook) return 1;
+    while (psyscr__win.get_message(&m, NULL, 0, 0) > 0)
+        if (m.message == WM_APP) psyscr__panic();
+    if (psyscr__wd.hook) { psyscr__win.unhook(psyscr__wd.hook); psyscr__wd.hook = NULL; }
+    return 0;
+}
+
+/* The first armed screen starts the watchdog, with its desc's numbers. */
+static const char* psyscr__wd_arm(psyscr_screen* s, const psyscr_desc* d) {
+    if (psyscr__wd.armed == 0) {
+        psyscr__win_load();
+        if (!psyscr__win.set_hook || !psyscr__win.unhook || !psyscr__win.next_hook || !psyscr__win.get_message ||
+            !psyscr__win.peek_message || !psyscr__win.post_thread || !psyscr__win.key_state ||
+            !psyscr__win.foreground || !psyscr__win.window_pid)
+            return "desc.panic: user32.dll lacks the keyboard hook calls";
+        psyscr__wd.vk = psyscr__vk_of(psyscr__ab.key);
+        psyscr__wd.key_down = 0;
+        psyscr__wd.fn = d->panic_fn;
+        psyscr__wd.ctx = d->panic_ctx;
+        psyscr__wd.panicking = 0;
+        psyscr__wd.ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+        psyscr__wd.thread = psyscr__wd.ready ? CreateThread(NULL, 0, psyscr__wd_main, NULL, 0, &psyscr__wd.tid) : NULL;
+        if (!psyscr__wd.thread || WaitForSingleObject(psyscr__wd.ready, 2000) != WAIT_OBJECT_0 || !psyscr__wd.hook) {
+            if (psyscr__wd.thread) { WaitForSingleObject(psyscr__wd.thread, 2000); CloseHandle(psyscr__wd.thread); }
+            if (psyscr__wd.ready) CloseHandle(psyscr__wd.ready);
+            psyscr__wd.thread = psyscr__wd.ready = NULL;
+            return "desc.panic: the low-level keyboard hook was refused";
+        }
+        CloseHandle(psyscr__wd.ready);
+        psyscr__wd.ready = NULL;
+        /* it sleeps in GetMessage; raised so a busy frame thread cannot hold
+         * up the session's keys behind it */
+        SetThreadPriority(psyscr__wd.thread, THREAD_PRIORITY_HIGHEST);
+        psyscr__panic_config(d->panic_presses ? d->panic_presses : 3, d->panic_window_ms ? d->panic_window_ms : 2000,
+                             d->panic_grace_ms ? d->panic_grace_ms : 10000);
+    }
+    psyscr__wd.armed++;
+    s->panic_armed = 1;
+    return NULL;
+}
+
+static void psyscr__wd_disarm(psyscr_screen* s) {
+    if (s->panic_armed != 1) return;
+    s->panic_armed = 0;
+    if (--psyscr__wd.armed > 0) return;
+    psyscr__panic_config(0, 0, 0);
+    psyscr__win.post_thread(psyscr__wd.tid, WM_QUIT, 0, 0);
+    WaitForSingleObject(psyscr__wd.thread, 2000);
+    CloseHandle(psyscr__wd.thread);
+    psyscr__wd.thread = NULL;
 }
 
 #endif /* PSYSCR__DXGI */
@@ -4603,8 +5476,79 @@ static void psyscr__restamp_correlate(psyscr_screen* s) {
         s->sdl_rt = (int64_t)c.rt_ns;
         s->sdl_ticks = (int64_t)c.other;
         s->sdl_width = c.width_ns;
+        psyscr__a_store64(&psyscr__ab.sdl_off, s->sdl_rt - s->sdl_ticks);
     }
     s->sdl_corr_t = psyscr__now();
+}
+
+static uint32_t psyscr__mods_of(SDL_Keymod m) {
+    return ((m & SDL_KMOD_SHIFT) ? PSYSCR_MOD_SHIFT : 0u) | ((m & SDL_KMOD_CTRL) ? PSYSCR_MOD_CTRL : 0u) |
+           ((m & SDL_KMOD_ALT) ? PSYSCR_MOD_ALT : 0u) | ((m & SDL_KMOD_GUI) ? PSYSCR_MOD_GUI : 0u);
+}
+
+/* SDL calls this as it queues each event, on the thread that queues it, so
+ * the header sees every abort even when the caller reads the events before
+ * begin(). It may run on SDL's raw-input thread: atomics only. */
+static bool SDLCALL psyscr__abort_watch(void* ud, SDL_Event* e) {
+    int64_t t;
+    int i;
+    (void)ud;
+    if (!e) return true;
+    t = (int64_t)e->common.timestamp + psyscr__a_load64(&psyscr__ab.sdl_off);
+    switch (e->type) {
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+        if ((uint32_t)e->key.key == psyscr__ab.key) {
+            if (psyscr__abort_edge(&psyscr__ab.sdl_held, e->type == SDL_EVENT_KEY_DOWN) &&
+                psyscr__abort_key((uint32_t)e->key.key, psyscr__mods_of(e->key.mod), t, PSYSCR__AB_SDL)) {
+#if defined(PSYSCR__DXGI)
+                if (psyscr__wd.thread) psyscr__win.post_thread(psyscr__wd.tid, WM_APP, 0, 0);
+#endif
+            }
+        } else if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat && e->key.key == SDLK_F4 && (e->key.mod & SDL_KMOD_ALT)) {
+            psyscr__abort_push(PSYSCR_ABORT_ALT_F4, PSYSCR__AB_SDL, (uint32_t)e->key.key, psyscr__mods_of(e->key.mod), t);
+        }
+        break;
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        for (i = 0; i < PSYSCR__SLOTS; i++)
+            if (psyscr__slot[i].s && psyscr__slot[i].win == (uint32_t)e->window.windowID) {
+                psyscr__abort_push(PSYSCR_ABORT_CLOSE, PSYSCR__AB_SDL, 0, 0, t);
+                break;
+            }
+        break;
+    case SDL_EVENT_QUIT:
+        psyscr__abort_push(PSYSCR_ABORT_QUIT, PSYSCR__AB_SDL, 0, 0, t);
+        break;
+    default:
+        break;
+    }
+    return true;
+}
+static int psyscr__abort_windows;   /* open screens with a window: the watch's users */
+
+/* The window icon: desc.icon_rgba, or the header's at 32 pixels with 16 and
+ * 48 for other scales. SDL copies the surfaces. */
+static const char* psyscr__set_icon(psyscr_screen* s, const psyscr_desc* d) {
+    SDL_Surface* base = NULL;
+    int k, ok = 1;
+    if (d->icon_sdl) return NULL;
+    if (d->icon_rgba) {
+        base = SDL_CreateSurfaceFrom(d->icon_w, d->icon_h, SDL_PIXELFORMAT_RGBA32, (void*)(uintptr_t)d->icon_rgba, d->icon_w * 4);
+        ok = base != NULL;
+    } else {
+        SDL_Surface* alt[3] = { NULL, NULL, NULL };
+        for (k = 0; k < 3; k++) {
+            alt[k] = SDL_CreateSurface(psyscr__icon_size[k][0], psyscr__icon_size[k][0], SDL_PIXELFORMAT_RGBA32);
+            ok = ok && alt[k] && psyscr__icon_decode(k, (uint8_t*)alt[k]->pixels, alt[k]->pitch);
+        }
+        base = alt[1];
+        if (ok) ok = SDL_AddSurfaceAlternateImage(base, alt[0]) && SDL_AddSurfaceAlternateImage(base, alt[2]);
+        if (alt[0]) SDL_DestroySurface(alt[0]);
+        if (alt[2]) SDL_DestroySurface(alt[2]);
+    }
+    if (ok) ok = SDL_SetWindowIcon(s->window, base);
+    if (base) SDL_DestroySurface(base);
+    return ok ? NULL : "the window icon";
 }
 #endif
 
@@ -4632,6 +5576,23 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
     if (desc->patch.size < 0 || desc->patch.corner < 0 || desc->patch.corner > 3 ||
         desc->sim_period_ns < 0 || desc->window_w < 0 || desc->window_h < 0) {
         psyscr__copy(s->error, sizeof s->error, "psy_screen: a negative size, period or corner in desc");
+        return false;
+    }
+    if (desc->icon_rgba && (desc->icon_w < 1 || desc->icon_w > 256 || desc->icon_h < 1 || desc->icon_h > 256)) {
+        psyscr__copy(s->error, sizeof s->error, "psy_screen: desc.icon_w and icon_h must be 1 to 256 with desc.icon_rgba");
+        return false;
+    }
+    if (desc->panic && (desc->panic_presses < 0 || desc->panic_window_ms < 0 || desc->panic_grace_ms < 0)) {
+        psyscr__copy(s->error, sizeof s->error, "psy_screen: a negative desc.panic_presses, panic_window_ms or panic_grace_ms");
+        return false;
+    }
+    if (desc->panic && desc->abort_keys.off) {
+        psyscr__copy(s->error, sizeof s->error, "psy_screen: desc.panic needs the abort combination (desc.abort_keys.off is set)");
+        return false;
+    }
+    if (desc->panic && !psyscr__vk_known(desc->abort_keys.key ? desc->abort_keys.key : PSYSCR_KEY_ESCAPE)) {
+        psyscr__copy(s->error, sizeof s->error, "psy_screen: desc.panic takes Esc, F1 to F12, a letter or a digit "
+                     "as desc.abort_keys.key");
         return false;
     }
     s->backend = desc->backend;
@@ -4676,8 +5637,17 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
         return false;
     }
 
+    {
+        const char* e = psyscr__abort_open(s, desc);
+        if (e) {
+            psyscr__set_error(s->error, sizeof s->error, "psy_screen: %s", e);
+            s->pr = NULL;
+            return false;
+        }
+    }
     memset(&want, 0, sizeof want);
     memset(&in, 0, sizeof in);
+    in.d3d11_video = desc->d3d11_video ? 1 : 0;
     in.display = desc->display;
     in.angle_dir = desc->angle_dir;
     in.sim_period_ns = desc->sim_period_ns;
@@ -4701,8 +5671,12 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
          * measured up to 15.7 ms early. Default priority, so a caller's own
          * setting of the hint wins. */
         SDL_SetHintWithPriority(SDL_HINT_WINDOWS_RAW_KEYBOARD, "1", SDL_HINT_DEFAULT);
+        /* SDL would turn Alt+F4 into a close request; the header reports it
+         * as its own reason (ABORT). */
+        SDL_SetHintWithPriority(SDL_HINT_WINDOWS_CLOSE_ON_ALT_F4, "0", SDL_HINT_DEFAULT);
         if (!psyscr__video_up()) {
             psyscr__set_error(s->error, sizeof s->error, "psy_screen: SDL video: %s", SDL_GetError());
+            psyscr_close(s);
             return false;
         }
         s->sdl_video = 1;
@@ -4759,6 +5733,20 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
                 return false;
             }
         }
+        {
+            const char* e = psyscr__set_icon(s, desc);
+            if (e) {
+                psyscr__set_error(s->error, sizeof s->error, "psy_screen: %s: %s", e, SDL_GetError());
+                psyscr_close(s);
+                return false;
+            }
+#if defined(PSYSCR__DXGI)
+            if (!desc->icon_sdl && !desc->icon_rgba) {
+                s->hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(s->window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+                psyscr__win_icons(s);
+            }
+#endif
+        }
         if (!desc->windowed) SDL_SyncWindow(s->window);
         SDL_RaiseWindow(s->window);
         /* SDL routes keys through the message path while text input runs. */
@@ -4777,8 +5765,16 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
         }
         in.window = s->window;
         psyscr__restamp_correlate(s);
+        s->hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(s->window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+        psyscr__slot_take(s, (uint32_t)SDL_GetWindowID(s->window));
+        if (s->abort_slot && psyscr__abort_windows++ == 0 && !SDL_AddEventWatch(psyscr__abort_watch, NULL)) {
+            psyscr__set_error(s->error, sizeof s->error, "psy_screen: SDL_AddEventWatch: %s", SDL_GetError());
+            psyscr_close(s);
+            return false;
+        }
     }
 #endif
+    if (!s->abort_slot) psyscr__slot_take(s, 0);
 
     rc = s->pr->open(s->pr_ctx, &in, &s->caps, s->error, sizeof s->error);
     s->pr_open = rc >= 0;
@@ -4799,7 +5795,6 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
     s->lead = desc->lead == 0 ? 0.5 : desc->lead;
     s->offset = desc->onset_offset_ns;
     s->patch = desc->patch;
-    s->esc_quits = !desc->no_esc_quit;
     s->nominal_f = (double)s->caps.period_ns;
     s->period_f = s->nominal_f;
     s->depth = 1;
@@ -4836,7 +5831,15 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
                 (psyscr_code_risk(s) & ~(uint16_t)PSYSCR_CODE_RISK_COMPOSED))
                 e = "desc.codes_strict: the display may change code pixels (see the describe line)";
         }
+        /* Armed after the gamma ramp is taken, so a panic finds it. A
+         * window has no ramp or mode to put back, and its user has the
+         * desktop. */
+        if (!e && desc->panic && (s->backend == PSYSCR_BACKEND_DXGI_FLIP || s->backend == PSYSCR_BACKEND_COMPOSITION)) {
+            if (!desc->windowed || PSYSCR__PANIC_WINDOWED) e = psyscr__wd_arm(s, desc);
+            else s->panic_armed = 2;
+        }
 #endif
+        if (!e && desc->panic && !s->panic_armed) s->panic_armed = 3;
         if (e) {
             psyscr__set_error(s->error, sizeof s->error, "psy_screen: %s", e);
             psyscr_close(s);
@@ -4890,14 +5893,31 @@ PSYSCR_API void psyscr_close(psyscr_screen* s) {
     }
     if (s->lock_ok) { psyscr__lock_free(s); s->lock_ok = 0; }
 #if defined(PSYSCR__DXGI)
+    psyscr__wd_disarm(s);
     psyscr__win_gamma_release(s);
 #endif
+    s->panic_armed = 0;
+#if !defined(PSYSCR_NO_SDL)
+    if (s->abort_slot && psyscr__slot[s->abort_slot - 1].win && --psyscr__abort_windows == 0)
+        SDL_RemoveEventWatch(psyscr__abort_watch, NULL);
+#endif
+    psyscr__slot_free(s);
+    psyscr__abort_close(s);
     if (s->pr && s->pr_open && s->pr->close) s->pr->close(s->pr_ctx);
     s->pr = NULL;
     s->pr_open = 0;
 #if !defined(PSYSCR_NO_SDL)
     if (s->cursor_hidden) SDL_ShowCursor();
     if (s->window) SDL_DestroyWindow(s->window);
+#if defined(PSYSCR__DXGI)
+    {   /* after the window that showed them */
+        int k;
+        for (k = 0; k < 2; k++) {
+            if (s->win_icon[k] && psyscr__win.destroy_icon) psyscr__win.destroy_icon((HICON)s->win_icon[k]);
+            s->win_icon[k] = NULL;
+        }
+    }
+#endif
     if (s->sdl_video) psyscr__video_down();
 #endif
     s->window = NULL;
@@ -4928,7 +5948,7 @@ static const char* psyscr__path_name(uint16_t p) {
 }
 
 PSYSCR_API int psyscr_describe(const psyscr_screen* s, char* buf, size_t cap) {
-    char extra[448];
+    char extra[448], abort_s[40];
     double hz, ppm;
     if (!s || !buf || cap == 0) return PSYSCR_ERR_ARG;
     if (!s->open) return snprintf(buf, cap, "psy_screen: closed");
@@ -4958,33 +5978,40 @@ PSYSCR_API int psyscr_describe(const psyscr_screen* s, char* buf, size_t cap) {
                      cpus, !s->trig_fence ? "off" : (s->pr->gpu_done ? "on" : "unavailable"));
         }
     }
+    {   /* the abort combination, as an operator reads it */
+        uint32_t k = psyscr__ab.key;
+        size_t n = 0;
+        if (psyscr__ab.off) n = (size_t)snprintf(abort_s, sizeof abort_s, "off");
+        else {
+            n += (size_t)snprintf(abort_s + n, sizeof abort_s - n, "%s%s%s%s",
+                                  (psyscr__ab.mods & PSYSCR_MOD_CTRL) ? "ctrl+" : "", (psyscr__ab.mods & PSYSCR_MOD_ALT) ? "alt+" : "",
+                                  (psyscr__ab.mods & PSYSCR_MOD_SHIFT) ? "shift+" : "", (psyscr__ab.mods & PSYSCR_MOD_GUI) ? "gui+" : "");
+            if (k == PSYSCR_KEY_ESCAPE) snprintf(abort_s + n, sizeof abort_s - n, "esc");
+            else if (k >= 0x4000003Au && k <= 0x40000045u) snprintf(abort_s + n, sizeof abort_s - n, "f%u", (unsigned)(k - 0x4000003Au + 1));
+            else if (k > 32 && k < 127) snprintf(abort_s + n, sizeof abort_s - n, "%c", (char)k);
+            else snprintf(abort_s + n, sizeof abort_s - n, "key0x%x", (unsigned)k);
+        }
+    }
     return snprintf(buf, cap, "psy_screen %s: backend=%s %s mode=%dx%d@%d/%d measured=%.4fHz(%+.0fppm) "
-                    "path=%s depth=%d lead=%.2f worst_tier=%d%s%s",
+                    "path=%s depth=%d lead=%.2f worst_tier=%d abort=%s panic=%s%s%s",
                     PSYSCR_VERSION_STRING, s->pr->name, extra, s->caps.mode.w, s->caps.mode.h,
                     s->caps.mode.refresh_num, s->caps.mode.refresh_den, hz, ppm,
-                    psyscr__path_name(s->path), s->depth, s->lead < 0 ? -1.0 : s->lead, s->worst_tier,
+                    psyscr__path_name(s->path), s->depth, s->lead < 0 ? -1.0 : s->lead, s->worst_tier, abort_s,
+                    s->panic_armed == 1 ? "armed" : s->panic_armed == 2 ? "idle(windowed)" : s->panic_armed == 3 ? "n/a" : "off",
                     s->unstable ? " WARNING=off-grid-vblanks" : "",
                     (ppm > 200 || ppm < -200) ? " WARNING=period-differs-from-mode" : "");
 }
 
+static void psyscr__pump(psyscr_screen* s) {
 #if !defined(PSYSCR_NO_SDL)
-static int psyscr__quit_pending(psyscr_screen* s) {
-    SDL_Event ev[8];
-    int i, n;
-    if (!s->window) return 0;
-    if (!s->polled) {   /* psyscr_poll() pumped already this frame */
+    if (s->window && !s->polled) {   /* psyscr_poll() pumped already this frame */
         PSYRT_ZONE(z_pump, "psyscr.pump");
         SDL_PumpEvents();
         PSYRT_ZONE_END(z_pump);
     }
-    s->polled = 0;
-    if (SDL_HasEvent(SDL_EVENT_QUIT) || SDL_HasEvent(SDL_EVENT_WINDOW_CLOSE_REQUESTED)) return 1;
-    if (!s->esc_quits) return 0;
-    n = SDL_PeepEvents(ev, 8, SDL_PEEKEVENT, SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_DOWN);
-    for (i = 0; i < n; i++) if (ev[i].key.key == SDLK_ESCAPE) return 1;
-    return 0;
-}
 #endif
+    s->polled = 0;
+}
 
 PSYSCR_API int psyscr_begin(psyscr_screen* s, psyscr_frame* f) {
     int64_t t0, now, wait;
@@ -4993,9 +6020,8 @@ PSYSCR_API int psyscr_begin(psyscr_screen* s, psyscr_frame* f) {
     if (!s || !f) { PSYRT_ZONE_END(z_begin); return PSYSCR_ERR_ARG; }
     if (!s->open) { PSYRT_ZONE_END(z_begin); return PSYSCR_ERR_CLOSED; }
     if (s->begun) { PSYRT_ZONE_END(z_begin); return PSYSCR_ERR_ORDER; }
-#if !defined(PSYSCR_NO_SDL)
-    if (psyscr__quit_pending(s)) { PSYRT_ZONE_END(z_begin); return PSYSCR_QUIT; }
-#endif
+    psyscr__pump(s);
+    if (psyscr__abort_take(s, f)) { PSYRT_ZONE_END(z_begin); return PSYSCR_QUIT; }
     t0 = psyscr__now();
     if (!s->slot_held) {
         psyscr_vblank newest;
@@ -5388,6 +6414,16 @@ PSYSCR_API int psyscr_native(const psyscr_screen* s, psyscr_native_info* out) {
             out->egl_display = c->dpy;
         }
         out->d3d11_device = dev;
+        if (dev) {   /* asked of the device, not of the desc */
+            ID3D11Multithread* mt = NULL;
+            out->video = (PSYSCR__CALL0(dev, GetCreationFlags) & (UINT)D3D11_CREATE_DEVICE_VIDEO_SUPPORT) ? 1 : 0;
+            if (out->d3d11_context &&
+                SUCCEEDED(PSYSCR__CALL((ID3D11DeviceContext*)out->d3d11_context, QueryInterface,
+                                       PSYSCR__IID(psyscr__IID_ID3D11Multithread), (void**)&mt)) && mt) {
+                out->mt_protected = PSYSCR__CALL0(mt, GetMultithreadProtected) ? 1 : 0;
+                PSYSCR__RELEASE(mt);
+            }
+        }
         /* asked of the device, so it is the adapter the device is on even
          * when open() found no adapter for the monitor */
         if (dev && SUCCEEDED(PSYSCR__CALL(dev, QueryInterface, PSYSCR__IID(psyscr__IID_IDXGIDevice), (void**)&xd))) {
@@ -5413,6 +6449,17 @@ PSYSCR_API int psyscr_begin_group(psyscr_screen* const* s, int n, psyscr_frame* 
     for (i = 0; i < n; i++) {
         if (!s[i] || !s[i]->open) return PSYSCR_ERR_CLOSED;
         if (s[i]->pr->waits_block) return PSYSCR_ERR_NOT_IMPLEMENTED;
+        if (s[i]->begun) return PSYSCR_ERR_ORDER;
+    }
+    /* SDL's pump is the process's: once for the group, then every member
+     * sees the same aborts before any of them begins a frame. */
+    for (i = 0; i < n && !s[i]->window; i++) { }
+    if (i < n) psyscr__pump(s[i]);
+    for (i = 0; i < n; i++) s[i]->polled = 1;
+    for (i = 0; i < n && !psyscr__abort_pending(s[i]); i++) { }
+    if (i < n) {
+        for (i = 0; i < n; i++) if (!psyscr__abort_take(s[i], &f[i])) memset(&f[i], 0, sizeof f[i]);
+        return PSYSCR_QUIT;
     }
     /* Each wait is on its own kernel object, so waiting in turn costs the
      * longest wait, not their sum. */
@@ -5464,6 +6511,9 @@ PSYSCR_API int64_t psyscr_restamp(const psyscr_screen* s, uint64_t sdl_ticks_ns)
     (void)s; (void)sdl_ticks_ns; return 0;
 }
 PSYSCR_API bool psyscr_poll(psyscr_screen* s, union SDL_Event* ev, int64_t* t_rt) {
+    /* the key feed and the icon serve SDL's event watch and its window;
+     * without SDL only tests/adapt/psy_screen_test.c calls them */
+    (void)&psyscr__abort_key; (void)&psyscr__icon_decode; (void)&psyscr__abort_edge;
     (void)s; (void)ev; (void)t_rt; return false;
 }
 #endif
@@ -5485,7 +6535,15 @@ PSYSCR_API const psyscr_param* psyscr_params(int* n) {
         { "patch.size",      "i32",  0, 4096, PSYSCR_PATCH_DEFAULT_SIZE, "px", "patch side" },
         { "patch.corner",    "enum", 0, 3, 0, "",                 "0 top left, 1 top right, 2 bottom left, 3 bottom right" },
         { "show_cursor",     "bool", 0, 1, 0, "",                 "keep the cursor visible in fullscreen" },
-        { "no_esc_quit",     "bool", 0, 1, 0, "",                 "Esc does not end the frame loop" },
+        { "abort_keys.off",  "bool", 0, 1, 0, "",                 "no key combination aborts the frame loop" },
+        { "abort_keys.key",  "u32",  0, 4294967295.0, 27, "",     "SDL keycode of the abort combination; 0 = Esc" },
+        { "abort_keys.mods", "u32",  0, 255, 1, "",               "modifiers held: 1 shift, 2 ctrl, 4 alt, 8 gui, 128 none; 0 = shift" },
+        { "panic",           "bool", 0, 1, 0, "",                 "arm the panic watchdog in fullscreen (Windows)" },
+        { "panic_presses",   "i32",  0, 16, 3, "",                "abort presses that end a hung program" },
+        { "panic_window_ms", "i32",  0, 60000, 2000, "ms",        "the time those presses must fall in" },
+        { "panic_grace_ms",  "i32",  0, 600000, 10000, "ms",      "no panic this long after the frame loop reported an abort" },
+        { "icon_sdl",        "bool", 0, 1, 0, "",                 "keep SDL's window icon instead of the header's" },
+        { "d3d11_video",     "bool", 0, 1, 0, "",                 "D3D11 device with video support and multithread protection" },
         { "onset_offset_ns", "i64", -1e9, 1e9, 0, "ns",           "added to every onset; from the photodiode test" },
         { "min_tier",        "i32",  0, 3, 0, "",                 "flag flips whose tier is worse; 0 = off" },
         { "sim_period_ns",   "i64",  0, 1e10, 16666667, "ns",     "frame period of the simulated display" }

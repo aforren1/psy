@@ -1,9 +1,11 @@
 # Rig specification: display, audio, video, pack, player, designer
 
-Status: proposal, 2026-09-24. Nothing below is implemented. It records the
+Status: proposal of 2026-09-24, revised 2026-10-06. It records the
 decisions made while planning the move from the transport and adaptive
-headers into graphics, audio, video and the tooling above them, so the
-first implementation starts from the same place the discussion ended.
+headers into graphics, audio, video and the tooling above them. Steps 1 to
+6 of section 11 have started; section 11 gives the state of each step.
+Each header's design note in `docs/` records what was built and measured.
+When a note and this document disagree, the note is newer.
 
 The existing headers and their conventions in [README.md](../README.md)
 stay as they are. This document adds to them.
@@ -67,7 +69,7 @@ produces packs and talks to the player.
 | Component | Decision | Reason |
 |---|---|---|
 | SDL3 | Accepted, for windowing, input, display modes, camera capture | Windowing is the hairiest OS surface. Stable ABI, packaged everywhere, Emscripten support, exposes native handles so present-timing code can go under it. Camera API since 3.2 covers Media Foundation, AVFoundation, V4L2 and getUserMedia. |
-| ANGLE | Accepted, for GL ES 3.0 on Windows and macOS | Three browser vendors maintain it. One shader language end to end. Same code path as WebGL2 in the browser. Reliable on Intel integrated GPUs where vendor GL is not. Exposes vblank timestamps on its D3D11 backend. Pinned commit, built once per platform in CI, shipped beside the player. |
+| ANGLE | Accepted, for GL ES 3.0 on Windows and macOS | Three browser vendors maintain it. One shader language end to end. Same code path as WebGL2 in the browser. Reliable on Intel integrated GPUs where vendor GL is not. Exposes vblank timestamps on its D3D11 backend. Binaries, not a source build (decided 2026-10-06): CI takes ANGLE from an Electron release zip, checked by checksum; development machines use whatever Electron copy is present. A source build at a pinned commit (depot_tools, about 10 GB) waits until an ANGLE bug or a missing feature needs a patch. Each measurement names the ANGLE version it ran on, and program binaries are keyed per ANGLE build. |
 | miniaudio | Accepted, for audio devices | Single file, public domain, WASAPI shared and exclusive, CoreAudio, ALSA, PulseAudio, Web Audio. Same implementation-macro mechanic as `psy_rt.h`. |
 | Emscripten | Accepted, for the web player | Required by SDL3's web backend. `psy_rt.h` already has the branch. |
 | zig cc | Accepted, for the eject path and custom modules | One directory, cross-compiles to Windows and Linux with a pinned glibc. Driven as a compiler, version pinned, shipped with the designer. |
@@ -190,10 +192,47 @@ the swap path and the input restamping.
     counters, or one window spanning two outputs in the same mode with
     a single swap, which works only when the CRTCs are in step and is
     the one path to a synchronous dual display without genlock.
-    Wayland: presentation-time per output.
+    Separate X screens (`:0.0`, `:0.1`, one per display) are a
+    supported configuration too, and the recommended one for a stimulus
+    display beside an operator display, as in Psychtoolbox: each screen
+    has its own page flips and vblank counter, and the operator
+    screen's compositor cannot touch the stimulus screen. The GLX
+    backend takes the X screen by name (`desc.x_display`). Whether
+    SDL3 creates a window and context on a screen other than the
+    default must be checked on a real two-screen setup (reports from
+    the SDL 2.0 era say it did not). If it does not, the backend opens
+    its own X connection to that screen and owns the window and the
+    GLX context there, as the Windows backends own their swapchain.
+    Input on that screen then comes from XInput2 on the same
+    connection, or only from the operator screen; reaction times use
+    response boxes either way. Wayland has no equivalent: a display is
+    chosen by going fullscreen on a `wl_output`, with presentation-time
+    per output.
   - macOS: one window per display on its own display link, nothing
     synchronizes them.
   - Web: one window. A second display is out of scope.
+- **Untimed screens** (proposal, 2026-10-06), for an operator view, a
+  mirror of what the participant sees, or an eye-tracker overlay. An
+  untimed screen is a `psy_screen.h` handle opened with a kind that
+  makes no timing claim:
+  - it never blocks the frame thread: it presents without waiting
+    (DXGI: `DXGI_PRESENT_DO_NOT_WAIT`; GLX: swap interval 0 on its own
+    X screen) and drops frames freely, counting them;
+  - it never joins a group's wait, and a group refuses it;
+  - its records carry no onset and no tier;
+  - it shows a scaled copy of a timed screen's scene (a texture shared
+    on the same device, sampled after that screen's draw) or its own
+    content, such as a UI.
+
+  A second swapchain on the same GPU can disturb the timed display:
+  on Windows the operator window adds composition work for DWM on a
+  shared GPU. So before it is built, a measurement on two physical
+  displays decides it: the timed display fullscreen in independent
+  flip, the untimed window updating at the desktop rate on the other
+  display, and the timed display's flip records (drops, residuals,
+  path) with and without it. If the untimed screen disturbs the timed
+  one, the manual names the condition, and the browser operator
+  console (section 6) stays the recommended operator display.
 - **Per-flip record** into the event ring: target, estimate, residual,
   dropped count, mode, and the phase durations of the frame: timeline
   evaluate, script callback, draw submission, texture upload, swap
@@ -218,7 +257,7 @@ point of its own box at x, y that it turns about, the center by default).
   float render target, present. Small enough that a second
   implementation is possible if ANGLE fails somewhere.
 - **Stimulus set.** Rect, grating and gabor by shader, dot fields by
-  instancing, image textures, text from a prebuilt glyph atlas, noise
+  instancing, image textures, text from glyph outlines (Slug, 5.2), noise
   and filtered noise by fragment passes on float render targets.
 - **Shapes by signed distance.** Circle, annulus, rect, line, polygon,
   cross, aperture and mask as signed-distance functions in one
@@ -242,8 +281,14 @@ point of its own box at x, y that it turns about, the center by default).
   that ES 3.0 does not have.
 - **Calibration.** Measured primaries and gamma from a photometer become
   a 3x3 matrix into cone space (Stockman-Sharpe fundamentals), DKL and
-  cone contrast, and a table from linear to device values. No general
-  color library.
+  cone contrast, and a table from linear to device values. Changed
+  2026-10-06: the calibration and the color math are `psy_color.h`'s
+  (`psycol_`, pure computation), which `psy_gfx.h` includes from v0.5. It
+  is a color header for calibrated displays, not a general color library:
+  every conversion goes through a calibration, a color outside the gamut
+  comes back unclipped with its distance, and gamut questions are calls of
+  their own. No ICC profiles, appearance models or color-difference
+  formulas (docs/psy_color.md). Was: "No general color library".
 - **Shader contract.** A user writes a fragment function body in GLSL ES
   against a fixed interface: a uniform block with time, resolution, the
   frame's predicted onset and a parameter array, plus fixed texture
@@ -254,6 +299,12 @@ point of its own box at x, y that it turns about, the center by default).
   A stimulus whose pixel values must be reproducible is generated on
   the CPU on the pump, or in the pack, seeded, and uploaded.
 - **Parameter table** for the designer.
+- **Added in v0.4.0** (2026-10-06): a program binary cache in storage the
+  caller owns; NV12 and I420 textures converted to linear light by a
+  stated encoding, and texture import for `psy_video.h`'s GPU paths;
+  instanced stimuli (a template and up to 16384 elements a frame, with a
+  per-element hit test); draws reordered across kinds where they do not
+  overlap, with identical pixels.
 
 ### 4.4 psy_audio.h (`psyau_`, `PSYAU_`)
 
@@ -297,6 +348,12 @@ callback.
 - **Latency.** Reported only as measured by the line-out to line-in
   loopback test.
 - **Per-onset record** into the event ring.
+- **Streams.** Added 2026-10-06 (v0.2.0): a ring-fed voice that is
+  played, planned, recorded and confirmed as a buffer is. Its sample s
+  plays on stream frame origin + s. A late start or a ring underrun skips
+  samples and does not move origin. A movie's soundtrack is a stream, so
+  movie sound takes the same path as every other sound, and `psy_video.h`
+  follows origin. WAV files (RIFF, RF64, BW64) stream through it.
 
 ### 4.5 psy_timeline.h (`psytl_`, `PSYTL_`)
 
@@ -318,13 +375,16 @@ Includes nothing. Caller-sized fixed arrays, no heap.
   the timeline runs it. At movie scale the arrays hold thousands of
   annotations.
 
-#### 4.5.1 C authoring API, draft
+#### 4.5.1 C authoring API
 
-Status: draft, 2026-10-04. Not implemented. The goal is for C code to be
-about as short as a JS animation library, GSAP or anime.js, with the
-timeline's timing unchanged. The draft adds a sequence builder over the
-existing calls, in the same header. Its semantics are the same as the
-script API's (section 6.1), so a C trial and a Luau trial read alike.
+Status: built in `psy_timeline.h` v0.4.0 (2026-10-06), revised from the
+2026-10-04 draft after a review (docs/psy_timeline.md, "Sequences"). The
+draft lowered each `psytl_to` to `psytl_tween()`. A channel holds one
+waiting tween, so the draft trial below lost its first ramp, and a
+re-anchor did not replay tweens. The goal is for C code to be about as
+short as a JS animation library, GSAP or anime.js, with the timeline's
+timing unchanged. The builder is in the same header. A C trial and a Luau
+trial read alike (section 6.1).
 
 The trial from the `psy_timeline.h` USAGE section, in GSAP:
 
@@ -365,10 +425,17 @@ The rules:
   sets it. `q.t` is the cursor: store it in a variable to use it as a
   label.
 - **Events and tweens at the cursor.** `psytl_on`, `psytl_off`,
-  `psytl_set`, `psytl_trigger` and `psytl_mark` add an event at the
-  cursor. `psytl_to` starts a tween at the cursor plus the desc's
-  `delay`, and the cursor does not move. That is the script's
-  non-blocking `tween()`.
+  `psytl_set_value`, `psytl_trigger` and `psytl_mark(&q, code, user)` add
+  an event at the cursor. `psytl_to` starts a tween at the cursor plus the
+  desc's `delay`, and the cursor does not move. That is the script's
+  non-blocking `tween()`. A desc with `start_set` is refused: the cursor
+  is the start.
+- **One keyed track per channel.** A sequence's tweens on a channel
+  become one keyed track in the key arena, which grows with each call.
+  The track waits for its first start and then takes over from the old
+  driver, as `psytl_tween()` does. After that it is a function of base
+  time, so re-anchoring a trial replays it. A tween that starts inside
+  the channel's previous one is refused, and so is `PSYTL_FOREVER`.
 - **Sequencing.** `psytl_then` is `psytl_to` and then a wait to the
   tween's end, which is the default placement of GSAP's `.to()`.
   `psytl_to` returns the tween's end time, so
@@ -376,15 +443,15 @@ The rules:
 - **A sticky error, as in a stream.** The first failing call stores its
   code in `q.err` and its index in `q.err_call`. Every call after that
   does nothing. So a sequence needs no check after each line, only one
-  at the end. That is the C analog of a chained JS call.
-- **Keyframes and stagger** copy their keys into the timeline's key
-  arena (see the decisions below), because keys must outlive the call:
-  `psytl_keyframes(&q, ch, values, times, n, ease)` and
-  `psytl_on_n(&q, chans, n, stagger)`. `psytl_clear()` of the base frees
-  them.
-- **Nothing here changes timing.** Every call lowers to `psytl_add`,
-  `psytl_tween` or `psytl_set_track` at an absolute base time. Frame
-  placement, sampling at the onset and replay are the core's.
+  at the end. That is the C analog of a chained JS call. The builder is
+  not atomic: the calls before the error stay. `psytl_seq_cancel(&q)`
+  removes what the sequence added.
+- **Keyframes and stagger:** `psytl_keyframes(&q, ch, values, offsets, n,
+  ease)` joins the channel's track in the arena, and
+  `psytl_on_n(&q, chans, n, stagger)` adds onsets all or none.
+- **Nothing here changes timing.** Every call lowers to events and keys at
+  absolute base times. Frame placement, sampling at the onset and replay
+  are the core's.
 
 ##### The same sequence as data
 
@@ -427,9 +494,10 @@ typedef struct psytl_op {
     int              ch;
     int64_t          t;       /* WAIT: dt; AT: base time                    */
     int32_t          code;    /* TRIGGER, MARK                              */
-    float            value;   /* SET                                        */
+    float            value;   /* SET_VALUE                                  */
+    uint64_t         user;    /* MARK                                       */
     psytl_tween_desc tween;   /* TO, THEN                                   */
-} psytl_op;
+} psytl_op;                   /* 96 bytes                                   */
 
 #define PSYTL_ON(c)      { .op = PSYTL_OP_ON, .ch = (c) }
 #define PSYTL_WAIT(dt)     { .op = PSYTL_OP_WAIT, .t = (dt) }
@@ -470,6 +538,10 @@ The costs:
   `psytl_tween_desc`. C does not require this.
 - C++17 users use the builder.
 
+The header's own compile checks are `tests/compile/psy_timeline.c` (the
+table as C) and `tests/compile/psy_timeline_ops.cpp` (as C++20, with
+`-Wno-missing-field-initializers` on g++; g++ 16.1 still warns there).
+
 Decisions (2026-10-05):
 - **`psytl_on` and `psytl_off`, not show and hide.** The header does not
   know what a channel means. The script layer keeps `show` and `hide`
@@ -489,14 +561,15 @@ Decisions (2026-10-05):
   audio onset record comes from `psy_audio.h` (section 4.4). Which base
   and channel kinds are audio is the player's choice, not the header's.
 - **The key arena is in the timeline handle.** `desc.keys` and
-  `desc.key_capacity` give caller-owned storage, as `desc.events` does.
-  Keyframes and stagger allocate from it. Each allocation is tagged with
-  its base, and `psytl_clear(base)` frees that base's allocations, then
-  compacts the arena in one pass, as it does the events. A track that
-  uses the arena stores an offset, not a pointer, so compaction does not
-  leave it dangling. The arena is not in the seq: a seq is a short-lived
-  cursor, often on the stack, and the keys must live until the track is
-  replaced or its base is cleared, which only the timeline knows.
+  `desc.key_capacity` give caller-owned storage, as `desc.events` does,
+  with no default (NULL: a sequence tween is `PSYTL_ERR_FULL`). Each
+  tweened channel has one block, and the channel stores an offset, not a
+  pointer. A replaced block, or one whose base `psytl_clear()` cleared, is
+  garbage until a call needs its room; then one pass compacts the arena.
+  A call that does not fit is refused and adds nothing. The arena is not
+  in the seq: a seq is a short-lived cursor, often on the stack, and the
+  keys must live until the track is replaced or its base is cleared,
+  which only the timeline knows.
 - **No C++ sugar for now.** C++17 users use the builder. A chained C++
   wrapper is not planned.
 - **g++ and `-Wmissing-field-initializers`.** The C++20 compile check of
@@ -507,12 +580,14 @@ Decisions (2026-10-05):
   a different version from the designer, an extension that an op needs
   may not be installed, the parameter tables and channel counts may have
   changed, or the rig's display or audio rate may make an op invalid,
-  for example a flicker rate. The check is O(n) once per run, not per
-  frame. It is all or nothing, as `psytl_add_n()` is: the whole table is
-  checked before the first op is applied, so a bad op at index 37 does
-  not leave half a trial. `psytl_check_ops(tl, ops, n, &bad)` does the
-  same check without applying, so the player can reject a pack when it
-  loads, before the session starts, not at trial 190.
+  for example a flicker rate. The check runs once per run, not per frame.
+  Binding is checked against the first earlier op naming the channel,
+  O(n^2) compares with no scratch table. It is all or nothing, as
+  `psytl_add_n()` is: the whole table is checked before the first op is
+  applied, so a bad op at index 37 does not leave half a trial.
+  `psytl_check_ops(tl, base, ops, n, &bad)` does the same check without
+  applying, so the player can reject a pack when it loads, before the
+  session starts, not at trial 190.
 
 Open questions:
 - How far ahead must `psytl_peek()` look for audio? That is the audio
@@ -520,9 +595,8 @@ Open questions:
   measured the shortest lead with no late onset at 43.5 to 54.5 ms
   (WASAPI shared, 10 ms periods, this laptop; docs/psy_audio.md). The
   line-in loopback test is still needed for the output latency itself.
-- How large should the arena default be when `desc.keys` is NULL: none,
-  or a small inline arena in the handle, as `psy_rt.h`'s pump has an
-  inline ring?
+- Answered (v0.4.0): the arena has no default. An inline arena would grow
+  every handle, and the handle is already 64 KB.
 
 ### 4.6 psy_video.h (`psyvid_`, `PSYVID_`)
 
@@ -576,10 +650,11 @@ Streaming Layer markers through liblsl as an opt-in backend.
   carry over and are a separate project.
 - Offline psychometric fitting. R, Python and MATLAB do it better and
   analysis happens there.
-- A standalone color header. The calibration piece lives in
-  `psy_gfx.h`.
 - A logging library. The event ring in `psy_rt.h` is the primitive.
 - A general random-number header. `psy_trials.h` owns the only draw.
+
+Removed from this list 2026-10-06: "a standalone color header". It is
+`psy_color.h` (4.3, Calibration).
 
 ## 5. The pack
 
@@ -604,10 +679,10 @@ section can cite the manifest and a reviewer can rebuild the pack.
 | Texture | Uncompressed 8-bit, 16-bit or float planes, optionally QOI or a single-file deflate or LZ4 | Block compression opt-in, recorded in the manifest. |
 | Video | Constant frame rate, fixed pixel format and resolution, closed GOPs, no B-frames, plus an index of frame to byte offset and timestamp | Produced by ffmpeg, command recorded. |
 | Audio | The project rate and channel count; 16-bit, 24-bit or float samples | Resampled offline with a high-quality resampler, recorded. In memory always float, widened exactly at load (2026-10-05): one mixer path, and float holds 16- and 24-bit values exactly. |
-| Font | The font file, plus glyph atlases built from it: MSDF for scalable or animated text, and alpha coverage at the sizes the experiment uses for value-exact text. Static text is stored as laid-out glyph runs. | No platform font engine. One pinned Skribidi does layout, bidirectional text and shaping in the designer (WebAssembly, with editing), the pack tool and the player, so text is the same everywhere. Glyphs missing from an atlas (typed responses) are rasterized at run time by Skribidi's CPU rasterizer. Headers only draw glyph runs. Changed 2026-10-05: "glyph atlas plus metrics; no font engine at runtime". |
-| Shader | The user's fragment body wrapped in the contract (`psygfx_shader_wrap()`, the same function in the tool and the runtime), as GLSL ES 3.00 text, with reflection | glslang validates it in the tool. GL ES 3.0 has no portable binary, so ANGLE compiles the text on the rig when the pack loads; an ANGLE program binary may be cached per ANGLE build, adapter and driver. SPIRV-Cross is for a second backend only. Changed 2026-10-05: "D3D bytecode is finished by the runner" (docs/psy_gfx.md). |
+| Font | The font file, plus the glyph outlines built from it in the Slug form (quadratic curves and bands; cubic outlines converted within a stated tolerance), and alpha coverage at the sizes the experiment uses for value-exact text. Static text is stored as laid-out glyph runs. | No platform font engine. One pinned Skribidi does layout, bidirectional text and shaping in the designer (WebAssembly, with editing), the pack tool and the player, so text is the same everywhere. Scalable text is drawn from the outlines by the Slug algorithm (Lengyel, JCGT 2017; patent dedicated to the public domain 2026-03-17; reference shaders need attribution). A whole font fits in the pack (about 65 MB for a CJK font, against 212 to 762 MB as MSDF atlases), and a glyph missing from it is built from the font's outline in 17 to 66 us, so the player rasterizes nothing at run time. Value-exact alpha coverage comes from an exact-area rasterizer in the pack tool, not Skribidi's (max error 0.24 to 0.32 of full scale), and is drawn on the pixel grid only. Effects: outlines and faux bold by stroke expansion of the curves, filled the same way; hard shadows by an offset copy; soft shadows, glow and blurred text by a Gaussian blur pass on a render target (numbers in docs/text_probe.md). Headers only draw glyph runs. Changed 2026-10-06: MSDF atlases dropped from the pack, after a probe on the Iris Xe (docs/text_probe.md; MSDF failed on dense CJK and overlapping contours, and a distance soft edge is a true blur only on straight edges). Changed 2026-10-05: "glyph atlas plus metrics; no font engine at runtime". |
+| Shader | The user's fragment body wrapped in the contract (`psygfx_shader_wrap()`, the same function in the tool and the runtime), as GLSL ES 3.00 text, with reflection | glslang validates it in the tool. GL ES 3.0 has no portable binary, so ANGLE compiles the text on the rig when the pack loads; `psy_gfx.h` caches each program's binary per ANGLE build, adapter and driver (`desc.cache`, v0.4.0), checked by its own hash before the driver sees it. SPIRV-Cross is for a second backend only. Changed 2026-10-05: "D3D bytecode is finished by the runner" (docs/psy_gfx.md). |
 | Table | Typed binary columns from condition files and from ELAN, Praat or BIDS events exports | Read directly by `psy_trials.h` and `psy_timeline.h`. |
-| Calibration | The 3x3 matrix and the gamma table, with the photometer readings beside them | |
+| Calibration | The 3x3 matrix and the gamma table, with the photometer readings beside them | `psy_color.h`'s `.psycal` file (62528 bytes, CRC-32; the same bytes as `psy_gfx.h` v0.4's), rebuilt from its readings on load. A participant's luminance from flicker photometry is session data, not pack data: `psy_color.h`'s `.psylum` file (changed 2026-10-06). |
 | Experiment | The definition the player interprets | See section 6. |
 
 The canonical in-memory forms are the same as the on-disk forms (audio
@@ -871,7 +946,7 @@ go to nanoseconds by `psytl_ns()`, rounded to nearest.
 | `mark(name, v)` | `psytl_add` MARK, `code` = name id, `user` = `v` |
 | `wait(dt)` | A scheduler entry at the target time, resumed by the window rule of the timeline; logged as a MARK |
 | `tween(...)` | `psytl_tween` per channel, with a `psytl_tween_desc` |
-| keyframes `{a, b, c}` | `psytl_set_track` keyed, with the keys in the player's arena for the trial |
+| keyframes `{a, b, c}` | `psytl_keyframes` on a sequence, with the keys in the timeline's key arena (`desc.keys`, section 4.5.1) |
 | `stagger` | The player computes each target's `start`; the timeline sees ordinary tweens and events |
 | `opts.repeat`, `opts.yoyo` | `psytl_set_track` keyed, with `period` and `repeats`; `yoyo` adds a key back to the start |
 | `follow(...)` | `psytl_set_track` sampled, with the table's rate from the manifest |
@@ -884,21 +959,27 @@ go to nanoseconds by `psytl_ns()`, rounded to nearest.
 - Done in v0.2.0: `psytl_tween()` takes a `psytl_tween_desc` with
   `from`, `start` or `delay`, `cycles`, `yoyo` and `keep_velocity`, and
   takes over from the old track's value at its start.
-- A query for the end of the frame window on a base, for example
-  `psytl_window(tl, base, &frame)`. The scheduler resumes a wait before
-  the timeline evaluates the frame, so it must apply the same rule.
-  Otherwise the player copies the rule and the two can disagree.
-- Constructors for C users and the eject path: `psytl_onset()`,
-  `psytl_trigger()`, `psytl_keys()`, `psytl_samples()`. They follow the
-  helper pattern of `psy_trials.h`.
+- Done in v0.4.0: `psytl_window(tl, base, &frame, &end)` gives the base
+  time that a frame's window reaches, from the same function the evaluate
+  uses. The scheduler resumes a wait on the frame where `target <= end`,
+  so the player does not copy the rule. `psytl_rt_time()` gives the RT
+  time of a base time, to lower `now()` to an RT change point.
+- Dropped (v0.4.0): constructors `psytl_onset()`, `psytl_trigger()`,
+  `psytl_keys()`, `psytl_samples()`. The sequence builder of section 4.5.1
+  and designated initializers serve the same users, and the builder now
+  owns the name `psytl_trigger`.
 
 #### Left out, and why
 
 - **Easings that overshoot** (back, elastic, bounce): an overshoot of a
   stimulus value is a confound. `bezier()` with y outside [0, 1] stays
   possible on purpose.
-- **Time scale, reverse, seek inside a trial:** the timeline has no rate
-  by design. A movie seek is the video header's job.
+- **Time scale, reverse, seek inside a trial:** a rate on the trial base
+  scales every wait, tween and duration of the trial, which is a
+  confound. `psytl_rate()` (v0.4.0) exists for a movie base: a script sets
+  it through the movie (`m.rate`), never on the trial base. Reverse is
+  refused at every level (docs/psy_timeline.md). A movie seek is the video
+  header's job.
 - **Position parameters and labels** (`"<"`, `"+=0.5"`): `now()` is the
   label, a local variable keeps it, and `wait` is the relative offset.
 - **Per-tween `onUpdate`:** it costs script time on every frame, and its
@@ -919,7 +1000,13 @@ go to nanoseconds by `psytl_ns()`, rounded to nearest.
   nearest rate that divides evenly?
 - **Color.** Should a tween on color run in DKL or cone space through
   the `psy_gfx.h` calibration, with the channels as the coordinates of
-  that space?
+  that space? Partly answered 2026-10-06: `psy_color.h` converts a DKL or
+  cone-contrast color to a stimulus direction (`psycol_to_dir()`) through
+  the context `psy_gfx.h` uses (`psygfx_color()`), at 22 to 27 ns a call
+  (MSVC; 79 ns MinGW), so three channels bound to a color in a space cost
+  about 0.3 ms of CPU for 10000 elements a frame. Open: the binding form
+  (three channels to one color field) and whether it belongs in
+  `psygfx_bind`.
 - **Units.** The parameter table gives each property's unit. Should
   `tween(g, {x = 2})` take a unit suffix (`deg(2)`, `px(2)`), or only the
   table's unit?
@@ -1029,29 +1116,69 @@ Two cases with different answers:
 - `tests/loopback/` gains a photodiode test for `psy_screen.h`, a
   line-out to line-in test for `psy_audio.h`, an LED test for capture,
   a variable-refresh interval sweep and a luminance-versus-interval
-  sweep.
+  sweep. State on 2026-10-06: the photodiode test
+  (`psy_screen_loopback`) and the line-in mode of the audio loopback
+  (`--line`) are built and have never run. Every onset measured so far
+  is a software timestamp.
 - `tests/compile/` gains the C and C++ pairs for each header, and a
   no-ANGLE build for Linux.
-- CI builds ANGLE once per platform at the pinned commit and caches it.
+- CI on Windows takes ANGLE from the Electron release zip named in
+  `ci.yml` (Electron v38.8.6, ANGLE 2.1.25848), checked by checksum and
+  cached. Linux uses Mesa's EGL. macOS CI has no GL, so the psy_gfx
+  pixel checks skip there; where macOS gets ANGLE is not decided.
 - No number outside a STATUS block is a measurement, as today.
 
 ## 11. Order of work
 
-1. `psy_rt.h`: the event ring and the clock correlation.
-2. `psy_timeline.h`. Pure computation, testable now, needed by
-   everything after it.
-3. `psy_screen.h` on Linux X11 with the native driver, with the
-   photodiode test, then Windows 10 through ANGLE, then Windows 11 and
-   macOS.
-4. `psy_audio.h`, in parallel with 3, with the loopback test.
-5. `psy_gfx.h` with the output stage, the calibration piece, the atlas
-   text and the shader contract.
-6. `psy_video.h`: frame sequence, pl_mpeg, then Media Foundation and
-   AVFoundation, then capture.
-7. The pack tool as a library, and its CLI.
-8. The player, native and WebAssembly, and the runner protocol.
-9. The designer.
-10. Build jobs, `psy_net.h`.
+Revised 2026-10-06. The first order put Linux X11 with the photodiode
+test first and Windows 10 second. The work went to Windows 11 first, on
+the one development machine, and Windows 10 became best effort
+(section 9).
+
+### State on 2026-10-06
+
+| Step | State |
+|---|---|
+| 1. `psy_rt.h`: event ring, clock correlation | Done, v0.5.0, with the instrumentation macros. |
+| 2. `psy_timeline.h` | v0.4.0: events, tracks, tweens, `psytl_skip`, `psytl_lead`, `psytl_peek`, exact rational base rates (`psytl_rate`), `psytl_window`, `psytl_rt_time`, the `psytl_seq` builder with op tables, `psytl_run`, `psytl_check_ops` and the key arena (4.5.1). |
+| 3. `psy_screen.h` | v0.3.0 on Windows: DXGI_FLIP and COMPOSITION, flip hooks (codes, triggers, after-flip callbacks), the OS gamma ramp. X11, Wayland, macOS and web are stubs. No photodiode run. |
+| 4. `psy_audio.h` | v0.2.0 on WASAPI shared mode: onsets from a fit of device positions, tier 2. Streams (ring-fed voices, the soundtrack path) and WAV streaming. The other backends compile and have never run. No line-in run. |
+| 5. `psy_gfx.h` | v0.4.0: stimuli, the signed-distance vector program, strokes, sprites, groups, render targets, MSDF glyph runs, the output stage; a program binary cache (open 11 to 35 ms warm), NV12 and I420 video converted to linear light, texture import (GL, D3D11 through ANGLE), instanced stimuli, and draws reordered where they do not overlap. Text layout (Skribidi) and atlases belong to the pack tool and the player (5.2), not to the header. Missed bars: four of v0.3's GPU bars, and the video program's 1.5x of an RGBA8 image (docs/psy_gfx.md). |
+| 6. `psy_video.h` | v0.1.0: scheduler, frame sequence, pl_mpeg, decode-ahead, YUV conversion on the pump. Not built: the planar shader path, Media Foundation, the shared GPU path, the soundtrack source, AVFoundation, capture. |
+| 7 to 10 | Not started. |
+
+### Next, in order
+
+1. **Hardware verification on Windows 11.** Run the photodiode test on
+   DXGI_FLIP and COMPOSITION, and the line-in test for `psy_audio.h`.
+   Re-measure the "one vblank early" flips of the windowed DXGI runs,
+   which the `flip_at` fix of 2026-10-05 may have removed. Every later
+   step builds on onset claims that are software timestamps until this
+   step is done. It needs the photodiode and a line-out to line-in
+   cable on the development machine.
+2. **`psy_gfx.h`**: the program binary cache, planar YUV and texture
+   import, instanced stimuli: done (v0.4.0). Next, docs/psy_gfx.md "Next".
+3. **`psy_video.h`**: the planar shader path, Media Foundation, the
+   shared GPU path, the soundtrack source. Needs the planar formats and
+   texture import from item 2.
+4. **`psy_timeline.h`**: done for now (v0.4.0: base rates,
+   `psytl_window()`, sequences). `psy_video.h` applies the rates for any
+   rate other than 1.
+5. **Other platforms.** `psy_screen.h` on Linux X11 (GLX sync control)
+   and Wayland (presentation-time), then macOS through ANGLE's Metal
+   backend. `psy_audio.h` on ALSA, PulseAudio and CoreAudio. A platform
+   gets its tier from a photodiode or line-in run on that platform, not
+   from CI.
+6. The pack tool as a library, and its CLI, with Skribidi, the Slug
+   outline builder and the exact-area alpha rasterizer. Before it:
+   Slug glyph runs and the blur pass in `psy_gfx.h`, after instancing.
+7. The player, native and WebAssembly, and the runner protocol.
+8. The designer.
+9. Build jobs, `psy_net.h`.
+
+Items 2, 3 and 4 can run in parallel. Measurements on the development
+machine run one at a time: on 2026-10-05 a second measuring job's load
+showed up as a false regression in the first.
 
 ## 12. Extensions
 
@@ -1102,11 +1229,22 @@ extension implements one of these kinds, each a versioned C vtable:
 
 - Does SDL3 create an EGL context on Cocoa against ANGLE's Metal
   backend, and what present timing does that backend expose?
-- ANGLE's 10-bit surface configurations on D3D11 and Metal.
+- ANGLE's 10-bit surface configurations on D3D11 and Metal. Answered
+  for D3D11 (2026-10-05, docs/psy_gfx.md): RGBA 10/10/10/2 and RGBA16F
+  configurations exist, and a client-buffer pbuffer on an
+  `R10G10B10A2` texture works. Metal: not run.
 - Composition swapchain: how a target time between two vblanks is
   quantized, how far ahead the queue accepts presents, and whether a
   borderless fullscreen composition window gets independent flip on the
-  lab GPU and driver.
+  lab GPU and driver. Answered on the Iris Xe (2026-10-05,
+  docs/psy_screen.md): the frame goes to the nearest vblank, a tie to
+  the earlier one; the queue accepts at least 7 presents ahead; a
+  fullscreen COMPOSITION window got independent flip. The lab GPU and
+  driver: not run.
+- Whether an untimed screen on a second display disturbs a timed
+  display in independent flip on the same GPU (4.2, Untimed screens).
+- Whether SDL3 opens a window and a GL context on an X screen other
+  than the default (`:0.1`).
 - Whether the composition swapchain's present-at-time removes the need
   for the spin-wait under variable refresh.
 - miniaudio's exclusive-mode behavior per backend and the exact flag

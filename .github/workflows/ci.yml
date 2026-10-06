@@ -96,6 +96,9 @@ jobs:
           expect 0 "$bin/timeline_trial"
           expect 0 "$bin/timeline_tracking"    # checks its own errors
           expect 0 "$bin/timeline_bench" 500   # a 2 ms frame budget
+          # The color example on its nominal display; color_bench is built, not run.
+          expect 0 "$bin/color_convert"
+          expect 2 "$bin/color_convert" a b    # usage
           # The audio example on miniaudio's null device: no sound hardware.
           expect 0 "$bin/audio_tone" --null
           expect 2 "$bin/audio_tone" --bogus
@@ -188,6 +191,7 @@ jobs:
           expect 0 build/trials_interleave
           expect 0 build/timeline_trial
           expect 0 build/timeline_tracking
+          expect 0 build/color_convert
           expect 0 build/audio_tone --null
 
   # --------------------------------------------------------------------- #
@@ -224,7 +228,7 @@ jobs:
 
   # --------------------------------------------------------------------- #
   # WebAssembly: the computation headers (stair, quest, gp, trials,        #
-  # timeline)                                                              #
+  # timeline, color)                                                       #
   # claim to need nothing but libm, and psy_rt.h claims a platform branch  #
   # is all wasm needs. Compile the compile checks with emcc, threads off,  #
   # and run them under node. Nothing here is a timing claim.               #
@@ -255,7 +259,7 @@ jobs:
           emcc $W $T -o rt_test.js tests/adapt/psy_rt_test.c && node rt_test.js
           emcc $W $T -o rt_pump.js examples/rt_pump.c && node rt_pump.js 40
           emcc $W $T -o rt_ring_csv.js examples/rt_ring_csv.c && node rt_ring_csv.js 30 > /dev/null
-          for h in stair quest gp trials timeline; do
+          for h in stair quest gp trials timeline color; do
             emcc $W -o "compile_$h.js" "tests/compile/psy_$h.c" && node "compile_$h.js"
             emcc $W -o "test_$h.js" "tests/adapt/psy_${h}_test.c" && node "test_$h.js"
           done
@@ -293,7 +297,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        package: [psy_parallel, psy_serial, psy_stair, psy_quest, psy_gp, psy_trials]
+        package: [psy_parallel, psy_serial, psy_stair, psy_quest, psy_gp, psy_trials, psy_color]
         exclude:
           - os: macos-latest      # psy_parallel.h #errors on macOS
             package: psy_parallel
@@ -411,6 +415,10 @@ jobs:
         working-directory: bindings/mex
         run: octave-cli -q --eval "test_mex"
 
+      - name: Color binding test (test_mex_color.m)
+        working-directory: bindings/mex
+        run: octave-cli -q --eval "test_mex_color"
+
       - uses: actions/upload-artifact@v7
         with:
           name: octave-mex-bookworm
@@ -496,6 +504,11 @@ jobs:
         uses: matlab-actions/run-command@v3
         with:
           command: cd('bindings/mex'); test_mex
+
+      - name: Color binding test (test_mex_color.m)
+        uses: matlab-actions/run-command@v3
+        with:
+          command: cd('bindings/mex'); test_mex_color
 
       - uses: actions/upload-artifact@v7
         with:
@@ -607,7 +620,7 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_PL_MPEG=ON
 
       - name: Build
-        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench compile_psy_video_c compile_psy_video_cxx test_psy_video video_play video_bench
+        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input screen_abort psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery compile_psy_video_c compile_psy_video_cxx test_psy_video video_play video_bench
 
       # psy_gfx.h's pixel checks must run where software GL exists; macOS has
       # no EGL, so its test runs the CPU checks only.
@@ -637,6 +650,8 @@ jobs:
           expect 0 "$bin/gfx_trial" --sim
           expect 0 "$bin/gfx_load" --sim --gabors 10 --dots 100 --seconds 1
           expect 0 "$bin/gfx_calib"                 # no args: the synthetic display
+          expect 0 "$bin/gfx_gallery" --sim         # each page once; 1 if a tile's draw is refused
+          expect 2 "$bin/gfx_gallery" --page 9
           expect 2 "$bin/gfx_hello" --bogus
           expect 2 "$bin/gfx_bench" --device bogus
           # psy_video.h: a generated frame sequence, plain, QOI and I420.

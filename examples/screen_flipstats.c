@@ -4,7 +4,7 @@
  *                      [--cover N] [--frames N] [--load N]
  *                      [--overrun MS] [--miss N] [--hold] [--patch]
  *                      [--codes] [--row clear|update] [--verify N]
- *                      [--trigger] [--fence]
+ *                      [--trigger] [--fence] [--d3d11-video]
  *                      [--group] [--allocs | --allocs-control] [--csv FILE]
  *
  *   --sim        the simulated display: no window, no GPU (CI runs this)
@@ -38,6 +38,8 @@
  *   --trigger-rt-cores   leave the trigger worker where psy_rt.h puts it
  *                        (the P-cores on a hybrid CPU), not on the E-cores
  *   --trigger-spin US    the trigger worker's spin window
+ *   --d3d11-video  the device with video support and multithread
+ *                protection (desc.d3d11_video), for its cost per frame
  *   --group      two windows flipped as a group (implies --windowed)
  *   --allocs     count C runtime heap calls in the frame loop (MSVC debug)
  *   --allocs-control  the same, with one malloc per frame the count must see
@@ -327,7 +329,7 @@ int main(int argc, char** argv) {
 #endif
     double overrun = 0;
     int miss_every = 0;
-    int codes = 0, row_method = -1, verify = 0, trigger = 0, fence = 0;
+    int codes = 0, row_method = -1, verify = 0, trigger = 0, fence = 0, video = 0;
     double trig_offset_us = 0;
     int trig_cpu = 0;
     double trig_spin_us = 0;
@@ -363,6 +365,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--verify") && i + 1 < argc) verify = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--trigger")) trigger = 1;
         else if (!strcmp(argv[i], "--fence")) fence = 1;
+        else if (!strcmp(argv[i], "--d3d11-video")) video = 1;
         else if (!strcmp(argv[i], "--trigger-offset") && i + 1 < argc) trig_offset_us = atof(argv[++i]);
         else if (!strcmp(argv[i], "--trigger-cpu") && i + 1 < argc) trig_cpu = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "--trigger-rt-cores")) trig_cpu = -1;
@@ -401,6 +404,7 @@ int main(int argc, char** argv) {
         d.ring = &g_ring;
         d.display_index = (uint32_t)i;
         d.patch.on = patch != 0;
+        d.d3d11_video = video != 0;
         if (codes) {
             d.patch.corner = PSYSCR_BOTTOM_LEFT;
             d.codes[0] = psyscr_slot_pixel_mode();
@@ -436,6 +440,11 @@ int main(int argc, char** argv) {
         if (trigger) psyscr_on_flip(&scr[i], flip_fn, NULL);
         psyscr_describe(&scr[i], line, sizeof line);
         printf("%s\n", line);
+        {
+            psyscr_native_info ni;
+            if (psyscr_native(&scr[i], &ni) == PSYSCR_OK)
+                printf("device: video_support=%d multithread_protected=%d\n", ni.video, ni.mt_protected);
+        }
     }
 #if defined(_WIN32)
     {   /* timing on battery differs: every result names its power source */

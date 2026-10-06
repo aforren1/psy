@@ -3,7 +3,8 @@
  *
  *     audio_clockstats [--null] [--device NAME] [--exclusive] [--period N]
  *                      [--seconds S] [--load N] [--frame-work MS]
- *                      [--voices N] [--stall-at S --stall MS]
+ *                      [--voices N] [--streams N [--wav PATH] [--ring S]]
+ *                      [--stall-at S --stall MS]
  *                      [--allocs | --allocs-control] [--csv PREFIX]
  *
  *   --device NAME  the playback device whose name contains NAME
@@ -16,6 +17,11 @@
  *                  spins MS ms per frame and hands a silent 10 ms sound to
  *                  psyau_play_at() each frame; its psyau cost is measured
  *   --voices N     N silent sounds looping for the whole run (mixer cost)
+ *   --streams N    N stereo streams (STREAMS) playing for the whole run, fed
+ *                  silence in 4096-frame steps by one producer thread
+ *   --wav PATH     the streams play this WAV file instead (looped), fed by
+ *                  one psyrt_pump (psyau_wav_step), woken by the frame loop
+ *   --ring S       ring of each stream in seconds (default 1)
  *   --stall-at S --stall MS  once, S seconds in, the callback sleeps MS ms:
  *                  an injected underrun
  *   --allocs       count C runtime heap calls after the warm-up (MSVC debug
@@ -25,7 +31,8 @@
  *                  PREFIX_ring.csv (every ring record)
  *
  * Prints the describe line and a summary: callback intervals, underruns,
- * GetPosition and render cost, the fit, the frame thread's cost.
+ * GetPosition and render cost, the fit, the frame thread's cost, and with
+ * streams their gaps and the lowest ring fill the frame loop saw.
  *
  * Exit: 0 when the run completed, 1 when the device did not open, 2 usage.
  */
@@ -131,6 +138,76 @@ static int64_t g_tmp[CS_MAX];
 static float g_silence[48000 * 2];
 static int64_t g_frame_cost[60 * 700];
 
+/* --- streams ------------------------------------------------------------------------- */
+#define CS_STREAMS 8
+static int g_nstreams = 0;
+static double g_ring_s = 1.0;
+#if PSYAU_VERSION_MINOR >= 2
+static psyau_stream g_st[CS_STREAMS];
+static psyau_wav g_wav[CS_STREAMS];
+static float* g_ringmem[CS_STREAMS];
+static const char* g_wav_path = NULL;
+static psyrt_pump g_pump;
+static psyau_stream* cs_stream(int i) { return g_wav_path ? &g_wav[i].stream : &g_st[i]; }
+/* the producer of silence: acquire, zero, commit; then sleep 5 ms */
+#if defined(_WIN32)
+static unsigned __stdcall producer(void* p)
+#else
+static void* producer(void* p)
+#endif
+{
+    (void)p;
+    while (!g_stop) {
+        int i;
+        for (i = 0; i < g_nstreams; i++) {
+            int64_t n;
+            float* f;
+            while ((f = psyau_stream_acquire(&g_st[i], &n)) != NULL) {
+                if (n > 4096) n = 4096;
+                memset(f, 0, sizeof(float) * 2 * (size_t)n);
+                psyau_stream_commit(&g_st[i], n);
+            }
+        }
+        psyrt_sleep_until(psyrt_now_ns() + 5000000, 0);
+    }
+#if defined(_WIN32)
+    return 0;
+#else
+    return NULL;
+#endif
+}
+/* one pump feeds every WAV stream, a block each in turn */
+static bool cs_wav_step(void* ctx) {
+    int i;
+    bool more = false;
+    (void)ctx;
+    for (i = 0; i < g_nstreams; i++) more = psyau_wav_step(&g_wav[i]) || more;
+    return more;
+}
+static void cs_wav_msg(void* ctx, const void* msg, uint32_t seq) { (void)ctx; (void)msg; (void)seq; }
+#endif
+
+/* Once a frame: the lowest fill seen, and the pump woken when a WAV ring is
+ * below half (inside the frame thread's timed region with --frame-work). */
+#if PSYAU_VERSION_MINOR >= 2
+static int64_t g_low_fill = INT64_MAX;
+#endif
+static void cs_streams_frame(void) {
+#if PSYAU_VERSION_MINOR >= 2
+    int i, wake = 0;
+    for (i = 0; i < g_nstreams; i++) {
+        psyau_stream_info in;
+        psyau_stream_get_info(cs_stream(i), &in);
+        if (in.started && in.fill < g_low_fill) g_low_fill = in.fill;
+        if (g_wav_path && psyau_wav_wants(&g_wav[i])) wake = 1;
+    }
+    if (wake) {
+        int64_t m = -1;
+        (void)psyrt_pump_submit(&g_pump, &m);
+    }
+#endif
+}
+
 int main(int argc, char** argv) {
     psyau_desc d;
     const char* csv = NULL;
@@ -150,6 +227,11 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--load") && i + 1 < argc) load = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--frame-work") && i + 1 < argc) frame_work = atof(argv[++i]);
         else if (!strcmp(argv[i], "--voices") && i + 1 < argc) voices = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--streams") && i + 1 < argc) g_nstreams = atoi(argv[++i]);
+#if PSYAU_VERSION_MINOR >= 2
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) g_wav_path = argv[++i];
+#endif
+        else if (!strcmp(argv[i], "--ring") && i + 1 < argc) g_ring_s = atof(argv[++i]);
         else if (!strcmp(argv[i], "--stall-at") && i + 1 < argc) stall_at = atof(argv[++i]);
         else if (!strcmp(argv[i], "--stall") && i + 1 < argc) g_stall_ns = (int64_t)(atof(argv[++i]) * 1e6);
         else if (!strcmp(argv[i], "--allocs")) allocs = 1;
@@ -159,9 +241,20 @@ int main(int argc, char** argv) {
     }
     if (d.exclusive && seconds > 30) { fprintf(stderr, "audio_clockstats: --exclusive runs at most 30 s\n"); return 2; }
     if (seconds <= 0 || seconds > 660 || voices < 0 || voices > 32 || load < 0 || load > 32) { fprintf(stderr, "audio_clockstats: bad --seconds, --voices or --load\n"); return 2; }
+#if PSYAU_VERSION_MINOR >= 2
+    if (g_nstreams < 0 || g_nstreams > CS_STREAMS || g_ring_s < 0.05 || g_ring_s > 4) { fprintf(stderr, "audio_clockstats: --streams 0..%d, --ring 0.05..4\n", CS_STREAMS); return 2; }
+    for (i = 0; i < g_nstreams; i++) {
+        /* before open: the ring memory is the run's, not the arena's */
+        g_ringmem[i] = (float*)calloc((size_t)(g_ring_s * 192000.0) * 2, sizeof(float));
+        if (!g_ringmem[i]) return 2;
+    }
+#else
+    if (g_nstreams) { fprintf(stderr, "audio_clockstats: --streams needs psy_audio.h 0.2\n"); return 2; }
+#endif
     psyrt_ring_open(&g_ring, &(psyrt_ring_desc){ .memory = g_ring_mem, .bytes = sizeof g_ring_mem });
     d.ring = &g_ring;
     d.arena_bytes = 1 << 16;
+    if (voices + g_nstreams > 32) d.voices = voices + g_nstreams;   /* a stream takes a voice */
     if (allocs) { static float arena[1 << 14]; d.arena = arena; d.arena_bytes = sizeof arena; }
     if (g_stall_ns) {
         d.source = &g_stall_src;
@@ -190,6 +283,42 @@ int main(int argc, char** argv) {
         pd.loops = PSYAU_FOREVER;
         if (psyau_play(&au, &pd) <= 0) { fprintf(stderr, "voice %d refused\n", i); }
     }
+#if PSYAU_VERSION_MINOR >= 2
+    for (i = 0; i < g_nstreams; i++) {
+        int64_t frames = (int64_t)(g_ring_s * (double)au.dcaps.rate);
+        if (g_wav_path) {
+            psyau_wav_desc wd;
+            memset(&wd, 0, sizeof wd);
+            wd.path = g_wav_path; wd.loops = PSYAU_FOREVER; wd.ring = frames; wd.memory = g_ringmem[i];
+            if (psyau_wav_open(&au, &g_wav[i], &wd) < 0) { fprintf(stderr, "%s\n", psyau_wav_error(&g_wav[i])); return 1; }
+            (void)psyau_wav_feed(&g_wav[i], 0);
+        } else {
+            psyau_stream_desc sd;
+            int64_t nf;
+            float* f;
+            memset(&sd, 0, sizeof sd);
+            sd.memory = g_ringmem[i]; sd.frames = frames;
+            if (psyau_stream_init(&au, &g_st[i], &sd) < 0) { fprintf(stderr, "%s\n", psyau_error(&au)); return 1; }
+            while ((f = psyau_stream_acquire(&g_st[i], &nf)) != NULL) psyau_stream_commit(&g_st[i], nf);
+        }
+        if (psyau_play_stream(&au, cs_stream(i), 0) <= 0) fprintf(stderr, "stream %d refused\n", i);
+    }
+    if (g_nstreams && g_wav_path) {
+        psyrt_pump_desc pd;
+        memset(&pd, 0, sizeof pd);
+        pd.msg_size = 8; pd.capacity = 4; pd.on_msg = cs_wav_msg; pd.on_idle = cs_wav_step;
+        if (!psyrt_pump_start(&g_pump, &pd)) { fprintf(stderr, "%s\n", psyrt_pump_error(&g_pump)); return 1; }
+    } else if (g_nstreams) {
+#if defined(_WIN32)
+        _beginthreadex(NULL, 0, producer, NULL, 0, NULL);
+#else
+        pthread_t th; pthread_create(&th, NULL, producer, NULL); pthread_detach(th);
+#endif
+        /* the thread's own setup (the C runtime's, psy_rt's timer) before
+         * --allocs starts counting */
+        psyrt_sleep_until(psyrt_now_ns() + 100000000, 0);
+    }
+#endif
     for (i = 0; i < load; i++) {
 #if defined(_WIN32)
         _beginthreadex(NULL, 0, spin, NULL, 0, NULL);
@@ -226,11 +355,13 @@ int main(int argc, char** argv) {
                 sb.frames = g_silence; sb.n = 480; sb.channels = 2;
                 (void)psyau_play_at(&au, sb, a + psyau_lead_ns(&au) + PSYAU_MS(20));
                 (void)psyau_update(&au);
+                cs_streams_frame();
                 b = (int64_t)psyrt_now_ns();
                 if (nframes < (long)(sizeof g_frame_cost / sizeof g_frame_cost[0])) g_frame_cost[nframes++] = b - a;
                 if (frame_work > 0) psyrt_spin_until((uint64_t)(a + (int64_t)(frame_work * 1e6)));
             } else {
                 (void)psyau_update(&au);
+                cs_streams_frame();
             }
             while ((k = psyrt_ring_drain(&g_ring, g_ev, 1024)) > 0) {
                 int j;
@@ -251,6 +382,16 @@ int main(int argc, char** argv) {
     }
     psyau_describe(&au, line, sizeof line);
     g_stop = 1;
+#if PSYAU_VERSION_MINOR >= 2
+    if (g_nstreams && g_wav_path) psyrt_pump_stop(&g_pump);
+    if (g_nstreams) {
+        psyau_caps c;
+        psyau_get_caps(&au, &c);
+        printf("streams %d (%s, ring %.2f s): gaps %u, lowest fill %.1f ms\n", g_nstreams,
+               g_wav_path ? "wav on a pump" : "silence from a thread", g_ring_s, (unsigned)c.gaps,
+               g_low_fill == INT64_MAX ? -1.0 : (double)g_low_fill * 1e3 / (double)c.rate);
+    }
+#endif
     if (allocs) {
         uint32_t ma1 = ((psyau__ma*)(void*)au.backend_mem)->allocs;
 #if defined(_WIN32) && defined(_DEBUG)
@@ -297,8 +438,8 @@ int main(int argc, char** argv) {
             double mean = 0;
             for (i = 0; i < m; i++) mean += (double)g_tmp[i];
             mean /= (double)m;
-            printf("render us mean %.2f p50 %.2f p99 %.2f max %.2f (%d voices)\n", mean / 1e3,
-                   pct(g_tmp, m, 0.5) / 1e3, pct(g_tmp, m, 0.99) / 1e3, g_tmp[m - 1] / 1e3, voices);
+            printf("render us mean %.2f p50 %.2f p99 %.2f max %.2f (%d voices, %d streams)\n", mean / 1e3,
+                   pct(g_tmp, m, 0.5) / 1e3, pct(g_tmp, m, 0.99) / 1e3, g_tmp[m - 1] / 1e3, voices, g_nstreams);
         }
     }
     if (nframes > 0) {

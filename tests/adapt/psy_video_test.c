@@ -7,7 +7,10 @@
  * follow clock, the records field by field, the canonical check at open,
  * the frame sequence container in every format (raw and QOI, file, memory
  * and reader), the QOI codec, the YUV conversion against a double
- * reference, XXH64 against its published vectors, replay, and the heap.
+ * reference, XXH64 against its published vectors, replay, the heap, the
+ * soundtrack on psy_audio.h's scripted device (every sample on its frame,
+ * the movie clock on the audio's, controls, loop, late start, refusals),
+ * and Media Foundation on generated clips (Windows, PSYVID_TEST_MEDIA).
  * No framework: it returns 0 when every check passed and 1 after printing
  * each failure.
  *
@@ -37,6 +40,15 @@ static long long g_vt = 1000000000000LL;
 static long long vnow(void);
 #define PSYVID__NOW() ((int64_t)vnow())
 
+/* psy_audio.h first, on the same virtual clock, with no miniaudio: the
+ * soundtrack's cases drive its scripted device */
+#define PSYAU_NO_MINIAUDIO
+static void vsleep_until(long long t);
+#define PSYAU__NOW() ((int64_t)vnow())
+#define PSYAU__SLEEP_UNTIL(t) vsleep_until((long long)(t))
+#define PSY_AUDIO_IMPLEMENTATION
+#include "psy_audio.h"
+
 #define PSY_VIDEO_IMPLEMENTATION
 #include "psy_video.h"
 
@@ -58,6 +70,10 @@ static long long vnow(void);
 #include <math.h>
 
 static long long vnow(void) { return g_virtual ? g_vt : (long long)psyrt_now_ns(); }
+static void vsleep_until(long long t) {
+    if (!g_virtual) { psyrt_sleep_until((uint64_t)t, 0); return; }
+    if (t > g_vt) g_vt = t;
+}
 
 /* ---------------------------------------------------------------- harness */
 
@@ -189,15 +205,36 @@ static int64_t g_up_frame;         /* the index coded in the last RGBA8 upload *
 static uint64_t g_up_hash;
 static size_t g_up_bytes;          /* w x h x bpp of the texture, set by the case */
 static uint8_t g_up_copy[64 * 64 * 16];
+static const uint8_t* g_up_ptr;    /* the last upload, valid until the next decode */
+static size_t g_up_stride;
+static int g_up_w;
+/* A planar upload is one call per plane, Y first: each frame's planes are
+ * collected in order from g_planes_off = 0, and the Y plane is kept. */
+static uint8_t g_planes[1 << 20];
+static size_t g_planes_off;
+static const uint8_t* g_up_y;
+static size_t g_up_ys;
+static int g_plane_i;     /* planes uploaded since the frame began */
+static uint8_t g_up_row32[8192];   /* the Y plane's row 32, copied at upload: the
+                                    * slot goes back to the decoder after it */
 
 static int rec_update(void* c, uint32_t id, int x, int y, int w, int h, const void* data, size_t stride) {
     const uint8_t* p = (const uint8_t*)data;
     int k;
     (void)c; (void)id; (void)x; (void)y; (void)w; (void)h; (void)stride;
     g_up_n++;
+    g_up_ptr = p; g_up_stride = stride; g_up_w = w;
+    if (g_plane_i++ == 0) {
+        g_up_y = p; g_up_ys = stride;
+        if (h > 32 && stride <= sizeof g_up_row32) memcpy(g_up_row32, p + (size_t)32 * stride, stride);
+    }
+    if (stride > 0 && g_planes_off + (size_t)h * stride <= sizeof g_planes) {
+        memcpy(g_planes + g_planes_off, p, (size_t)h * stride);
+        g_planes_off += (size_t)h * stride;
+    }
     g_up_frame = 0;
     for (k = 0; k < 8; k++) g_up_frame = (int64_t)((uint64_t)g_up_frame | (uint64_t)p[k] << (8 * k));
-    g_up_hash = psyvid_xxh64(p, g_up_bytes, 0);
+    g_up_hash = g_up_bytes ? psyvid_xxh64(p, g_up_bytes, 0) : 0;
     if (g_up_bytes <= sizeof g_up_copy) memcpy(g_up_copy, p, g_up_bytes);
     return PSYGFX_OK;
 }
@@ -366,6 +403,8 @@ static void disp_next(disp* d, psyscr_frame* f) {
     d->cur.index = d->k;
     d->cur.target = onset;
     g_vt = onset - d->P_report / 2;
+    g_planes_off = 0;   /* the next upload's first plane is Y */
+    g_plane_i = 0;
 }
 
 /* ------------------------------------------------------------ movie */
@@ -1429,11 +1468,17 @@ static void test_open_refusals(void) {
     REFUSE(g_sd.gop = 0, "GOP");
     REFUSE(g_sd.report_frames = 0, "no frames");
     REFUSE(g_sd.fail_open = 1, "scripted failure");
-    REFUSE(vd.gpu_path = PSYVID_PATH_SHARED, "psyscr_native");
-    REFUSE(vd.light = PSYVID_LIGHT_EOTF, "planar");
+    REFUSE(vd.gpu_path = PSYVID_PATH_SHARED, "SHARED GPU path is not built");
+    REFUSE(vd.gpu_path = PSYVID_PATH_GPU, "PSYVID_PATH_GPU is for Media Foundation");
+    REFUSE(vd.hw_decode = (psyvid_hw)7, "hw_decode");
+    REFUSE(vd.light = PSYVID_LIGHT_EOTF, "for YUV movies");
     REFUSE(vd.ahead = 99, "ahead");
     REFUSE(vd.lead = 1.5, "lead");
-    REFUSE(vd.backend = PSYVID_BACKEND_MF, "not in v0.1");
+#if PSYVID__MF
+    REFUSE(vd.backend = PSYVID_BACKEND_MF, "no index");
+#else
+    REFUSE(vd.backend = PSYVID_BACKEND_MF, "Media Foundation");
+#endif
     /* an index that disagrees with the stream, field by field */
     memset(&c, 0, sizeof c);
     c.codec = PSYVID_CODEC_CUSTOM; c.w = FW; c.h = FH; c.format = PSYVID_FMT_RGBA8;
@@ -1641,7 +1686,7 @@ static void test_seq(void) {
             vd.ahead = 3;
             if (src == 0) vd.path = path;
             else { vd.data = filebuf; vd.size = fsize; }
-            g_up_bytes = (size_t)W * (size_t)H * (size_t)psyvid__bpt(psyvid__is_yuv(fmt) ? PSYVID_FMT_RGBA8 : fmt);
+            g_up_bytes = psyvid__is_yuv(fmt) ? 0 : (size_t)W * (size_t)H * (size_t)psyvid__bpt(fmt);
             if (!psyvid_open(&g_mv, &g_gfx, &vd)) { fail(__LINE__, psyvid_error(&g_mv)); fprintf(stderr, "  %s\n", psyvid_error(&g_mv)); break; }
             CHECK_I(g_mv.info.frames, 12);
             CHECK_I(g_mv.info.format, fmt);
@@ -1651,13 +1696,14 @@ static void test_seq(void) {
                 int64_t i = (int64_t)(rnd() % 12);
                 CHECK_I(psyvid_show(&g_mv, i), PSYVID_OK);
                 disp_next(&d, &f);
+                g_planes_off = 0; g_plane_i = 0;
                 CHECK_I(psyvid_update(&g_mv, &f), PSYVID_OK);
                 if (psyvid__is_yuv(fmt)) {
-                    psyvid_planes in;
-                    psyvid__planes_layout(fmt, W, H, frames[i], &in);
-                    CHECK_I(psyvid_yuv_to_rgba(&in, fmt, W, H, sd.matrix, sd.range, sd.siting, 0, expect, W * 4, rows),
-                            PSYVID_OK);
-                    CHECK(memcmp(g_up_copy, expect, g_up_bytes) == 0);
+                    /* the planes go up as stored, for the gfx's video program */
+                    size_t pb = psyvid__planes_layout(fmt, W, H, NULL, NULL);
+                    CHECK(g_planes_off == 0 || g_planes_off == pb);
+                    if (g_planes_off) CHECK(memcmp(g_planes, frames[i], pb) == 0);
+                    (void)expect; (void)rows;
                 } else {
                     CHECK(memcmp(g_up_copy, frames[i], g_up_bytes) == 0);
                     CHECK(g_up_hash == psyvid_xxh64(frames[i], g_up_bytes, 0));
@@ -1783,6 +1829,11 @@ static void test_threaded(void) {
     g_virtual = 0;
     rec_reset();
     sd_default(&g_sd, 250, 1, 1000, 5);
+    /* a decoder that is not ready for a while (PENDING) on the real decode
+     * thread: the slot it took stays with that thread (the free queue has
+     * the frame thread as its only producer; ThreadSanitizer checks) */
+    g_sd.stall_frame = 40;
+    g_sd.stall_until = (int64_t)psyrt_now_ns() + 300000000;
     desc_default(&vd);
     vd.inline_decode = false;
     vd.refresh_num = 250;
@@ -1810,6 +1861,1204 @@ static void test_threaded(void) {
 #endif
 }
 
+/* ------------------------------------------------------------- soundtrack
+ * psy_audio.h on a scripted device (its Audio device extension) on the same
+ * virtual clock as the display: a device clock at a set drift, position
+ * reports stamped at the call, a tape of every output sample. The
+ * soundtrack is a test source whose every sample says which it is, so each
+ * output sample is checked against the sample that belongs on its frame. */
+
+#define ATAPE (48000 * 60)
+typedef struct adev {
+    int64_t  T0;            /* psy_rt time of stream frame -L's output          */
+    double   drift_ppm;
+    int64_t  L;             /* frames from render to output                      */
+    int64_t  k, W;
+    psyau_render_fn render;
+    void*    host;
+    float    out[480 * 2];
+} adev;
+static adev g_ad;
+static float g_atape[ATAPE * 2];
+
+static double ad_kd(const adev* a) { return 1e9 / 48000.0 / (1.0 + a->drift_ppm * 1e-6); }
+static int64_t ad_event(const adev* a) { return a->T0 + (int64_t)floor((double)(a->k * 480) * ad_kd(a) + 0.5); }
+/* The stream frame on which t falls (nearest), from the truth. */
+static int64_t ad_frame_of(const adev* a, int64_t t) {
+    return (int64_t)ceil((double)(t - a->T0) / ad_kd(a) - (double)a->L - 0.5);
+}
+static int ad_open(void* ctx, const psyau_device_open* in, psyau_device_caps* caps, char* err, size_t cap) {
+    (void)ctx; (void)in; (void)err; (void)cap;
+    memset(caps, 0, sizeof *caps);
+    caps->rate = 48000; caps->channels = 2; caps->out = PSYAU_OUT_F32;
+    caps->map[0] = PSYAU_CH_FL; caps->map[1] = PSYAU_CH_FR;
+    caps->period = 480; caps->buffer = 1440; caps->pos_source = PSYAU_POS_DEVICE; caps->tier = PSYAU_TIER_2;
+    snprintf(caps->name, sizeof caps->name, "scripted");
+    return 0;
+}
+static int ad_start(void* ctx, psyau_render_fn r, void* host) { adev* a = (adev*)ctx; a->render = r; a->host = host; return 0; }
+static void ad_stop(void* ctx) { (void)ctx; }
+static void ad_close(void* ctx) { (void)ctx; }
+static const psyau_device g_adevice = { PSYAU_DEVICE_VERSION, "scripted", ad_open, ad_start, ad_stop, ad_close, NULL };
+
+/* Renders every block whose callback is due by t, with a position report
+ * stamped at the call. */
+static void ad_until(adev* a, int64_t t) {
+    while (ad_event(a) <= t) {
+        psyau_tick tk;
+        int64_t e = ad_event(a), f;
+        memset(&tk, 0, sizeof tk);
+        tk.t_entry = e;
+        f = (int64_t)floor((double)(e - a->T0) / ad_kd(a) + 1e-3);
+        tk.pos = f - a->L > 0 ? f - a->L : 0;
+        tk.pos_t = a->T0 + (int64_t)floor((double)f * ad_kd(a) + 0.5);
+        a->render(a->host, a->out, 480, &tk);
+        if (a->W + 480 <= ATAPE) memcpy(&g_atape[a->W * 2], a->out, sizeof a->out);
+        a->W += 480;
+        a->k++;
+    }
+}
+
+static psyau_audio g_au;
+static float g_au_arena[1 << 18];
+
+static bool au_open(double drift_ppm, int64_t T0) {
+    psyau_desc d;
+    memset(&g_ad, 0, sizeof g_ad);
+    memset(g_atape, 0, sizeof g_atape);
+    g_ad.T0 = T0; g_ad.drift_ppm = drift_ppm; g_ad.L = 1900;
+    memset(&d, 0, sizeof d);
+    d.backend = PSYAU_BACKEND_CUSTOM;
+    d.dev = &g_adevice;
+    d.dev_ctx = &g_ad;
+    d.arena = g_au_arena; d.arena_bytes = sizeof g_au_arena;
+    d.ring = &g_ring;
+    if (!psyau_open(&g_au, &d)) { fprintf(stderr, "psyau_open: %s\n", psyau_error(&g_au)); return false; }
+    return true;
+}
+
+/* The identity source: sample s of channel c is idv(s, c), never 0, exact
+ * in a float and in a float plus 0.25. */
+static float idv(int64_t s, int c) { return (float)((((s * 2 + c) % 4093) + 1)) / 8192.0f; }
+/* A float WAV in memory (WAVE_FORMAT_IEEE_FLOAT) of `frames` identity
+ * samples at `rate` Hz and `ch` channels; psy_audio.h's WAV reader feeds it. */
+static uint8_t g_wav[44 + 480000 * 2 * 4 + 64];
+static size_t g_wav_n;
+static void wav_le(uint8_t* p, uint32_t v, int n) { int k; for (k = 0; k < n; k++) p[k] = (uint8_t)(v >> (8 * k)); }
+static void make_wav(uint32_t rate, uint16_t ch, int64_t frames) {
+    uint32_t data = (uint32_t)(frames * ch * 4);
+    int64_t i;
+    int c;
+    if (44 + (size_t)data > sizeof g_wav) { fail(__LINE__, "test WAV too long"); g_wav_n = 0; return; }
+    memcpy(g_wav, "RIFF", 4); wav_le(g_wav + 4, 36 + data, 4); memcpy(g_wav + 8, "WAVEfmt ", 8);
+    wav_le(g_wav + 16, 16, 4); wav_le(g_wav + 20, 3, 2); wav_le(g_wav + 22, ch, 2); wav_le(g_wav + 24, rate, 4);
+    wav_le(g_wav + 28, rate * ch * 4, 4); wav_le(g_wav + 32, (uint32_t)ch * 4, 2); wav_le(g_wav + 34, 32, 2);
+    memcpy(g_wav + 36, "data", 4); wav_le(g_wav + 40, data, 4);
+    for (i = 0; i < frames; i++)
+        for (c = 0; c < ch; c++) {
+            float v = idv(i, c);
+            memcpy(g_wav + 44 + (size_t)(i * ch + c) * 4, &v, 4);
+        }
+    g_wav_n = 44 + (size_t)data;
+}
+static void wav_desc(psyvid_soundtrack_desc* sd) {
+    memset(sd, 0, sizeof *sd);
+    sd->data = g_wav;
+    sd->size = g_wav_n;
+}
+
+/* One display frame: the audio device run up to the frame thread's time,
+ * the fit moved to the frame thread, the follow, the update. */
+static int snd_frame(disp* d, psyscr_frame* f) {
+    disp_next(d, f);
+    ad_until(&g_ad, g_vt);
+    psyau_update(&g_au);
+    CHECK(psyvid_follow_audio(&g_mv, &g_au, f) >= 0);
+    return psyvid_update(&g_mv, f);
+}
+
+/* The movie time the audio truth gives at RT time t: the (fractional)
+ * sample playing then, over the rate. */
+static int64_t truth_mt(int64_t origin, int64_t t) {
+    double x = (double)(t - g_ad.T0) / ad_kd(&g_ad) - (double)g_ad.L - (double)origin;
+    return (int64_t)floor(x * 1e9 / 48000.0 + 0.5);
+}
+
+/* Output frames w0..w1-1 hold the soundtrack's sample (frame - origin) of
+ * the pass, plus `tone` from frame t0 to t1-1. Returns the bad samples. */
+static int64_t tape_check(int64_t w0, int64_t w1, int64_t origin, int64_t pass, int64_t t0, int64_t t1, float tone) {
+    int64_t w, bad = 0;
+    for (w = w0; w < w1 && w < ATAPE; w++) {
+        int64_t s = w - origin;
+        int c;
+        float add = (w >= t0 && w < t1) ? tone : 0.0f;
+        for (c = 0; c < 2; c++) if (g_atape[w * 2 + c] != idv(pass > 0 ? s % pass : s, c) + add) bad++;
+    }
+    return bad;
+}
+static int64_t tape_silent(int64_t w0, int64_t w1) {
+    int64_t w, bad = 0;
+    for (w = w0; w < w1 && w < ATAPE; w++) bad += g_atape[w * 2] != 0.0f || g_atape[w * 2 + 1] != 0.0f;
+    return bad;
+}
+
+/* psy_audio.h fits the device's slope once its points span 5 s; before
+ * that a plan is off by the drift times the time since the fit started. */
+#define SND_WARM 420
+
+static const psyrt_event* last_sound(int what) {
+    int i;
+    const psyrt_event* r = NULL;
+    for (i = 0; i < g_noth; i++) if (g_oth[i].kind == PSYVID_EV_SOUND && (int)g_oth[i].u.u32[8] == what) r = &g_oth[i];
+    return r;
+}
+
+static int64_t snd_origin(void) {
+    psyau_stream_info si;
+    psyau_stream_get_info(&((psyvid__snd*)g_mv.snd)->w.stream, &si);
+    return si.started ? si.origin : INT64_MIN;
+}
+
+/* Opens audio and a movie of `frames` at 30 fps with the identity soundtrack. */
+static int snd_setup(disp* d, double drift_ppm, int64_t frames, bool loop) {
+    psyvid_desc vd;
+    psyvid_soundtrack_desc sdd;
+    rec_reset();
+    disp_init(d, 60.0, 0);
+    g_vt = d->T0 - 3000000000LL;
+    if (!au_open(drift_ppm, g_vt + 1000000)) { fail(__LINE__, "audio open"); return 0; }
+    sd_default(&g_sd, 30, 1, frames, 10);
+    desc_default(&vd);
+    vd.loop = loop;
+    if (!open_mv(&vd)) { psyau_close(&g_au); return 0; }
+    make_wav(48000, 2, frames * 1600);
+    wav_desc(&sdd);
+    CHECK_I(psyvid_soundtrack(&g_mv, &g_au, &sdd), PSYVID_OK);
+    return 1;
+}
+
+static void snd_teardown(disp* d) {
+    psyscr_frame f;
+    int k;
+    psyvid_pause_at(&g_mv, PSYVID_ASAP);
+    for (k = 0; k < 30; k++) snd_frame(d, &f);   /* the stop reaches the device */
+    psyvid_close(&g_mv);
+    psyau_close(&g_au);
+}
+
+/* Start, every sample on its frame, the movie clock on the audio's, a tone
+ * mixed beside it, no allocation per frame. */
+static void test_snd_lock(double drift_ppm) {
+    disp d;
+    psyscr_frame f;
+    int64_t k, origin, t_start, first_shown = -1, worst = 0, heap0 = 0, tone_f0 = -1, n_mt = 0;
+    psyau_id tone_id = 0;
+    static float tone[480 * 2];
+    const psyrt_event* ev;
+    g_case = drift_ppm > 0 ? "soundtrack lock +" : "soundtrack lock -";
+    if (!snd_setup(&d, drift_ppm, 300, false)) return;
+    for (k = 0; k < SND_WARM; k++) snd_frame(&d, &f);   /* the fit has its slope */
+    CHECK(psyvid_play_at(&g_mv, PSYVID_ASAP) > 0);
+    for (k = 0; k < 480 * 2; k++) tone[k] = 0.25f;
+    for (k = 0; k < 560; k++) {
+        CHECK(snd_frame(&d, &f) >= 0);
+        if (k == 120) heap0 = (int64_t)psyvid_heap_calls();
+        if (k == 200) {
+            /* feedback during the movie: a voice on the same device */
+            psyau_buf b;
+            memset(&b, 0, sizeof b);
+            b.frames = tone; b.n = 480; b.channels = 2;
+            tone_id = psyau_play_at(&g_au, b, f.onset + 100000000);
+        }
+        if (first_shown < 0 && g_mv.has_last && g_mv.last.decision == PSYVID_SHOWN) first_shown = g_mv.last.predicted;
+    }
+    CHECK_I((int64_t)psyvid_heap_calls() - heap0, 0);
+    drain();
+    ev = last_sound(1);
+    CHECK(ev != NULL);
+    origin = snd_origin();
+    CHECK(origin != INT64_MIN);
+    if (!ev || origin == INT64_MIN) { snd_teardown(&d); return; }
+    t_start = ev->u.i64[2];
+    CHECK_I(ev->u.i64[1], 0);   /* sample 0 is movie time 0 */
+    /* the sound's first sample nearest the shared target, which is a
+     * display onset: the first frame shows on it (a target between onsets
+     * puts every frame up to half a period off the sound) */
+    CHECK(llabs(origin - ad_frame_of(&g_ad, t_start)) <= 1);
+    /* the follow reads the soundtrack's own sample, not the device's stream
+     * through an anchor (that path writes a CLOCK record) */
+    CHECK_I(count_other((uint16_t)PSYVID_EV_CLOCK), 0);
+    CHECK(first_shown >= 0 && llabs(first_shown - t_start) <= 1000);
+    {
+        psyau_onset o;
+        memset(&o, 0, sizeof o);
+        CHECK(tone_id > 0 && psyau_result(&g_au, tone_id, &o) == PSYAU_OK);
+        tone_f0 = o.start_frame;
+        CHECK(llabs(tone_f0 - ad_frame_of(&g_ad, o.target)) <= 1);
+    }
+    CHECK_I(tape_check(origin, origin + 480000 < g_ad.W ? origin + 480000 : g_ad.W, origin, 0, tone_f0, tone_f0 + 480, 0.25f), 0);
+    CHECK_I(tape_silent(0, origin), 0);
+    /* the movie time at each onset is the audio's: the sample on that
+     * frame, to the fit's error and half a sample */
+    for (k = 0; k < MAXD && k < SND_WARM + 600; k++) {
+        const frec* r = &g_fr[k];
+        int64_t e;
+        if (!r->have || !(r->flags & PSYVID_F_AUDIO_CLOCK)) continue;
+        e = llabs(r->mt - truth_mt(origin, r->t));
+        if (e > worst) worst = e;
+        n_mt++;
+    }
+    CHECK(n_mt > 400);
+    CHECK(worst < 30000);
+    printf("psy_video_test: soundtrack at %+.0f ppm: start on the target's frame %+lld, %lld frames on the audio clock, worst movie time against the audio %.1f us\n",
+           drift_ppm, (long long)(origin - ad_frame_of(&g_ad, t_start)), (long long)n_mt, worst / 1e3);
+    snd_teardown(&d);
+}
+
+/* Pause, resume, seek: the stop on its frame, silence, the resume at the
+ * sample nearest the resumed movie time, the seek's at the target's. */
+static void test_snd_controls(void) {
+    disp d;
+    psyscr_frame f;
+    int64_t k, o1, o2, o3, stop_f, w_resume, s0;
+    psyrt_event pr;
+    int64_t pause_id;
+    const psyrt_event* ev;
+    g_case = "soundtrack controls";
+    if (!snd_setup(&d, 37.0, 300, false)) return;
+    for (k = 0; k < SND_WARM; k++) snd_frame(&d, &f);
+    psyvid_play_at(&g_mv, PSYVID_ASAP);
+    for (k = 0; k < 120; k++) snd_frame(&d, &f);
+    o1 = snd_origin();
+    pause_id = psyvid_pause_at(&g_mv, PSYVID_ASAP);
+    for (k = 0; k < 40; k++) snd_frame(&d, &f);
+    drain();
+    ev = last_sound(2);
+    CHECK(ev != NULL);
+    CHECK_I(psyvid_result(&g_mv, pause_id, &pr), PSYVID_OK);
+    stop_f = ev ? ad_frame_of(&g_ad, ev->u.i64[2]) : 0;
+    w_resume = g_ad.W;
+    CHECK_I(tape_check(o1, stop_f - 1, o1, 0, 0, 0, 0.0f), 0);
+    CHECK_I(tape_silent(stop_f + 1, w_resume), 0);
+    /* the video paused on the frame nearest the same time */
+    CHECK(llabs((int64_t)pr.t_ns - (ev ? ev->u.i64[2] : 0)) <= d.P_report / 2 + 1);
+    psyvid_play_at(&g_mv, PSYVID_ASAP);
+    for (k = 0; k < 120; k++) snd_frame(&d, &f);
+    drain();
+    ev = last_sound(1);
+    o2 = snd_origin();
+    s0 = ev ? ev->u.i64[1] : -1;
+    /* resumed one display period after the frozen movie time */
+    CHECK_I(s0, psyvid__snd_sample(&g_mv, pr.u.i64[0] + d.P_report, 0));
+    CHECK(ev && llabs(o2 + s0 - ad_frame_of(&g_ad, ev->u.i64[2])) <= 1);
+    CHECK_I(tape_silent(stop_f + 1, o2 + s0), 0);
+    CHECK_I(tape_check(o2 + s0, g_ad.W, o2, 0, 0, 0, 0.0f), 0);
+    /* a seek forward, ASAP */
+    w_resume = g_ad.W;
+    psyvid_seek_frame(&g_mv, 200, PSYVID_ASAP);
+    for (k = 0; k < 120; k++) snd_frame(&d, &f);
+    drain();
+    ev = last_sound(1);
+    o3 = snd_origin();
+    CHECK(ev && ev->u.i64[1] == 200 * 1600);
+    CHECK(ev && llabs(o3 + 200 * 1600 - ad_frame_of(&g_ad, ev->u.i64[2])) <= 1);
+    CHECK_I(tape_check(o3 + 200 * 1600, g_ad.W, o3, 0, 0, 0, 0.0f), 0);
+    /* nothing from before the seek after its stop */
+    {
+        const psyrt_event* st = last_sound(2);
+        int64_t sf = st ? ad_frame_of(&g_ad, st->u.i64[2] > 0 ? st->u.i64[2] : 0) : w_resume;
+        (void)sf;
+        CHECK_I(tape_silent(w_resume + 2 * 1440, o3 + 200 * 1600), 0);
+    }
+    snd_teardown(&d);
+}
+
+/* A loop: the source's pass again and again, gapless, with the video's. */
+static void test_snd_loop(void) {
+    disp d;
+    psyscr_frame f;
+    int64_t k, origin;
+    g_case = "soundtrack loop";
+    if (!snd_setup(&d, 37.0, 150, true)) return;   /* 5 s: 240000 samples */
+    for (k = 0; k < SND_WARM; k++) snd_frame(&d, &f);
+    psyvid_play_at(&g_mv, PSYVID_ASAP);
+    for (k = 0; k < 1000; k++) CHECK(snd_frame(&d, &f) >= 0);   /* 16.7 s: three cycles */
+    drain();
+    origin = snd_origin();
+    CHECK(origin != INT64_MIN);
+    CHECK(g_ad.W - origin > 3 * 240000);
+    CHECK_I(tape_check(origin, g_ad.W, origin, 240000, 0, 0, 0.0f), 0);
+    CHECK(count_other((uint16_t)PSYVID_EV_LOOP) >= 3);
+    snd_teardown(&d);
+}
+
+/* A timed start inside the audio's lead: psy_audio starts it late and skips
+ * the samples it missed, so every later sample is still on its frame. */
+static void test_snd_late(void) {
+    disp d;
+    psyscr_frame f;
+    int64_t k, origin, t;
+    g_case = "soundtrack late";
+    if (!snd_setup(&d, 37.0, 300, false)) return;
+    for (k = 0; k < SND_WARM; k++) snd_frame(&d, &f);
+    t = g_vt + 5000000;   /* 5 ms: inside the lead */
+    psyvid_play_at(&g_mv, t);
+    for (k = 0; k < 200; k++) snd_frame(&d, &f);
+    origin = snd_origin();
+    CHECK(origin != INT64_MIN);
+    CHECK(llabs(origin - ad_frame_of(&g_ad, t)) <= 1);   /* origin from the plan, not the late frame */
+    {
+        int64_t w0 = origin;
+        while (w0 < g_ad.W && g_atape[w0 * 2] == 0.0f) w0++;
+        CHECK(w0 > origin);   /* it did start late */
+        CHECK_I(tape_check(w0, g_ad.W, origin, 0, 0, 0, 0.0f), 0);
+    }
+    snd_teardown(&d);
+}
+
+static void test_snd_refusals(void) {
+    disp d;
+    psyvid_desc vd;
+    psyvid_soundtrack_desc sdd;
+    static const struct { int32_t num, den; int64_t frames, samples; bool loop; int ok; const char* why; } t[] = {
+        { 30, 1, 150, 240000, false, 1, NULL },
+        { 30, 1, 150, 239999, false, 0, "240000 are needed" },
+        { 30, 1, 150, 240001, false, 0, "240000 are needed" },
+        { 30000, 1001, 151, 241842, false, 1, NULL },              /* 241841.6 rounds to 241842 */
+        { 30000, 1001, 151, 241841, false, 0, "241842 are needed" },
+        { 30000, 1001, 151, 241843, false, 0, "241842 are needed" },
+        { 256, 1, 1, 188, false, 1, NULL },                        /* 187.5: a tie, up */
+        { 256, 1, 1, 187, false, 0, "188 are needed" },
+        { 30000, 1001, 151, 241842, true, 0, "multiple of 5" },     /* not a whole number of samples */
+        { 30000, 1001, 150, 240240, true, 1, NULL },
+    };
+    size_t i;
+    g_case = "soundtrack refusals";
+    disp_init(&d, 60.0, 0);
+    g_vt = d.T0 - 3000000000LL;
+    if (!au_open(0.0, g_vt + 1000000)) { fail(__LINE__, "audio open"); return; }
+    for (i = 0; i < sizeof t / sizeof t[0]; i++) {
+        int rc;
+        sd_default(&g_sd, t[i].num, t[i].den, t[i].frames, 1);
+        desc_default(&vd);
+        vd.loop = t[i].loop;
+        if (!open_mv(&vd)) continue;
+        make_wav(48000, 2, t[i].samples);
+        wav_desc(&sdd);
+        rc = psyvid_soundtrack(&g_mv, &g_au, &sdd);
+        if (t[i].ok) { if (rc != PSYVID_OK) { fprintf(stderr, "  case %d: %s\n", (int)i, psyvid_error(&g_mv)); fail(__LINE__, "refused a right length"); } }
+        else if (rc != PSYVID_ERR_REFUSED || !strstr(psyvid_error(&g_mv), t[i].why)) {
+            fprintf(stderr, "  case %d: %d '%s', wanted '%s'\n", (int)i, rc, psyvid_error(&g_mv), t[i].why);
+            fail(__LINE__, "refusal");
+        }
+        psyvid_close(&g_mv);
+    }
+    /* rate and channels */
+    sd_default(&g_sd, 30, 1, 150, 1);
+    desc_default(&vd);
+    if (open_mv(&vd)) {
+        /* rate and channels: psy_audio's refusals, passed through */
+        make_wav(44100, 2, 220500);
+        wav_desc(&sdd);
+        CHECK_I(psyvid_soundtrack(&g_mv, &g_au, &sdd), PSYVID_ERR_REFUSED);
+        CHECK(strstr(psyvid_error(&g_mv), "44100") != NULL);
+        make_wav(48000, 3, 240000);
+        wav_desc(&sdd);
+        CHECK_I(psyvid_soundtrack(&g_mv, &g_au, &sdd), PSYVID_ERR_REFUSED);
+        CHECK(strstr(psyvid_error(&g_mv), "3") != NULL);
+        make_wav(48000, 2, 240000);
+        wav_desc(&sdd);
+        psyvid_play_at(&g_mv, PSYVID_ASAP);
+        CHECK_I(psyvid_soundtrack(&g_mv, &g_au, &sdd), PSYVID_ERR_ORDER);   /* after a play */
+        psyvid_close(&g_mv);
+    }
+    psyau_close(&g_au);
+}
+
+/* Without the follow, the movie base alone must agree with the sound: both
+ * start at the shared target, so at 0 ppm the base's time at each onset is
+ * the sample playing then, to half a sample. The display misses the
+ * target's vblank, so the first frame lands a period after the sound
+ * started: the base still starts at the target. And the sample of a movie
+ * time is the nearest one. */
+static void test_snd_base(void) {
+    disp d;
+    psyscr_frame f;
+    psyvid_movie m;
+    int64_t k, origin, worst = 0, n = 0;
+    int missed = 0;
+    g_case = "soundtrack base, no follow";
+    memset(&m, 0, sizeof m);
+    m.snd_rate = 48000; m.snd_frames = 1000;
+    CHECK_I(psyvid__snd_sample(&m, 10416, 0), 0);     /* 0.49997 samples */
+    CHECK_I(psyvid__snd_sample(&m, 10417, 0), 1);     /* 0.50002 */
+    CHECK_I(psyvid__snd_sample(&m, 20833, 0), 1);     /* 0.99998 */
+    CHECK_I(psyvid__snd_sample(&m, 1000000000, 2), 2000 + 48000);
+    if (!snd_setup(&d, 0.0, 300, false)) return;
+    for (k = 0; k < SND_WARM; k++) snd_frame(&d, &f);
+    psyvid_play_at(&g_mv, PSYVID_ASAP);
+    for (k = 0; k < 300; k++) {
+        disp_next(&d, &f);
+        ad_until(&g_ad, g_vt);
+        psyau_update(&g_au);
+        CHECK(psyvid_update(&g_mv, &f) >= 0);
+        if (!missed && g_mv.snd_phase == 2 && llabs(f.onset + d.P_report - g_mv.snd_t) < 1000) {
+            d.late_next = 1;   /* this flip takes the target's vblank */
+            missed = 1;
+        }
+    }
+    CHECK_I(missed, 1);
+    drain();
+    origin = snd_origin();
+    CHECK(origin != INT64_MIN);
+    for (k = 0; k < MAXD && k < SND_WARM + 300; k++) {
+        const frec* r = &g_fr[k];
+        int64_t e;
+        if (!r->have || r->dec == 0 || r->mt <= 0) continue;
+        e = llabs(r->mt - truth_mt(origin, r->t));
+        if (e > worst) worst = e;
+        n++;
+    }
+    CHECK(n > 200);
+    CHECK(worst < 30000);
+    snd_teardown(&d);
+}
+
+static void test_soundtrack(void) {
+    test_snd_base();
+    test_snd_lock(37.0);
+    test_snd_lock(-400.0);
+    test_snd_controls();
+    test_snd_loop();
+    test_snd_late();
+    test_snd_refusals();
+}
+
+/* ------------------------------------------------------------ base rates
+ * psy_timeline.h's base rates (v0.4.0): the movie base at num/den. The due
+ * frame is the base time the frame's window reaches (psytl_window), so an
+ * annotation at t(i) on the movie base fires on the display frame that
+ * first shows frame i at any rate, as at rate 1. */
+
+/* As run_agree, with the base at rn/rd from the start, or changed to rn/rd
+ * at display frame `change_at` (rate 1 before it). */
+static void run_agree_rate(const char* name, int32_t num, int32_t den, double hz, double noise,
+                           int32_t rn, int32_t rd, int64_t change_at) {
+    psyvid_desc vd;
+    disp d;
+    psyscr_frame f;
+    int64_t k, n = 2400, frames = 3000, mism = 0, fired_n = 0, twice = 0, drift_near = 0, k_change = -1;
+    static int64_t fired_at[4000];
+    static int64_t first_show[4000];
+    g_case = name;
+    rec_reset();
+    tl_open();
+    for (k = 0; k < frames; k++) {
+        psytl_event e;
+        memset(&e, 0, sizeof e);
+        e.base = 3; e.kind = PSYTL_MARK; e.time = psyvid_frame_time(num, den, k); e.code = (int32_t)k;
+        psytl_add(&g_tl, &e);
+        fired_at[k] = -1;
+        first_show[k] = -1;
+    }
+    if (change_at < 0) CHECK_I(psytl_rate(&g_tl, 3, 0, rn, rd), 0);   /* a stopped base keeps it */
+    sd_default(&g_sd, num, den, frames, 1);
+    desc_default(&vd);
+    vd.refresh_num = (int32_t)hz;
+    vd.timeline = &g_tl;
+    vd.base = 3;
+    if (!open_mv(&vd)) return;
+    disp_init(&d, hz, 0);
+    d.noise_ns = noise;
+    CHECK(psyvid_play_at(&g_mv, PSYVID_ASAP) > 0);
+    for (k = 0; k < n; k++) {
+        psytl_event fired[16];
+        psytl_frame tf;
+        int nf, i;
+        disp_next(&d, &f);
+        if (k == change_at) { CHECK_I(psytl_rate(&g_tl, 3, f.onset, rn, rd), 0); k_change = f.index; }
+        psyvid_update(&g_mv, &f);
+        if (g_mv.has_last && g_mv.last.display == f.index && g_mv.last.decision == PSYVID_SHOWN && g_mv.last.frame < 4000)
+            first_show[g_mv.last.frame] = f.index;
+        tf.onset = f.onset; tf.period = f.period; tf.index = f.index;
+        nf = psytl_evaluate(&g_tl, &tf, fired, 16);
+        for (i = 0; i < nf && i < 16; i++) {
+            int64_t c = fired[i].code;
+            if (fired_at[c] >= 0) twice++;
+            fired_at[c] = f.index;
+            fired_n++;
+        }
+        if ((k & 255) == 0) drain();
+    }
+    settle(&d);
+    for (k = 0; k < frames; k++) {
+        int64_t want = first_show[k];
+        if (fired_at[k] < 0 && want < 0) continue;
+        if (want < 0) {
+            int64_t j;
+            for (j = k + 1; j < frames && first_show[j] < 0; j++) {}
+            want = j < frames ? first_show[j] : -1;
+        }
+        if (fired_at[k] != want) mism++;
+    }
+    /* a change of rate is not a slip */
+    if (k_change >= 0) for (k = k_change; k < k_change + 3 && k < MAXD; k++) drift_near += g_fr[k].have && g_fr[k].why == PSYVID_WHY_DRIFT;
+    CHECK(fired_n > 100);
+    CHECK_I(mism, 0);
+    CHECK_I(twice, 0);
+    CHECK_I(drift_near, 0);
+    CHECK(count_other((uint16_t)PSYVID_EV_RATE) >= 1);
+    psyvid_close(&g_mv);
+}
+
+static void test_rates(void) {
+    run_agree_rate("rate 1/2: 30 on 60, 20 us noise", 30, 1, 60.0, 20000, 1, 2, -1);
+    run_agree_rate("rate 1001/1000: 23.976 on 60", 24000, 1001, 60.0, 20000, 1001, 1000, -1);
+    run_agree_rate("rate 2/1: 30 on 60", 30, 1, 60.0, 20000, 2, 1, -1);
+    run_agree_rate("rate 1 to 1/2 at frame 500", 30, 1, 60.0, 20000, 1, 2, 500);
+    /* the cadence at the rate: 15 fps of movie time on 60 Hz is a multiple */
+    {
+        psyvid_desc vd;
+        disp d;
+        psyscr_frame f;
+        psyvid_info info;
+        const psyrt_event* ev;
+        int64_t k, pause_id;
+        psyrt_event pr;
+        g_case = "rate 1/2: cadence, pause, record due";
+        rec_reset();
+        tl_open();
+        sd_default(&g_sd, 30, 1, 1000, 1);
+        desc_default(&vd);
+        vd.timeline = &g_tl; vd.base = 2;
+        if (open_mv(&vd)) {
+            disp_init(&d, 60.0, 0);
+            CHECK_I(psytl_rate(&g_tl, 2, 0, 1, 2), 0);
+            psyvid_play_at(&g_mv, PSYVID_ASAP);
+            for (k = 0; k < 200; k++) { disp_next(&d, &f); psyvid_update(&g_mv, &f); }
+            psyvid_get_info(&g_mv, &info);
+            CHECK_I(info.multiple, 4);
+            drain();
+            ev = find_other((uint16_t)PSYVID_EV_RATE, 0);
+            CHECK(ev && ev->u.i32[0] == 1 && ev->u.i32[1] == 2 && ev->u.i32[2] == 4);
+            /* the record's due is the RT time the base reached the frame,
+             * repeats included; no slip on an exact grid */
+            {
+                int64_t drift = 0, checked = 0;
+                for (k = 20; k < 190; k++) {
+                    const frec* r = &g_fr[k];
+                    int64_t rt = 0;
+                    if (!r->have || r->dec == 0) continue;
+                    drift += r->why == PSYVID_WHY_DRIFT;
+                    if (k < 150) continue;
+                    CHECK(psytl_rt_time(&g_tl, 2, psyvid_frame_time(30, 1, r->frame), &rt));
+                    CHECK_I(r->due, rt);
+                    checked++;
+                }
+                CHECK_I(drift, 0);
+                CHECK(checked > 30);
+            }
+            /* a resume starts one display period of RT later: half a period
+             * of movie time */
+            pause_id = psyvid_pause_at(&g_mv, PSYVID_ASAP);
+            for (k = 0; k < 5; k++) { disp_next(&d, &f); psyvid_update(&g_mv, &f); }
+            CHECK_I(psyvid_result(&g_mv, pause_id, &pr), PSYVID_OK);
+            {
+                int64_t pid = psyvid_play_at(&g_mv, PSYVID_ASAP);
+                psyrt_event pl;
+                for (k = 0; k < 20; k++) { disp_next(&d, &f); psyvid_update(&g_mv, &f); }
+                CHECK_I(psyvid_result(&g_mv, pid, &pl), PSYVID_OK);
+                CHECK_I(pl.u.i64[0], pr.u.i64[0] + d.P_report / 2);
+            }
+            psyvid_close(&g_mv);
+        }
+    }
+    /* 23.976 at 1/2 judders on 60 Hz: CADENCE, never DRIFT, 10 ppb off the
+     * exact grid (where ties would be) */
+    {
+        psyvid_desc vd;
+        disp d;
+        psyscr_frame f;
+        int64_t k, drift = 0, cad = 0;
+        g_case = "rate 1/2: 23.976 judders";
+        rec_reset();
+        tl_open();
+        sd_default(&g_sd, 24000, 1001, 1000, 1);
+        desc_default(&vd);
+        vd.timeline = &g_tl; vd.base = 1;
+        if (open_mv(&vd)) {
+            disp_init(&d, 60.0, 0.01);
+            CHECK_I(psytl_rate(&g_tl, 1, 0, 1, 2), 0);
+            psyvid_play_at(&g_mv, PSYVID_ASAP);
+            for (k = 0; k < 900; k++) { disp_next(&d, &f); psyvid_update(&g_mv, &f); if ((k & 255) == 0) drain(); }
+            settle(&d);
+            for (k = 20; k < 880; k++) { drift += g_fr[k].have && g_fr[k].why == PSYVID_WHY_DRIFT; cad += g_fr[k].have && g_fr[k].why == PSYVID_WHY_CADENCE; }
+            CHECK_I(drift, 0);
+            (void)cad;   /* 5.005 display frames per frame: a sixth showing each 200 frames, too few here */
+            {
+                psyvid_info info;
+                psyvid_get_info(&g_mv, &info);
+                CHECK_I(info.multiple, 0);
+                CHECK(fabs(info.per_frame - 5.005) < 1e-6);
+            }
+            psyvid_close(&g_mv);
+        }
+    }
+    /* a loop at 1/2: the wrap at the RT time the base reached t(N); the
+     * annotation at frame 0 fires once per cycle */
+    {
+        psyvid_desc vd;
+        disp d;
+        psyscr_frame f;
+        psytl_event e;
+        int64_t k;
+        int fired0 = 0;
+        g_case = "rate 1/2: loop";
+        rec_reset();
+        tl_open();
+        memset(&e, 0, sizeof e);
+        e.base = 1; e.kind = PSYTL_MARK; e.time = 0; e.code = 7;
+        psytl_add(&g_tl, &e);
+        sd_default(&g_sd, 24000, 1001, 10, 1);
+        desc_default(&vd);
+        vd.loop = true; vd.timeline = &g_tl; vd.base = 1;
+        if (open_mv(&vd)) {
+            CHECK_I(psytl_rate(&g_tl, 1, 0, 1, 2), 0);
+            psyvid_play_at(&g_mv, PSYVID_ASAP);
+            disp_init(&d, 60.0, 0.01);   /* 10 ppb off the exact grid */
+            for (k = 0; k < 1020; k++) {   /* 17 s: 10 frames of 23.976 at 1/2 last 0.83 s, 20 cycles */
+                psytl_event fired[8];
+                psytl_frame tf;
+                int nf, i;
+                disp_next(&d, &f);
+                psyvid_update(&g_mv, &f);
+                tf.onset = f.onset; tf.period = f.period; tf.index = f.index;
+                nf = psytl_evaluate(&g_tl, &tf, fired, 8);
+                for (i = 0; i < nf; i++) fired0 += fired[i].code == 7;
+            }
+            drain();
+            CHECK(fired0 >= 19 && fired0 <= 21);
+            CHECK(count_other((uint16_t)PSYVID_EV_LOOP) >= 18);
+            /* each cycle lasts twice the movie's duration of RT: the wraps
+             * stay on that grid, with no error that adds up */
+            {
+                const psyrt_event* l0 = find_other((uint16_t)PSYVID_EV_LOOP, 0);
+                int c;
+                for (c = 1; l0 && c < 18; c++) {
+                    const psyrt_event* lc = find_other((uint16_t)PSYVID_EV_LOOP, c);
+                    int64_t want = (int64_t)l0->t_ns + (int64_t)c * 2 * psyvid_frame_time(24000, 1001, 10);
+                    if (lc && llabs((int64_t)lc->t_ns - want) > d.P_report + 1) fail_i(__LINE__, "loop wrap off the rate's grid", (long long)lc->t_ns, (long long)want);
+                }
+            }
+            /* at the wrap the base keeps the overshoot: the movie time steps
+             * by half a period, less the duration */
+            {
+                int c, n_ok = 0;
+                for (c = 0; c < 18; c++) {
+                    const psyrt_event* lc = find_other((uint16_t)PSYVID_EV_LOOP, c);
+                    int64_t k2;
+                    if (!lc) break;
+                    for (k2 = 1; k2 < MAXD; k2++) if (g_fr[k2].have && (int64_t)g_fr[k2].t == (int64_t)lc->t_ns) break;
+                    if (k2 >= MAXD || !g_fr[k2 - 1].have) continue;
+                    if (llabs(g_fr[k2].mt - (g_fr[k2 - 1].mt + d.P_report / 2 - psyvid_frame_time(24000, 1001, 10))) > 2)
+                        fail_i(__LINE__, "movie time across the wrap", (long long)g_fr[k2].mt, (long long)(g_fr[k2 - 1].mt + d.P_report / 2 - psyvid_frame_time(24000, 1001, 10)));
+                    else n_ok++;
+                }
+                CHECK(n_ok >= 15);
+            }
+            psyvid_close(&g_mv);
+        }
+    }
+    /* strict_cadence: a rate that judders holds the frame and refuses */
+    {
+        psyvid_desc vd;
+        disp d;
+        psyscr_frame f;
+        int64_t k, held;
+        int rc = PSYVID_OK;
+        g_case = "rate: strict_cadence";
+        rec_reset();
+        tl_open();
+        sd_default(&g_sd, 30, 1, 1000, 1);
+        desc_default(&vd);
+        vd.timeline = &g_tl; vd.base = 1; vd.strict_cadence = true;
+        if (open_mv(&vd)) {
+            disp_init(&d, 60.0, 0);
+            psyvid_play_at(&g_mv, PSYVID_ASAP);
+            for (k = 0; k < 60; k++) { disp_next(&d, &f); CHECK_I(psyvid_update(&g_mv, &f), PSYVID_OK); }
+            CHECK_I(psytl_rate(&g_tl, 1, f.onset + d.P_report, 3, 4), 0);   /* 22.5 fps on 60 Hz */
+            held = g_mv.shown_g;
+            for (k = 0; k < 30; k++) { disp_next(&d, &f); rc = psyvid_update(&g_mv, &f); }
+            CHECK_I(rc, PSYVID_ERR_REFUSED);
+            CHECK(g_mv.shown_g <= held + 1);
+            CHECK(strstr(psyvid_error(&g_mv), "strict_cadence") != NULL);
+            drain();
+            {
+                const psyrt_event* ev = find_other((uint16_t)PSYVID_EV_RATE, 0);
+                CHECK(ev && ev->u.u32[8] == 1);
+            }
+            CHECK_I(psytl_rate(&g_tl, 1, f.onset + d.P_report, 1, 2), 0);   /* back to a multiple */
+            for (k = 0; k < 30; k++) { disp_next(&d, &f); rc = psyvid_update(&g_mv, &f); }
+            CHECK_I(rc, PSYVID_OK);
+            psyvid_close(&g_mv);
+        }
+    }
+    /* a soundtrack refuses a rate other than 1 */
+    {
+        psyvid_desc vd;
+        psyvid_soundtrack_desc sdd;
+        disp d;
+        g_case = "rate: soundtrack";
+        disp_init(&d, 60.0, 0);
+        g_vt = d.T0 - 3000000000LL;
+        rec_reset();
+        tl_open();
+        if (au_open(0.0, g_vt + 1000000)) {
+            sd_default(&g_sd, 30, 1, 150, 1);
+            desc_default(&vd);
+            vd.timeline = &g_tl; vd.base = 1;
+            if (open_mv(&vd)) {
+                CHECK_I(psytl_rate(&g_tl, 1, 0, 1, 2), 0);
+                make_wav(48000, 2, 240000);
+                wav_desc(&sdd);
+                CHECK_I(psyvid_soundtrack(&g_mv, &g_au, &sdd), PSYVID_ERR_REFUSED);
+                CHECK(strstr(psyvid_error(&g_mv), "rate 1 only") != NULL);
+                psyvid_close(&g_mv);
+            }
+            psyau_close(&g_au);
+        }
+    }
+}
+
+/* ------------------------------------------------- Media Foundation (Windows)
+ * Real decoding of the clips tests/media/make_video_clips.sh makes, in the
+ * directory PSYVID_TEST_MEDIA names. Each frame carries its index in 16 bars
+ * across the top rows, so the test reads which frame the upload holds.
+ * Skipped, with a message, without the clips or without Media Foundation. */
+#if PSYVID__MF
+
+static char g_media[512];
+
+static const char* media(const char* name) {
+    static char p[4][1024];
+    static int k;
+    k = (k + 1) & 3;
+    snprintf(p[k], sizeof p[k], "%s/%s", g_media, name);
+    return p[k];
+}
+
+static void index_desc_bt709(psyvid_index_desc* d) {
+    memset(d, 0, sizeof *d);
+    d->matrix = PSYVID_MATRIX_BT709; d->range = PSYVID_RANGE_LIMITED; d->transfer = PSYVID_TRC_BT1886;
+    d->primaries = PSYVID_PRIM_BT709; d->siting = PSYVID_SITING_LEFT;
+}
+
+/* The frame number in the last RGBA8 upload: bit k is bar k, read at row 32
+ * (luma 235 is white, 16 black). */
+static int up_bars(void) {
+    int k, v = 0;
+    if (!g_up_y || g_up_w < 16) return -1;
+    for (k = 0; k < 16; k++) {
+        int x = (k * g_mv.info.w) / 16 + g_mv.info.w / 32;
+        if (g_up_row32[x] > 128) v |= 1 << k;
+    }
+    return v;
+}
+
+static void mf_desc(psyvid_desc* vd, const char* clip) {
+    memset(vd, 0, sizeof *vd);
+    vd->path = media(clip);
+    vd->inline_decode = true;
+    vd->ring = &g_ring;
+    vd->refresh_num = 60; vd->refresh_den = 1;
+    vd->ahead = 4;
+}
+
+/* The XXH64 of each of the first 3 frames of clip.nv12 (ffmpeg's decoder,
+ * tight NV12) must be the index's: the same byte stream that
+ * psyvid__hash_planes() hashes. */
+static void mf_ref_check(const char* clip, int w, int h) {
+    char p[300], ip[300];
+    psyvid__index ix;
+    psyvid_desc vd;
+    char err[300];
+    size_t fb = (size_t)w * (size_t)h + (size_t)((w + 1) / 2) * 2 * (size_t)((h + 1) / 2);
+    uint8_t* b = (uint8_t*)malloc(fb);
+    FILE* fh;
+    int k;
+    snprintf(p, sizeof p, "%s.nv12", clip);
+    snprintf(ip, sizeof ip, "%s.mp4", clip);
+    fh = fopen(media(p), "rb");
+    if (!fh || !b) { printf("psy_video_test: no %s; the ffmpeg reference check skipped\n", media(p)); if (fh) fclose(fh); free(b); return; }
+    memset(&vd, 0, sizeof vd);
+    vd.path = media(ip);
+    if (psyvid__index_load(&vd, &ix, 1, err, sizeof err) < 0) { fail(__LINE__, err); fclose(fh); free(b); return; }
+    for (k = 0; k < 3; k++) {
+        if (fread(b, 1, fb, fh) != fb) { fail(__LINE__, "short reference"); break; }
+        if (psyvid_xxh64(b, fb, 0) != ix.hashes[k]) { fprintf(stderr, "  %s frame %d\n", clip, k); fail(__LINE__, "Media Foundation's bytes differ from ffmpeg's"); }
+    }
+    fclose(fh);
+    free(b);
+    psyvid__free(ix.hashes);
+}
+
+static void test_mf_index(void) {
+    static const struct { const char* clip; int64_t frames; const char* why; } t[] = {
+        { "c_720p30.mp4", 300, NULL }, { "c_1080p30.mp4", 300, NULL }, { "c_1080p60.mp4", 600, NULL },
+        { "c_2997.mp4", 150, NULL }, { "c_23976.mp4", 96, NULL }, { "c_crop.mp4", 60, NULL },
+        { "c_audio.mp4", 90, NULL },
+        { "r_bframes.mp4", 0, "B-frames" }, { "r_vfr.mp4", 0, "no constant rate" }, { "r_gop.mp4", 0, "GOP length changes" },
+        { "r_10bit.mp4", 0, "High 10" }, { "r_444.mp4", 0, "4:4:4" }, { "r_sar.mp4", 0, "square pixels" },
+        { "r_interlace.mp4", 0, "interlaced" }, { "r_mpeg4.mp4", 0, "not H.264 or HEVC" },
+        { "r_rotation.mp4", 0, "rotated" }, { "r_ts1000.mp4", 0, "no constant rate" }, { "r_offset.mp4", 0, "edit list" },
+    };
+    psyvid_index_desc d;
+    char err[600];
+    size_t i;
+    int64_t n;
+    g_case = "mf index";
+    for (i = 0; i < sizeof t / sizeof t[0]; i++) {
+        index_desc_bt709(&d);
+        err[0] = 0;
+        n = psyvid_index_make(media(t[i].clip), NULL, &d, err, sizeof err);
+        if (t[i].why == NULL) {
+            if (n != t[i].frames) { fprintf(stderr, "  %s: %s\n", t[i].clip, err); fail_i(__LINE__, "index frames", n, t[i].frames); }
+        } else if (n >= 0 || !strstr(err, t[i].why)) {
+            fprintf(stderr, "  %s: %lld, '%s', wanted '%s'\n", t[i].clip, (long long)n, err, t[i].why);
+            fail(__LINE__, "refusal");
+        }
+    }
+    /* the index's first hashes against ffmpeg's decoder, frame for frame */
+    {
+        static const struct { const char* clip; int w, h; } r[] = {
+            { "c_720p30", 1280, 720 }, { "c_1080p30", 1920, 1080 }, { "c_crop", 1280, 718 } };
+        for (i = 0; i < sizeof r / sizeof r[0]; i++) mf_ref_check(r[i].clip, r[i].w, r[i].h);
+    }
+    /* HEVC needs a decoder that Windows may not have */
+    index_desc_bt709(&d);
+    n = psyvid_index_make(media("c_hevc.mp4"), NULL, &d, err, sizeof err);
+    if (n < 0) {
+        if (strstr(err, "HEVC")) printf("psy_video_test: HEVC skipped: %s\n", err);
+        else { fprintf(stderr, "  c_hevc: %s\n", err); fail(__LINE__, "HEVC index"); }
+    } else CHECK_I(n, 120);
+    /* the color comes from the stream's SPS (Media Foundation reports none):
+     * an empty desc takes it, a desc that contradicts it is refused */
+    {
+        psyvid__index ix;
+        psyvid_desc vq;
+        memset(&d, 0, sizeof d);
+        n = psyvid_index_make(media("c_crop.mp4"), media("c_crop.vui.psyvi"), &d, err, sizeof err);
+        if (n != 60) { fprintf(stderr, "  %s\n", err); fail(__LINE__, "index from the SPS's color"); }
+        memset(&vq, 0, sizeof vq);
+        vq.path = media("c_crop.mp4");
+        {
+            static uint8_t ib[4096];
+            FILE* fh = fopen(media("c_crop.vui.psyvi"), "rb");
+            size_t got = fh ? fread(ib, 1, sizeof ib, fh) : 0;
+            if (fh) fclose(fh);
+            vq.index = ib; vq.index_size = got;
+            if (psyvid__index_load(&vq, &ix, 0, err, sizeof err) == PSYVID_OK) {
+                CHECK_I(ix.c.matrix, PSYVID_MATRIX_BT709); CHECK_I(ix.c.range, PSYVID_RANGE_LIMITED);
+                CHECK_I(ix.c.transfer, PSYVID_TRC_BT1886); CHECK_I(ix.c.primaries, PSYVID_PRIM_BT709);
+                CHECK_I(ix.c.siting, PSYVID_SITING_LEFT);
+            } else fail(__LINE__, err);
+        }
+        remove(media("c_crop.vui.psyvi"));
+        memset(&d, 0, sizeof d);
+        d.matrix = PSYVID_MATRIX_BT601;
+        n = psyvid_index_make(media("c_crop.mp4"), media("c_crop.vui.psyvi"), &d, err, sizeof err);
+        CHECK(n < 0 && strstr(err, "the stream states matrix"));
+        remove(media("c_crop.vui.psyvi"));
+        /* three different fields: each in its place */
+        memset(&d, 0, sizeof d);
+        n = psyvid_index_make(media("c_mixcolor.mp4"), media("c_mixcolor.vui.psyvi"), &d, err, sizeof err);
+        if (n != 30) { fprintf(stderr, "  %s\n", err); fail(__LINE__, "c_mixcolor index"); }
+        else {
+            static uint8_t ib2[4096];
+            FILE* fh = fopen(media("c_mixcolor.vui.psyvi"), "rb");
+            size_t got = fh ? fread(ib2, 1, sizeof ib2, fh) : 0;
+            if (fh) fclose(fh);
+            vq.path = media("c_mixcolor.mp4");
+            vq.index = ib2; vq.index_size = got;
+            if (psyvid__index_load(&vq, &ix, 0, err, sizeof err) == PSYVID_OK) {
+                CHECK_I(ix.c.matrix, PSYVID_MATRIX_BT601); CHECK_I(ix.c.transfer, PSYVID_TRC_SRGB);
+                CHECK_I(ix.c.primaries, PSYVID_PRIM_BT709);
+            } else fail(__LINE__, err);
+        }
+        remove(media("c_mixcolor.vui.psyvi"));
+        /* HEVC's VUI is not read: its color must be stated */
+        memset(&d, 0, sizeof d);
+        n = psyvid_index_make(media("c_hevc.mp4"), media("c_hevc.vui.psyvi"), &d, err, sizeof err);
+        CHECK(n < 0 && (strstr(err, "does not state its matrix") || strstr(err, "HEVC")));
+        remove(media("c_hevc.vui.psyvi"));
+    }
+}
+
+/* Plays a clip from frame 0 to the end on 60 Hz and checks every shown
+ * frame's bar code against its index; returns the shown count. */
+static int32_t g_mf_w, g_mf_h;
+static int64_t mf_play_all(const psyvid_desc* vd, int64_t frames, int check_heap) {
+    disp d;
+    psyscr_frame f;
+    psyvid_info info;
+    int64_t k, shown = 0, bad = 0, heap0 = 0;
+    int rc = PSYVID_OK;
+    rec_reset();
+    g_up_bytes = 0;
+    if (!psyvid_open(&g_mv, &g_gfx, vd)) { fprintf(stderr, "  open: %s\n", psyvid_error(&g_mv)); fail(__LINE__, "open"); return 0; }
+    disp_init(&d, 60.0, 0.01);
+    CHECK(psyvid_play_at(&g_mv, PSYVID_ASAP) > 0);
+    for (k = 0; k < frames * 3 + 60 && rc == PSYVID_OK; k++) {
+        disp_next(&d, &f);
+        if (k == 120) heap0 = (int64_t)psyvid_heap_calls();
+        rc = psyvid_update(&g_mv, &f);
+        if (g_mv.has_last && g_mv.last.display == f.index && g_mv.last.decision == PSYVID_SHOWN) {
+            shown++;
+            if (up_bars() != (int)(g_mv.last.frame & 0xffff)) bad++;
+        }
+    }
+    CHECK_I(rc, PSYVID_ENDED);
+    CHECK_I(bad, 0);
+    if (check_heap) CHECK_I((int64_t)psyvid_heap_calls() - heap0, 0);
+    psyvid_get_info(&g_mv, &info);
+    CHECK_I(info.ts_mismatch, 0);
+    CHECK_I(info.hash_mismatch, 0);
+    g_mf_w = info.w; g_mf_h = info.h;
+    psyvid_close(&g_mv);
+    return shown;
+}
+
+static void test_mf_play(void) {
+    psyvid_desc vd;
+    psyvid_index_desc id;
+    char err[600], line[1024];
+    int hw;
+    g_case = "mf play";
+    mf_desc(&vd, "c_720p30.mp4");
+    CHECK_I(mf_play_all(&vd, 300, 1), 300);
+    /* 1080p: coded 1088 rows, the chroma plane after all of them */
+    mf_desc(&vd, "c_1080p30.mp4");
+    CHECK_I(mf_play_all(&vd, 300, 1), 300);
+    CHECK_I(g_mf_w, 1920); CHECK_I(g_mf_h, 1080);   /* the display aperture, not the coded 1088 */
+    mf_desc(&vd, "c_crop.mp4");
+    CHECK_I(mf_play_all(&vd, 60, 0), 60);
+    CHECK_I(g_mf_w, 1280); CHECK_I(g_mf_h, 718);
+    /* 24000/1001: the rate is the index's, fitted from the sample times */
+    mf_desc(&vd, "c_23976.mp4");
+    CHECK(mf_play_all(&vd, 96, 0) == 96);
+    /* every decoder gives the software decoder's bytes (the index's) */
+    g_case = "mf decoders";
+    for (hw = PSYVID_HW_OFF; hw <= PSYVID_HW_DXVA; hw++) {
+        psyvid_info info;
+        mf_desc(&vd, "c_1080p60.mp4");
+        vd.hw_decode = (psyvid_hw)hw;
+        vd.refresh_num = 120;
+        CHECK_I(mf_play_all(&vd, 600, 0), 600);
+        if (psyvid_open(&g_mv, &g_gfx, &vd)) {
+            psyvid_get_info(&g_mv, &info);
+            psyvid_describe(&g_mv, line, sizeof line);
+            printf("psy_video_test: hw %d: %.140s\n", hw, line);
+            psyvid_close(&g_mv);
+        }
+    }
+    /* an index made by DXVA serves the software decoder */
+    index_desc_bt709(&id);
+    id.hw = PSYVID_HW_DXVA;
+    CHECK_I(psyvid_index_make(media("c_720p30.mp4"), media("c_720p30.dxva.psyvi"), &id, err, sizeof err), 300);
+    mf_desc(&vd, "c_720p30.mp4");
+    {
+        FILE* fh = fopen(media("c_720p30.dxva.psyvi"), "rb");
+        static uint8_t ib[8192];
+        size_t n = fh ? fread(ib, 1, sizeof ib, fh) : 0;
+        if (fh) fclose(fh);
+        vd.index = ib; vd.index_size = n;
+        vd.hw_decode = PSYVID_HW_OFF;
+        CHECK_I(mf_play_all(&vd, 300, 0), 300);
+    }
+    remove(media("c_720p30.dxva.psyvi"));
+}
+
+static void test_mf_seek(void) {
+    static const int64_t targets[] = { 133, 7, 30, 299, 59, 61, 0, 250 };
+    psyvid_desc vd;
+    disp d;
+    psyscr_frame f;
+    size_t i;
+    int64_t k;
+    g_case = "mf seek";
+    mf_desc(&vd, "c_1080p30.mp4");
+    rec_reset();
+    if (!psyvid_open(&g_mv, &g_gfx, &vd)) { fail(__LINE__, psyvid_error(&g_mv)); return; }
+    disp_init(&d, 60.0, 0.01);
+    psyvid_play_at(&g_mv, PSYVID_ASAP);
+    for (k = 0; k < 20; k++) { disp_next(&d, &f); psyvid_update(&g_mv, &f); }
+    for (i = 0; i < sizeof targets / sizeof targets[0]; i++) {
+        int landed = 0;
+        CHECK(psyvid_seek_frame(&g_mv, targets[i], PSYVID_STAY_PAUSED) > 0);
+        for (k = 0; k < 40 && !landed; k++) {
+            disp_next(&d, &f);
+            CHECK(psyvid_update(&g_mv, &f) >= 0);
+            landed = g_mv.state == PSYVID__PAUSED && g_mv.shown_g == targets[i];
+        }
+        CHECK(landed);
+        if (up_bars() != (int)targets[i]) fail_i(__LINE__, "the seek's frame", up_bars(), targets[i]);
+    }
+    {
+        psyvid_info info;
+        psyvid_get_info(&g_mv, &info);
+        CHECK_I(info.hash_mismatch, 0);
+        CHECK_I(info.ts_mismatch, 0);
+    }
+    psyvid_close(&g_mv);
+}
+
+static uint8_t* g_mf_file;
+static int64_t g_mf_size;
+static int64_t mf_rd(void* ctx, int64_t off, void* buf, int64_t n) {
+    (void)ctx;
+    if (off < 0 || off >= g_mf_size) return -1;
+    if (n > g_mf_size - off) n = g_mf_size - off;
+    if (n > 65536) n = 65536;   /* short reads, as a range request gives */
+    memcpy(buf, g_mf_file + off, (size_t)n);
+    return n;
+}
+
+static uint8_t* slurp(const char* path, int64_t* n) {
+    FILE* fh = fopen(path, "rb");
+    uint8_t* b;
+    long sz;
+    *n = 0;
+    if (!fh) return NULL;
+    fseek(fh, 0, SEEK_END); sz = ftell(fh); fseek(fh, 0, SEEK_SET);
+    b = (uint8_t*)malloc((size_t)sz);
+    if (b && fread(b, 1, (size_t)sz, fh) != (size_t)sz) { free(b); b = NULL; }
+    fclose(fh);
+    *n = b ? sz : 0;
+    return b;
+}
+
+static void test_mf_sources(void) {
+    psyvid_desc vd;
+    psyvid_reader rd;
+    int64_t isz = 0;
+    uint8_t* ix;
+    char line[1024];
+    g_case = "mf sources";
+    g_mf_file = slurp(media("c_720p30.mp4"), &g_mf_size);
+    ix = slurp(media("c_720p30.mp4.psyvi"), &isz);
+    if (!g_mf_file || !ix) { fail(__LINE__, "read the clip"); free(g_mf_file); free(ix); return; }
+    mf_desc(&vd, "c_720p30.mp4");
+    vd.path = NULL; vd.data = g_mf_file; vd.size = (size_t)g_mf_size; vd.index = ix; vd.index_size = (size_t)isz;
+    CHECK_I(mf_play_all(&vd, 300, 0), 300);
+    mf_desc(&vd, "c_720p30.mp4");
+    rd.read = mf_rd; rd.size = g_mf_size;
+    vd.path = NULL; vd.reader = &rd; vd.index = ix; vd.index_size = (size_t)isz;
+    CHECK_I(mf_play_all(&vd, 300, 0), 300);
+    /* one byte changed inside the media data: the size and the ends still
+     * match the index, the frame hashes do not */
+    g_mf_file[g_mf_size / 2] ^= 0x55;
+    mf_desc(&vd, "c_720p30.mp4");
+    vd.path = NULL; vd.data = g_mf_file; vd.size = (size_t)g_mf_size; vd.index = ix; vd.index_size = (size_t)isz;
+    if (psyvid_open(&g_mv, &g_gfx, &vd)) {
+        disp d;
+        psyscr_frame f;
+        int k, rc = PSYVID_OK;
+        psyvid_info info;
+        disp_init(&d, 60.0, 0.01);
+        psyvid_play_at(&g_mv, PSYVID_ASAP);
+        for (k = 0; k < 700 && rc == PSYVID_OK; k++) { disp_next(&d, &f); rc = psyvid_update(&g_mv, &f); }
+        psyvid_get_info(&g_mv, &info);
+        psyvid_describe(&g_mv, line, sizeof line);
+        CHECK(info.hash_mismatch > 0);
+        CHECK(strstr(line, "NOT CANONICAL: hash mismatches") != NULL);
+        psyvid_close(&g_mv);
+    } else fail(__LINE__, psyvid_error(&g_mv));
+    /* a stale index: another clip's */
+    {
+        int64_t isz2 = 0;
+        uint8_t* ix2 = slurp(media("c_crop.mp4.psyvi"), &isz2);
+        mf_desc(&vd, "c_720p30.mp4");
+        vd.index = ix2; vd.index_size = (size_t)isz2;
+        CHECK(!psyvid_open(&g_mv, &g_gfx, &vd));
+        CHECK(strstr(psyvid_error(&g_mv), "index") != NULL);
+        free(ix2);
+    }
+    free(g_mf_file); g_mf_file = NULL;
+    free(ix);
+}
+
+/* The decode thread for real, with the frame thread in an STA (as SDL3
+ * makes it) and Media Foundation in the MTA. */
+static void test_mf_threaded(void) {
+    psyvid_desc vd;
+    psyscr_frame f;
+    int64_t k, t0, P = 16666667, last = -1, order_bad = 0, shown = 0, bars_bad = 0;
+    int rc = PSYVID_OK;
+    HRESULT co = E_FAIL;
+    /* looked up, so the test links nothing beyond what the header does */
+    typedef HRESULT (WINAPI *co_init_fn)(void*, DWORD);
+    typedef void (WINAPI *co_uninit_fn)(void);
+    HMODULE ole = LoadLibraryW(L"ole32.dll");
+    co_init_fn co_init = ole ? (co_init_fn)(void (*)(void))GetProcAddress(ole, "CoInitializeEx") : NULL;
+    co_uninit_fn co_uninit = ole ? (co_uninit_fn)(void (*)(void))GetProcAddress(ole, "CoUninitialize") : NULL;
+    g_case = "mf threaded";
+    g_virtual = 0;
+    if (co_init) co = co_init(NULL, COINIT_APARTMENTTHREADED);
+    mf_desc(&vd, "c_720p30.mp4");
+    vd.inline_decode = false;
+    rec_reset();
+    g_up_bytes = 0;
+    if (!psyvid_open(&g_mv, &g_gfx, &vd)) { fail(__LINE__, psyvid_error(&g_mv)); g_virtual = 1; return; }
+    CHECK(psyvid_play_at(&g_mv, PSYVID_ASAP) > 0);
+    t0 = (int64_t)psyrt_now_ns() + 20000000;
+    for (k = 0; k < 400 && rc == PSYVID_OK; k++) {
+        memset(&f, 0, sizeof f);
+        f.onset = t0 + k * P; f.period = P; f.index = k; f.vblank = k;
+        psyrt_sleep_until((uint64_t)(f.onset - P / 2), 0);
+        g_planes_off = 0; g_plane_i = 0;
+        rc = psyvid_update(&g_mv, &f);
+        if (g_mv.has_last && g_mv.last.display == k && g_mv.last.decision == PSYVID_SHOWN) {
+            if (g_mv.last.frame <= last) order_bad++;
+            if (up_bars() != (int)g_mv.last.frame) bars_bad++;
+            last = g_mv.last.frame;
+            shown++;
+        }
+        if (k == 200) psyvid_seek_frame(&g_mv, 50, PSYVID_ASAP), last = -1;
+    }
+    CHECK(rc >= 0);
+    CHECK_I(order_bad, 0);
+    CHECK_I(bars_bad, 0);
+    if (shown < 150) fail_i(__LINE__, "frames shown", shown, 150);
+    psyvid_close(&g_mv);
+    if (SUCCEEDED(co) && co_uninit) co_uninit();
+    g_virtual = 1;
+}
+
+static void test_mf(void) {
+    const char* dir = getenv("PSYVID_TEST_MEDIA");
+    char probe[600];
+    FILE* fh;
+    if (!dir || !dir[0]) { printf("psy_video_test: Media Foundation cases skipped: set PSYVID_TEST_MEDIA to the clips of tests/media/make_video_clips.sh\n"); return; }
+    snprintf(g_media, sizeof g_media, "%s", dir);
+    snprintf(probe, sizeof probe, "%s/c_720p30.mp4", dir);
+    fh = fopen(probe, "rb");
+    if (!fh) { printf("psy_video_test: Media Foundation cases skipped: no %s\n", probe); return; }
+    fclose(fh);
+    {
+        char err[256];
+        if (psyvid__mf_load(err, sizeof err) < 0) { printf("psy_video_test: Media Foundation cases skipped: %s\n", err); return; }
+        psyvid__mf_unload();
+    }
+    test_mf_index();
+    test_mf_play();
+    test_mf_seek();
+    test_mf_sources();
+    test_mf_threaded();
+}
+#else
+static void test_mf(void) { printf("psy_video_test: Media Foundation cases skipped: not Windows, or PSYVID_NO_MF\n"); }
+#endif
+
 int main(void) {
     gfx_open();
     test_pure();
@@ -1833,6 +3082,9 @@ int main(void) {
     test_seq();
     test_reader();
     test_threaded();
+    test_soundtrack();
+    test_rates();
+    test_mf();
     psygfx_close(&g_gfx);
     psyscr_close(&g_scr);
     if (g_failures) { fprintf(stderr, "psy_video_test: %d failure(s)\n", g_failures); return 1; }

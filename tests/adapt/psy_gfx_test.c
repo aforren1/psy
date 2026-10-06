@@ -35,6 +35,21 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#if defined(_WIN32)
+    #include <direct.h>
+    #if defined(_MSC_VER)
+        #pragma warning(push)
+        #pragma warning(disable: 4201)   /* the SDK's nameless unions */
+    #endif
+    #include <d3d11_1.h>   /* the D3D11 import: textures on ANGLE's device, shared ones */
+    #if defined(_MSC_VER)
+        #pragma warning(pop)
+    #endif
+    #define TEST_RMDIR(p) _rmdir(p)
+#else
+    #include <unistd.h>
+    #define TEST_RMDIR(p) rmdir(p)
+#endif
 
 /* ---------------------------------------------------------------- harness */
 
@@ -135,20 +150,20 @@ static void test_noise_cpu(void) {
 }
 
 static void test_cal_srgb(void) {
-    static psygfx_cal c, c2;
+    static psycol_cal c, c2;
     static const float xy[4][2] = { { 0.64f, 0.33f }, { 0.30f, 0.60f }, { 0.15f, 0.06f }, { 0.3127f, 0.3290f } };
     /* IEC 61966-2-1:1999, as published (4 decimals) */
     static const double iec[9] = { 0.4124, 0.3576, 0.1805, 0.2126, 0.7152, 0.0722, 0.0193, 0.1192, 0.9505 };
-    static unsigned char bytes[sizeof(psygfx_cal)];
+    static unsigned char bytes[sizeof(psycol_cal)];
     char err[200];
     double e = 0, e17 = 0, e256 = 0;
     int k, gun, rc;
-    CHECK(psygfx_cal_nominal(&c, xy, 1.0f, 2.2) == PSYGFX_OK);
+    CHECK(psycol_cal_nominal(&c, xy, 1.0f, 2.2) == PSYGFX_OK);
     for (k = 0; k < 9; k++) e = maxd(e, fabs(c.rgb_to_xyz[k] - iec[k]));
     printf("sRGB primaries to XYZ, against IEC 61966-2-1's printed matrix: max |diff| %.2e\n", e);
     /* 0.9505 is printed; the primaries and D65 give 0.95030 */
     CHECK_LE(e, 1.2e-4);      /* measured 3.9e-5 */
-    CHECK(c.flags & PSYGFX_CAL_NOMINAL);
+    CHECK(c.flags & PSYCOL_CAL_NOMINAL);
     CHECK(fabs(c.white_err) < 1e-4);
     /* The CLUT of a display with sRGB's transfer function is sRGB's
      * encoding, from 17 and from 64 levels per gun (the file holds 256
@@ -156,75 +171,75 @@ static void test_cal_srgb(void) {
     for (rc = 0; rc < 2; rc++) {
         int n = rc ? 64 : 17;
         double m = 0;
-        psygfx_cal_init(&c2);
-        psygfx_cal_add(&c2, PSYGFX_GUN_BLACK, 0, 0, 0, 0);
+        psycol_cal_init(&c2);
+        psycol_cal_add(&c2, PSYCOL_GUN_BLACK, 0, 0, 0, 0);
         for (gun = 0; gun < 3; gun++)
-            for (k = 1; k < n; k++) psygfx_cal_add(&c2, gun, (float)k / (float)(n - 1), (float)(80.0 * srgb_eotf((double)k / (n - 1))), 0, 0);
-        CHECK(psygfx_cal_derive(&c2, err, sizeof err) == PSYGFX_OK);
-        for (k = 0; k < PSYGFX_CAL_MAX_LUT; k++) m = maxd(m, fabs(c2.lut[1][k] - srgb_oetf((double)k / (PSYGFX_CAL_MAX_LUT - 1))));
+            for (k = 1; k < n; k++) psycol_cal_add(&c2, gun, (float)k / (float)(n - 1), (float)(80.0 * srgb_eotf((double)k / (n - 1))), 0, 0);
+        CHECK(psycol_cal_derive(&c2, err, sizeof err) == PSYGFX_OK);
+        for (k = 0; k < PSYCOL_CAL_MAX_LUT; k++) m = maxd(m, fabs(c2.lut[1][k] - srgb_oetf((double)k / (PSYCOL_CAL_MAX_LUT - 1))));
         if (rc) e256 = m; else e17 = m;
     }
     printf("CLUT against sRGB's encoding: 17 levels per gun max |diff| %.2e, 64 levels %.2e\n", e17, e256);
     CHECK_LE(e17, 4e-3);      /* measured 1.30e-3 */
     CHECK_LE(e256, 1.1e-4);   /* measured 3.64e-5 */
     /* round trip, then every refusal */
-    CHECK(psygfx_cal_save(&c2, bytes, sizeof bytes) == (int)sizeof bytes);
+    CHECK(psycol_cal_save(&c2, bytes, sizeof bytes) == (int)sizeof bytes);
     memset(&c, 0, sizeof c);
-    CHECK(psygfx_cal_load(&c, bytes, sizeof bytes, err, sizeof err) == PSYGFX_OK);
+    CHECK(psycol_cal_load(&c, bytes, sizeof bytes, err, sizeof err) == PSYGFX_OK);
     CHECK(memcmp(&c, &c2, sizeof c) == 0);
-    CHECK(psygfx_cal_check(&c, err, sizeof err) == PSYGFX_OK);
-    CHECK(psygfx_cal_load(&c, bytes, sizeof bytes - 1, err, sizeof err) == PSYGFX_ERR_FORMAT);
+    CHECK(psycol_cal_check(&c, err, sizeof err) == PSYGFX_OK);
+    CHECK(psycol_cal_load(&c, bytes, sizeof bytes - 1, err, sizeof err) == PSYGFX_ERR_FORMAT);
     bytes[1000] ^= 1;
-    CHECK(psygfx_cal_load(&c, bytes, sizeof bytes, err, sizeof err) == PSYGFX_ERR_FORMAT);
+    CHECK(psycol_cal_load(&c, bytes, sizeof bytes, err, sizeof err) == PSYGFX_ERR_FORMAT);
     CHECK(strstr(err, "CRC") != NULL);
     bytes[1000] ^= 1;
     c2.lut[0][100] += 1e-4f;   /* a table its readings do not give */
-    psygfx_cal_save(&c2, bytes, sizeof bytes);
-    CHECK(psygfx_cal_load(&c, bytes, sizeof bytes, err, sizeof err) == PSYGFX_ERR_FORMAT);
+    psycol_cal_save(&c2, bytes, sizeof bytes);
+    CHECK(psycol_cal_load(&c, bytes, sizeof bytes, err, sizeof err) == PSYGFX_ERR_FORMAT);
     CHECK(strstr(err, "CLUT") != NULL);
     /* readings that do not rise are refused, with the level */
-    psygfx_cal_init(&c2);
-    psygfx_cal_add(&c2, PSYGFX_GUN_BLACK, 0, 0.5f, 0, 0);
+    psycol_cal_init(&c2);
+    psycol_cal_add(&c2, PSYCOL_GUN_BLACK, 0, 0.5f, 0, 0);
     for (gun = 0; gun < 3; gun++) {
-        psygfx_cal_add(&c2, gun, 0.5f, 10.0f, 0, 0);
-        psygfx_cal_add(&c2, gun, 0.75f, 9.0f, 0, 0);
-        psygfx_cal_add(&c2, gun, 1.0f, 30.0f, 0, 0);
+        psycol_cal_add(&c2, gun, 0.5f, 10.0f, 0, 0);
+        psycol_cal_add(&c2, gun, 0.75f, 9.0f, 0, 0);
+        psycol_cal_add(&c2, gun, 1.0f, 30.0f, 0, 0);
     }
-    CHECK(psygfx_cal_derive(&c2, err, sizeof err) == PSYGFX_ERR_RANGE);
+    CHECK(psycol_cal_derive(&c2, err, sizeof err) == PSYGFX_ERR_RANGE);
     CHECK(strstr(err, "0.75") != NULL);
     /* no cone space without spectra */
     {
         float bg[3] = { 0.5f, 0.5f, 0.5f }, cc[3] = { 0.1f, 0, 0 }, dir[3];
-        CHECK(psygfx_cal_dir_cone(&c, bg, cc, dir) == PSYGFX_ERR_REFUSED);
+        CHECK(psycol_cal_dir_cone(&c, bg, cc, dir) == PSYGFX_ERR_REFUSED);
     }
 }
 
 static void test_cones_dkl(void) {
-    static psygfx_cal c;
+    static psycol_cal c;
     float r[81], g[81], b[81];
     double l[3], m[9], e = 0;
     char err[200];
     const float bg[3] = { 0.4f, 0.5f, 0.3f };
     int i, k;
     /* CVRL linss2_10e_1 rows, as published */
-    psygfx_cone_fundamentals(440.0, l);
+    psycol_cone_fundamentals(PSYCOL_CONES_SS2, 440.0, l);
     CHECK(fabs(l[0] / 4.02563e-2 - 1) < 1e-7 && fabs(l[1] / 6.47782e-2 - 1) < 1e-7 && fabs(l[2] / 9.91020e-1 - 1) < 1e-7);
-    psygfx_cone_fundamentals(570.0, l);
+    psycol_cone_fundamentals(PSYCOL_CONES_SS2, 570.0, l);
     CHECK(fabs(l[0] / 9.99993e-1 - 1) < 1e-7 && fabs(l[1] / 8.13509e-1 - 1) < 1e-7 && fabs(l[2] / 2.81800e-4 - 1) < 1e-7);
-    psygfx_cone_fundamentals(700.0, l);
+    psycol_cone_fundamentals(PSYCOL_CONES_SS2, 700.0, l);
     CHECK(l[2] == 0.0 && l[0] > 0.0);
-    psygfx_cone_fundamentals(389.0, l);
+    psycol_cone_fundamentals(PSYCOL_CONES_SS2, 389.0, l);
     CHECK(l[0] == 0.0);
     for (i = 0; i < 81; i++) { r[i] = b_monitor[i][0]; g[i] = b_monitor[i][1]; b[i] = b_monitor[i][2]; }
-    psygfx_cal_init(&c);
-    psygfx_cal_add(&c, PSYGFX_GUN_BLACK, 0, 0, 0, 0);
-    for (k = 0; k < 3; k++) psygfx_cal_add(&c, k, 1, 1, 0, 0);
-    CHECK(psygfx_cal_set_spectra(&c, 380, 5, 81, r, g, b, NULL) == PSYGFX_OK);
-    CHECK(psygfx_cal_derive(&c, err, sizeof err) == PSYGFX_OK);
+    psycol_cal_init(&c);
+    psycol_cal_add(&c, PSYCOL_GUN_BLACK, 0, 0, 0, 0);
+    for (k = 0; k < 3; k++) psycol_cal_add(&c, k, 1, 1, 0, 0);
+    CHECK(psycol_cal_set_spectra(&c, 380, 5, 81, r, g, b, NULL) == PSYGFX_OK);
+    CHECK(psycol_cal_derive(&c, err, sizeof err) == PSYGFX_OK);
     for (k = 0; k < 9; k++) e = maxd(e, fabs(c.rgb_to_lms[k] - ref_rgb_to_lms[k]) / fabs(ref_rgb_to_lms[k]));
     printf("RGB to LMS against Psychtoolbox (B_monitor, SS2): max relative diff %.2e\n", e);
     CHECK_LE(e, 1e-6);
-    CHECK(psygfx_cal_dkl_matrix(&c, bg, m) == PSYGFX_OK);
+    CHECK(psycol_cal_dkl_matrix(&c, bg, m) == PSYGFX_OK);
     e = 0;
     for (k = 0; k < 9; k++) e = maxd(e, fabs(m[k] - ref_dkl[k]) / (fabs(ref_dkl[k]) + 1e-12));
     printf("DKL matrix against ComputeDKL_M: max relative diff %.2e\n", e);
@@ -235,11 +250,11 @@ static void test_cones_dkl(void) {
         double lb[3] = { 0, 0, 0 }, lc[3] = { 0, 0, 0 }, inc[3], v;
         int j;
         unit[k] = 1.0f;
-        CHECK(psygfx_cal_dir_dkl(&c, bg, unit, dir) == PSYGFX_OK);
+        CHECK(psycol_cal_dir_dkl(&c, bg, unit, dir) == PSYGFX_OK);
         for (j = 0; j < 3; j++) e = maxd(e, fabs(dir[j] - ref_dkl_rgb[j * 3 + k]) / fabs(ref_dkl_rgb[j * 3 + k]));
         /* the axes isolate: L-M keeps S and luminance, S keeps L and M
          * (the cone increment of the float dir, in double) */
-        psygfx_cal_lms(&c, bg, lb);
+        psycol_cal_lms(&c, bg, lb);
         for (j = 0; j < 3; j++)
             inc[j] = c.rgb_to_lms[j * 3] * dir[0] + c.rgb_to_lms[j * 3 + 1] * dir[1] + c.rgb_to_lms[j * 3 + 2] * dir[2];
         (void)lc;
@@ -254,20 +269,20 @@ static void test_cones_dkl(void) {
         float cc[3] = { 0.1f, 0, 0 }, dir[3], p[3];
         double lb[3] = { 0, 0, 0 }, lc[3] = { 0, 0, 0 };
         int j;
-        CHECK(psygfx_cal_dir_cone(&c, bg, cc, dir) == PSYGFX_OK);
+        CHECK(psycol_cal_dir_cone(&c, bg, cc, dir) == PSYGFX_OK);
         for (j = 0; j < 3; j++) p[j] = bg[j] + dir[j];
-        psygfx_cal_lms(&c, bg, lb);
-        psygfx_cal_lms(&c, p, lc);
+        psycol_cal_lms(&c, bg, lb);
+        psycol_cal_lms(&c, p, lc);
         CHECK(fabs(lc[0] / lb[0] - 1.1) < 1e-5);
         CHECK(fabs(lc[1] / lb[1] - 1.0) < 1e-5 && fabs(lc[2] / lb[2] - 1.0) < 1e-5);
     }
     {
         float d3[3], dir[3] = { 0.1f, -0.2f, 0.05f }, bgm[3] = { 0.5f, 0.5f, 0.25f };
-        psygfx_dkl_from_sph(90, 0, 2, d3);
+        psycol_dkl_from_sph(90, 0, 2, d3);
         CHECK(fabs(d3[0] - 2) < 1e-6 && fabs(d3[1]) < 1e-6);
-        psygfx_dkl_from_sph(0, 90, 1, d3);
+        psycol_dkl_from_sph(0, 90, 1, d3);
         CHECK(fabs(d3[2] - 1) < 1e-6 && fabs(d3[0]) < 1e-6);
-        CHECK(fabsf(psygfx_max_contrast(bgm, dir) - 2.5f) < 1e-6f);
+        CHECK(fabsf(psycol_max_contrast(bgm, dir) - 2.5f) < 1e-6f);
     }
 }
 
@@ -474,6 +489,9 @@ typedef struct stats2 {
 
 static stats2 S2;
 
+/* desc.cache for every GL open but the cache part's own (v0.4) */
+static const psygfx_cache* test_cache(void);
+
 static int gl_open(int bg_gray, psygfx_format fmt, psygfx_dither dither) {
     psygfx_desc gd;
     memset(&gd, 0, sizeof gd);
@@ -482,6 +500,7 @@ static int gl_open(int bg_gray, psygfx_format fmt, psygfx_dither dither) {
     psygfx__test_scene32 = fmt == PSYGFX_RGBA32F;
     gd.dither = dither;
     gd.seed = 99;
+    gd.cache = test_cache();
     if (!psygfx_open(&R->g, &gd)) {
         fprintf(stderr, "psy_gfx_test [%s]: open: %s\n", g_where, psygfx_error(&R->g));
         g_failures++;
@@ -2644,7 +2663,7 @@ static void gl_v03_fx(stats* st) {
 
 /* Oklab from linear device RGB through a calibration's XYZ (white Y = 1),
  * Ottosson's published matrices, in double: written apart from the header. */
-static void ok_from_rgb(const psygfx_cal* c, const double rgb[3], double lab[3]) {
+static void ok_from_rgb(const psycol_cal* c, const double rgb[3], double lab[3]) {
     static const double m1[9] = { 0.8189330101, 0.3618667424, -0.1288597137, 0.0329845436, 0.9293118715, 0.0361456387,
                                   0.0482003018, 0.2643662691, 0.6338517070 };
     static const double m2[9] = { 0.2104542553, 0.7936177850, -0.0040720468, 1.9779984951, -2.4285922050, 0.4505937099,
@@ -2658,7 +2677,7 @@ static void ok_from_rgb(const psygfx_cal* c, const double rgb[3], double lab[3])
 
 /* ... and back, by Newton on the forward map (no inverse matrices shared
  * with the header). */
-static void ok_to_rgb(const psygfx_cal* c, const double lab[3], double rgb[3]) {
+static void ok_to_rgb(const psycol_cal* c, const double lab[3], double rgb[3]) {
     int it, i, j;
     rgb[0] = rgb[1] = rgb[2] = 0.5;
     for (it = 0; it < 30; it++) {
@@ -2684,7 +2703,7 @@ static void ok_to_rgb(const psygfx_cal* c, const double lab[3], double rgb[3]) {
 }
 
 static void gl_v03_paint(stats* st) {
-    static psygfx_cal cal, cal2;
+    static psycol_cal cal, cal2;
     static const float xy[4][2] = { { 0.64f, 0.33f }, { 0.30f, 0.60f }, { 0.15f, 0.06f }, { 0.3127f, 0.3290f } };
     psygfx_desc gd;
     psygfx_shape_desc d;
@@ -2692,16 +2711,16 @@ static void gl_v03_paint(stats* st) {
     psygfx_stim s;
     int i, j, k, sp;
     (void)st;
-    CHECK(psygfx_cal_nominal(&cal, xy, 80.0f, 2.2) == PSYGFX_OK);
+    CHECK(psycol_cal_nominal(&cal, xy, 80.0f, 2.2) == PSYGFX_OK);
     {   /* a calibration with spectra for DKL: Psychtoolbox's B_monitor */
         float r[81], g[81], b[81];
         char err[200];
         for (i = 0; i < 81; i++) { r[i] = b_monitor[i][0]; g[i] = b_monitor[i][1]; b[i] = b_monitor[i][2]; }
-        psygfx_cal_init(&cal2);
-        psygfx_cal_add(&cal2, PSYGFX_GUN_BLACK, 0, 0, 0, 0);
-        for (k = 0; k < 3; k++) psygfx_cal_add(&cal2, k, 1, 1, 0, 0);
-        psygfx_cal_set_spectra(&cal2, 380, 5, 81, r, g, b, NULL);
-        CHECK(psygfx_cal_derive(&cal2, err, sizeof err) == PSYGFX_OK);
+        psycol_cal_init(&cal2);
+        psycol_cal_add(&cal2, PSYCOL_GUN_BLACK, 0, 0, 0, 0);
+        for (k = 0; k < 3; k++) psycol_cal_add(&cal2, k, 1, 1, 0, 0);
+        psycol_cal_set_spectra(&cal2, 380, 5, 81, r, g, b, NULL);
+        CHECK(psycol_cal_derive(&cal2, err, sizeof err) == PSYGFX_OK);
     }
     for (sp = 0; sp < 3; sp++) {
         memset(&gd, 0, sizeof gd);
@@ -2744,16 +2763,16 @@ static void gl_v03_paint(stats* st) {
                         ok_from_rgb(&cal, a, la); ok_from_rgb(&cal, b, lb);
                         for (q = 0; q < 3; q++) m[q] = la[q] + (lb[q] - la[q]) * u;
                         ok_to_rgb(&cal, m, want);
-                    } else {   /* DKL polar about the background, through psygfx_cal_dir_dkl */
+                    } else {   /* DKL polar about the background, through psycol_cal_dir_dkl */
                         double ea[3], eb[3], dk[3], inv[9], M[9];
                         float dir[3] = { 0, 0, 0 }, unit[3];   /* newer gcc cannot see the call fill it */
                         int c2, r2;
                         for (c2 = 0; c2 < 3; c2++) {   /* the RGB increment of each DKL unit axis, then its inverse */
                             unit[0] = unit[1] = unit[2] = 0; unit[c2] = 1;
-                            psygfx_cal_dir_dkl(&cal2, gd.background, unit, dir);
+                            psycol_cal_dir_dkl(&cal2, gd.background, unit, dir);
                             for (r2 = 0; r2 < 3; r2++) M[3 * r2 + c2] = dir[r2];
                         }
-                        psygfx__inv3(M, inv);
+                        psycol__inv3(M, inv);
                         for (q = 0; q < 2; q++) {
                             double* e3 = q ? eb : ea;
                             const double* cc = q ? b : a;
@@ -2968,16 +2987,1833 @@ static void test_v03_cpu(void) {
     {   /* Oklab's L is relative to white: a round trip cannot see a lost
          * white scale, so the white itself must map to L = 1, a = b = 0 */
         static psygfx_gfx gw;
-        static psygfx_cal cw;
+        static psycol_cal cw;
         static const float xy[4][2] = { { 0.64f, 0.33f }, { 0.30f, 0.60f }, { 0.15f, 0.06f }, { 0.3127f, 0.3290f } };
         static const float white[3] = { 1.0f, 1.0f, 1.0f };
         double lab[3];
         memset(&gw, 0, sizeof gw);
-        CHECK(psygfx_cal_nominal(&cw, xy, 80.0f, 2.2) == PSYGFX_OK);
-        psygfx__paint_spaces(&gw, &cw);
+        CHECK(psycol_cal_nominal(&cw, xy, 80.0f, 2.2) == PSYGFX_OK);
+        {   /* PAINT's spaces come from psy_color.h's context (v0.5) */
+            psycol_ctx_desc cd;
+            memset(&cd, 0, sizeof cd);
+            cd.cal = &cw;
+            CHECK(psycol_ctx_init(&gw.color, &cd, NULL, 0) == PSYCOL_OK);
+            psygfx__paint_spaces(&gw);
+        }
         CHECK(gw.has_oklab);
         psygfx__to_space(&gw, PSYGFX_SPACE_OKLAB, white, lab);
         CHECK(fabs(lab[0] - 1.0) < 1e-3 && fabs(lab[1]) < 1e-3 && fabs(lab[2]) < 1e-3);
+    }
+}
+
+/* ------------------------------------------------------------- v0.4 cache */
+
+/* A program cache in memory: the test's desc.cache, and the store the
+ * corruption checks reach into. */
+#define MC_MAX 64
+typedef struct memcache { int n; uint64_t key[MC_MAX]; unsigned char* data[MC_MAX]; size_t len[MC_MAX]; long loads, stores; } memcache;
+static size_t mc_load(void* u, uint64_t key, void* dst, size_t cap) {
+    memcache* m = (memcache*)u;
+    int i;
+    m->loads++;
+    for (i = 0; i < m->n; i++)
+        if (m->key[i] == key) {
+            if (dst && cap >= m->len[i]) memcpy(dst, m->data[i], m->len[i]);
+            return m->len[i];
+        }
+    return 0;
+}
+static int mc_store(void* u, uint64_t key, const void* data, size_t n) {
+    memcache* m = (memcache*)u;
+    int i;
+    unsigned char* p = (unsigned char*)malloc(n);
+    if (!p) return -1;
+    memcpy(p, data, n);
+    m->stores++;
+    for (i = 0; i < m->n && m->key[i] != key; i++) {}
+    if (i == MC_MAX) { free(p); return -1; }
+    if (i == m->n) m->n++;
+    else free(m->data[i]);
+    m->key[i] = key; m->data[i] = p; m->len[i] = n;
+    return 0;
+}
+static void mc_clear(memcache* m) {
+    int i;
+    for (i = 0; i < m->n; i++) free(m->data[i]);
+    memset(m, 0, sizeof *m);
+}
+
+/* A backend whose "binary" is a hash of the program's text: the cache's
+ * logic, every reject path included, without GL. */
+#define FB_PROGS 11
+static psygfx__null g_fb_ctx;
+static psygfx_backend g_fb;
+static uint64_t g_fb_hash[256];
+static int g_fb_refuse;
+static const char* g_fb_vendor = "fake vendor";
+static const char* g_fb_renderer = "fake renderer";
+static const char* g_fb_version = "fake 1";
+static int fb_open(void* c, const psygfx_backend_open* in, psygfx_backend_caps* caps, char* err, size_t cap) {
+    int rc = psygfx__null_backend.open(c, in, caps, err, cap);
+    snprintf(caps->vendor, sizeof caps->vendor, "%s", g_fb_vendor);
+    snprintf(caps->version, sizeof caps->version, "%s", g_fb_version);
+    snprintf(caps->renderer, sizeof caps->renderer, "%s", g_fb_renderer);
+    caps->binary_format = 0x1234;
+    return rc;
+}
+static int fb_make(void* c, const psygfx_pipeline_src* d, uint32_t* id, char* err, size_t cap) {
+    uint64_t h = psygfx__fnv64(d->vs, strlen(d->vs)) ^ (psygfx__fnv64(d->fs, strlen(d->fs)) * 3u);
+    int loaded = d->binary && d->binary_size == 64 && d->binary_format == 0x1234 && !g_fb_refuse &&
+                 memcmp(d->binary, &h, sizeof h) == 0;
+    psygfx__null_backend.pipeline_make(c, d, id, err, cap);
+    if (*id < 256) g_fb_hash[*id] = h;
+    return loaded;
+}
+static int fb_binary(void* c, uint32_t id, void* out, size_t cap, uint32_t* format) {
+    (void)c;
+    if (out && cap >= 64) { memset(out, 0xA5, 64); memcpy(out, &g_fb_hash[id & 255], 8); *format = 0x1234; }
+    return 64;
+}
+
+typedef struct stats6 {
+    /* cache: rejects that fell back, loads after a cold open, frames equal */
+    long cache_bad, cache_cases;
+    double open_cold_ms, open_warm_ms;
+    int programs;
+    /* the gallery's findings (v0.4 fixes) */
+    double alpha_lin, alpha_old, first_diff, shape_p_diff;
+    long dots_px;
+    long zero_ok, zero_n, zero_poly_px, zero_dots_px;
+    /* VIDEO */
+    double vid_1x, vid_trc, vid_prim, vid_lin, vid_part, rebind_diff, import_gl_diff, import_d3d_diff;
+    long vid_cases, codes_bad, vid_refused_ok, vid_refused_n, d3d_ran;
+    double shared_diff[2];          /* NT handle + keyed mutex; legacy handle + event query */
+    const char* shared_why[2];
+    /* INSTANCES */
+    double inst_diff[5], pal_frac, csd_err;
+    long pal_bad, hit_bad, hit_n, hit_ties, bind_bad, inst_refused_ok, inst_refused_n;
+    long order_bad, order_frames, order_saved, order_pass_ok;
+    long refused_ok, refused_n;
+} stats6;
+static stats6 S6;
+
+static int fb_open_gfx(psygfx_gfx* g, const psygfx_cache* c, psygfx_programs* st) {
+    static psyscr_screen scr;
+    psyscr_desc d;
+    psygfx_desc gd;
+    int ok;
+    memset(&d, 0, sizeof d);
+    d.backend = PSYSCR_BACKEND_SIM;
+    if (!psyscr_is_open(&scr) && !psyscr_open(&scr, &d)) return 0;
+    memset(&gd, 0, sizeof gd);
+    gd.screen = &scr; gd.width = 64; gd.height = 64;
+    gd.backend = &g_fb; gd.backend_ctx = &g_fb_ctx; gd.cache = c;
+    ok = psygfx_open(g, &gd);
+    psygfx_program_stats(g, st);
+    return ok;
+}
+
+static psygfx_pipe user_pipe(psygfx_gfx* g, const char* body) {
+    psygfx_pipeline_desc d;
+    memset(&d, 0, sizeof d);
+    d.body = body;
+    return psygfx_pipeline(g, &d);
+}
+
+static void test_v04_cache_cpu(void) {
+    static psygfx_gfx g;
+    static memcache mc;
+    psygfx_cache c;
+    psygfx_programs st;
+    int i;
+    g_fb = psygfx__null_backend;
+    g_fb.open = fb_open; g_fb.pipeline_make = fb_make; g_fb.pipeline_binary = fb_binary;
+    c.load = mc_load; c.store = mc_store; c.user = &mc;
+    mc_clear(&mc);
+    /* cold, then warm */
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.compiled == FB_PROGS && st.loaded == 0 && st.stored == FB_PROGS && st.rejected == 0 && mc.n == FB_PROGS);
+    {   /* a user pipeline goes through the cache too */
+        psygfx_pipe p = user_pipe(&g, "float psy_main(vec2 p) { return 0.5; }\n");
+        CHECK(p.id != 0);
+        psygfx_program_stats(&g, &st);
+        CHECK(st.compiled == FB_PROGS + 1 && st.stored == FB_PROGS + 1);
+    }
+    psygfx_close(&g);
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.loaded == FB_PROGS && st.compiled == 0 && st.rejected == 0 && st.stored == 0);
+    CHECK(user_pipe(&g, "float psy_main(vec2 p) { return 0.5; }\n").id != 0);
+    psygfx_program_stats(&g, &st);
+    CHECK(st.loaded == FB_PROGS + 1);
+    psygfx_close(&g);
+    /* another driver: a different key, so misses, not rejects */
+    g_fb_vendor = "another vendor";
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.compiled == FB_PROGS && st.rejected == 0 && st.loaded == 0);
+    psygfx_close(&g);
+    g_fb_vendor = "fake vendor";
+    g_fb_renderer = "fake renderer, another driver version";   /* ANGLE puts the driver here */
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.compiled == FB_PROGS && st.rejected == 0 && st.loaded == 0);
+    psygfx_close(&g);
+    g_fb_renderer = "fake renderer";
+    g_fb_version = "fake 2";   /* another ANGLE build */
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.compiled == FB_PROGS && st.rejected == 0 && st.loaded == 0);
+    psygfx_close(&g);
+    g_fb_version = "fake 1";
+    /* a byte of each payload flipped: the hash rejects it, compiles, stores
+     * a good one again */
+    for (i = 0; i < mc.n; i++) mc.data[i][mc.len[i] - 1] ^= 1;
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.rejected == FB_PROGS && st.compiled == FB_PROGS && st.loaded == 0 && st.stored == FB_PROGS);
+    psygfx_close(&g);
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.loaded == FB_PROGS);
+    psygfx_close(&g);
+    /* a header byte (the magic), a truncation */
+    for (i = 0; i < mc.n; i++) { if (i & 1) mc.data[i][0] ^= 1; else mc.len[i] -= 3; }
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.rejected == FB_PROGS && st.compiled == FB_PROGS);
+    psygfx_close(&g);
+    /* the driver refuses an entry that passes every check */
+    g_fb_refuse = 1;
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.rejected == FB_PROGS && st.compiled == FB_PROGS && st.loaded == 0);
+    psygfx_close(&g);
+    g_fb_refuse = 0;
+    /* every key the same: each program finds another's entry; the second
+     * hash catches it */
+    mc_clear(&mc);
+    psygfx__test_key_mask = 0;
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.compiled == FB_PROGS && mc.n == 1);
+    psygfx_close(&g);
+    CHECK(fb_open_gfx(&g, &c, &st));
+    CHECK(st.loaded == 0 && st.rejected == FB_PROGS && st.compiled == FB_PROGS);   /* each compiled program is stored before the next loads */
+    psygfx_close(&g);
+    psygfx__test_key_mask = ~(uint64_t)0;
+    /* no cache, a cache without store */
+    CHECK(fb_open_gfx(&g, NULL, &st));
+    CHECK(st.compiled == FB_PROGS && st.stored == 0 && mc.loads > 0);
+    psygfx_close(&g);
+    mc_clear(&mc);
+    /* the file cache's arguments */
+    {
+        psygfx_file_cache fc;
+        char big[600];
+        memset(big, 'a', sizeof big - 1);
+        big[sizeof big - 1] = '\0';
+        CHECK(psygfx_file_cache_init(&fc, NULL) == NULL);
+        CHECK(psygfx_file_cache_init(&fc, "") == NULL);
+        CHECK(psygfx_file_cache_init(&fc, big) == NULL);
+        CHECK(psygfx_file_cache_init(&fc, "x/y/") == &fc.cache && strcmp(fc.dir, "x/y") == 0);
+    }
+}
+
+/* Draws one frame of stimuli from most programs and the output stage. */
+static void cache_frame(float* scene, uint8_t* out) {
+    static const unsigned char px[4 * 4 * 4] = { 10, 200, 30, 255, 250, 0, 0, 255, 0, 250, 0, 128, 0, 0, 250, 255,
+                                                 90, 90, 90, 255, 1, 2, 3, 4, 200, 100, 50, 255, 7, 7, 7, 7,
+                                                 10, 200, 30, 255, 250, 0, 0, 255, 0, 250, 0, 128, 0, 0, 250, 255,
+                                                 90, 90, 90, 255, 1, 2, 3, 4, 200, 100, 50, 255, 7, 7, 7, 7 };
+    psygfx_texture_desc td;
+    psygfx_tex t;
+    psygfx_stim s[6];
+    psygfx_gabor_desc gb;
+    psygfx_shape_desc sd;
+    psygfx_image_desc id;
+    psygfx_noise_desc nd;
+    psygfx_grating_desc gr;
+    memset(&td, 0, sizeof td);
+    td.w = 4; td.h = 4; td.format = PSYGFX_RGBA8; td.data = px;
+    t = psygfx_texture(&R->g, &td);
+    memset(&gb, 0, sizeof gb);
+    gb.x = -80; gb.sf = 1 / 16.0f; gb.sigma = 12; gb.contrast = 0.4f; gb.ori = 20;
+    s[0] = psygfx_gabor(&gb);
+    memset(&sd, 0, sizeof sd);
+    sd.shape = PSYGFX_CIRCLE; sd.x = 60; sd.w = 50; sd.edge = PSYGFX_EDGE_GAUSSIAN; sd.edge_width = 2;
+    sd.color[0] = 0.9f; sd.color[1] = 0.2f; sd.color[2] = 0.1f;
+    s[1] = psygfx_shape(&sd);
+    memset(&sd, 0, sizeof sd);
+    sd.shape = PSYGFX_RRECT; sd.y = 60; sd.w = 120; sd.h = 40; sd.shape_p[0] = 6; sd.shape_p[1] = 12; sd.shape_p[2] = 3;
+    sd.edge = PSYGFX_EDGE_COSINE; sd.edge_width = 3; sd.color[0] = 0.2f; sd.color[1] = 0.7f; sd.color[2] = 0.3f;
+    s[2] = psygfx_shape(&sd);
+    memset(&id, 0, sizeof id);
+    id.tex = t; id.x = 120; id.y = -50; id.w = 40; id.h = 40; id.linear = true;
+    s[3] = psygfx_image(&R->g, &id);
+    memset(&nd, 0, sizeof nd);
+    nd.x = -120; nd.y = -60; nd.w = 40; nd.check = 4; nd.seed = 3; nd.contrast = 0.3f;
+    s[4] = psygfx_noise(&nd);
+    memset(&gr, 0, sizeof gr);
+    gr.y = -60; gr.w = 60; gr.h = 30; gr.sf = 1 / 9.0f; gr.contrast = 0.2f; gr.aperture = PSYGFX_CIRCLE;
+    s[5] = psygfx_grating(&gr);
+    gl_frame(s, 6);
+    memcpy(scene, R->scene, sizeof R->scene);
+    memcpy(out, R->out, sizeof R->out);
+    psygfx_texture_free(&R->g, t);
+}
+
+static memcache g_mc;   /* the GL parts' desc.cache, per renderer */
+static int g_use_mc = 1;
+static const psygfx_cache* test_cache(void) {
+    static psygfx_cache c;
+    c.load = mc_load; c.store = mc_store; c.user = &g_mc;
+    return g_use_mc ? &c : NULL;
+}
+
+/* The file cache with its keys recorded, so the test can remove its files. */
+typedef struct filekeys { psygfx_cache c; const psygfx_cache* inner; uint64_t keys[64]; int n; } filekeys;
+static size_t fk_load(void* u, uint64_t key, void* dst, size_t cap) {
+    filekeys* f = (filekeys*)u;
+    return f->inner->load(f->inner->user, key, dst, cap);
+}
+static int fk_store(void* u, uint64_t key, const void* data, size_t n) {
+    filekeys* f = (filekeys*)u;
+    if (f->n < 64) f->keys[f->n++] = key;
+    return f->inner->store(f->inner->user, key, data, n);
+}
+static filekeys g_fk = { { fk_load, fk_store, &g_fk }, NULL, { 0 }, 0 };
+
+static void gl_v04_cache(stats* st) {
+    static float ref_s[W * H * 4], s1[W * H * 4];
+    static uint8_t ref_o[W * H * 4], o1[W * H * 4];
+    static memcache mc;
+    psygfx_cache c;
+    psygfx_programs ps;
+    psygfx_desc gd;
+    int k, i, n;
+    long before;
+    uint64_t t0;
+    (void)st;
+    c.load = mc_load; c.store = mc_store; c.user = &mc;
+    mc_clear(&mc);
+    g_use_mc = 0;
+    /* the reference: no cache */
+    t0 = psyrt_now_ns();
+    if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_ORDERED)) { g_use_mc = 1; return; }
+    S6.open_cold_ms = (double)(psyrt_now_ns() - t0) * 1e-6;
+    cache_frame(ref_s, ref_o);
+    psygfx_close(&R->g);
+    /* cases: 0 cold, 1 warm, 2 payload flipped, 3 warm again, 4 collisions
+     * cold, 5 collisions warm, 6 another identity, 7 driver refuses a
+     * re-hashed truncated payload */
+    for (k = 0; k < 8; k++) {
+        psygfx__test_key_mask = (k == 4 || k == 5) ? 0 : ~(uint64_t)0;
+        psygfx__test_ident = k >= 6 ? "another driver" : "";
+        if (k == 4) mc_clear(&mc);
+        if (k == 2) for (i = 0; i < mc.n; i++) mc.data[i][mc.len[i] / 2 + 24] ^= 0x55;
+        if (k == 7)
+            for (i = 0; i < mc.n; i++) {
+                /* a valid header over a binary of another driver build: the
+                 * first byte of ANGLE's build hash changed. (Half a binary under
+                 * a valid header crashed ANGLE: only the payload hash keeps a
+                 * damaged entry from the driver.) */
+                psygfx__prog_head h;
+                memcpy(&h, mc.data[i], sizeof h);
+                mc.data[i][sizeof h] ^= 0x01;
+                h.payload_hash = psygfx__fnv64(mc.data[i] + sizeof h, h.payload_bytes);
+                memcpy(mc.data[i], &h, sizeof h);
+            }
+        memset(&gd, 0, sizeof gd);
+        gd.screen = &R->scr; gd.dither = PSYGFX_DITHER_ORDERED; gd.seed = 99; gd.cache = &c;
+        psygfx__test_scene32 = 1;
+        t0 = psyrt_now_ns();
+        if (!psygfx_open(&R->g, &gd)) { CHECK(0); continue; }
+        if (k == 1) S6.open_warm_ms = (double)(psyrt_now_ns() - t0) * 1e-6;
+        psygfx_program_stats(&R->g, &ps);
+        n = (int)(ps.loaded + ps.compiled);
+        S6.programs = n;
+        S6.cache_cases++;
+        before = S6.cache_bad;
+        switch (k) {
+        case 0: case 6: S6.cache_bad += !(ps.compiled == (uint32_t)n && ps.stored == (uint32_t)n && ps.rejected == 0); break;
+        case 1: case 3: S6.cache_bad += !(ps.loaded == (uint32_t)n && ps.compiled == 0); break;
+        case 2: S6.cache_bad += !(ps.rejected == (uint32_t)n && ps.compiled == (uint32_t)n); break;
+        case 4: S6.cache_bad += !(ps.compiled == (uint32_t)n && mc.n >= 1); break;
+        case 5: S6.cache_bad += !(ps.loaded == 1 && ps.rejected == (uint32_t)n - 1); break;
+        case 7: S6.cache_bad += !(ps.rejected == (uint32_t)n && ps.loaded == 0); break;
+        }
+        if (k == 1) {   /* a user pipeline: compiled, then loaded */
+            psygfx_pipe p = user_pipe(&R->g, "float psy_main(vec2 p) { return 0.25; }\n");
+            psygfx_program_stats(&R->g, &ps);
+            S6.cache_bad += !(p.id && ps.compiled == 1 && ps.stored == 1);
+        }
+        if (k == 2) user_pipe(&R->g, "float psy_main(vec2 p) { return 0.25; }\n");   /* its entry was damaged too */
+        if (k == 3) {
+            psygfx_pipe p = user_pipe(&R->g, "float psy_main(vec2 p) { return 0.25; }\n");
+            psygfx_program_stats(&R->g, &ps);
+            S6.cache_bad += !(p.id && ps.compiled == 0 && ps.loaded == (uint32_t)n + 1);
+        }
+        cache_frame(s1, o1);
+        S6.cache_bad += memcmp(s1, ref_s, sizeof s1) != 0 || memcmp(o1, ref_o, sizeof o1) != 0;
+        if (S6.cache_bad != before)
+            fprintf(stderr, "  cache case %d: loaded %u compiled %u rejected %u stored %u; frame %s\n", k, ps.loaded, ps.compiled,
+                    ps.rejected, ps.stored, memcmp(s1, ref_s, sizeof s1) || memcmp(o1, ref_o, sizeof o1) ? "differs" : "equal");
+        psygfx_close(&R->g);
+    }
+    psygfx__test_key_mask = ~(uint64_t)0;
+    psygfx__test_ident = "";
+    /* the file cache: cold, warm, and a folder that cannot be made; the
+     * files it wrote are removed after */
+    {
+        psygfx_file_cache fc;
+        char dir[300], top[100], path[400];
+        FILE* f;
+        snprintf(top, sizeof top, "psygfx_test_cache_%u", (unsigned)(psyrt_now_ns() & 0xFFFFFF));
+        snprintf(dir, sizeof dir, "%s/sub", top);
+        g_fk.n = 0;
+        for (k = 0; k < 3; k++) {
+            memset(&gd, 0, sizeof gd);
+            gd.screen = &R->scr; gd.dither = PSYGFX_DITHER_ORDERED; gd.seed = 99;
+            if (k == 2) {   /* a file where the folder would be */
+                f = fopen("psygfx_test_cache_file", "wb");
+                if (f) fclose(f);
+                snprintf(dir, sizeof dir, "psygfx_test_cache_file/sub");
+            }
+            g_fk.inner = psygfx_file_cache_init(&fc, dir);
+            CHECK(g_fk.inner != NULL);
+            gd.cache = &g_fk.c;
+            if (!psygfx_open(&R->g, &gd)) { CHECK(0); continue; }
+            psygfx_program_stats(&R->g, &ps);
+            n = (int)(ps.loaded + ps.compiled);
+            S6.cache_cases++;
+            before = S6.cache_bad;
+            if (k == 0) S6.cache_bad += !(ps.compiled == (uint32_t)n && ps.stored == (uint32_t)n);
+            if (k == 1) S6.cache_bad += !(ps.loaded == (uint32_t)n);
+            if (k == 2) S6.cache_bad += !(ps.store_failed == (uint32_t)n && ps.stored == 0);
+            cache_frame(s1, o1);
+            S6.cache_bad += memcmp(s1, ref_s, sizeof s1) != 0 || memcmp(o1, ref_o, sizeof o1) != 0;
+            if (S6.cache_bad != before)
+                fprintf(stderr, "  file cache case %d: loaded %u compiled %u stored %u failed %u\n", k, ps.loaded, ps.compiled,
+                        ps.stored, ps.store_failed);
+            psygfx_close(&R->g);
+        }
+        remove("psygfx_test_cache_file");
+        for (i = 0; i < g_fk.n; i++) {
+            snprintf(path, sizeof path, "%s/sub/%08x%08x.psyprog", top, (unsigned)(g_fk.keys[i] >> 32), (unsigned)(g_fk.keys[i] & 0xFFFFFFFFu));
+            remove(path);
+        }
+        snprintf(path, sizeof path, "%s/sub", top);
+        TEST_RMDIR(path);
+        TEST_RMDIR(top);
+    }
+    mc_clear(&mc);
+    g_use_mc = 1;
+}
+
+/* ------------------------------------------------------------- v0.4 video */
+
+/* A planar frame on the CPU and its light in double, from the definitions
+ * (H.273's matrices and ranges, the transfers' formulas), none of the
+ * header's arithmetic. */
+typedef struct vframe {
+    int fmt, w, h;
+    uint8_t y[64 * 64], u[64 * 64], v[64 * 64];   /* NV12: u holds CbCr pairs */
+    psygfx_encoding e;
+} vframe;
+
+static int vf_cw(const vframe* f) { return (f->w + 1) / 2; }
+static int vf_ch(const vframe* f) { return (f->h + 1) / 2; }
+
+/* plane 0 Y, 1 Cb, 2 Cr, as values 0..1 */
+static double vf_at(const vframe* f, int plane, int x, int y) {
+    int w = plane ? vf_cw(f) : f->w, h = plane ? vf_ch(f) : f->h;
+    x = x < 0 ? 0 : (x > w - 1 ? w - 1 : x);
+    y = y < 0 ? 0 : (y > h - 1 ? h - 1 : y);
+    if (plane == 0) return f->y[y * f->w + x] / 255.0;
+    if (f->fmt == PSYGFX_NV12) return f->u[(y * vf_cw(f) + x) * 2 + plane - 1] / 255.0;
+    return (plane == 1 ? f->u : f->v)[y * vf_cw(f) + x] / 255.0;
+}
+
+static double vf_bilin(const vframe* f, int plane, double cx, double cy) {
+    double fx = cx - 0.5, fy = cy - 0.5, ix = floor(fx), iy = floor(fy), wx = fx - ix, wy = fy - iy;
+    int x0 = (int)ix, y0 = (int)iy;
+    double a = vf_at(f, plane, x0, y0), b = vf_at(f, plane, x0 + 1, y0), c = vf_at(f, plane, x0, y0 + 1), d = vf_at(f, plane, x0 + 1, y0 + 1);
+    return (a + (b - a) * wx) * (1 - wy) + (c + (d - c) * wx) * wy;
+}
+
+static double trc_ref(double v, int tr) {
+    if (tr == PSYGFX_TRC_BT1886) return pow(v, 2.4);
+    if (tr == PSYGFX_TRC_SRGB) return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
+    if (tr == PSYGFX_TRC_GAMMA22) return pow(v, 2.2);
+    return v;   /* LINEAR, and DEVICE under an identity CLUT */
+}
+
+/* The light of luma point (lx, ly), texel-edge coordinates; M the primaries'
+ * matrix (NULL = identity). */
+static void vf_ref(const vframe* f, double lx, double ly, int lin, const double* M, double out[3]) {
+    const psygfx_encoding* e = &f->e;
+    double kr = 0.299, kb = 0.114, kg, Y, cb, cr, rgb[3], l[3];
+    double ox = e->siting == PSYGFX_SITING_LEFT || e->siting == PSYGFX_SITING_TOP_LEFT ? 0.25 : 0.0;
+    double oy = e->siting == PSYGFX_SITING_TOP_LEFT ? 0.25 : 0.0, cx, cy;
+    int lim = e->range == PSYGFX_RANGE_LIMITED, k;
+    if (e->matrix == PSYGFX_MATRIX_BT709) { kr = 0.2126; kb = 0.0722; }
+    if (e->matrix == PSYGFX_MATRIX_BT2020) { kr = 0.2627; kb = 0.0593; }
+    kg = 1 - kr - kb;
+    if (!lin) { lx = floor(lx) + 0.5; ly = floor(ly) + 0.5; }
+    Y = lin ? vf_bilin(f, 0, lx, ly) : vf_at(f, 0, (int)floor(lx), (int)floor(ly));
+    if (e->chroma_nearest) {
+        int qx = (int)floor(lx) / 2, qy = (int)floor(ly) / 2;
+        cb = vf_at(f, 1, qx, qy); cr = vf_at(f, 2, qx, qy);
+    } else {
+        cx = lx / 2 + ox; cy = ly / 2 + oy;
+        cb = vf_bilin(f, 1, cx, cy); cr = vf_bilin(f, 2, cx, cy);
+    }
+    Y = lim ? (Y * 255 - 16) / 219 : Y;
+    cb = lim ? (cb * 255 - 128) / 224 : (cb * 255 - 128) / 255;
+    cr = lim ? (cr * 255 - 128) / 224 : (cr * 255 - 128) / 255;
+    rgb[0] = Y + 2 * (1 - kr) * cr;
+    rgb[2] = Y + 2 * (1 - kb) * cb;
+    rgb[1] = (Y - kr * rgb[0] - kb * rgb[2]) / kg;   /* the luma equation, not the header's form */
+    for (k = 0; k < 3; k++) l[k] = trc_ref(rgb[k] < 0 ? 0 : (rgb[k] > 1 ? 1 : rgb[k]), e->transfer);
+    for (k = 0; k < 3; k++) out[k] = M ? M[k * 3] * l[0] + M[k * 3 + 1] * l[1] + M[k * 3 + 2] * l[2] : l[k];
+}
+
+static uint32_t g_lcg = 12345u;
+static int rnd(int lo, int hi) { g_lcg = g_lcg * 1664525u + 1013904223u; return lo + (int)((g_lcg >> 8) % (uint32_t)(hi - lo + 1)); }
+
+static void vf_fill(vframe* f, int fmt, int w, int h) {
+    int i, n = ((w + 1) / 2) * ((h + 1) / 2);
+    f->fmt = fmt; f->w = w; f->h = h;
+    for (i = 0; i < w * h; i++) f->y[i] = (uint8_t)(i % 17 == 0 ? (i % 2 ? 0 : 255) : rnd(16, 235));
+    for (i = 0; i < 2 * n; i++) f->u[i] = (uint8_t)(i % 13 == 0 ? (i % 2 ? 0 : 255) : rnd(16, 240));
+    for (i = 0; i < n; i++) f->v[i] = (uint8_t)rnd(16, 240);
+}
+
+static psygfx_planes vf_planes(const vframe* f) {
+    psygfx_planes p;
+    memset(&p, 0, sizeof p);
+    p.data[0] = f->y; p.data[1] = f->u; p.data[2] = f->v;
+    return p;
+}
+
+/* Draws frame f at (5, 5) top-left, scale px per texel; the largest |scene -
+ * reference| over the image's pixels. */
+static double vf_check(psygfx_tex t, const vframe* f, double scale, int lin, const double* M) {
+    psygfx_image_desc idd;
+    psygfx_stim s;
+    double worst = 0, ref[3];
+    int i, j, c;
+    memset(&idd, 0, sizeof idd);
+    idd.tex = t; idd.place = PSYGFX_TOP_LEFT; idd.anchor = PSYGFX_TOP_LEFT; idd.x = 5; idd.y = 5;
+    idd.w = (float)(f->w * scale); idd.h = (float)(f->h * scale); idd.linear = lin != 0;
+    s = psygfx_image(&R->g, &idd);
+    gl_frame(&s, 1);
+    for (j = 5; j < 5 + (int)(f->h * scale); j++)
+        for (i = 5; i < 5 + (int)(f->w * scale); i++) {
+            vf_ref(f, (i + 0.5 - 5) / scale, (j + 0.5 - 5) / scale, lin, M, ref);
+            for (c = 0; c < 3; c++) worst = maxd(worst, fabs(R->scene[(j * W + i) * 4 + c] - ref[c]));
+        }
+    return worst;
+}
+
+static psygfx_tex vf_texture(const vframe* f) {
+    psygfx_texture_desc td;
+    psygfx_planes p = vf_planes(f);
+    memset(&td, 0, sizeof td);
+    td.w = f->w; td.h = f->h; td.format = (psygfx_format)f->fmt; td.enc = f->e; td.planes = &p;
+    return psygfx_texture(&R->g, &td);
+}
+
+#if defined(_WIN32)
+/* ANGLE's D3D11 device through EGL_EXT_device_query, as psyscr_native()
+ * gives it in a window. */
+static void* d3d11_device(void) {
+    typedef unsigned (PSYGFX_HL__API *qa_fn)(void*, int32_t, intptr_t*);
+    qa_fn qda = (qa_fn)psygfx_hl__sym(&R->hl, "eglQueryDisplayAttribEXT");
+    qa_fn qdev = (qa_fn)psygfx_hl__sym(&R->hl, "eglQueryDeviceAttribEXT");
+    intptr_t edev = 0, d3d = 0;
+    if (!qda || !qdev || !qda(R->hl.dpy, 0x322C, &edev) || !edev) return NULL;      /* EGL_DEVICE_EXT */
+    if (!qdev((void*)edev, 0x33A1, &d3d)) return NULL;                                /* EGL_D3D11_DEVICE_ANGLE */
+    return (void*)d3d;
+}
+#endif
+
+#if defined(_WIN32)
+/* COM from C and C++ alike, and the IIDs here so nothing links dxguid. */
+#ifdef __cplusplus
+    #define TCOM(o, m, ...) ((o)->m(__VA_ARGS__))
+    #define TCOM0(o, m)     ((o)->m())
+    #define TIID(x)         (x)
+#else
+    #define TCOM(o, m, ...) ((o)->lpVtbl->m((o), __VA_ARGS__))
+    #define TCOM0(o, m)     ((o)->lpVtbl->m(o))
+    #define TIID(x)         (&(x))
+#endif
+#define TREL(o) do { if (o) { TCOM0((o), Release); (o) = NULL; } } while (0)
+static const IID t_IID_IDXGIDevice      = {0x54ec77fa,0x1377,0x44e6,{0x8c,0x32,0x88,0xfd,0x5f,0x44,0xc8,0x4c}};
+static const IID t_IID_IDXGIResource    = {0x035f3ab4,0x482e,0x4e50,{0xb4,0x1f,0x8a,0x7f,0x8b,0xd8,0x96,0x0b}};
+static const IID t_IID_IDXGIResource1   = {0x30961379,0x4609,0x4a41,{0x99,0x8e,0x54,0xfe,0x56,0x7e,0xe0,0xc1}};
+static const IID t_IID_IDXGIKeyedMutex  = {0x9d8e1289,0xd7b3,0x465f,{0x81,0x26,0x25,0x0e,0x34,0x9a,0xf8,0x5d}};
+static const IID t_IID_ID3D11Texture2D  = {0x6f15aaf2,0xd208,0x4e89,{0x9a,0xb4,0x48,0x95,0x35,0xd3,0x4f,0x9c}};
+static const IID t_IID_ID3D11Device1    = {0xa04bfb29,0x08ef,0x43d6,{0xa4,0x9c,0xa9,0xbd,0xbd,0xcb,0xe6,0x86}};
+
+/* The video worker's SHARED path: a second D3D11 device on ANGLE's adapter
+ * writes an NV12 frame on its GPU; ANGLE's device opens the texture by its
+ * shared handle; psy_gfx imports it. variant 0: an NT handle with a keyed
+ * mutex (the producer releases key 1 after its write, the consumer acquires
+ * it before psygfx_end() and gives key 0 back after the frame); variant 1:
+ * a legacy shared handle, ordered by the producer's flush and an event query
+ * it waits on. The largest |scene - reference|, or -1 when a step failed
+ * (*why names it). */
+static double d3d11_shared_case(ID3D11Device* dev, int variant, const vframe* fr, const char** why) {
+    typedef HRESULT (WINAPI *create_fn)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL*, UINT, UINT,
+                                        ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**);
+    static uint8_t nv[64 * 36];
+    HMODULE lib = GetModuleHandleW(L"d3d11.dll");
+    create_fn create = lib ? (create_fn)(psyscr_proc)GetProcAddress(lib, "D3D11CreateDevice") : NULL;
+    IDXGIDevice* xd = NULL;
+    IDXGIAdapter* ad = NULL;
+    ID3D11Device* pd = NULL;
+    ID3D11DeviceContext* pc = NULL;
+    ID3D11Texture2D *pt = NULL, *ct = NULL;
+    IDXGIKeyedMutex *pkm = NULL, *ckm = NULL;
+    ID3D11Query* q = NULL;
+    HANDLE h = NULL;
+    D3D11_TEXTURE2D_DESC td;
+    double worst = -1;
+    int y;
+    *why = "";
+    memset(nv, 0, sizeof nv);
+    for (y = 0; y < fr->h; y++) memcpy(nv + y * 64, fr->y + y * fr->w, (size_t)fr->w);
+    for (y = 0; y < vf_ch(fr); y++) memcpy(nv + 64 * 24 + y * 64, fr->u + y * vf_cw(fr) * 2, (size_t)vf_cw(fr) * 2);
+    if (!create) { *why = "D3D11CreateDevice"; return -1; }
+    if (FAILED(TCOM(dev, QueryInterface, TIID(t_IID_IDXGIDevice), (void**)&xd)) || FAILED(TCOM(xd, GetAdapter, &ad))) { *why = "the adapter"; goto out; }
+    if (FAILED(create(ad, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &pd, NULL, &pc))) { *why = "a second device"; goto out; }
+    memset(&td, 0, sizeof td);
+    td.Width = 38; td.Height = 24; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_NV12;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.MiscFlags = variant == 0 ? (D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) : D3D11_RESOURCE_MISC_SHARED;
+    if (FAILED(TCOM(pd, CreateTexture2D, &td, NULL, &pt))) { *why = "a shared NV12 texture"; goto out; }
+    /* the producer's write, on its GPU */
+    if (variant == 0) {
+        if (FAILED(TCOM(pt, QueryInterface, TIID(t_IID_IDXGIKeyedMutex), (void**)&pkm)) || FAILED(TCOM(pkm, AcquireSync, 0, 1000))) { *why = "the producer's key"; goto out; }
+    }
+    TCOM(pc, UpdateSubresource, (ID3D11Resource*)pt, 0, NULL, nv, 64, 0);
+    if (variant == 0) {
+        TCOM(pkm, ReleaseSync, 1);
+    } else {
+        D3D11_QUERY_DESC qd;
+        qd.Query = D3D11_QUERY_EVENT; qd.MiscFlags = 0;
+        if (FAILED(TCOM(pd, CreateQuery, &qd, &q))) { *why = "an event query"; goto out; }
+        TCOM(pc, End, (ID3D11Asynchronous*)q);
+        TCOM0(pc, Flush);
+        while (TCOM(pc, GetData, (ID3D11Asynchronous*)q, NULL, 0, 0) == S_FALSE) {}
+    }
+    /* the handle, opened on ANGLE's device */
+    if (variant == 0) {
+        IDXGIResource1* r1 = NULL;
+        ID3D11Device1* d1 = NULL;
+        if (FAILED(TCOM(pt, QueryInterface, TIID(t_IID_IDXGIResource1), (void**)&r1)) ||
+            FAILED(TCOM(r1, CreateSharedHandle, NULL, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, NULL, &h))) {
+            TREL(r1); *why = "an NT handle"; goto out;
+        }
+        TREL(r1);
+        if (FAILED(TCOM(dev, QueryInterface, TIID(t_IID_ID3D11Device1), (void**)&d1)) ||
+            FAILED(TCOM(d1, OpenSharedResource1, h, TIID(t_IID_ID3D11Texture2D), (void**)&ct))) {
+            TREL(d1); *why = "OpenSharedResource1"; goto out;
+        }
+        TREL(d1);
+        if (FAILED(TCOM(ct, QueryInterface, TIID(t_IID_IDXGIKeyedMutex), (void**)&ckm))) { *why = "the consumer's key"; goto out; }
+    } else {
+        IDXGIResource* r0 = NULL;
+        if (FAILED(TCOM(pt, QueryInterface, TIID(t_IID_IDXGIResource), (void**)&r0)) || FAILED(TCOM(r0, GetSharedHandle, &h))) {
+            TREL(r0); *why = "a shared handle"; goto out;
+        }
+        TREL(r0);
+        if (FAILED(TCOM(dev, OpenSharedResource, h, TIID(t_IID_ID3D11Texture2D), (void**)&ct))) { h = NULL; *why = "OpenSharedResource"; goto out; }
+        h = NULL;   /* a legacy handle is not closed */
+    }
+    {
+        psygfx_import_desc id;
+        psygfx_image_desc idd;
+        psygfx_tex m;
+        psygfx_stim s;
+        double ref[3];
+        int i2, j2, c;
+        memset(&id, 0, sizeof id);
+        id.kind = PSYGFX_IMPORT_D3D11; id.w = 38; id.h = 24; id.format = PSYGFX_NV12; id.enc = fr->e; id.d3d11_tex = ct;
+        m = psygfx_texture_import(&R->g, &id);
+        if (!m.id) { *why = "psygfx_texture_import"; goto out; }
+        memset(&idd, 0, sizeof idd);
+        idd.tex = m; idd.place = PSYGFX_TOP_LEFT; idd.anchor = PSYGFX_TOP_LEFT; idd.x = 5; idd.y = 5;
+        idd.src[2] = 37; idd.src[3] = 23;
+        s = psygfx_image(&R->g, &idd);
+        /* the consumer takes key 1 before ANGLE samples, and gives key 0
+         * back after the frame (the readback waited for the GPU) */
+        if (ckm && FAILED(TCOM(ckm, AcquireSync, 1, 1000))) { psygfx_texture_free(&R->g, m); *why = "the consumer's AcquireSync"; goto out; }
+        gl_frame(&s, 1);
+        if (ckm) TCOM(ckm, ReleaseSync, 0);
+        worst = 0;
+        for (j2 = 5; j2 < 5 + 23; j2++)
+            for (i2 = 5; i2 < 5 + 37; i2++) {
+                vf_ref(fr, i2 + 0.5 - 5, j2 + 0.5 - 5, 0, NULL, ref);
+                for (c = 0; c < 3; c++) worst = maxd(worst, fabs(R->scene[(j2 * W + i2) * 4 + c] - ref[c]));
+            }
+        psygfx_texture_free(&R->g, m);
+    }
+out:
+    TREL(ckm); TREL(ct); TREL(pkm); TREL(q); TREL(pt); TREL(pc); TREL(pd); TREL(ad); TREL(xd);
+    if (h) CloseHandle(h);
+    return worst;
+}
+#endif
+
+static void gl_v04_video(stats* st) {
+    static vframe f, f2;
+    static psycol_cal cal;
+    static const float xy[4][2] = { { 0.600f, 0.370f }, { 0.356f, 0.550f }, { 0.155f, 0.110f }, { 0.3135f, 0.3291f } };   /* the panel's EDID */
+    psygfx_tex t, t2;
+    int fmt, mat, rng, sit, cn, k, i;
+    (void)st;
+    if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) return;
+    /* every format, matrix, range, siting and chroma filter at 1:1 */
+    for (fmt = PSYGFX_NV12; fmt <= PSYGFX_I420; fmt++)
+        for (mat = PSYGFX_MATRIX_BT601; mat <= PSYGFX_MATRIX_BT2020; mat++)
+            for (rng = PSYGFX_RANGE_LIMITED; rng <= PSYGFX_RANGE_FULL; rng++)
+                for (sit = PSYGFX_SITING_LEFT; sit <= PSYGFX_SITING_TOP_LEFT; sit++)
+                    for (cn = 0; cn < 2; cn++) {
+                        vf_fill(&f, fmt, (mat + sit) % 2 ? 37 : 36, cn ? 23 : 24);
+                        memset(&f.e, 0, sizeof f.e);
+                        f.e.matrix = (uint8_t)mat; f.e.range = (uint8_t)rng; f.e.transfer = PSYGFX_TRC_LINEAR;
+                        f.e.primaries = PSYGFX_PRIM_DEVICE; f.e.siting = (uint8_t)sit; f.e.chroma_nearest = (uint8_t)cn;
+                        t = vf_texture(&f);
+                        CHECK(t.id != 0);
+                        S6.vid_1x = maxd(S6.vid_1x, vf_check(t, &f, 1.0, 0, NULL));
+                        S6.vid_cases++;
+                        psygfx_texture_free(&R->g, t);
+                    }
+    /* each transfer; the linear path drawn at 2.5x; an RGB texture encoded */
+    vf_fill(&f, PSYGFX_NV12, 37, 23);
+    memset(&f.e, 0, sizeof f.e);
+    f.e.matrix = PSYGFX_MATRIX_BT709; f.e.range = PSYGFX_RANGE_LIMITED; f.e.primaries = PSYGFX_PRIM_DEVICE; f.e.siting = PSYGFX_SITING_LEFT;
+    for (k = PSYGFX_TRC_DEVICE; k <= PSYGFX_TRC_GAMMA22; k++) {
+        f.e.transfer = (uint8_t)k;
+        t = vf_texture(&f);
+        S6.vid_trc = maxd(S6.vid_trc, vf_check(t, &f, 1.0, 0, NULL));
+        psygfx_texture_free(&R->g, t);
+    }
+    f.e.transfer = PSYGFX_TRC_SRGB;
+    t = vf_texture(&f);
+    S6.vid_lin = vf_check(t, &f, 2.5, 1, NULL);
+    /* a rectangle of one plane updated, then all of them */
+    for (i = 0; i < 6 * 4; i++) f.y[(3 + i / 6) * f.w + 10 + i % 6] = (uint8_t)(40 + 7 * i);
+    {
+        uint8_t blk[6 * 4];
+        int q;
+        for (q = 0; q < 24; q++) blk[q] = f.y[(3 + q / 6) * f.w + 10 + q % 6];
+        CHECK(psygfx_texture_update_plane(&R->g, t, 0, 10, 3, 6, 4, blk, 6) == PSYGFX_OK);
+    }
+    S6.vid_part = vf_check(t, &f, 1.0, 0, NULL);
+    vf_fill(&f, PSYGFX_NV12, 37, 23);
+    {
+        psygfx_planes p = vf_planes(&f);
+        CHECK(psygfx_texture_update_planes(&R->g, t, &p) == PSYGFX_OK);
+    }
+    S6.vid_part = maxd(S6.vid_part, vf_check(t, &f, 1.0, 0, NULL));
+    /* rebind: shows the other's texels, then its own, then its own again
+     * when the other goes */
+    vf_fill(&f2, PSYGFX_NV12, 37, 23);
+    f2.e = f.e;
+    t2 = vf_texture(&f2);
+    CHECK(psygfx_texture_rebind(&R->g, t, t2) == PSYGFX_OK);
+    S6.rebind_diff = vf_check(t, &f2, 1.0, 0, NULL);
+    CHECK(psygfx_texture_rebind(&R->g, t, t) == PSYGFX_OK);
+    S6.rebind_diff = maxd(S6.rebind_diff, vf_check(t, &f, 1.0, 0, NULL));
+    CHECK(psygfx_texture_rebind(&R->g, t, t2) == PSYGFX_OK);
+    psygfx_texture_free(&R->g, t2);
+    S6.rebind_diff = maxd(S6.rebind_diff, vf_check(t, &f, 1.0, 0, NULL));
+    /* import: the GL name of a texture psy_gfx made, as an NV12 import; freeing
+     * the import leaves the source */
+    {
+        psygfx__gl* gl = (psygfx__gl*)R->g.bctx;
+        psygfx_import_desc id;
+        psygfx_tex m;
+        memset(&id, 0, sizeof id);
+        id.kind = PSYGFX_IMPORT_GL; id.w = f.w; id.h = f.h; id.format = PSYGFX_NV12; id.enc = f.e;
+        id.gl_tex[0] = gl->tex[R->g.tex[t.id - 1].bid - 1].tex;
+        id.gl_tex[1] = gl->tex[R->g.tex[t.id - 1].plane_bid[0] - 1].tex;
+        m = psygfx_texture_import(&R->g, &id);
+        CHECK(m.id != 0);
+        S6.import_gl_diff = vf_check(m, &f, 1.0, 0, NULL);
+        psygfx_texture_free(&R->g, m);
+        S6.import_gl_diff = maxd(S6.import_gl_diff, vf_check(t, &f, 1.0, 0, NULL));
+    }
+#if defined(_WIN32)
+    if (psygfx_features(&R->g) & PSYGFX_FEAT_IMPORT_NV12) {   /* the zero-copy path's shape: an NV12 array slice */
+        ID3D11Device* dev = (ID3D11Device*)d3d11_device();
+        D3D11_TEXTURE2D_DESC td;
+        D3D11_SUBRESOURCE_DATA sd[2];
+        static uint8_t nv[2][64 * 96];
+        ID3D11Texture2D* arr = NULL;
+        int s2, y;
+        for (s2 = 0; s2 < 2; s2++) {
+            const vframe* src = s2 ? &f : &f2;   /* slice 1 holds f */
+            memset(nv[s2], 0, sizeof nv[s2]);
+            for (y = 0; y < src->h; y++) memcpy(nv[s2] + y * 64, src->y + y * src->w, (size_t)src->w);
+            for (y = 0; y < vf_ch(src); y++) memcpy(nv[s2] + 64 * 24 + y * 64, src->u + y * vf_cw(src) * 2, (size_t)vf_cw(src) * 2);
+            sd[s2].pSysMem = nv[s2]; sd[s2].SysMemPitch = 64; sd[s2].SysMemSlicePitch = 0;
+        }
+        memset(&td, 0, sizeof td);
+        /* NV12 needs even sizes: the frame is the 37 x 23 corner of a 38 x 24 texture */
+        td.Width = 38; td.Height = 24; td.MipLevels = 1; td.ArraySize = 2; td.Format = DXGI_FORMAT_NV12;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        /* the chroma plane starts at row 24 of each slice's memory */
+        if (dev) {
+#ifdef __cplusplus
+            dev->CreateTexture2D(&td, sd, &arr);
+#else
+            dev->lpVtbl->CreateTexture2D(dev, &td, sd, &arr);
+#endif
+        }
+        CHECK(arr != NULL);
+        if (arr) {
+            psygfx_import_desc id;
+            psygfx_tex m;
+            psygfx_image_desc idd;
+            psygfx_stim s;
+            vframe g38 = f;   /* the import is 38 x 24: compare its 37 x 23 corner */
+            memset(&id, 0, sizeof id);
+            id.kind = PSYGFX_IMPORT_D3D11; id.w = 38; id.h = 24; id.format = PSYGFX_NV12; id.enc = f.e;
+            id.d3d11_tex = arr; id.d3d11_slice = 1;
+            m = psygfx_texture_import(&R->g, &id);
+            CHECK(m.id != 0);
+            memset(&idd, 0, sizeof idd);
+            idd.tex = m; idd.place = PSYGFX_TOP_LEFT; idd.anchor = PSYGFX_TOP_LEFT; idd.x = 5; idd.y = 5;
+            idd.src[2] = 37; idd.src[3] = 23;
+            s = psygfx_image(&R->g, &idd);
+            gl_frame(&s, 1);
+            {
+                double ref[3];
+                int i2, j2, c;
+                for (j2 = 5; j2 < 5 + 22; j2++)          /* the last row and column read the padding's chroma */
+                    for (i2 = 5; i2 < 5 + 36; i2++) {
+                        vf_ref(&g38, i2 + 0.5 - 5, j2 + 0.5 - 5, 0, NULL, ref);
+                        for (c = 0; c < 3; c++) S6.import_d3d_diff = maxd(S6.import_d3d_diff, fabs(R->scene[(j2 * W + i2) * 4 + c] - ref[c]));
+                    }
+            }
+            psygfx_texture_free(&R->g, m);
+            S6.d3d_ran = 1;
+            for (s2 = 0; s2 < 2; s2++) S6.shared_diff[s2] = d3d11_shared_case(dev, s2, &f, &S6.shared_why[s2]);
+#ifdef __cplusplus
+            arr->Release();
+#else
+            arr->lpVtbl->Release(arr);
+#endif
+        }
+    }
+#endif
+    /* refusals */
+    {
+        psygfx_texture_desc td;
+        psygfx_image_desc idd;
+        psygfx_stim s;
+        int rc[6];
+        memset(&td, 0, sizeof td);
+        td.w = 16; td.h = 16; td.format = PSYGFX_NV12;
+        rc[0] = psygfx_texture(&R->g, &td).id == 0;                          /* no encoding */
+        td.enc = f.e; td.enc.primaries = PSYGFX_PRIM_BT709;
+        rc[1] = psygfx_texture(&R->g, &td).id == 0 && strstr(psygfx_error(&R->g), "PRIM_DEVICE") != NULL;   /* no calibration */
+        td.enc = f.e; td.enc.siting = PSYGFX_SITING_NONE;
+        rc[2] = psygfx_texture(&R->g, &td).id == 0;
+        rc[3] = psygfx_texture_update(&R->g, t, 0, 0, 4, 4, f.y, 0) == PSYGFX_ERR_ARG;
+        memset(&idd, 0, sizeof idd);
+        idd.tex = t; idd.modulation = true;
+        s = psygfx_image(&R->g, &idd);
+        CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+        CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+        rc[4] = psygfx_draw(&R->g, &s) == PSYGFX_ERR_ARG;
+        CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+        CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+        td.format = PSYGFX_I420; td.enc = f.e;
+        t2 = psygfx_texture(&R->g, &td);
+        rc[5] = psygfx_texture_rebind(&R->g, t, t2) == PSYGFX_ERR_ARG;
+        psygfx_texture_free(&R->g, t2);
+        for (k = 0; k < 6; k++) { S6.vid_refused_n++; S6.vid_refused_ok += rc[k]; }
+    }
+    psygfx_texture_free(&R->g, t);
+    psygfx_close(&R->g);
+    /* with a calibration: primaries through its chromaticities, and DEVICE
+     * codes that come out of the output stage as they went in */
+    CHECK(psycol_cal_nominal(&cal, xy, 80.0f, 2.2) == PSYGFX_OK);
+    {
+        psygfx_desc gd;
+        memset(&gd, 0, sizeof gd);
+        gd.screen = &R->scr; gd.cal = &cal; gd.cache = test_cache();
+        psygfx__test_scene32 = 1;
+        if (!psygfx_open(&R->g, &gd)) { CHECK(0); return; }
+    }
+    for (k = PSYGFX_PRIM_BT709; k <= PSYGFX_PRIM_BT2020; k += 3) {   /* BT.709, BT.2020 */
+        static const double pr[2][8] = { { 0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290 },
+                                         { 0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290 } };
+        const double* p = pr[k == PSYGFX_PRIM_BT709 ? 0 : 1];
+        double S[9], D[9], Di[9], M[9], ws[3], wd[3], ss[3], sdv[3], yw;
+        int a, b2, c;
+        /* source RGB to XYZ with white Y = 1; the display's from the
+         * calibration, scaled to white Y = 1; M = display^-1 source */
+        for (c = 0; c < 3; c++) { S[c] = p[2 * c] / p[2 * c + 1]; S[3 + c] = 1; S[6 + c] = (1 - p[2 * c] - p[2 * c + 1]) / p[2 * c + 1]; }
+        ws[0] = p[6] / p[7]; ws[1] = 1; ws[2] = (1 - p[6] - p[7]) / p[7];
+        CHECK(psycol__inv3(S, Di));
+        psygfx__mul3(Di, ws, ss);
+        for (c = 0; c < 9; c++) S[c] *= ss[c % 3];
+        yw = cal.rgb_to_xyz[3] + cal.rgb_to_xyz[4] + cal.rgb_to_xyz[5];
+        for (c = 0; c < 9; c++) D[c] = cal.rgb_to_xyz[c] / yw;
+        CHECK(psycol__inv3(D, Di));
+        for (a = 0; a < 3; a++)
+            for (b2 = 0; b2 < 3; b2++) { M[a * 3 + b2] = 0; for (c = 0; c < 3; c++) M[a * 3 + b2] += Di[a * 3 + c] * S[c * 3 + b2]; }
+        (void)wd; (void)sdv;
+        vf_fill(&f, PSYGFX_I420, 37, 23);
+        memset(&f.e, 0, sizeof f.e);
+        f.e.matrix = PSYGFX_MATRIX_BT709; f.e.range = PSYGFX_RANGE_LIMITED; f.e.transfer = PSYGFX_TRC_BT1886;
+        f.e.primaries = (uint8_t)k; f.e.siting = PSYGFX_SITING_CENTER;
+        t = vf_texture(&f);
+        CHECK(t.id != 0);
+        S6.vid_prim = maxd(S6.vid_prim, vf_check(t, &f, 1.0, 0, M));
+        psygfx_texture_free(&R->g, t);
+    }
+    {   /* 256 gray codes as an RGB texture with the DEVICE transfer */
+        static uint8_t codes[256 * 4];
+        psygfx_texture_desc td;
+        psygfx_image_desc idd;
+        psygfx_stim s;
+        for (i = 0; i < 256; i++) { codes[i * 4] = codes[i * 4 + 1] = codes[i * 4 + 2] = (uint8_t)i; codes[i * 4 + 3] = 255; }
+        memset(&td, 0, sizeof td);
+        td.w = 256; td.h = 1; td.format = PSYGFX_RGBA8; td.data = codes;
+        td.enc.matrix = PSYGFX_MATRIX_RGB; td.enc.range = PSYGFX_RANGE_FULL; td.enc.transfer = PSYGFX_TRC_DEVICE;
+        td.enc.primaries = PSYGFX_PRIM_DEVICE;
+        t = psygfx_texture(&R->g, &td);
+        CHECK(t.id != 0);
+        for (k = 0; k < 2; k++) {   /* columns 0..127, then 128..255 (the image is wider than the scene) */
+            memset(&idd, 0, sizeof idd);
+            idd.tex = t; idd.place = PSYGFX_TOP_LEFT; idd.anchor = PSYGFX_TOP_LEFT; idd.y = 3;
+            idd.src[0] = (float)(128 * k); idd.src[2] = 128; idd.src[3] = 1;
+            s = psygfx_image(&R->g, &idd);
+            gl_frame(&s, 1);
+            for (i = 0; i < 128; i++) {
+                const uint8_t* o = &R->out[(3 * W + i) * 4];
+                int want = 128 * k + i;
+                S6.codes_bad += o[0] != want || o[1] != want || o[2] != want;
+            }
+        }
+        psygfx_texture_free(&R->g, t);
+    }
+    psygfx_close(&R->g);
+}
+
+/* ---------------------------------------------------------- v0.4 instances */
+
+/* The vertex shader's cosine and sine of degrees, in float as the GPU runs
+ * it, against double (the doc's number). */
+static void csd_float(float deg, float* c, float* s) {
+    float t = deg / 360.0f, q, r, r2, sv, cv;
+    int qi;
+    t -= floorf(t + 0.5f);
+    q = floorf(t * 4.0f + 0.5f);
+    r = (t - 0.25f * q) * 6.28318530717959f;
+    r2 = r * r;
+    sv = r * (1.0f + r2 * (-0.166666666666667f + r2 * (0.00833333333333333f + r2 * (-0.000198412698412698f + r2 * 2.75573192239859e-6f))));
+    cv = 1.0f + r2 * (-0.5f + r2 * (0.0416666666666667f + r2 * (-0.00138888888888889f + r2 * 2.48015873015873e-5f)));
+    qi = (int)q & 3;
+    *c = qi == 0 ? cv : (qi == 1 ? -sv : (qi == 2 ? -cv : sv));
+    *s = qi == 0 ? sv : (qi == 1 ? cv : (qi == 2 ? -sv : -cv));
+}
+
+/* Element i drawn alone: the template in a one-point group at the
+ * element's anchor, turned and scaled there (the test's own composition,
+ * from the manual's definitions). */
+static void test_elem(const psygfx_stim* t, int i, psygfx_stim* e, psygfx_group* gr, int mod) {
+    const psygfx_inst* it = &t->inst[i];
+    const uint32_t f = t->inst_fields;
+    const double deg = 3.14159265358979323846 / 180.0;
+    float ax, ay;
+    double th = t->ori * deg;
+    psygfx_resolve(&R->g, t, &ax, &ay);
+    *e = *t;
+    e->inst = NULL; e->n_inst = 0;
+    memset(gr, 0, sizeof *gr);
+    gr->place = PSYGFX_TOP_LEFT; gr->visible = 1; gr->opacity = 1;
+    gr->x = ax + ((f & PSYGFX_I_XY) ? (float)(it->x * cos(th) - it->y * sin(th)) : 0.0f);
+    gr->y = ay + ((f & PSYGFX_I_XY) ? (float)(it->x * sin(th) + it->y * cos(th)) : 0.0f);
+    gr->scale = (f & PSYGFX_I_SCALE) ? it->scale : 1.0f;
+    e->group = gr;
+    e->place = PSYGFX_CENTER;
+    e->x = e->y = 0;
+    e->ori = t->ori + ((f & PSYGFX_I_ORI) ? it->ori : 0.0f);
+    if (f & PSYGFX_I_PHASE) e->phase += it->phase;
+    if (f & PSYGFX_I_CONTRAST) { e->contrast *= it->contrast; e->opacity *= it->contrast; }
+    if (f & PSYGFX_I_GATE) e->gate *= it->gate;
+    if (f & PSYGFX_I_COLOR) {
+        int i0 = (int)floor(it->color), i1 = i0 + 1 < (int)t->n_palette ? i0 + 1 : i0, k;
+        double fr = it->color - i0;
+        float* d = mod ? e->dir : (t->kind == PSYGFX_IMAGE ? e->tint : e->color);
+        for (k = 0; k < 3; k++) d[k] = (float)((1.0 - fr) * t->palette[3 * i0 + k] + fr * t->palette[3 * i1 + k]);
+    }
+}
+
+/* The largest |instanced - elements drawn alone| over the scene. */
+static double inst_vs_alone(const psygfx_stim* t, int mod) {
+    static float a1[W * H * 4];
+    psygfx_stim e[32];
+    psygfx_group gr[32];
+    double worst = 0;
+    int i, n = (int)t->n_inst;
+    gl_frame(t, 1);
+    memcpy(a1, R->scene, sizeof a1);
+    for (i = 0; i < n && i < 32; i++) test_elem(t, i, &e[i], &gr[i], mod);
+    gl_frame(e, n < 32 ? n : 32);
+    for (i = 0; i < W * H * 4; i++) worst = maxd(worst, fabs(a1[i] - R->scene[i]));
+    return worst;
+}
+
+static void fill_elems(psygfx_inst* a, int nx, int ny, float dx, float dy, int fields, double sc_lo, double sc_hi, int npal) {
+    int i;
+    psygfx_inst_grid(a, nx, ny, dx, dy);
+    for (i = 0; i < nx * ny; i++) {
+        a[i].x += (float)rnd(-30, 30) * 0.1f;
+        a[i].y += (float)rnd(-30, 30) * 0.1f;
+        if (fields & PSYGFX_I_ORI) a[i].ori = (float)rnd(-3600, 3600) * 0.1f;
+        if (fields & PSYGFX_I_PHASE) a[i].phase = (float)rnd(0, 100) * 0.01f;
+        if (fields & PSYGFX_I_CONTRAST) a[i].contrast = (float)rnd(20, 100) * 0.01f;
+        if (fields & PSYGFX_I_SCALE) a[i].scale = (float)(sc_lo + (sc_hi - sc_lo) * rnd(0, 100) * 0.01);
+        if (fields & PSYGFX_I_GATE) a[i].gate = (float)rnd(30, 100) * 0.01f;
+        if (fields & PSYGFX_I_COLOR) a[i].color = i % 3 == 0 ? (float)rnd(0, npal - 1) : (float)rnd(0, (npal - 1) * 100) * 0.01f;
+    }
+}
+
+static void gl_v04_inst(stats* st) {
+    static psygfx_inst el[9000], el2[9000];
+    static const float pal[3 * 6] = { 0.9f, 0.1f, 0.1f, 0.1f, 0.8f, 0.2f, 0.2f, 0.2f, 0.9f, 0.7f, 0.7f, 0.1f,
+                                      0.05f, 0.6f, 0.6f, 0.95f, 0.95f, 0.95f };
+    static const float dirs[3 * 3] = { 0.4f, 0.4f, 0.4f, 0.4f, -0.3f, 0.1f, 0.1f, 0.2f, -0.4f };
+    psygfx_instances_desc id;
+    psygfx_stim t, s;
+    psygfx_tex tex;
+    const uint32_t ALL = PSYGFX_I_XY | PSYGFX_I_ORI | PSYGFX_I_CONTRAST | PSYGFX_I_SCALE | PSYGFX_I_GATE | PSYGFX_I_COLOR;
+    int i, k;
+    (void)st;
+    if (!gl_open(1, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) return;
+    memset(&id, 0, sizeof id);
+    id.inst = el; id.n = 24; id.palette = pal; id.n_palette = 6;
+    /* gabors: every field, dir from the palette */
+    {
+        psygfx_gabor_desc d;
+        memset(&d, 0, sizeof d);
+        d.ori = 10; d.sf = 1 / 7.0f; d.sigma = 5; d.contrast = 0.5f;
+        t = psygfx_gabor(&d);
+        id.palette = dirs; id.n_palette = 3;
+        id.fields = ALL | PSYGFX_I_PHASE;
+        fill_elems(el, 6, 4, 50, 48, (int)id.fields, 0.6, 1.4, 3);
+        s = psygfx_instances(&R->g, &t, &id);
+        CHECK(s.n_inst == 24);
+        S6.inst_diff[0] = inst_vs_alone(&s, 1);
+        {   /* two instanced stimuli in one frame read their own elements */
+            static float a2[W * H * 4];
+            psygfx_stim two[2], e[24];
+            psygfx_group gr[24];
+            two[0] = s;
+            two[0].n_inst = 12;
+            two[1] = s;
+            two[1].inst = el + 12;
+            two[1].n_inst = 12;
+            gl_frame(two, 2);
+            memcpy(a2, R->scene, sizeof a2);
+            for (i = 0; i < 12; i++) { test_elem(&two[0], i, &e[i], &gr[i], 1); test_elem(&two[1], i, &e[12 + i], &gr[12 + i], 1); }
+            gl_frame(e, 24);
+            for (i = 0; i < W * H * 4; i++) S6.inst_diff[0] = maxd(S6.inst_diff[0], fabs(a2[i] - R->scene[i]));
+        }
+        id.palette = pal; id.n_palette = 6;
+    }
+    {   /* a grating in a cosine-edged circle; noise (no scale) */
+        psygfx_grating_desc d;
+        psygfx_noise_desc nd;
+        memset(&d, 0, sizeof d);
+        d.w = 30; d.sf = 1 / 6.0f; d.contrast = 0.4f; d.aperture = PSYGFX_CIRCLE; d.edge = PSYGFX_EDGE_COSINE; d.edge_width = 3; d.ori = -20;
+        t = psygfx_grating(&d);
+        id.fields = PSYGFX_I_XY | PSYGFX_I_ORI | PSYGFX_I_PHASE | PSYGFX_I_SCALE | PSYGFX_I_CONTRAST;
+        fill_elems(el, 6, 4, 50, 48, (int)id.fields, 0.7, 1.3, 6);
+        s = psygfx_instances(&R->g, &t, &id);
+        S6.inst_diff[1] = inst_vs_alone(&s, 1);
+        memset(&nd, 0, sizeof nd);
+        nd.w = 30; nd.check = 3; nd.seed = 5; nd.contrast = 0.3f; nd.aperture = PSYGFX_RECT;
+        t = psygfx_noise(&nd);
+        id.fields = PSYGFX_I_XY | PSYGFX_I_ORI | PSYGFX_I_GATE;
+        fill_elems(el, 6, 4, 50, 48, (int)id.fields, 1, 1, 6);
+        s = psygfx_instances(&R->g, &t, &id);
+        S6.inst_diff[1] = maxd(S6.inst_diff[1], inst_vs_alone(&s, 1));
+    }
+    {   /* shapes: a stroked v0.2 cross, a vector RRECT with an offset */
+        psygfx_shape_desc d;
+        memset(&d, 0, sizeof d);
+        d.shape = PSYGFX_CROSS; d.w = 30; d.h = 24; d.shape_p[0] = 6; d.stroke = 2; d.edge = PSYGFX_EDGE_GAUSSIAN; d.edge_width = 1.0f;
+        d.color[0] = 0.5f; d.color[1] = 0.5f; d.color[2] = 0.5f; d.ori = 15;
+        t = psygfx_shape(&d);
+        id.fields = ALL;
+        fill_elems(el, 6, 4, 50, 48, (int)id.fields, 0.7, 1.3, 6);
+        s = psygfx_instances(&R->g, &t, &id);
+        S6.inst_diff[2] = inst_vs_alone(&s, 0);
+        memset(&d, 0, sizeof d);
+        d.shape = PSYGFX_RRECT; d.w = 30; d.h = 20; d.shape_p[0] = 2; d.shape_p[1] = 6; d.shape_p[2] = 0; d.shape_p[3] = 4;
+        d.offset = 1; d.edge = PSYGFX_EDGE_COSINE; d.edge_width = 2; d.color[1] = 0.7f;
+        t = psygfx_shape(&d);
+        s = psygfx_instances(&R->g, &t, &id);
+        CHECK(s.n_inst == 24);
+        S6.inst_diff[2] = maxd(S6.inst_diff[2], inst_vs_alone(&s, 0));
+    }
+    {   /* an image, linear, tinted by the palette */
+        static unsigned char px[8 * 8 * 4];
+        psygfx_texture_desc td;
+        psygfx_image_desc idd;
+        for (i = 0; i < 8 * 8 * 4; i++) px[i] = (unsigned char)(i % 4 == 3 ? 255 : (i * 37) % 251);
+        memset(&td, 0, sizeof td);
+        td.w = 8; td.h = 8; td.format = PSYGFX_RGBA8; td.data = px;
+        tex = psygfx_texture(&R->g, &td);
+        memset(&idd, 0, sizeof idd);
+        idd.tex = tex; idd.w = 24; idd.h = 24; idd.linear = true;
+        t = psygfx_image(&R->g, &idd);
+        id.fields = ALL;
+        fill_elems(el, 6, 4, 50, 48, (int)id.fields, 0.7, 1.3, 6);
+        s = psygfx_instances(&R->g, &t, &id);
+        S6.inst_diff[3] = inst_vs_alone(&s, 0);
+        psygfx_texture_free(&R->g, tex);
+    }
+    {   /* a user shader sees the same local coordinates and size either way */
+        psygfx_user_desc ud;
+        psygfx_pipeline_desc pd;
+        psygfx_pipe p;
+        memset(&pd, 0, sizeof pd);
+        pd.mode = PSYGFX_COLOR;
+        pd.body = "vec4 psy_main(vec2 p) {\n"
+                  "    return vec4(0.5 + 0.4 * cos(3.0 * p.x / psy_size.x), 0.5 + 0.02 * p.y, psy_color.b, 1.0);\n"
+                  "}\n";
+        p = psygfx_pipeline(&R->g, &pd);
+        if (!p.id) fprintf(stderr, "user pipeline: %s\n", psygfx_error(&R->g));
+        CHECK(p.id != 0);
+        memset(&ud, 0, sizeof ud);
+        ud.pipe = p; ud.w = 30; ud.h = 22; ud.aperture = PSYGFX_CIRCLE; ud.edge = PSYGFX_EDGE_COSINE; ud.edge_width = 2;
+        ud.color[2] = 0.3f; ud.ori = 25;
+        t = psygfx_user(&ud);
+        t.ax = 0.3f; t.ay = 0.6f;   /* turned and scaled about a corner-ward anchor */
+        id.fields = PSYGFX_I_XY | PSYGFX_I_ORI | PSYGFX_I_SCALE | PSYGFX_I_COLOR;
+        fill_elems(el, 6, 4, 50, 48, (int)id.fields, 0.5, 1.5, 6);
+        s = psygfx_instances(&R->g, &t, &id);
+        CHECK(s.n_inst == 24);
+        S6.inst_diff[4] = inst_vs_alone(&s, 0);
+        psygfx_pipeline_free(&R->g, p);
+    }
+    {   /* integer palette entries exactly; fractions mixed in linear light */
+        psygfx_shape_desc d;
+        double fr_worst = 0;
+        memset(&d, 0, sizeof d);
+        d.shape = PSYGFX_RECT; d.w = 20; d.h = 20; d.color[0] = 1;
+        t = psygfx_shape(&d);
+        id.fields = PSYGFX_I_XY | PSYGFX_I_COLOR;
+        psygfx_inst_grid(el, 8, 4, 36, 40);
+        for (i = 0; i < 32; i++) el[i].color = i < 16 ? (float)(i % 6) : (float)(i % 5) + 0.37f;
+        id.n = 32;
+        s = psygfx_instances(&R->g, &t, &id);
+        gl_frame(&s, 1);
+        for (i = 0; i < 32; i++) {
+            float x, y;
+            const float* px;
+            psygfx_inst_resolve(&R->g, &s, i, &x, &y);
+            px = &R->scene[((int)y * W + (int)x) * 4];
+            for (k = 0; k < 3; k++) {
+                if (i < 16) S6.pal_bad += px[k] != pal[3 * (i % 6) + k];
+                else {
+                    int i0 = i % 5;
+                    fr_worst = maxd(fr_worst, fabs(px[k] - ((1 - 0.37) * pal[3 * i0 + k] + 0.37 * pal[3 * i0 + 3 + k])));
+                }
+            }
+        }
+        S6.pal_frac = fr_worst;
+        id.n = 24;
+    }
+    {   /* psygfx_hit_index against the GPU: 16 overlapping hard discs, one
+         * palette entry each (the scene's color names the element), one with
+         * gate 0 */
+        static const float pal16[3 * 16] = { 0.1f, 0.2f, 0.3f, 0.2f, 0.3f, 0.4f, 0.3f, 0.4f, 0.5f, 0.4f, 0.5f, 0.6f, 0.5f, 0.6f, 0.7f,
+                                             0.6f, 0.7f, 0.8f, 0.7f, 0.8f, 0.9f, 0.8f, 0.9f, 0.1f, 0.9f, 0.1f, 0.2f, 0.15f, 0.25f, 0.35f,
+                                             0.25f, 0.35f, 0.45f, 0.35f, 0.45f, 0.55f, 0.45f, 0.55f, 0.65f, 0.55f, 0.65f, 0.75f,
+                                             0.65f, 0.75f, 0.85f, 0.75f, 0.85f, 0.95f };
+        psygfx_shape_desc d;
+        int j;
+        memset(&d, 0, sizeof d);
+        d.shape = PSYGFX_RECT; d.w = 60; d.h = 36;
+        t = psygfx_shape(&d);
+        id.fields = PSYGFX_I_XY | PSYGFX_I_ORI | PSYGFX_I_SCALE | PSYGFX_I_COLOR | PSYGFX_I_GATE;
+        id.palette = pal16; id.n_palette = 16; id.n = 16;
+        for (i = 0; i < 16; i++) {
+            memset(&el[i], 0, sizeof el[i]);
+            el[i].x = (float)rnd(-100, 100); el[i].y = (float)rnd(-60, 60); el[i].ori = (float)rnd(0, 359);
+            el[i].scale = (float)rnd(60, 160) * 0.01f; el[i].color = (float)i; el[i].gate = i == 7 ? 0.0f : 1.0f; el[i].contrast = 1;
+        }
+        s = psygfx_instances(&R->g, &t, &id);
+        gl_frame(&s, 1);
+        for (j = 0; j < H; j++)
+            for (i = 0; i < W; i++) {
+                const float* px = &R->scene[(j * W + i) * 4];
+                int h = psygfx_hit_index(&R->g, &s, (float)i + 0.5f, (float)j + 0.5f), want = -1, q;
+                /* a pixel within 1e-3 px of an edge is a tie */
+                if (psygfx_hit_index(&R->g, &s, (float)i + 0.501f, (float)j + 0.5f) != h ||
+                    psygfx_hit_index(&R->g, &s, (float)i + 0.499f, (float)j + 0.5f) != h ||
+                    psygfx_hit_index(&R->g, &s, (float)i + 0.5f, (float)j + 0.501f) != h ||
+                    psygfx_hit_index(&R->g, &s, (float)i + 0.5f, (float)j + 0.499f) != h) { S6.hit_ties++; continue; }
+                for (q = 0; q < 16; q++)
+                    if (px[0] == pal16[3 * q] && px[1] == pal16[3 * q + 1] && px[2] == pal16[3 * q + 2]) want = q;
+                S6.hit_bad += h != want;
+                S6.hit_n += h >= 0;
+            }
+        id.palette = pal; id.n_palette = 6; id.n = 24;
+    }
+    {   /* bindings: the template's field moves all, an element's field one */
+        psygfx_gabor_desc d;
+        psygfx_bind b[2];
+        float v[2] = { 0.25f, 33.0f };
+        float x0, y0, x1, y1;
+        memset(&d, 0, sizeof d);
+        d.sf = 0.1f; d.sigma = 4; d.contrast = 0.5f;
+        t = psygfx_gabor(&d);
+        id.fields = PSYGFX_I_XY;
+        psygfx_inst_grid(el, 4, 1, 40, 0);
+        id.n = 4;
+        s = psygfx_instances(&R->g, &t, &id);
+        memset(b, 0, sizeof b);
+        b[0].stim = &s; b[0].param = PSYGFX_P_CONTRAST; b[0].channel = 0;
+        b[1].field = &el[2].x; b[1].channel = 1;
+        psygfx_inst_resolve(&R->g, &s, 2, &x0, &y0);
+        CHECK(psygfx_apply(b, 2, v) == 2);
+        psygfx_inst_resolve(&R->g, &s, 2, &x1, &y1);
+        S6.bind_bad += s.contrast != 0.25f || fabs((x1 - x0) - (33.0f - 20.0f)) > 1e-4;
+        id.n = 24;
+    }
+    {   /* refusals; capacity is per frame and never truncates */
+        psygfx_dots_desc dd;
+        psygfx_shape_desc d;
+        psygfx_noise_desc nd;
+        psygfx_compound_desc cd;
+        psygfx_prim pr[8];
+        int rc[8];
+        memset(&dd, 0, sizeof dd);
+        t = psygfx_dots(&dd);
+        rc[0] = psygfx_instances(&R->g, &t, &id).n_inst == 0;
+        memset(&d, 0, sizeof d);
+        d.shape = PSYGFX_CIRCLE; d.w = 10;
+        t = psygfx_shape(&d);
+        id.fields = PSYGFX_I_PHASE;
+        rc[1] = psygfx_instances(&R->g, &t, &id).n_inst == 0;
+        id.fields = PSYGFX_I_COLOR; id.palette = NULL;
+        rc[2] = psygfx_instances(&R->g, &t, &id).n_inst == 0;
+        id.palette = pal;
+        memset(&nd, 0, sizeof nd);
+        nd.w = 10;
+        t = psygfx_noise(&nd);
+        id.fields = PSYGFX_I_SCALE;
+        rc[3] = psygfx_instances(&R->g, &t, &id).n_inst == 0;
+        memset(pr, 0, sizeof pr);
+        for (i = 0; i < 8; i++) { pr[i].shape = PSYGFX_CIRCLE; pr[i].x = (float)(i * 5); pr[i].w = 6; }
+        memset(&cd, 0, sizeof cd);
+        cd.prims = pr; cd.n = 8; cd.w = 50; cd.h = 10;
+        t = psygfx_compound(&cd);
+        id.fields = PSYGFX_I_XY;
+        rc[4] = psygfx_instances(&R->g, &t, &id).n_inst == 0;   /* extension blocks */
+        id.n = 20000;
+        t = psygfx_shape(&d);
+        rc[5] = psygfx_instances(&R->g, &t, &id).n_inst == 0;   /* past max_instances */
+        {   /* 9000 + 9000 > 16384 in one frame */
+            psygfx_stim a, b2;
+            id.n = 9000; id.inst = el;
+            psygfx_inst_grid(el, 90, 100, 1, 1);
+            a = psygfx_instances(&R->g, &t, &id);
+            id.inst = el2;
+            psygfx_inst_grid(el2, 90, 100, 1, 1);
+            b2 = psygfx_instances(&R->g, &t, &id);
+            CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+            CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+            rc[6] = psygfx_draw(&R->g, &a) == PSYGFX_OK;
+            rc[7] = psygfx_draw(&R->g, &b2) == PSYGFX_ERR_FULL && strstr(psygfx_error(&R->g), "max_instances") != NULL;
+            CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+            CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+            id.inst = el;
+        }
+        for (k = 0; k < 8; k++) { S6.inst_refused_n++; S6.inst_refused_ok += rc[k]; if (!rc[k]) fprintf(stderr, "  refusal %d not made\n", k); }
+    }
+    psygfx_close(&R->g);
+}
+
+/* The vertex shader's cosine and sine of degrees against double. */
+static void test_v04_inst_cpu(void) {
+    double worst = 0;
+    long k;
+    psygfx_inst a[6];
+    for (k = -720000; k <= 720000; k++) {
+        float c, s, deg = (float)k * 0.001f;
+        double r = (double)deg * (3.14159265358979323846 / 180.0);
+        csd_float(deg, &c, &s);
+        worst = maxd(worst, maxd(fabs(c - cos(r)), fabs(s - sin(r))));
+    }
+    S6.csd_err = worst;
+    CHECK_LE(worst, 1e-6);
+    psygfx_inst_grid(a, 3, 2, 10, 4);
+    CHECK(a[0].x == -10 && a[0].y == -2 && a[5].x == 10 && a[5].y == 2 && a[4].scale == 1 && a[4].gate == 1 && a[4].color == 0);
+}
+
+/* ------------------------------------------------------------ v0.4 order */
+
+/* One frame of n stimuli, in call order (reorder off) and reordered: the
+ * scene and the output codes must be equal bit for bit. Returns the draw
+ * calls saved; *bad counts the frames that differed. */
+static long order_frame(const psygfx_stim* s, int n, long* bad) {
+    static float a1[W * H * 4];
+    static uint8_t o1[W * H * 4];
+    uint64_t d0, d1, d2;
+    d0 = R->g.draws;
+    R->g.no_reorder = 1;
+    gl_frame(s, n);
+    d1 = R->g.draws;
+    memcpy(a1, R->scene, sizeof a1);
+    memcpy(o1, R->out, sizeof o1);
+    R->g.no_reorder = 0;
+    gl_frame(s, n);
+    d2 = R->g.draws;
+    *bad += memcmp(a1, R->scene, sizeof a1) != 0 || memcmp(o1, R->out, sizeof o1) != 0;
+    return (long)((d1 - d0) - (d2 - d1));
+}
+
+/* A stimulus of kind k (0 gabor, 1 soft circle, 2 RRECT, 3 grating, 4
+ * image) at x, y from the top-left, turned. */
+static psygfx_stim order_stim(int k, float x, float y, float ori, psygfx_tex tex) {
+    psygfx_stim s;
+    switch (k) {
+    case 0: {
+        psygfx_gabor_desc d;
+        memset(&d, 0, sizeof d);
+        d.place = PSYGFX_TOP_LEFT; d.x = x; d.y = y; d.sf = 1 / 6.0f; d.sigma = 4; d.contrast = 0.3f; d.ori = ori;
+        s = psygfx_gabor(&d);
+        break;
+    }
+    case 1: {
+        psygfx_shape_desc d;
+        memset(&d, 0, sizeof d);
+        d.place = PSYGFX_TOP_LEFT; d.x = x; d.y = y; d.shape = PSYGFX_CIRCLE; d.w = 18; d.edge = PSYGFX_EDGE_GAUSSIAN;
+        d.edge_width = 1.5f; d.color[0] = 0.9f; d.color[1] = 0.3f; d.color[2] = 0.2f; d.opacity = 0.8f;
+        s = psygfx_shape(&d);
+        break;
+    }
+    case 2: {
+        psygfx_shape_desc d;
+        memset(&d, 0, sizeof d);
+        d.place = PSYGFX_TOP_LEFT; d.x = x; d.y = y; d.shape = PSYGFX_RRECT; d.w = 22; d.h = 12; d.ori = ori;
+        d.shape_p[0] = d.shape_p[1] = d.shape_p[2] = d.shape_p[3] = 3; d.edge = PSYGFX_EDGE_COSINE; d.edge_width = 2;
+        d.color[0] = 0.2f; d.color[1] = 0.4f; d.color[2] = 0.9f; d.opacity = 0.7f;
+        s = psygfx_shape(&d);
+        break;
+    }
+    case 3: {
+        psygfx_grating_desc d;
+        memset(&d, 0, sizeof d);
+        d.place = PSYGFX_TOP_LEFT; d.x = x; d.y = y; d.w = 20; d.sf = 1 / 5.0f; d.contrast = 0.25f; d.aperture = PSYGFX_CIRCLE;
+        d.edge = PSYGFX_EDGE_COSINE; d.edge_width = 2; d.ori = ori;
+        s = psygfx_grating(&d);
+        break;
+    }
+    default: {
+        psygfx_image_desc d;
+        memset(&d, 0, sizeof d);
+        d.place = PSYGFX_TOP_LEFT; d.tex = tex; d.x = x; d.y = y; d.w = 16; d.h = 16; d.ori = ori; d.linear = true; d.opacity = 0.9f;
+        s = psygfx_image(&R->g, &d);
+        break;
+    }
+    }
+    return s;
+}
+
+static void gl_v04_order(stats* st) {
+    static psygfx_stim s[400];
+    static unsigned char px[4 * 4 * 4];
+    psygfx_texture_desc td;
+    psygfx_tex tex;
+    int i, r;
+    (void)st;
+    if (!gl_open(1, PSYGFX_RGBA32F, PSYGFX_DITHER_ORDERED)) return;
+    for (i = 0; i < 64; i++) px[i] = (unsigned char)(i % 4 == 3 ? 200 : i * 13);
+    memset(&td, 0, sizeof td);
+    td.w = 4; td.h = 4; td.format = PSYGFX_RGBA8; td.data = px;
+    tex = psygfx_texture(&R->g, &td);
+    /* sparse (a grid: nothing overlaps) and dense (random: most overlap) */
+    for (r = 0; r < 6; r++) {
+        int n = r < 3 ? 160 : 400;
+        for (i = 0; i < n; i++) {
+            float x, y;
+            if (r < 3) { x = 12.0f + (float)(i % 16) * 19.0f; y = 12.0f + (float)(i / 16) * 19.0f; }
+            else { x = (float)rnd(0, W); y = (float)rnd(0, H); }
+            s[i] = order_stim(rnd(0, 4), x, y, (float)rnd(0, 359), tex);
+        }
+        S6.order_saved += order_frame(s, n, &S6.order_bad);
+        S6.order_frames++;
+    }
+    /* a draw that passes several others and joins an earlier run: the
+     * second circle overlaps the gabor three draws back, not its neighbor;
+     * it must stay after the gabor */
+    s[0] = order_stim(1, 40, 40, 0, tex);
+    s[1] = order_stim(0, 120, 40, 0, tex);
+    s[2] = order_stim(2, 200, 40, 0, tex);
+    s[3] = order_stim(3, 260, 40, 0, tex);
+    s[4] = order_stim(1, 126, 44, 0, tex);   /* on the gabor: a new run */
+    s[5] = order_stim(2, 200, 120, 0, tex);  /* free: passes two, joins the RRECT */
+    s[6] = order_stim(1, 40, 120, 0, tex);   /* joins s[4]'s run */
+    {
+        long saved = order_frame(s, 7, &S6.order_bad);
+        S6.order_frames++;
+        S6.order_pass_ok += saved == 2;      /* 7 draws become 5 */
+    }
+    /* fringes that meet at the bounds' edge: a Gaussian-edged circle next
+     * to an RRECT, their quads from overlapping to touching, the soft
+     * edges reaching into the shared pixels */
+    for (r = 0; r < 9; r++) {
+        /* the RRECT's quad reaches 13 px from its center, the circle's 17.5
+         * (radius 9 + 5 SD + 1 px): they meet at 30.5 px; from 24 to 32 px
+         * their soft edges share pixels or the quads' margins touch */
+        float d = 24.0f + (float)r;
+        s[0] = order_stim(1, 40, 160, 0, tex);
+        s[1] = order_stim(2, 120, 100, 0, tex);
+        s[2] = order_stim(1, 120 + d, 100.5f, 0, tex);
+        S6.order_saved += order_frame(s, 3, &S6.order_bad);
+        S6.order_frames++;
+    }
+    /* a turned box's bounds: an RRECT 40 x 40 at 45 degrees reaches 0.707
+     * x its diagonal across, more than its half width; its corner touches
+     * the circle's fringe, and a free copy of it far away is the run it
+     * may not join */
+    for (r = 0; r < 4; r++) {
+        psygfx_shape_desc d;
+        memset(&d, 0, sizeof d);
+        d.place = PSYGFX_TOP_LEFT; d.shape = PSYGFX_RRECT; d.w = 40; d.h = 40; d.ori = 45;
+        d.shape_p[0] = d.shape_p[1] = d.shape_p[2] = d.shape_p[3] = 1; d.edge = PSYGFX_EDGE_COSINE; d.edge_width = 2;
+        d.color[1] = 0.8f; d.opacity = 0.6f;
+        d.x = 40; d.y = 150;
+        s[0] = psygfx_shape(&d);
+        s[1] = order_stim(1, 120, 100, 0, tex);
+        d.x = 120.0f + 42.0f + (float)r; d.y = 100;
+        s[2] = psygfx_shape(&d);
+        S6.order_saved += order_frame(s, 3, &S6.order_bad);
+        S6.order_frames++;
+    }
+    psygfx_texture_free(&R->g, tex);
+    psygfx_close(&R->g);
+}
+
+/* The calibration recipe of the manual, as written: derive() seals the CRC,
+ * so check() and open take it with no save() between. */
+static void test_v04_fixes_cpu(void) {
+    static psycol_cal c;
+    static float s[81];
+    static const float xy[4][2] = { { 0.64f, 0.33f }, { 0.30f, 0.60f }, { 0.15f, 0.06f }, { 0.3127f, 0.3290f } };
+    char err[200];
+    int i;
+    for (i = 0; i < 81; i++) s[i] = 0.01f + 0.001f * (float)i;
+    CHECK(psycol_cal_nominal(&c, xy, 80.0f, 2.2) == PSYGFX_OK);
+    CHECK(psycol_cal_set_spectra(&c, 380, 5, 81, s, s, s, NULL) == PSYGFX_OK);
+    CHECK(c.crc == 0);                       /* unsealed by the change */
+    CHECK(psycol_cal_derive(&c, err, sizeof err) == PSYGFX_OK);
+    CHECK(psycol_cal_check(&c, err, sizeof err) == PSYGFX_OK);
+    CHECK(c.crc == psygfx__crc32(&c, offsetof(psycol_cal, crc)));   /* sealed, not left at 0 */
+    {
+        static psygfx_gfx g;
+        static psyscr_screen scr;
+        psyscr_desc d;
+        psygfx_desc gd;
+        memset(&d, 0, sizeof d);
+        d.backend = PSYSCR_BACKEND_SIM;
+        CHECK(psyscr_open(&scr, &d));
+        memset(&gd, 0, sizeof gd);
+        gd.screen = &scr; gd.width = 64; gd.height = 64; gd.cal = &c;
+        CHECK(psygfx_open(&g, &gd));
+        CHECK(psygfx_calibrated(&g) && psygfx_screen(&g) == &scr);
+        psygfx_close(&g);
+        CHECK(!psygfx_calibrated(&g) && psygfx_screen(&g) == NULL);
+        psyscr_close(&scr);
+    }
+    c.readings[3].Y *= 1.01f;               /* changed by hand after derive */
+    CHECK(psycol_cal_check(&c, err, sizeof err) == PSYGFX_ERR_FORMAT);
+}
+
+/* The gallery's findings: straight-alpha sprites filtered linearly, the
+ * range rule on DIST atlases, a run from its first record, apertures'
+ * shape_p in the descs. */
+static void gl_v04_fixes(stats* st) {
+    static float a1[W * H * 4];
+    static unsigned char spr[4 * 4 * 4];
+    psygfx_texture_desc td;
+    psygfx_tex t;
+    psygfx_image_desc idd;
+    psygfx_stim s;
+    int i, j, k;
+    (void)st;
+    if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) return;
+    /* a 2 x 2 opaque middle, a clear border, one half-clear border texel */
+    memset(spr, 0, sizeof spr);
+    for (j = 1; j < 3; j++)
+        for (i = 1; i < 3; i++) { unsigned char* q = &spr[(j * 4 + i) * 4]; q[0] = 200; q[1] = 100; q[2] = 50; q[3] = 255; }
+    spr[(0 * 4 + 1) * 4 + 0] = 255; spr[(0 * 4 + 1) * 4 + 1] = 255; spr[(0 * 4 + 1) * 4 + 2] = 255; spr[(0 * 4 + 1) * 4 + 3] = 64;
+    memset(&td, 0, sizeof td);
+    td.w = 4; td.h = 4; td.format = PSYGFX_RGBA8; td.data = spr;
+    t = psygfx_texture(&R->g, &td);
+    memset(&idd, 0, sizeof idd);
+    idd.tex = t; idd.place = PSYGFX_TOP_LEFT; idd.anchor = PSYGFX_TOP_LEFT; idd.x = 10; idd.y = 10; idd.w = 64; idd.h = 64;
+    idd.linear = true;
+    s = psygfx_image(&R->g, &idd);
+    gl_frame(&s, 1);
+    for (j = 10; j < 74; j++)
+        for (i = 10; i < 74; i++) {
+            /* the scene over black is the premultiplied color: the bilinear of
+             * rgb x alpha, clamped to the texture */
+            double u = (i + 0.5 - 10) / 16.0, v = (j + 0.5 - 10) / 16.0;
+            double fx = u - 0.5, fy = v - 0.5, ix = floor(fx), iy = floor(fy), wx = fx - ix, wy = fy - iy;
+            int x0 = (int)ix, y0 = (int)iy, x1 = x0 + 1, y1 = y0 + 1, c;
+            x0 = x0 < 0 ? 0 : (x0 > 3 ? 3 : x0); x1 = x1 < 0 ? 0 : (x1 > 3 ? 3 : x1);
+            y0 = y0 < 0 ? 0 : (y0 > 3 ? 3 : y0); y1 = y1 < 0 ? 0 : (y1 > 3 ? 3 : y1);
+            for (c = 0; c < 3; c++) {
+                double p[4], st_[4], a[4], want, old;
+                int q, xs[4] = { x0, x1, x0, x1 }, ys[4] = { y0, y0, y1, y1 };
+                for (q = 0; q < 4; q++) {
+                    const unsigned char* tx = &spr[(ys[q] * 4 + xs[q]) * 4];
+                    a[q] = tx[3] / 255.0; st_[q] = tx[c] / 255.0; p[q] = st_[q] * a[q];
+                }
+                want = (p[0] + (p[1] - p[0]) * wx) * (1 - wy) + (p[2] + (p[3] - p[2]) * wx) * wy;
+                /* v0.3's: the straight colors and the alphas apart, then multiplied */
+                old = ((st_[0] + (st_[1] - st_[0]) * wx) * (1 - wy) + (st_[2] + (st_[3] - st_[2]) * wx) * wy) *
+                      ((a[0] + (a[1] - a[0]) * wx) * (1 - wy) + (a[2] + (a[3] - a[2]) * wx) * wy);
+                S6.alpha_lin = maxd(S6.alpha_lin, fabs(R->scene[(j * W + i) * 4 + c] - want));
+                S6.alpha_old = maxd(S6.alpha_old, fabs(old - want));
+            }
+        }
+    psygfx_texture_free(&R->g, t);
+    {   /* DIST atlases: the range rule, and a run from its first record */
+        enum { AW = 64 };
+        static float dist[AW * AW];
+        static psygfx_glyph gl4[4];
+        static float dots[10 * 2];
+        psygfx_glyphs_desc gd;
+        psygfx_dots_desc dd;
+        psygfx_shape_desc sd;
+        psygfx_buf b4, b2, d10, d5;
+        psygfx_tex nr, wr;
+        psygfx_stim r[3];
+        int rc[6];
+        for (j = 0; j < AW; j++)
+            for (i = 0; i < AW; i++) {   /* two discs of radius 8 texels, 16 apart, in 32 x 64 cells */
+                double cx = i < 32 ? 16 : 48, x = i + 0.5 - cx, y = j + 0.5 - 32;
+                dist[j * AW + i] = (float)(sqrt(x * x + y * y) - 8.0);
+            }
+        memset(&td, 0, sizeof td);
+        td.w = AW; td.h = AW; td.format = PSYGFX_R32F; td.data = dist;
+        nr = psygfx_texture(&R->g, &td);              /* no range stated */
+        td.sdf = PSYGFX_SDF_DIST; td.sdf_range = 16;  /* padding 8 texels */
+        wr = psygfx_texture(&R->g, &td);
+        memset(gl4, 0, sizeof gl4);
+        for (k = 0; k < 4; k++) { gl4[k].x = (float)(k * 40); gl4[k].y = (float)(k * 5); gl4[k].sx = (float)(k % 2 * 32); gl4[k].sw = 32; gl4[k].sh = 64; }
+        b4 = psygfx_buffer(&R->g, sizeof gl4);
+        b2 = psygfx_buffer(&R->g, 2 * sizeof gl4[0]);
+        CHECK(psygfx_buffer_update(&R->g, b4, 0, gl4, sizeof gl4) == PSYGFX_OK);
+        CHECK(psygfx_buffer_update(&R->g, b2, 0, gl4 + 2, 2 * sizeof gl4[0]) == PSYGFX_OK);
+        memset(&gd, 0, sizeof gd);
+        gd.atlas = wr; gd.buf = b4; gd.first = 2; gd.count = 2; gd.scale = 1; gd.place = PSYGFX_TOP_LEFT; gd.anchor = PSYGFX_TOP_LEFT;
+        gd.x = 20; gd.y = 30; gd.w = 160; gd.h = 80; gd.edge = PSYGFX_EDGE_COSINE; gd.edge_width = 2; gd.color[0] = 1;
+        r[0] = psygfx_glyphs(&gd);
+        gd.buf = b2; gd.first = 0;
+        r[1] = psygfx_glyphs(&gd);
+        gl_frame(&r[0], 1);
+        memcpy(a1, R->scene, sizeof a1);
+        gl_frame(&r[1], 1);
+        for (i = 0; i < W * H * 4; i++) S6.first_diff = maxd(S6.first_diff, fabs(a1[i] - R->scene[i]));
+        /* the same with dots: 5 from the sixth against a buffer of those 5 */
+        for (i = 0; i < 20; i++) dots[i] = (float)(i * 7 % 50) - 25.0f;
+        d10 = psygfx_buffer(&R->g, sizeof dots);
+        d5 = psygfx_buffer(&R->g, sizeof dots / 2);
+        CHECK(psygfx_buffer_update(&R->g, d10, 0, dots, sizeof dots) == PSYGFX_OK);
+        CHECK(psygfx_buffer_update(&R->g, d5, 0, dots + 10, sizeof dots / 2) == PSYGFX_OK);
+        memset(&dd, 0, sizeof dd);
+        dd.buf = d10; dd.first = 5; dd.count = 5; dd.dot_size = 6; dd.edge = PSYGFX_EDGE_COSINE; dd.edge_width = 1; dd.color[2] = 1;
+        r[0] = psygfx_dots(&dd);
+        dd.buf = d5; dd.first = 0;
+        r[1] = psygfx_dots(&dd);
+        gl_frame(&r[0], 1);
+        memcpy(a1, R->scene, sizeof a1);
+        gl_frame(&r[1], 1);
+        for (i = 0; i < W * H * 4; i++) S6.first_diff = maxd(S6.first_diff, fabs(a1[i] - R->scene[i]));
+        for (i = 0; i < W * H; i++) S6.dots_px += R->scene[i * 4 + 2] > 0.5f;   /* they were drawn */
+        /* refusals: a run past its buffer; a run or a rectangle on a DIST
+         * atlas with no range; a reach past the padding. A whole-texture
+         * DIST mask with no range stays v0.2's (drawn). */
+        CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+        CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+        gd.buf = b4; gd.first = 3; gd.count = 2; r[2] = psygfx_glyphs(&gd); rc[0] = psygfx_draw(&R->g, &r[2]);
+        gd.atlas = nr; gd.first = 0; r[2] = psygfx_glyphs(&gd); rc[1] = psygfx_draw(&R->g, &r[2]);
+        gd.atlas = wr; gd.edge = PSYGFX_EDGE_GAUSSIAN; gd.edge_width = 1.5f; r[2] = psygfx_glyphs(&gd); rc[2] = psygfx_draw(&R->g, &r[2]);
+        gd.edge_width = 1.0f; r[2] = psygfx_glyphs(&gd); rc[3] = psygfx_draw(&R->g, &r[2]);   /* 5 px <= 6.5 */
+        memset(&sd, 0, sizeof sd);
+        sd.shape = PSYGFX_MASK_TEX; sd.mask = nr; sd.w = 32; sd.h = 64; sd.color[0] = 1;
+        r[2] = psygfx_shape(&sd);
+        r[2].src[2] = 32; r[2].src[3] = 64;
+        rc[4] = psygfx_draw(&R->g, &r[2]);
+        sd.w = 64; r[2] = psygfx_shape(&sd); rc[5] = psygfx_draw(&R->g, &r[2]);
+        CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+        CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+        S6.refused_n += 6;
+        S6.refused_ok += (rc[0] == PSYGFX_ERR_ARG) + (rc[1] == PSYGFX_ERR_RANGE) + (rc[2] == PSYGFX_ERR_RANGE) +
+                         (rc[3] == PSYGFX_OK) + (rc[4] == PSYGFX_ERR_RANGE) + (rc[5] == PSYGFX_OK);
+        psygfx_texture_free(&R->g, nr);
+        psygfx_texture_free(&R->g, wr);
+        psygfx_buffer_free(&R->g, b4); psygfx_buffer_free(&R->g, b2);
+        psygfx_buffer_free(&R->g, d10); psygfx_buffer_free(&R->g, d5);
+    }
+    {   /* a stimulus that can cover no pixel is refused with a message, never
+         * drawn as nothing; empty fields, runs and element arrays are legal;
+         * zero defaults draw what the manual says (a polygon's box from its
+         * vertices, a dot field with no aperture) */
+        static const float tri[6] = { -20, 15, 20, 15, 0, -18 };
+        static float dxy[10] = { -30, 0, -10, 5, 10, -5, 30, 0, 0, 20 };
+        psygfx_grating_desc gr;
+        psygfx_noise_desc nd;
+        psygfx_user_desc ud;
+        psygfx_shape_desc sd;
+        psygfx_dots_desc dd;
+        psygfx_gabor_desc gd;
+        psygfx_image_desc idd2;
+        psygfx_instances_desc ins;
+        psygfx_stim z[14];
+        psygfx_buf db;
+        int rc[14], want[14], q, nz = 0;
+        psygfx_pipeline_desc pd;
+        psygfx_pipe up;
+        memset(&pd, 0, sizeof pd);
+        pd.body = "float psy_main(vec2 p) { return 0.5; }\n";
+        up = psygfx_pipeline(&R->g, &pd);
+        db = psygfx_buffer(&R->g, sizeof dxy);
+        CHECK(psygfx_buffer_update(&R->g, db, 0, dxy, sizeof dxy) == PSYGFX_OK);
+        memset(&gr, 0, sizeof gr); gr.sf = 0.1f;                         z[nz] = psygfx_grating(&gr); want[nz++] = PSYGFX_ERR_ARG;
+        memset(&nd, 0, sizeof nd);                                        z[nz] = psygfx_noise(&nd); want[nz++] = PSYGFX_ERR_ARG;
+        memset(&ud, 0, sizeof ud); ud.pipe = up;                          z[nz] = psygfx_user(&ud); want[nz++] = PSYGFX_ERR_ARG;
+        memset(&td, 0, sizeof td); td.w = 4; td.h = 4; td.format = PSYGFX_RGBA8; t = psygfx_texture(&R->g, &td);
+        memset(&idd2, 0, sizeof idd2); idd2.tex = t;                      z[nz] = psygfx_image(NULL, &idd2); want[nz++] = PSYGFX_ERR_ARG;   /* no g: no size */
+        memset(&sd, 0, sizeof sd); sd.shape = PSYGFX_CIRCLE;              z[nz] = psygfx_shape(&sd); want[nz++] = PSYGFX_ERR_ARG;
+        memset(&sd, 0, sizeof sd); sd.shape = PSYGFX_LINE; sd.w = 20;     z[nz] = psygfx_shape(&sd); want[nz++] = PSYGFX_ERR_ARG;
+        memset(&sd, 0, sizeof sd); sd.shape = PSYGFX_ANNULUS; sd.w = 20; sd.shape_p[0] = 10; z[nz] = psygfx_shape(&sd); want[nz++] = PSYGFX_ERR_ARG;
+        memset(&gd, 0, sizeof gd); gd.sf = 0.1f;                          z[nz] = psygfx_gabor(&gd); want[nz++] = PSYGFX_ERR_ARG;
+        memset(&dd, 0, sizeof dd); dd.buf = db; dd.count = 5;             z[nz] = psygfx_dots(&dd); want[nz++] = PSYGFX_ERR_ARG;   /* dot_size 0 */
+        dd.dot_size = 4; dd.aperture = PSYGFX_CIRCLE;                     z[nz] = psygfx_dots(&dd); want[nz++] = PSYGFX_ERR_ARG;   /* a CIRCLE of no w */
+        dd.count = 0;                                                     z[nz] = psygfx_dots(&dd); want[nz++] = PSYGFX_OK;        /* empty: legal */
+        memset(&ins, 0, sizeof ins); ins.n = 0;
+        memset(&sd, 0, sizeof sd); sd.shape = PSYGFX_CIRCLE; sd.w = 10; sd.color[2] = 1;   /* blue: must not show */
+        z[nz] = psygfx_shape(&sd);
+        z[nz] = psygfx_instances(&R->g, &z[nz], &ins); want[nz++] = PSYGFX_OK;   /* refused at make: draws nothing */
+        memset(&sd, 0, sizeof sd); sd.shape = PSYGFX_POLYGON; sd.shape_p[0] = 3; sd.vertices = tri; sd.color[0] = 1;
+        sd.x = -80;                                                       z[nz] = psygfx_shape(&sd); want[nz++] = PSYGFX_OK;   /* box from its vertices */
+        memset(&dd, 0, sizeof dd); dd.buf = db; dd.count = 5; dd.dot_size = 5; dd.color[1] = 1; dd.x = 80;
+        z[nz] = psygfx_dots(&dd); want[nz++] = PSYGFX_OK;                 /* no aperture by the zero default */
+        CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+        CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+        for (q = 0; q < nz; q++) {
+            rc[q] = psygfx_draw(&R->g, &z[q]);
+            S6.zero_n++;
+            S6.zero_ok += rc[q] == want[q] && (want[q] == PSYGFX_OK || strstr(psygfx_error(&R->g), "psy_gfx: ") != NULL);
+            if (rc[q] != want[q]) fprintf(stderr, "  zero-area case %d: %d, want %d (%s)\n", q, rc[q], want[q], psygfx_error(&R->g));
+        }
+        CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+        CHECK(psygfx_read_scene(&R->g, 0, 0, W, H, R->scene) == PSYGFX_OK);
+        CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+        for (q = 0; q < W * H; q++) { S6.zero_poly_px += R->scene[q * 4] > 0.5f; S6.zero_dots_px += R->scene[q * 4 + 1] > 0.5f; }
+        S6.zero_ok -= R->scene[((H / 2) * W + W / 2) * 4 + 2] != 0.0f;   /* the refused array's template is not drawn */
+        psygfx_buffer_free(&R->g, db);
+        psygfx_pipeline_free(&R->g, up);
+        psygfx_texture_free(&R->g, t);
+    }
+    {   /* an aperture's shape_p from the desc, against the field set by hand */
+        psygfx_grating_desc gr;
+        psygfx_noise_desc nd;
+        psygfx_stim a[2], b[2];
+        memset(&gr, 0, sizeof gr);
+        gr.w = 80; gr.sf = 1 / 10.0f; gr.contrast = 0.3f; gr.aperture = PSYGFX_ANNULUS; gr.x = -60;
+        a[0] = psygfx_grating(&gr);
+        a[0].shape_p[0] = 15;
+        gr.shape_p[0] = 15;
+        b[0] = psygfx_grating(&gr);
+        memset(&nd, 0, sizeof nd);
+        nd.w = 70; nd.h = 50; nd.contrast = 0.3f; nd.aperture = PSYGFX_RECT; nd.x = 60; nd.check = 3;
+        a[1] = psygfx_noise(&nd);
+        a[1].shape_p[1] = 12;
+        nd.shape_p[1] = 12;
+        b[1] = psygfx_noise(&nd);
+        gl_frame(a, 2);
+        memcpy(a1, R->scene, sizeof a1);
+        gl_frame(b, 2);
+        for (i = 0; i < W * H * 4; i++) S6.shape_p_diff = maxd(S6.shape_p_diff, fabs(a1[i] - R->scene[i]));
+    }
+    psygfx_close(&R->g);
+}
+
+/* v0.5: psy_color.h's context in open(); OKLAB paint on absolute XYZ, the
+ * display's black included, against a reference written apart from the
+ * header; desc.cones and desc.lum refusals. */
+typedef struct stats7 {
+    double oklab_black, black_shift;
+    long   ctx_bad, refused_ok, refused_n, ran;
+} stats7;
+static stats7 S7;
+
+/* Oklab of linear device RGB, Ottosson's published matrices. old = 0: the
+ * calibration's absolute XYZ (black included) against its white (black
+ * included); old = 1: v0.4's form, black removed. */
+static void okb_from_rgb(const psycol_cal* c, int old, const double rgb[3], double lab[3]) {
+    static const double m1[9] = { 0.8189330101, 0.3618667424, -0.1288597137, 0.0329845436, 0.9293118715, 0.0361456387,
+                                  0.0482003018, 0.2643662691, 0.6338517070 };
+    static const double m2[9] = { 0.2104542553, 0.7936177850, -0.0040720468, 1.9779984951, -2.4285922050, 0.4505937099,
+                                  0.0259040371, 0.7827717662, -0.8086757660 };
+    double yw = c->rgb_to_xyz[3] + c->rgb_to_xyz[4] + c->rgb_to_xyz[5] + (old ? 0.0 : c->black_xyz[1]), xyz[3], lms[3];
+    int i, k;
+    for (i = 0; i < 3; i++) {
+        xyz[i] = old ? 0.0 : c->black_xyz[i];
+        for (k = 0; k < 3; k++) xyz[i] += c->rgb_to_xyz[3 * i + k] * rgb[k];
+        xyz[i] /= yw;
+    }
+    for (i = 0; i < 3; i++) { lms[i] = 0; for (k = 0; k < 3; k++) lms[i] += m1[3 * i + k] * xyz[k]; lms[i] = cbrt(lms[i]); }
+    for (i = 0; i < 3; i++) { lab[i] = 0; for (k = 0; k < 3; k++) lab[i] += m2[3 * i + k] * lms[k]; }
+}
+
+/* A x = b for a 3 x 3, by Gaussian elimination with partial pivoting:
+ * the test's own solve, nothing shared with either header. */
+static void solve3(const double* A, const double* b, double* x) {
+    double M[3][4];
+    int i, j, k;
+    for (i = 0; i < 3; i++) { for (j = 0; j < 3; j++) M[i][j] = A[3 * i + j]; M[i][3] = b[i]; }
+    for (k = 0; k < 3; k++) {
+        int piv = k;
+        for (i = k + 1; i < 3; i++) if (fabs(M[i][k]) > fabs(M[piv][k])) piv = i;
+        for (j = 0; j < 4; j++) { double t = M[k][j]; M[k][j] = M[piv][j]; M[piv][j] = t; }
+        for (i = k + 1; i < 3; i++) {
+            double f = M[i][k] / M[k][k];
+            for (j = k; j < 4; j++) M[i][j] -= f * M[k][j];
+        }
+    }
+    for (i = 2; i >= 0; i--) {
+        double t = M[i][3];
+        for (j = i + 1; j < 3; j++) t -= M[i][j] * x[j];
+        x[i] = t / M[i][i];
+    }
+}
+
+/* ... and back: Lab to the cube roots (M2 solved), cubed, to XYZ (M1
+ * solved), to device RGB (the calibration's matrix solved). */
+static void okb_to_rgb(const psycol_cal* c, int old, const double lab[3], double rgb[3]) {
+    static const double m1[9] = { 0.8189330101, 0.3618667424, -0.1288597137, 0.0329845436, 0.9293118715, 0.0361456387,
+                                  0.0482003018, 0.2643662691, 0.6338517070 };
+    static const double m2[9] = { 0.2104542553, 0.7936177850, -0.0040720468, 1.9779984951, -2.4285922050, 0.4505937099,
+                                  0.0259040371, 0.7827717662, -0.8086757660 };
+    double yw = c->rgb_to_xyz[3] + c->rgb_to_xyz[4] + c->rgb_to_xyz[5] + (old ? 0.0 : c->black_xyz[1]), l[3], xyz[3];
+    int k;
+    solve3(m2, lab, l);
+    for (k = 0; k < 3; k++) l[k] = l[k] * l[k] * l[k];
+    solve3(m1, l, xyz);
+    for (k = 0; k < 3; k++) xyz[k] = xyz[k] * yw - (old ? 0.0 : c->black_xyz[k]);
+    solve3(c->rgb_to_xyz, xyz, rgb);
+}
+
+static void gl_v05_color(stats* st) {
+    static psycol_cal cal3;
+    static psycol_lum lum10;
+    static const float xy[3][2] = { { 0.64f, 0.33f }, { 0.30f, 0.60f }, { 0.15f, 0.06f } };
+    static const float peak[3] = { 17.0f, 57.0f, 5.8f };
+    psygfx_desc gd;
+    psygfx_shape_desc d;
+    psygfx_paint pt;
+    psygfx_stim s;
+    char err[200];
+    int i, j, k, q;
+    (void)st;
+    S7.ran = 1;
+    /* a display whose black has light: 0.5 cd/m2 under a white of about 80 */
+    psycol_cal_init(&cal3);
+    psycol_cal_add(&cal3, PSYCOL_GUN_BLACK, 0, 0.5f, 0.31f, 0.33f);
+    for (k = 0; k < 3; k++)
+        for (i = 1; i <= 8; i++)
+            psycol_cal_add(&cal3, k, i / 8.0f, (float)(0.5 + peak[k] * pow(i / 8.0, 2.2)), xy[k][0], xy[k][1]);
+    CHECK(psycol_cal_derive(&cal3, err, sizeof err) == PSYCOL_OK);
+    memset(&gd, 0, sizeof gd);
+    gd.screen = &R->scr;
+    gd.background[0] = 0.4f; gd.background[1] = 0.5f; gd.background[2] = 0.3f;
+    gd.cal = &cal3;
+    gd.cache = test_cache();
+    psygfx__test_scene32 = 1;
+    if (!psygfx_open(&R->g, &gd)) { fprintf(stderr, "v0.5 open: %s\n", psygfx_error(&R->g)); g_failures++; return; }
+    {   /* psygfx_color() is the context the same desc gives */
+        const psycol_ctx* cx = psygfx_color(&R->g);
+        psycol_ctx mine;
+        psycol_ctx_desc cd;
+        memset(&cd, 0, sizeof cd);
+        cd.cal = &cal3;
+        for (k = 0; k < 3; k++) cd.background[k] = gd.background[k];
+        S7.ctx_bad += !cx || psycol_ctx_init(&mine, &cd, err, sizeof err) < 0 || mine.id != cx->id ||
+                      memcmp(mine.ok_rgb_to_lms, cx->ok_rgb_to_lms, sizeof mine.ok_rgb_to_lms) != 0;
+    }
+    memset(&pt, 0, sizeof pt);
+    pt.kind = PSYGFX_PAINT_LINEAR; pt.space = PSYGFX_SPACE_OKLAB; pt.n = 3;
+    pt.x0 = -60; pt.y0 = -20; pt.x1 = 60; pt.y1 = 20;
+    pt.stops[0].t = 0; pt.stops[0].color[0] = 0.55f; pt.stops[0].color[1] = 0.45f; pt.stops[0].color[2] = 0.25f;
+    pt.stops[1].t = 0.4f; pt.stops[1].color[0] = 0.30f; pt.stops[1].color[1] = 0.55f; pt.stops[1].color[2] = 0.35f;
+    pt.stops[2].t = 1; pt.stops[2].color[0] = 0.02f; pt.stops[2].color[1] = 0.03f; pt.stops[2].color[2] = 0.05f;
+    memset(&d, 0, sizeof d);
+    d.shape = PSYGFX_RECT; d.w = 160; d.h = 120; d.paint = &pt; d.ori = 10;
+    s = psygfx_shape(&d);
+    gl_frame(&s, 1);
+    for (j = 0; j < H; j += 3)
+        for (i = 0; i < W; i += 3) {
+            float lx, ly;
+            double t, u, a[3], b[3], la[3], lb[3], m[3], want[3], was[3];
+            int seg;
+            psygfx_local(&R->g, &s, (float)i + 0.5f, (float)j + 0.5f, &lx, &ly);
+            if (fabs(lx) > 79 || fabs(ly) > 59) continue;
+            t = ((lx + 60) * 120 + (ly + 20) * 40) / (120.0 * 120 + 40 * 40);
+            t = t < 0 ? 0 : (t > 1 ? 1 : t);
+            seg = t < 0.4 ? 0 : 1;
+            u = seg ? (t - 0.4) / 0.6 : t / 0.4;
+            for (q = 0; q < 3; q++) { a[q] = pt.stops[seg].color[q]; b[q] = pt.stops[seg + 1].color[q]; }
+            okb_from_rgb(&cal3, 0, a, la); okb_from_rgb(&cal3, 0, b, lb);
+            for (q = 0; q < 3; q++) m[q] = la[q] + (lb[q] - la[q]) * u;
+            okb_to_rgb(&cal3, 0, m, want);
+            okb_from_rgb(&cal3, 1, a, la); okb_from_rgb(&cal3, 1, b, lb);
+            for (q = 0; q < 3; q++) m[q] = la[q] + (lb[q] - la[q]) * u;
+            okb_to_rgb(&cal3, 1, m, was);
+            if (getenv("PSYGFX_TEST_VERBOSE") && (want[0] != want[0] || was[0] != was[0] || R->scene[(j * W + i) * 4] != R->scene[(j * W + i) * 4]))
+                fprintf(stderr, "  v0.5 nan at %d %d: t %g scene %g want %g was %g\n", i, j, t, R->scene[(j * W + i) * 4], want[0], was[0]);
+            for (q = 0; q < 3; q++) {
+                S7.oklab_black = maxd(S7.oklab_black, fabs(R->scene[(j * W + i) * 4 + q] - want[q]));
+                S7.black_shift = maxd(S7.black_shift, fabs(want[q] - was[q]));
+            }
+        }
+    psygfx_close(&R->g);
+    /* refusals: desc.cones without a calibration; a lum record in other cone units */
+    memset(&gd, 0, sizeof gd);
+    gd.screen = &R->scr;
+    gd.cache = test_cache();
+    gd.cones = PSYCOL_CONES_SS10;
+    S7.refused_n++;
+    if (!psygfx_open(&R->g, &gd)) S7.refused_ok += strstr(psygfx_error(&R->g), "desc.cal") != NULL;
+    else psygfx_close(&R->g);
+    {
+        const double w[3] = { 0.7, 0.33, 0.0 };
+        CHECK(psycol_lum_stated(&lum10, PSYCOL_CONES_SS10, w) == PSYCOL_OK);
+        gd.cones = 0;
+        gd.cal = &cal3;
+        gd.lum = &lum10;
+        S7.refused_n++;
+        if (!psygfx_open(&R->g, &gd)) S7.refused_ok += strstr(psygfx_error(&R->g), "SS10") != NULL;
+        else psygfx_close(&R->g);
+    }
+    /* no calibration: no context */
+    if (gl_open(1, PSYGFX_RGBA16F, PSYGFX_DITHER_NONE)) {
+        S7.ctx_bad += psygfx_color(&R->g) != NULL;
+        psygfx_close(&R->g);
     }
 }
 
@@ -3003,15 +4839,20 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
         static void (*const parts[])(stats*) = { gl_shapes, gl_gratings, gl_gabors, gl_dots, gl_images,
                                                  gl_noise, gl_output, gl_user_batch_rows,
                                                  gl_strokes, gl_masks, gl_sprites, gl_tint, gl_groups, gl_targets,
-                                                 gl_alpha_passes, gl_edge_truth, gl_v03_kinds, gl_v03_truth, gl_v03_fx, gl_v03_paint, gl_v03_msdf };
+                                                 gl_alpha_passes, gl_edge_truth, gl_v03_kinds, gl_v03_truth, gl_v03_fx, gl_v03_paint, gl_v03_msdf,
+                                                 gl_v04_cache, gl_v04_fixes, gl_v04_video, gl_v04_inst, gl_v04_order, gl_v05_color };
         static const char* const names[] = { "shapes", "gratings", "gabors", "dots", "images", "noise",
                                              "output", "user+batch+rows", "strokes", "masks", "sprites", "tint",
-                                             "groups", "targets", "alpha+passes", "edge truth", "v0.3 kinds", "v0.3 truth", "v0.3 fx", "v0.3 paint", "v0.3 msdf" };
+                                             "groups", "targets", "alpha+passes", "edge truth", "v0.3 kinds", "v0.3 truth", "v0.3 fx", "v0.3 paint", "v0.3 msdf",
+                                             "v0.4 cache", "v0.4 fixes", "v0.4 video", "v0.4 inst", "v0.4 order", "v0.5 color" };
         int k;
         memset(&S2, 0, sizeof S2);
         memset(&S3, 0, sizeof S3);
         memset(&S4, 0, sizeof S4);
         memset(&S5, 0, sizeof S5);
+        memset(&S6, 0, sizeof S6);
+        memset(&S7, 0, sizeof S7);
+        mc_clear(&g_mc);
         printf("  seconds:");
         for (k = 0; k < (int)(sizeof parts / sizeof parts[0]); k++) {
             uint64_t t0 = psyrt_now_ns();
@@ -3163,7 +5004,7 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
         CHECK(S5.refused_ok == S5.refused_n);
     }
     printf("  v0.3 paint: RGB %.2e, OKLAB against Ottosson through the calibration %.2e, DKL_POLAR against "
-           "psygfx_cal_dir_dkl %.2e, VERTEX against barycentric %.2e\n"
+           "psycol_cal_dir_dkl %.2e, VERTEX against barycentric %.2e\n"
            "  v0.3 MSDF against the CPU's bilinear median %.2e; glyph run against single draws %.2e\n",
            S5.paint_rgb, S5.paint_oklab, S5.paint_dkl, S5.paint_vertex, S5.msdf, S5.glyph);
     {
@@ -3177,6 +5018,85 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
         CHECK(S4.hard_bad == 0);
         CHECK(S4.hit_bad == 0);
     }
+    if (S7.ran) {
+        const int ss7 = dev == PSYGFX_HL_SWIFTSHADER;
+        printf("  v0.5 color: OKLAB with the display's black against absolute XYZ %.2e (v0.4's black-free form would move this "
+               "gradient by %.2e); context from open() against one built apart: wrong %ld; refusals %ld of %ld\n",
+               S7.oklab_black, S7.black_shift, S7.ctx_bad, S7.refused_ok, S7.refused_n);
+        CHECK_LE(S7.oklab_black, ss7 ? 1e-4 : 2e-5);
+        CHECK(S7.black_shift > 1e-4);
+        CHECK(S7.ctx_bad == 0);
+        CHECK(S7.refused_ok == S7.refused_n);
+    }
+    printf("  v0.4 cache: %d programs, open without a cache %.0f ms, warm %.0f ms; %ld cases, wrong %ld\n",
+           S6.programs, S6.open_cold_ms, S6.open_warm_ms, S6.cache_cases, S6.cache_bad);
+    CHECK(S6.cache_bad == 0);
+    printf("  v0.4 fixes: straight alpha, linear, against the premultiplied bilinear %.2e (v0.3's way: %.2e); a run from its "
+           "first record against its own buffer %.2e; shape_p by desc against by hand %.2e; refusals %ld of %ld\n",
+           S6.alpha_lin, S6.alpha_old, S6.first_diff, S6.shape_p_diff, S6.refused_ok, S6.refused_n);
+    CHECK_LE(S6.alpha_lin, 2.5e-6);
+    CHECK(S6.first_diff == 0.0);
+    if (S6.refused_n) CHECK(S6.dots_px > 50);   /* when the part ran */
+    printf("  v0.4 no-pixel stimuli: %ld of %ld refused or drawn as the manual says; a polygon with no box %ld px, dots with no aperture %ld px\n",
+           S6.zero_ok, S6.zero_n, S6.zero_poly_px, S6.zero_dots_px);
+    CHECK(S6.zero_ok == S6.zero_n);
+    if (S6.zero_n) CHECK(S6.zero_poly_px > 100 && S6.zero_dots_px > 20);
+    CHECK(S6.shape_p_diff == 0.0);
+    CHECK(S6.refused_ok == S6.refused_n);
+    printf("  v0.4 video: %ld cases at 1:1 (NV12, I420 x matrix x range x siting x chroma filter) %.2e; transfers %.2e; "
+           "linear at 2.5x %.2e; plane updates %.2e; primaries through the calibration %.2e; DEVICE codes wrong %ld of 256; "
+           "rebind %.2e; GL import %.2e; D3D11 NV12 slice import %s %.2e; refusals %ld of %ld\n",
+           S6.vid_cases, S6.vid_1x, S6.vid_trc, S6.vid_lin, S6.vid_part, S6.vid_prim, S6.codes_bad, S6.rebind_diff,
+           S6.import_gl_diff, S6.d3d_ran ? "ran" : "not run", S6.import_d3d_diff, S6.vid_refused_ok, S6.vid_refused_n);
+    {
+        CHECK_LE(S6.vid_1x, 1e-6);
+        CHECK_LE(S6.vid_trc, 2e-6);
+        CHECK_LE(S6.vid_lin, 2e-5);
+        CHECK_LE(S6.vid_part, 2e-6);
+        CHECK_LE(S6.vid_prim, 4e-6);
+        CHECK(S6.codes_bad == 0);
+        CHECK_LE(S6.rebind_diff, 2e-6);
+        CHECK_LE(S6.import_gl_diff, 2e-6);
+        CHECK_LE(S6.import_d3d_diff, 2e-6);
+        CHECK(S6.vid_refused_ok == S6.vid_refused_n);
+#if defined(_WIN32)
+        if (dev != PSYGFX_HL_SWIFTSHADER && S6.vid_refused_n) CHECK(S6.d3d_ran == 1);
+        if (S6.d3d_ran) {
+            int v;
+            for (v = 0; v < 2; v++) {
+                printf("  v0.4 video: NV12 from a second D3D11 device by %s: %s",
+                       v ? "a legacy shared handle, after its flush and event query" : "an NT handle with a keyed mutex",
+                       S6.shared_diff[v] >= 0 ? "read back, max " : "not run: ");
+                if (S6.shared_diff[v] >= 0) printf("%.2e\n", S6.shared_diff[v]);
+                else printf("%s failed\n", S6.shared_why[v]);
+                if (S6.shared_diff[v] >= 0) CHECK_LE(S6.shared_diff[v], 2e-6);
+            }
+        }
+#endif
+    }
+    printf("  v0.4 instances against the elements drawn alone: gabor %.2e, grating and noise %.2e, shapes %.2e, image %.2e, "
+           "user %.2e; palette integers wrong %ld, fractions %.2e; hit_index wrong %ld of %ld (ties %ld); bindings wrong %ld; "
+           "refusals %ld of %ld\n",
+           S6.inst_diff[0], S6.inst_diff[1], S6.inst_diff[2], S6.inst_diff[3], S6.inst_diff[4], S6.pal_bad, S6.pal_frac,
+           S6.hit_bad, S6.hit_n, S6.hit_ties, S6.bind_bad, S6.inst_refused_ok, S6.inst_refused_n);
+    {
+        int k;
+        for (k = 0; k < 5; k++) CHECK_LE(S6.inst_diff[k], 3e-5);   /* 3x the worst renderer (user, 9.2e-6) */
+        CHECK(S6.pal_bad == 0);
+        CHECK_LE(S6.pal_frac, 2e-7);
+        CHECK(S6.hit_bad == 0);
+        CHECK(S6.bind_bad == 0);
+        CHECK(S6.inst_refused_ok == S6.inst_refused_n);
+    }
+    printf("  v0.4 order: %ld frames reordered against call order, %ld differed; %ld draw calls saved; a draw that passes "
+           "several and joins an earlier run: %s\n", S6.order_frames, S6.order_bad, S6.order_saved,
+           S6.order_pass_ok ? "joined only where nothing it passed overlaps" : "WRONG");
+    if (S6.order_frames) {
+        CHECK(S6.order_bad == 0);
+        CHECK(S6.order_saved > 0);
+        CHECK(S6.order_pass_ok == 1);
+    }
+    mc_clear(&g_mc);
     g_where = "cpu";
     return 1;
 }
@@ -3205,6 +5125,7 @@ static int wanted(const char* name) {
 int main(void) {
     int ran = 0;
     const char* req = getenv("PSYGFX_TEST_REQUIRE_GL");
+    setvbuf(stdout, NULL, _IONBF, 0);   /* a crash keeps what was printed */
     test_noise_cpu();
     test_cal_srgb();
     test_cones_dkl();
@@ -3212,6 +5133,10 @@ int main(void) {
     test_coordinates();
     test_null_and_ring();
     test_v03_cpu();
+    test_v04_cache_cpu();
+    test_v04_fixes_cpu();
+    test_v04_inst_cpu();
+    printf("v0.4 instances: the shader's cosine and sine of degrees, -720 to 720, against double: max %.2e\n", S6.csd_err);
     R = (rig*)calloc(1, sizeof *R);
     if (!R) return 1;
 #if defined(_WIN32)

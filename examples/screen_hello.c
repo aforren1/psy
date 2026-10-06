@@ -14,7 +14,7 @@
  * Usage: screen_hello [--sim] [--windowed]
  *   --sim       no window: the simulated display (CI runs this)
  *   --windowed  an 800 x 600 window instead of borderless fullscreen
- * Esc or closing the window ends the trial at once.
+ * Shift+Esc or closing the window ends the trial at once.
  * Exit code: 0, 1 when the screen did not open, 2 for a bad argument.
  */
 /* psy_screen.h first: psy_rt.h, which it includes, sets the feature-test

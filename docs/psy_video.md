@@ -20,15 +20,23 @@ that a restart loses nothing.
 |---|---|
 | Scheduler, records, controls (play, pause, seek, loop, end, manual) | Done, tested on a virtual clock |
 | Movie clock from a psy_timeline base; own anchor without one | Done, tested (agreement under cadence and noise) |
-| Follow another clock (`psyvid_follow`, `psyvid_follow_audio`) | Done, tested with a scripted 200 ppm clock; no run against real audio |
+| Follow another clock (`psyvid_follow`, `psyvid_follow_audio`) | Done, tested with a scripted 200 ppm clock and with the soundtrack on psy_audio's scripted device; one run on the real device ("Soundtrack") |
 | Decoder interface, frame sequence (read, write, raw, QOI), pl_mpeg | Done, tested; pl_mpeg run on generated clips |
 | Decode-ahead on a pump, inline mode | Done, tested (one threaded case) |
-| Upload through psy_gfx.h; I420 and NV12 to RGBA8 on the pump | Done, measured |
-| Mutations | 23 of 23 caught |
-| Build matrix | MSVC, MinGW, gcc (ASan, UBSan, TSan), emcc: pass (see "Builds and mutations") |
+| Upload through psy_gfx.h | Done, measured; YUV as planes since round 2 |
+| Mutations | v0.1: 23 of 23 caught; round 2: 29 of 31 ("Builds and mutations") |
+| Build matrix | MSVC, MinGW, gcc (ASan, UBSan, TSan): pass; emcc: v0.1 only (see "Builds and mutations") |
 | Decode thread that cannot start (wasm without -pthread) | Falls back to inline decode; describe() says so |
 | Follow-up (2026-10-05) | psy_timeline.h v0.3.0: `psytl_lead()` replaces the read of `tl->lead`; seeks and manual jumps use `psytl_skip()`, and the SEEK record counts the skipped annotations. psy_screen.h: `psyscr_frame.done` completes every flip record. See "Seeks and annotations" and "Records" |
-| Not in this task | Media Foundation, the shared and zero-copy GPU paths (they wait for psy_gfx.h's planar formats and texture import; `psyscr_native()` exists now), the planar shader, capture, FFmpeg, the soundtrack source |
+| Round 2 (2026-10-06): Media Foundation | Done (v0.2.0): `PSYVID_BACKEND_MF`, the MP4 index maker (with the H.264 SPS's color), `desc.hw_decode` (AUTO is DXVA, by M2). Tested on generated clips (`tests/media/make_video_clips.sh`, the core test with `PSYVID_TEST_MEDIA`); 9 of 11 mutations caught. M1, M3, M4 measured. See "Media Foundation" |
+| Round 2: base rates (item R) | Done, tested (rates 1/2, 1001/1000, 2/1, a change mid-play, loop, pause, strict_cadence); 9 of 9 mutations caught; rate 1 byte-identical to v0.1.0. See "Base rates" |
+| Round 2: soundtrack | Done on psy_audio.h v0.2.0 (`psyau_wav` on a stream); tested on psy_audio's scripted device; 10 of 10 mutations caught; on the real device the flips stay within -0.42 to +0.08 ms (p1 to p99) of the audio clock, after a fix the run found (the shared start put on a display onset). See "Soundtrack" |
+| Round 2: planar upload | Done, measured (M1, M2): kept; the RGBA8 conversion left the play path. See "Upload and conversion" and M2 |
+| Round 2: GPU path | `PSYVID_PATH_GPU` done; on psy_screen.h's `desc.d3d11_video` (in the tree since its v0.3.1 checkpoint). `examples/video_check.c` (against UPLOAD on hardware: the same value at every pixel) and `video_play --gpu` landed; measured (M7). An option: UPLOAD stays the default. See "GPU path" |
+| Round 2: fixes | A data race on the free queue after a PENDING decode, found with a new threaded case under ThreadSanitizer; fixed ("Builds and mutations") |
+| Round 2: missed bars | DXVA's cold open at 1080p60 (259 to 308 ms, bar 300 ms; M3); the software decoder's seek (M4); 2 Media Foundation mutations not caught (why, in "Builds and mutations"); emcc not re-run |
+| Round 2: not built | `PSYVID_PATH_SHARED`; HEVC's VUI |
+| Not in this task | Capture, FFmpeg, AVFoundation |
 
 ## Decisions that changed the design
 
@@ -48,7 +56,8 @@ the coordinator's and the user's:
    With `desc.timeline` and `desc.base`, `movie_time(onset)` is
    `psytl_base_time()`. play, pause, seek and loop anchor, pause and
    rewind the base. So a later psy_timeline.h with an exact base rate
-   gives slow motion with no change here. Rate is 1 in v0.1.
+   gives slow motion with no change here. Rate is 1 in v0.1; round 2
+   needed one change, the lead in RT ns ("Base rates").
 4. The design's other recommendations stand: no second display-locked
    clock, 10-bit refused, the timestamp checked on every frame and the
    hash on CPU paths, pl_mpeg fetched and pinned, QOI in the header,
@@ -164,13 +173,9 @@ again in the next cycle.
 
 The timeline's lead comes from `psytl_lead()`.
 
-**A base rate other than 1 needs a change here.** The due frame uses the
-movie time at the onset plus the lead, L = lead x period. L is RT ns and
-the movie time is base ns; at rate 1 they are the same unit. At rate r
-the due frame needs the base time at RT time onset + L (or the window
-psy_timeline.h computes, a `psytl_window()`), not base time at onset plus
-L. psy_video.h reads the base through one function, `movie_time()`, and
-adds L in `psyvid_update()`; both lines change together.
+A base rate other than 1 needed the due frame from the base time at RT
+onset + L, not the base time at the onset plus L: L is RT ns. Round 2
+does that with `psytl_window()` ("Base rates").
 
 ## Frame sequence and the index
 
@@ -217,12 +222,227 @@ CANONICAL: hash mismatches"); one changed index hash is flagged.
   backend maps it to 90 kHz units and the core rounds to a frame index,
   which holds for hours at any MPEG-1 rate.
 
+## Media Foundation
+
+Round 2 (2026-10-06). An `IMFSourceReader` in synchronous mode, made in
+`psyvid_open()` and used on the decode thread. It reads MP4 with one H.264
+or HEVC Main video track and gives NV12, which goes into the existing hash
+and then to the planar upload. Nothing is linked: `mfplat.dll`,
+`mfreadwrite.dll` and, for DXVA, `d3d11.dll` and `dxgi.dll` are loaded at
+run time, and the GUIDs are local copies.
+`tests/compile/psy_video_com.cpp` checks every GUID, the `MFVideoArea`
+layout and the IStream table against the Windows SDK on MSVC and MinGW.
+
+One IStream, the header's own, carries a path (64-bit offsets), memory and
+a `psyvid_reader` to Media Foundation, so a pack entry read by byte range
+plays like a file. Media Foundation calls it from its work-queue threads;
+an SRWLOCK keeps one call at a time. COM: `CoIncrementMTAUsage()` at open
+keeps a multithreaded apartment alive, so the decode thread needs no COM
+setup. The test opens a movie from a frame thread in a single-threaded
+apartment, as SDL3 leaves it, and decodes on the pump: it works.
+
+The test clips come from `tests/media/make_video_clips.sh` (ffmpeg,
+libx264 and libx265; each frame carries its index in 16 luma bars). The
+core test runs the Media Foundation cases when `PSYVID_TEST_MEDIA` names
+the clips' directory and skips them with a message otherwise.
+
+### Findings that changed the code
+
+| Finding | Seen on | Change |
+|---|---|---|
+| With `MF_LOW_LATENCY`, Microsoft's H.264 decoder gave frame 1 frame 0's time, then accumulated its 100 ns roundings (frame 4 at 999999 instead of 1000000) | c_720p30, every frame's time against its bars | Not set. Without it every time is the container's, to 100 ns |
+| `MF_READWRITE_DISABLE_CONVERTERS` together with `MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS` fails reader creation (E_INVALIDARG) | every clip | The software decoder gets DISABLE_CONVERTERS. With hardware, the transform chain is read after the type is set, and a second transform (a converter) is refused |
+| The output type's rate is a 100 ns approximation: 24000/1001 comes out 10000000/417083 | c_23976 | The index maker fits the rate from the compressed sample times: the simplest k/1 or k x 1000/1001 (k up to 1000) that puts every frame within 100 ns of its grid time. At play the index's rate is used; Media Foundation's must agree to 100 ppm |
+| The output type says "mixed interlace or progressive" for every H.264 stream | every clip | Mixed is accepted at the type; the index maker checks each decoded sample's `MFSampleExtension_Interlaced` |
+| Media Foundation reports none of the color the stream states (matrix, range, transfer, primaries, siting) | every clip | The index maker reads the H.264 SPS's VUI from `MF_MT_MPEG_SEQUENCE_HEADER` (about 140 lines): a desc field that contradicts it is refused, a zero desc field takes it. HEVC's VUI is not read (it sits behind profile_tier_level and the short-term reference picture sets), so an HEVC index needs the color in its desc |
+| ffmpeg drops `-color_trc` and `-color_primaries` after a `geq` filter, so the SPS states only matrix and range | ffprobe on the clips | The script also passes the color in x264's and x265's own parameters |
+| An absent `chroma_loc_info` means type 0 (left) by H.264 Annex E, and x264 omits it then | c_crop | The parser infers left, as the standard does |
+| An MP4 edit list with an empty edit (a 100 ms start offset) plays from time 0 in Media Foundation, with no sign | r_offset | The index maker reads the video track's `elst` and refuses any list but one entry at media time 0 |
+| A 1080-line H.264 frame is coded 1088 lines; the chroma plane starts after all 1088 | c_1080p30, against ffmpeg's frames | The display aperture gives the visible size; the chroma offset uses the surface's rows |
+| Software, hardware MFT and DXVA give the index's bytes on every frame, and ffmpeg's decoder gives them on the first three | c_720p30, c_1080p30, c_1080p60, c_crop | One index serves every decoder and machine. A decoder that differs on any frame is a finding, and the frame is flagged HASH_MISMATCH |
+
+### Refusals
+
+The index maker refuses each generated refusal clip with its reason
+(core test): B-frames ("decodes at ... but shows at ..."), frames missing
+from the grid and a 1 ms timescale at 30000/1001 ("fit no constant
+rate"), a keyframe forced off the GOP, 10-bit and 4:4:4 (by the H.264
+profile), a 2:1 pixel aspect, interlace (per sample), MPEG-4 Part 2,
+rotation (the display matrix; 270 degrees for ffmpeg's
+`-display_rotation 90`), and an edit list. HEVC Main 8-bit decodes on this
+machine. A machine without an HEVC decoder gets "no decoder gives NV12 ...
+no HEVC decoder may be installed".
+
+### Seeks
+
+`seek(key)` sets the position half a frame past the keyframe's time (the
+source takes the sync sample at or before it). It then reads forward to
+the frame whose time maps to `key`, so `next()` returns the keyframe as
+the interface requires. The index maker decodes every keyframe and the
+frame after it again after a seek and compares both hashes: the property
+the movie's seeks rely on, proved per file. Seeks to every target in the
+test land on the exact frame (bars and hash).
+
+## Soundtrack
+
+Round 2. The first design, a `psyvid_port` that took psy_audio.h's one
+source slot, was withdrawn: movie sound goes on the same path as every
+other sound. The soundtrack is a `psyau_wav` (psy_audio.h v0.2.0) whose
+stream is a voice, placed, recorded and confirmed like any sound.
+`psyau_play_at()` voices keep mixing beside it; the test plays a tone
+during the movie and checks both.
+
+How the movie drives it:
+
+- `psyvid_soundtrack(mv, au, &desc)` after `psyvid_open()` and before the
+  first play opens the WAV (path, memory or a `psyvid_reader`, which has
+  `psyau_reader`'s layout) into a ring of the movie's own memory, 1 s by
+  default. psy_audio refuses a rate, a channel count or a sample type
+  that is not the device's; psy_video refuses the rest (below).
+- The movie's decode thread feeds it: `psyau_wav_step()` runs in the
+  pump's idle step before each decode step. The frame thread wakes the
+  pump when `psyau_wav_wants()` says the ring is under half full.
+- A start: the sound starts at the sample nearest the movie time (a tie
+  to the earlier). With ASAP the target is the first predicted display
+  onset both can reach: at or after now plus `psyau_lead_ns()` plus one
+  period, once the frames and the ring are in. The movie base is anchored
+  at that target, so the base, the sound and the first frame share one
+  origin (the real-device run below found the onset needed).
+- A seek during play: the play is stopped at once
+  (`psyau_stop_at(id, 0, ramp)`), the decode thread retries
+  `psyau_wav_seek()` to the target's sample (BUSY until psy_audio has
+  ended the play) on each wake, the ring refills, and the movie resumes at
+  the next shared ASAP target with a new play. A pause stops at its
+  target; a resume is a new play from the sample one display period after
+  the frozen time. A loop is the WAV's `loops = PSYAU_FOREVER`: sample s
+  reads file frame s mod A, so the stream's numbering, and the follow,
+  continue across cycles.
+- The lock: `psyvid_follow_audio()` takes the movie time at each onset
+  from `psyau_stream_sample_at()`, the soundtrack's own sample on the
+  fit. Before the play's origin is fixed (PENDING) the base keeps its own
+  anchor.
+- Records: psy_audio's ONSET (confirmed), STREAM, GAP and END are the
+  sound's records. psy_video adds `PSYVID_EV_SOUND` per start (1) and stop
+  (2), with psy_audio's play id, the first sample and the target.
+
+Refusals that psy_video keeps:
+
+- **Length.** A = N x den x rate / num, the movie's duration in samples.
+  The WAV must hold round(A) samples, a tie up: (2 x N x den x rate + num)
+  / (2 x num) in integers. At 48 kHz and 30000/1001 fps, 151 frames are
+  241841.6 samples: 241842 is accepted, 241841 and 241843 are refused. The
+  test checks an integer A, a fraction, and a tie (A = 187.5 accepts 188,
+  refuses 187).
+- **Loop.** A loop needs A to be an integer, so that no cycle slips a part
+  of a sample: at 30000/1001 and 48 kHz the frame count must be a multiple
+  of 5 (the message says so).
+- **Base rate.** No resampling: a soundtrack is refused at a base rate
+  other than 1, and a later change of rate stops it (psyvid_update()
+  returns PSYVID_ERR_REFUSED once).
+
+Tests, on psy_audio's scripted device on the same virtual clock as the
+display (identity samples in a float WAV in memory): the start on the
+target's frame and the first video frame within 1 us of it; the base
+starting at the target when the display misses that vblank; every output
+sample equal to sample (frame minus origin); the movie
+time against the audio within 10.4 us (half a sample) at +37 and -400 ppm
+of device drift; a tone mixed beside it; pause, resume and seek (the stop
+frame, silence, the new start's sample); a loop over three cycles; a late
+timed start that skips the samples it missed; the refusals.
+
+On the real device, under the lock, 2026-10-06 11:47 to 11:58, AC: the
+10 min A/V clip of `make_video_clips.sh --av` (1080p30, DXVA, UPLOAD)
+with its 48 kHz WAV on the default device (Realtek, WASAPI shared through
+miniaudio, period 480, the speaker muted at volume 0 as it was), in the
+composed window, `psyvid_follow_audio()` on every frame. A scratch test
+tool ran 60 s: play, at 20 s a seek to 300 s, at 36 s a pause, at 38 s a
+resume. The times are psy_screen.h's flip onsets and psy_audio.h's fit,
+so this checks the lock between the two clocks, not light against sound.
+
+| | Before the fix (2 runs) | After (4 runs: 3 of 60 s, 1 of 20 s) |
+|---|---|---|
+| Each start's ONSET against its target | -0.05 to +0.01 ms | -0.014 to +0.010 ms |
+| The first new frame of each start: flip onset minus its time on the audio clock | -6.3 to +7.5 ms | -0.19 to +0.07 ms |
+| Every shown frame: flip onset minus its time on the audio clock, p1 / p50 / p99 | -6.5 / -6.2 / -3.1 ms; -2.4 / +4.5 / +7.5 ms | -0.42 to -0.09 / -0.15 to -0.02 / +0.03 to +0.08 ms |
+| Gaps, underruns | 0, 0 | 0, 0 |
+
+The device ran 44 to 48 ppm fast against the psy_rt clock; the fit's
+spread was 42 to 61 us.
+
+**The fix.** The first runs show a constant offset of up to half a
+display period between picture and sound, a different one each run. The
+shared ASAP target was now + `psyau_lead_ns()` + one period, a time
+between two vblanks: the sound started on it exactly, and the frame due
+then showed at the nearest vblank, so every frame after kept that phase.
+The target is now the first predicted display onset at or after that
+time. The scripted test did not see it: it allowed half a period. It now
+wants the first frame within 1 us of the target, and the old code fails
+it; and the base test makes the display miss the target's vblank, so the
+base must still start at the target, not where the first frame landed.
+
+Outside those numbers: in every run, about 1.3 s after the start, the
+composed window showed three flips a vblank before psy_screen.h's
+predicted onset, then one a vblank late (a residual of -16.7 ms on one
+frame; the movie time at the predicted onset was right). In one run the
+compositor showed 3.6 s of flips one or two vblanks late (+16.5 and
++33.2 ms, the first of each flagged LATE, 2 DISPLAY_LATE drops). The
+records report both as they happened. Both belong to the composed path,
+not to the lock.
+
+## Base rates
+
+Round 2, with psy_timeline.h v0.4.0 (`psytl_rate`, `psytl_get_rate`,
+`psytl_rt_time`, `psytl_window`). The due frame is the largest i with
+t(i) at or before `psytl_window()`, the base time at RT onset + L, so the
+lead stays RT ns and a video frame lands where an annotation at its time
+lands, at any rate. The other places that assumed rate 1:
+
+| Place | At rate num/den |
+|---|---|
+| The loop wrap's RT time | `psytl_rt_time()` of t(N) |
+| A resume | the frozen time plus one display period times num/den |
+| The record's `due` | `psytl_rt_time()` of the frame's time |
+| The nominal schedule (slips) | the advance per vblank and the lead in base ns; it starts again at a change of rate, so a change is not a slip |
+| The cadence | R against r x num/den, again at each change; a `PSYVID_EV_RATE` record (num, den, the multiple, display frames per frame, whether strict_cadence refuses it) |
+| strict_cadence | a rate whose cadence judders holds the frame on screen and makes psyvid_update() return PSYVID_ERR_REFUSED until the rate gives a multiple again or the movie closes. A seek alone does not clear it: it lands and holds again |
+| A soundtrack | refused (above) |
+
+Tests: the annotation agreement at 1/2, 1001/1000 and 2/1 under 20 us of
+onset noise, and with a change from 1 to 1/2 mid-play (no annotation
+twice, no slip at the change); the cadence and the record's due at 1/2;
+pause and resume at 1/2; a loop of 23.976 at 1/2 over 20 cycles (the
+wraps on the rate's grid, the movie time across each wrap exact to 2 ns);
+23.976 at 1/2 on 60 Hz (5.005 display frames per frame: CADENCE, no
+DRIFT); strict_cadence; the soundtrack refusal. Nine mutations, each
+caught. At rate 1 the records are byte-identical to v0.1.0's: a harness
+built against both headers compared 17,455 lines over four scenarios
+(seeks, pause, a seek that stays paused, a loop, timeline annotations
+under noise).
+
 ## Upload and conversion
 
-The decode thread converts I420 and NV12 to RGBA8 with the canonical
+Round 2: the planes go up as they are. A YUV movie's slot holds its NV12
+or I420 planes, tight (1.5 bytes a pixel instead of 4); the decode thread
+copies a decoder's borrowed planes into it (Media Foundation's have a
+padded pitch, and its buffer is the decoder's again at the next call);
+the frame thread uploads them with `psygfx_texture_update_planes()` into a
+`PSYGFX_NV12` or `PSYGFX_I420` texture whose encoding is the canonical
+form's matrix, range and siting (and `desc.chroma` as `chroma_nearest`).
+psy_gfx.h's video program converts. light CODES passes the codes through
+as device values (`PSYGFX_TRC_DEVICE`, `PSYGFX_PRIM_DEVICE`); light EOTF
+(and AUTO under a calibration) gives the stated transfer and primaries,
+so the movie is shown in linear light through the calibration. psy_gfx.md
+has the shader's accuracy: at 1:1 its chroma weights at the stated siting
+equal the ones below exactly, and the pixel tests are within 3.1e-7.
+
+The CPU conversion below stays as `psyvid_yuv_to_rgba()`, a public tool
+function (tests, export). Its numbers are the v0.1 record. M1 and M2
+("Measurements") decided for the planes; the A/B build that kept the old
+path is deleted.
+
+v0.1: the decode thread converts I420 and NV12 to RGBA8 with the canonical
 matrix and range; the frame thread uploads RGBA8 with one
-`psygfx_texture_update()`. The planar shader path, with linear light,
-waits for psy_gfx.h. Chroma is brought to 4:4:4 by weights in sixteenths
+`psygfx_texture_update()`. Chroma is brought to 4:4:4 by weights in sixteenths
 for the stated siting (left: co-sited across, between rows down;
 center: between both), or replicated (`PSYVID_CHROMA_NEAREST`). The
 conversion is within 1 code of the same weights and matrix in double,
@@ -233,6 +453,39 @@ matrix pass, so that a compiler can vectorize them. An A/B in one process
 at 1080p: MSVC 19.44 /O2 6.80 ms (one pass) against 7.03 ms (two passes),
 the same bytes; gcc 11 -O3 in WSL2 11.2 ms against 6.7 ms. Kept the two
 passes.
+
+## GPU path
+
+Round 2. `PSYVID_PATH_GPU`: DXVA decodes on the screen's own D3D11 device;
+the decode thread copies each kept frame on the GPU into one of the
+movie's own NV12 textures; psy_gfx.h imported each texture once at open,
+and the frame thread rebinds the stimulus to the due one. No readback, no
+upload, no slot memory. It was planned as ZERO_COPY: the decoder's own
+surfaces imported and drawn. Findings that changed it:
+
+| Finding | Seen on | Change |
+|---|---|---|
+| `MF_SA_D3D11_BINDFLAGS` on the reader's attributes is ignored: the surfaces came with bind flags 0x600 (DECODER, VIDEO_ENCODER), so they cannot be sampled | c_720p30, the import refused ("no SHADER_RESOURCE") | `MF_SOURCE_READER_D3D11_BIND_FLAGS` at reader creation. It works, but see the next row |
+| Holding decoder surfaces for decode-ahead stalls the decoder: with ahead 6 (8 slots held) ReadSample never returned | every clip | No decoder surface is held. One `CopySubresourceRegion` a frame into the movie's own textures, and the sample is released at once. The decoder keeps its pool |
+| The copy and the draw are on one immediate context (the screen's, with multithread protection on) | design | The context orders them; no fence and no keyed mutex. The slot on screen is not a copy target until another slot replaces it |
+| The frame never reaches the CPU | design | The timestamps are checked; the frame hashes are not, and describe() says so |
+
+Checked on hardware with `examples/video_check.c`: each movie drawn through UPLOAD and through
+the GPU path, frame by frame in manual mode, each read back with
+`psygfx_read_scene()`. At 1280 x 720, 1920 x 1080 (coded 1088) at 30 and
+60 fps, 40 frames each with jumps across GOPs: every frame shows its own
+index in the bars, and the two paths give the same value at every pixel
+(worst difference 0), with a scratch copy of psy_screen.h first and with
+the tree's `desc.d3d11_video` after it landed.
+
+`PSYVID_PATH_SHARED` (a second device and a shared texture) is not built:
+the GPU path covers the case it was planned for. psy_gfx.h's import test
+proved the keyed-mutex variants if a renderer ever needs it.
+
+M7 ("Measurements") weighs it against UPLOAD: 20 to 50 % less process
+CPU at 1080p and close frame-thread means, but a longer draw and flip
+tail; dropped frames did not separate the two. UPLOAD stays the default;
+`gpu_path` is the knob.
 
 ## Measurements
 
@@ -296,6 +549,156 @@ Not measured: slips on the real panel (13 ppm: one each 20.9 min at
 30 fps), fullscreen, the audio clock against a real device, a decode
 thread under load, any GPU but the Iris Xe.
 
+### Round 2: Media Foundation (M1, M3, M4)
+
+Under the lock, 2026-10-06 10:17 to 10:36, AC, MSVC 19.44 Release,
+`examples/video_bench.c --mp4` on the clips of
+`tests/media/make_video_clips.sh --long` (testsrc2 with temporal noise,
+libx264 CRF 20; 1080p30 at 64 Mb/s, 1080p60 at 36 Mb/s: harder than
+most camera footage at these sizes). Three rounds, rows interleaved; the
+table gives the median over the rounds. The first round ran about twice
+as slow as the other two in every row; the medians are the later rounds'.
+The bench decodes as fast as it can, so Media Foundation's worker threads
+are busy throughout and compete for cores with the hash and the
+conversion; a movie decodes at its own rate and pays less of that.
+
+Decode thread per frame, mean / p99 ms. "Planar path" is what v0.2
+does: ReadSample and the lock (for DXVA the readback), the hash, and the
+copy of the planes into a slot. "RGBA8 path" is v0.1's, with the NV12 to
+RGBA8 conversion instead of the copy.
+
+| Clip | Decoder | ReadSample + lock | Hash | Conversion | Copy | RGBA8 path | Planar path | CPU of the process per frame (Media Foundation's threads) |
+|---|---|---|---|---|---|---|---|---|
+| 1280 x 720, 30 fps | software | 0.29 / 1.05 | 0.41 / 0.94 | 5.32 / 11.49 | 0.13 / 0.30 | 6.02 / 12.54 | 0.83 / 1.85 | 15.4 ms (9.6) |
+| | hardware MFT | 0.28 / 0.99 | 0.41 / 0.81 | 5.12 / 9.92 | 0.12 / 0.28 | 5.80 / 11.30 | 0.81 / 1.75 | 14.8 ms (9.6) |
+| | DXVA | 2.61 / 4.95 | 0.30 / 0.71 | 4.24 / 9.67 | 0.11 / 0.23 | 7.15 / 14.02 | 3.02 / 5.46 | 5.8 ms (0.7) |
+| 1920 x 1080, 30 fps | software | 0.44 / 1.34 | 0.94 / 1.66 | 12.27 / 22.29 | 0.34 / 0.74 | 13.65 / 24.72 | 1.72 / 3.13 | 33.3 ms (20.8) |
+| | hardware MFT | 0.42 / 1.29 | 0.89 / 1.58 | 11.74 / 21.40 | 0.32 / 0.70 | 13.05 / 23.04 | 1.63 / 3.01 | 31.5 ms (20.1) |
+| | DXVA | 4.52 / 7.75 | 0.77 / 1.85 | 10.24 / 21.33 | 0.31 / 0.68 | 15.50 / 28.22 | 5.57 / 9.01 | 12.7 ms (1.0) |
+| 1920 x 1080, 60 fps | software | 0.50 / 1.50 | 0.99 / 1.82 | 12.09 / 22.48 | 0.40 / 0.78 | 13.57 / 24.32 | 1.89 / 3.30 | 28.8 ms (15.4) |
+| | hardware MFT | 0.45 / 1.42 | 0.96 / 1.90 | 11.32 / 21.53 | 0.35 / 0.78 | 12.72 / 23.75 | 1.75 / 3.25 | 26.1 ms (13.6) |
+| | DXVA | 4.36 / 6.97 | 0.74 / 1.87 | 8.79 / 19.71 | 0.29 / 0.65 | 13.66 / 26.65 | 5.34 / 8.53 | 11.2 ms (0.8) |
+
+Against the bar (decode thread mean at most half a frame period, p99 at
+most one; 1080p60: 8.3 / 16.7 ms): the planar path meets it with every
+decoder at every size. The RGBA8 path misses it at 1080p60 with every
+decoder: its conversion alone takes 9 to 12 ms (6.7 to 7.8 ms in v0.1's
+quiet bench; here Media Foundation's threads share the cores). That is
+the planar path's case, measured.
+
+"ReadSample" for the software decoder and the hardware MFT is short
+because Media Foundation decodes ahead on its own threads: their cost is in
+the CPU column, 13 to 21 ms of CPU per 1080p frame, more than one core at
+1080p60. The "hardware MFT" (Intel's, reported by
+`MFT_ENUM_HARDWARE_URL_Attribute`) costs as much CPU as the software
+decoder here. DXVA costs a readback of 2.6 to 4.5 ms on the decode thread
+and about 1 ms of Media Foundation's threads. M2 below decides AUTO.
+
+Open to the first frame in hand (M3), cold / warm median: software 115
+to 177 / 52 to 91 ms; hardware MFT 133 to 235 / 59 to 112 ms; DXVA 240 to
+308 / 116 to 177 ms. The 300 ms bar is missed by DXVA at 1080p60 in two
+rounds of three (293, 259, 308 ms cold).
+
+A seek to a random frame, request to the target in hand (M4), mean / p99:
+software 72 / 100 ms (720p, GOP 30), 154 / 228 ms (1080p30, GOP 30), 155 /
+241 ms (1080p60, GOP 60); the hardware MFT about the same; DXVA 15 / 32,
+32 / 70 and 42 / 127 ms. DXVA meets the bar (GOP x the mean decode + 50
+ms) everywhere. The software decoder's frames after a seek cannot be
+pipelined, so a seek costs about 5 ms per frame decoded (155 ms for up to
+29 frames at GOP 30), against a ReadSample mean of 0.5 ms in steady play.
+
+### Round 2: the frame thread (M2) and the decisions
+
+Under the lock, 2026-10-06 10:41, AC, MSVC 19.44 Release,
+`examples/video_play.c --hw ...` in the 640 x 360 composed window, 30 s a
+run, two rounds, rows interleaved. "RGBA8" is v0.1's path (the decode
+thread converts, the frame thread uploads 4 bytes a pixel), built for this
+A/B only. `psyvid_update()` on display frames with an upload, after the
+120th, ms; the range is over the two rounds.
+
+| Clip | Path, decoder | Mean | p99 | Max | Drops a run (why) |
+|---|---|---|---|---|---|
+| 1920 x 1080, 30 fps | planar, software | 0.40 to 0.47 | 0.72 to 1.01 | 1.63 | 0 to 1 (DRIFT) |
+| | planar, hardware MFT | 0.39 to 0.45 | 0.74 to 0.81 | 1.24 | 0 |
+| | planar, DXVA | 0.40 to 0.42 | 0.70 to 0.77 | 0.99 | 0 |
+| | RGBA8, software | 0.90 to 1.07 | 1.72 to 1.98 | 2.62 | 0 |
+| | RGBA8, DXVA | 0.92 to 0.97 | 1.49 to 1.60 | 2.15 | 0 |
+| 1920 x 1080, 60 fps | planar, software | 0.40 to 0.42 | 0.68 to 0.78 | 1.20 | 1 (DISPLAY_LATE) |
+| | planar, hardware MFT | 0.40 to 0.46 | 0.83 to 0.93 | 1.45 | 1 to 2 (DISPLAY_LATE, DRIFT) |
+| | planar, DXVA | 0.46 | 0.69 to 0.83 | 1.04 | 1 (DISPLAY_LATE) |
+| | RGBA8, software | 0.97 to 1.01 | 1.83 to 1.97 | 3.24 | 1 (DISPLAY_LATE) |
+| | RGBA8, DXVA | 1.01 to 1.03 | 1.67 to 1.80 | 2.83 | 4 to 6, and 3 to 5 repeats (DECODE_LATE) |
+
+Every run: 0 heap calls after frame 120. A repeat costs 0.005 to 0.011 ms
+mean. The one DISPLAY_LATE drop per 60 fps run comes with every path and
+decoder; its flip carried LATE.
+
+Decisions, by M1 to M4 and M2:
+
+- **Planar upload kept; the CPU conversion left the play path.** The
+  planar path halves the frame thread's cost (0.4 against 1.0 ms mean),
+  and on the decode thread it is the only one that meets the 1080p60 bar
+  (M1). RGBA8 with DXVA at 1080p60 fell behind (DECODE_LATE). The A/B
+  switch (`PSYVID__CPU_CONVERT`) is deleted; `psyvid_yuv_to_rgba()` stays
+  as a tool.
+- **AUTO is DXVA, with the software decoder when no DXVA device opens.**
+  The frame thread costs the same with every decoder (above). DXVA uses
+  11 to 13 ms of process CPU per 1080p frame against 29 to 33 ms for the
+  software decoder, and seeks 4 to 5 times faster (M4); it opens about
+  100 ms slower (M3) and spends its readback on the decode thread, which
+  has room for it.
+- **The hardware MFT is deleted** (`PSYVID_HW_MFT`): the same CPU as the
+  software decoder and the same frame-thread cost; no benefit measured.
+
+### Round 2: the GPU path (M7)
+
+Under the lock, AC, MSVC 19.44 Release, the 640 x 360 composed window,
+DXVA in both rows, 30 s a run, rows interleaved: `video_play --hw dxva`
+with and without `--gpu`. It times `psyvid_update()`, the draw and the
+flip on the frame thread, and the process CPU after frame 120. Three
+sets:
+
+- A and B (11:30 and 11:39): a scratch copy of psy_screen.h with the
+  video device option. In B another worker's GPU test ran during round 1
+  and a compile during round 3; those rows are left out.
+- C (13:56 to 14:08): the tree's psy_screen.h (`desc.d3d11_video`) and
+  the landed `video_play --gpu`, four rounds. Before each row the script
+  waited until no compiler or test ran; one row still overlapped a
+  compile. Other activity on the machine (the draw and flip's max reached
+  74 ms on both paths) made C noisier than A and B.
+
+| Clip | Path | `psyvid_update()` mean / p99, ms | Draw + flip mean / p99, ms | Process CPU, % of a core | Drops a run |
+|---|---|---|---|---|---|
+| 1920 x 1080, 30 fps | UPLOAD (planes) | 0.41 to 0.73 / 0.71 to 2.41 (frames with an upload) | 0.60 to 1.63 / 0.91 to 15.4 | 13.9 to 20.6 | 0 to 3 |
+| | GPU | 0.009 to 0.021 / 0.025 to 0.079 | 0.72 to 1.48 / 1.48 to 8.28 | 8.9 to 14.0 | 0 to 4 |
+| 1920 x 1080, 60 fps | UPLOAD (planes) | 0.44 to 0.65 / 0.70 to 1.53 | 0.60 to 1.03 / 0.91 to 7.32 | 25.5 to 30.0 | A, B: 1 to 11 (median 1); C: 0, 27, 25, 0 |
+| | GPU | 0.015 to 0.020 / 0.038 to 0.088 | 1.14 to 1.58 / 2.97 to 6.03 | 14.1 to 20.2 | A, B: 8 to 136 (median 19); C: 5, 20, 5, 6 |
+
+Most drops were DISPLAY_LATE. `video_check` with the tree's
+psy_screen.h: bars right and worst difference 0 at 720p30, 1080p30 and
+1080p60, as with the scratch copy.
+
+What it shows:
+
+- The GPU path takes the upload off the frame thread, but the draw and
+  the flip take longer: the decoder's work and the copy share the
+  screen's immediate context, and its lock, with the frame thread. The
+  means of the two paths' frame-thread totals are close; the GPU path's
+  tail is longer (draw + flip p99 1.5 to 8 ms against 0.9 to 2 ms in the
+  quieter runs). Both are far inside the 16.7 ms frame.
+- It saves 20 to 50 % of the process's CPU at 1080p (the readback and the
+  plane copy), and the 23.7 MB of slots.
+- Dropped frames do not separate the paths. In A and B the GPU path
+  dropped more at 60 fps (median 19 a run against 1); in C it dropped
+  fewer (5, 20, 5, 6 against 0, 27, 25, 0). In a composed window on a
+  shared machine the compositor and the other load decide the drop
+  count. GPU timestamps, fullscreen (tier 1) and another GPU were not
+  measured.
+
+Decision: `PSYVID_PATH_GPU` stays as an option, and UPLOAD stays the
+default (`gpu_path` 0). UPLOAD needs no video device and has the shorter
+frame-thread tail; the GPU path is the knob when CPU is short.
+
 ## Tests
 
 `tests/adapt/psy_video_test.c`, no GPU, no display, no pl_mpeg: a scripted
@@ -317,6 +720,23 @@ in all ten formats from a file and from memory with padded strides,
 damage, the reader, replay (byte-equal records over 3000 frames with a
 stall, a display drop, a seek and a pause), 0 heap calls per frame, and
 one case with the decode thread running for real.
+
+Round 2 adds: the planes of every YUV frame sequence frame uploaded as
+stored; the soundtrack on psy_audio.h's scripted device ("Soundtrack");
+the base rates ("Base rates"); and, with `PSYVID_TEST_MEDIA` set to the
+clips of `tests/media/make_video_clips.sh` on Windows, Media Foundation:
+the index of each canonical clip, each refusal clip refused with its
+reason, the SPS's color (and a contradicting desc refused), the first
+three frames' hashes equal to ffmpeg's decoder's, every frame's bars at
+720p, 1080p (coded 1088) and 1280 x 718, 23.976, the three decoders bit-exact
+with the index (and an index made by DXVA serving the software decoder),
+seeks to eight targets across GOPs, memory and reader sources, a damaged
+byte (hash mismatch), a stale index, 0 heap calls per frame, and the
+decode thread for real from an STA frame thread. The threaded case now
+also stalls the decoder (PENDING) for 300 ms at frame 40 on the real
+decode thread ("Builds and mutations": it found a data race). The GPU
+path needs a screen, so the core test checks only its refusals;
+`examples/video_check.c` compares it with UPLOAD on hardware.
 
 ## Builds and mutations
 
@@ -352,29 +772,63 @@ it; it is not a fault the code can show. The test also found that the
 first conversion scratch in the test was too small for the two-pass
 conversion: `psyvid_yuv_rows_bytes()` now sizes it, and the test checks.
 
+Round 2 builds (2026-10-06, on the v0.2.0 header):
+
+| Toolchain | What ran |
+|---|---|
+| MSVC 19.44, CMake, Release | compile checks C and C++17 with pl_mpeg, the COM check (`tests/compile/psy_video_com.cpp`: every GUID, `MFVideoArea` and the IStream table against the Windows SDK), the core test with the clips (`PSYVID_TEST_MEDIA`), the examples |
+| MinGW-w64 gcc 16.1 | compile check C99 and C++17 with pl_mpeg, the COM check |
+| gcc 11.4, WSL2 | compile check C99 -O3 and C++17; core test under ASan and UBSan, and under ThreadSanitizer (run with `setarch -R`: this WSL kernel's address layout makes TSan stop at "unexpected memory mapping" otherwise) |
+| emcc | not run in round 2: the Docker engine that holds emsdk was not running. The Media Foundation code compiles out off Windows, as the gcc builds show |
+
+Round 2 mutations, each on a copy of the header, run against the core
+test (with the clips for Media Foundation):
+
+| Area | Caught | Not caught, and why |
+|---|---|---|
+| Media Foundation | 9 of 11: pts to index rounded down; the chroma plane after the visible rows (caught by ffmpeg's frames); the display aperture ignored; the B-frame checks; the rate fit at 1 ms; the edit list check; the per-sample interlace check; the SPS's color ignored; the SPS's fields in the wrong order (caught after a clip with three different fields was added) | A seek that stops at an earlier keyframe: Media Foundation always positions on the keyframe itself on these clips, so the forward read never runs. The decoded times against the grid: the compressed times' rate fit catches every clip that would fail it; the check stays for a decoder that restamps frames (as `MF_LOW_LATENCY` did) |
+| Soundtrack | 10 of 10, re-run on the final header: the length rounded down; the loop check removed; the follow from the device's stream (caught after the test checked for the CLOCK record); ASAP without the audio lead; a resume at the frozen sample; a movie time's sample rounded down and the base anchored at the landing onset (both caught after a test without the follow was added); a seek that does not stop the sound; no refusal at a base rate other than 1; the shared ASAP target not put on a display onset (the test now wants the first frame within 1 us of the sound's target; it allowed half a period). With the target on an onset, the anchor at the landing onset equals the anchor at the target unless the first frame lands late, so the base test now makes the display miss the target's vblank, and catches it again | |
+| Base rates | 9 of 9 ("Base rates") | |
+| Decode-ahead | 1 of 1 under ThreadSanitizer: the slot of a PENDING decode pushed back onto the free queue from the decode thread | |
+
+**A data race, found by the new threaded case.** The free queue is
+single-producer: the frame thread frees slots, the decode thread takes
+them. After a decoder returned PENDING, the decode thread pushed the slot
+it had taken back onto the queue: a second producer. The core test's one
+threaded case never had a PENDING decode, so it did not show. With a
+300 ms stall at frame 40 on the real decode thread, ThreadSanitizer
+reports "data race ... in psyvid__free_push". The decode thread now keeps
+that slot for its next decode; ThreadSanitizer is quiet, and putting the
+old push back makes it report again.
+
 ## Needed from the other headers
 
 | Header | Request | Why |
 |---|---|---|
-| psy_screen.h | `psyscr_native()`: the D3D11 device and context, the EGL display, the adapter LUID | Delivered (psy_screen.h, 2026-10-05). Not used yet: the shared path waits for psy_gfx.h |
-| psy_screen.h | A desc flag for a device with VIDEO_SUPPORT and multithread protection | Zero-copy only |
+| psy_screen.h | `psyscr_native()`: the D3D11 device and context, the EGL display, the adapter LUID | Delivered (2026-10-05); the DXVA device takes the LUID, the GPU path the device |
+| psy_screen.h | A desc option for a D3D11 device with VIDEO_SUPPORT and multithread protection | Delivered by the screen worker: `desc.d3d11_video` (v0.3.1). psy_video.h reads the device's creation flags and its multithread protection itself. Before it landed, the GPU path ran with a scratch copy of psy_screen.h (a test tool, never in the tree) |
 | psy_screen.h | Each completed flip record in `psyscr_frame` | Delivered: `done`, `n_done`, `done_lost`; used |
-| psy_gfx.h | Planar `PSYGFX_NV12` and `PSYGFX_I420` with matrix, range, light and siting, converted in the IMAGE shader | Removes the 6.7 to 7.8 ms conversion at 1080p from the decode thread, and gives linear light |
-| psy_gfx.h | `psygfx_texture_import()`, `psygfx_texture_rebind()`, per-plane update | The shared path |
-| psy_gfx.h | `psygfx_screen(g)` and `psygfx_calibrated(g)` | psy_video.h reads `g->screen` and `g->cal_crc`, private fields |
+| psy_gfx.h | Planar `PSYGFX_NV12` and `PSYGFX_I420` with an encoding, converted by its video program | Delivered (v0.4); used ("Upload and conversion") |
+| psy_gfx.h | `psygfx_texture_import()`, `psygfx_texture_rebind()`, per-plane update, `psygfx_features()` | Delivered (v0.4); used (the planes update, and import and rebind on the GPU path) |
+| psy_gfx.h | `psygfx_screen(g)` and `psygfx_calibrated(g)` | Delivered; used |
+| psy_audio.h | A streaming voice and a WAV reader | Delivered (v0.2.0: `psyau_stream`, `psyau_wav`); used by the soundtrack |
+| psy_audio.h | A soundtrack start confirmed like any onset | Delivered with the stream: ONSET is confirmed (tier 2 on its conditions) |
 | psy_timeline.h | `psytl_skip(tl, base, rt, bt)` | Delivered (v0.3.0); used for seeks and manual jumps |
 | psy_timeline.h | `psytl_lead(tl)` | Delivered (v0.3.0); used |
-| psy_timeline.h | An exact base rate, `psytl_rate(tl, base, num, den)`: base time at RT t is bt + (t - rt) x num / den in integers, the anchor rules unchanged, and the window end of a frame (`psytl_window()`) | Slow motion: `movie_time()` reads the base, and the due frame must take the base time at RT onset + L (see "Seeks and annotations"). `psyvid__base_rate()` returns 1/1 today; a soundtrack is refused at any other rate (no resampling) |
+| psy_timeline.h | Exact base rates: `psytl_rate()`, `psytl_get_rate()`, `psytl_rt_time()`, `psytl_window()` | Delivered (v0.4.0); used ("Base rates") |
 
 ## Future work
 
+- PSYVID_PATH_SHARED (a second device, one GPU copy, a shared fence or the
+  keyed mutex the gfx test proved): only if a renderer cannot use the
+  screen's device. The GPU path covers the case it was planned for.
+- HEVC's VUI (its color), read from the SPS as H.264's is.
+- DXVA's cold open at 1080p60 (259 to 308 ms against the 300 ms bar):
+  `psyvid_probe()` or an open during the inter-trial interval hides it.
+- `examples/video_clips.c`: the test clips from Media Foundation's own
+  encoder, so CI on Windows needs no ffmpeg (skipped where the encoder is
+  missing).
 - `examples/movie_play.c` was asked for; the example is
   `examples/video_play.c`, because CMake builds `examples/<lib>_*.c` for
   each header.
-- docs/rig_spec.md is not edited; the design's sections 0 and 10.6 and
-  this note carry the findings.
-- The soundtrack source (a PCM resource streamed into a `psyau_source`)
-  and its loop check. `psyvid_follow_audio()` exists; the source does not.
-- Media Foundation, the shared GPU path, zero-copy after V9, AVFoundation,
-  FFmpeg, capture: the design's sections 3.2, 4 and 8.
-- A faster conversion, or none: the planar shader.
+- AVFoundation, FFmpeg, capture.

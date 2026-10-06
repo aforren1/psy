@@ -1,4 +1,4 @@
-/* psy_gfx.h - v0.3.0 - public domain single-header stimulus graphics library
+/* psy_gfx.h - v0.5.0 - public domain single-header stimulus graphics library
  *   (with MIT-licensed parts: see below)
  *
  *   Stimuli on GL ES 3.0, on top of psy_screen.h: signed-distance shapes
@@ -14,9 +14,10 @@
  *   glyph runs. No compute stage, no path rasterizer, no SVG: artwork goes
  *   through the pack tool.
  *
- *   REQUIRES psy_screen.h and psy_rt.h beside it, and what psy_screen.h
- *   needs (SDL3 to link; ANGLE's DLLs at run time on Windows). Nothing
- *   ANGLE or Khronos is needed to compile: GL is loaded at run time.
+ *   REQUIRES psy_screen.h, psy_rt.h and psy_color.h beside it, and what
+ *   psy_screen.h needs (SDL3 to link; ANGLE's DLLs at run time on
+ *   Windows). Nothing ANGLE or Khronos is needed to compile: GL is loaded
+ *   at run time.
  *
  *   Written in the single-header style of the stb / sokol libraries. C99 is
  *   the floor: it builds as C99, C11 and C++17, and in the C dialect MSVC
@@ -33,6 +34,66 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.5.0 - COLOR: the calibration is psy_color.h's. psygfx_cal and its
+ *          calls are psycol_cal and psycol_cal_* (init, add, set_spectra,
+ *          derive, check, save, load, nominal, lms, dir_cone, dkl_matrix,
+ *          dir_dkl), PSYGFX_CAL_* and PSYGFX_GUN_* are PSYCOL_CAL_* and
+ *          PSYCOL_GUN_*, psygfx_dkl_from_sph and psygfx_max_contrast are
+ *          psycol_dkl_from_sph and psycol_max_contrast, and
+ *          psygfx_cone_fundamentals(nm, lms) is
+ *          psycol_cone_fundamentals(PSYCOL_CONES_SS2, nm, lms): the same
+ *          code, the same bits, the same .psycal bytes. desc.cal is a
+ *          const psycol_cal*. psy_color.h must be beside psy_gfx.h.
+ *          open() makes a psy_color.h context (psycol_ctx) from desc.cal,
+ *          desc.background and the new desc.cones and desc.lum, and takes
+ *          PAINT's matrices and VIDEO's primaries from it;
+ *          psygfx_color(g) returns it, so a caller converts colors and
+ *          DKL directions with the background and luminance PAINT uses. A
+ *          PSYGFX_EV_COLOR ring record at open logs it. desc.lum (a
+ *          participant's luminance from flicker photometry) sets the DKL
+ *          luminance axis for DKL_POLAR paint; desc.cones picks the 2 or
+ *          10 degree cones. OKLAB paint now works on absolute XYZ, the
+ *          display's black included, against the display's white:
+ *          psy_color.h's Oklab. A calibration whose black has no light
+ *          gives the same pixels as v0.4 (every calibration in v0.4's
+ *          test); one with 0.5 cd/m2 of black under a white of 80 moves
+ *          the test's OKLAB gradient by up to 5.2e-3 of full scale. A calibration that
+ *          is not sealed (no CRC after the last change) is refused at
+ *          open: psycol_cal_derive() and psycol_cal_save() seal it.
+ *   v0.4.0 - PROGRAM CACHE: desc.cache (a load and store pair the caller
+ *          owns), psygfx_file_cache_init(), psygfx_program_stats(); an
+ *          entry is checked by a second hash of its key and a hash of its
+ *          binary before the driver sees it. VIDEO: PSYGFX_NV12 and
+ *          PSYGFX_I420 textures with a stated encoding (matrix, range,
+ *          transfer, primaries, siting) converted to linear light in the
+ *          image program; encoded RGB textures; texture_update_planes(),
+ *          texture_update_plane(), texture_import() (GL names; D3D11 RGBA
+ *          and NV12 through ANGLE), texture_rebind(). INSTANCES:
+ *          psygfx_instances(), psygfx_inst_grid(), psygfx_hit_index(),
+ *          psygfx_inst_resolve(), desc.max_instances. psygfx_screen(),
+ *          psygfx_calibrated(), psygfx_features(). Fixed (found by the
+ *          gallery): psygfx_cal_derive() seals the CRC (the manual's recipe
+ *          failed open with "CRC mismatch" until a save; cal_add() and
+ *          cal_set_spectra() unseal it); a straight-alpha image drawn with
+ *          linear filtering is filtered as premultiplied texels (clear
+ *          texels darkened its edges; image_desc.premultiplied states a
+ *          premultiplied texture); the range rule holds on DIST atlases
+ *          with texture_desc.sdf_range (glyph runs and src rectangles on
+ *          one without it are refused); a glyph run with no buffer read
+ *          past the pool. Added: first (a run or dot field from any record
+ *          of a shared buffer) on glyph and dot descs; shape_p on the
+ *          grating, noise and user descs. Breaking: backend version 3
+ *          (BACKENDS says what an out-of-tree backend changes);
+ *          psygfx_texture_update() on a planar texture is refused; a
+ *          straight-alpha image drawn linear looks different at its
+ *          transparent edges (correct now). Also: end() reorders draws
+ *          that do not overlap, so runs form across interleaved kinds
+ *          (DRAW ORDER; identical pixels); a stimulus that can cover no
+ *          pixel is refused with a message (v0.3 drew nothing); a dot
+ *          field with no aperture set draws (v0.1 to v0.3 culled every
+ *          dot); a POLYGON with no box takes its vertices' own; an empty
+ *          dot field or glyph run returns OK; every refusal in draw()
+ *          names its reason.
  *   v0.3.0 - the vector program (VECTOR SHAPES): SHAPE kinds RRECT, ARC,
  *          PIE, CAPSULE, NGON, STAR, ELLIPSE, QBEZIER, POLYLINE and
  *          COMPOUND (psygfx_compound(), up to 56 primitives folded by
@@ -75,7 +136,17 @@
  *          source rectangle, not the sampler's.
  *   v0.1.0 - first release.
  *
- *   STATUS: v0.3.0. Built and run on one Windows 11 laptop (Intel Iris Xe,
+ *   STATUS: v0.5.0. The calibration moved to psy_color.h with the same
+ *   bits: every scene and output readback of the test, hashed, is the same
+ *   as v0.4's on the Iris Xe, WARP and SwiftShader, and v0.4's calibration
+ *   code and psy_color.h's agreed bit for bit before the move (52
+ *   calibrations, 2100 raw calls, PAINT's matrices and the video
+ *   primaries; docs/psy_color.md). The new OKLAB black term: within 7.3e-7
+ *   of an independent double reference on all three, on a calibration
+ *   whose black has 0.5 cd/m2 under a white of 80, where v0.4's black-free
+ *   form would have moved the gradient by 5.2e-3. What follows is v0.4's
+ *   status, which v0.5 does not change.
+ *   v0.4.0: built and run on one Windows 11 laptop (Intel Iris Xe,
  *   a 1920 x 1200 panel at 60 Hz) with the ANGLE in Docker Desktop's
  *   Electron folder (2.1.23876, git fffbc739779a) and with CI's, from
  *   Electron v38.8.6 (2.1.25848, git 85cc0e0b9cc3): the same numbers. No
@@ -138,7 +209,7 @@
  *   layers drawn apart 1.9e-5 / 5.7e-6 / 1.2e-4 / 5.7e-6; EXACT_BLUR
  *   against the erf product 1.5e-7 to 1.7e-7; paint RGB 1.2e-6, OKLAB
  *   against Ottosson's matrices through the calibration 1.8e-6, DKL_POLAR
- *   against psygfx_cal_dir_dkl() 1.5e-5 / 6.3e-6 / 1.6e-4 / 1.3e-6,
+ *   against psycol_cal_dir_dkl() 1.5e-5 / 6.3e-6 / 1.6e-4 / 1.3e-6,
  *   VERTEX against barycentric 1.1e-7; MSDF against the CPU's bilinear
  *   median 3.5e-6; glyph runs, batching and MULTIPLY: exact or 4.8e-8. The
  *   edge model against a supersampled Gaussian blur: 0.2500 at a right
@@ -170,8 +241,29 @@
  *   RGBA8 back buffers, this panel's link is 8 bits per color, and no
  *   device was there to verify); stereo (refused); text layout (a glyph
  *   run draws placed glyphs; there is no atlas tool yet); cubic Beziers;
- *   filtered noise on the GPU; a program binary cache; fullscreen runs;
- *   any other GPU, macOS, X11 or Wayland (psy_screen.h's stubs), WebGL.
+ *   filtered noise on the GPU; fullscreen runs; kind-specialized vector
+ *   programs; any other GPU, macOS, X11 or Wayland (psy_screen.h's stubs),
+ *   WebGL; v0.4 on WSL, llvmpipe and emcc.
+ *   v0.4 (docs/psy_gfx.md has the tables; Iris Xe, WARP, SwiftShader):
+ *   the program cache: every frame drawn from cached programs equals the
+ *   same frame compiled, bit for bit, and a damaged, truncated, colliding
+ *   or foreign entry is compiled instead (11 cases); psygfx_open() 11.4 to
+ *   35 ms warm against 2.3 to 5.3 s without a cache (AC). Video: NV12 and
+ *   I420 through 3 matrices, 2 ranges, 3 sitings and 2 chroma filters
+ *   within 3.1e-7 of a double reference; the transfers 7.5e-7; primaries
+ *   through a calibration 1.3e-6; the 256 codes through TRC_DEVICE and a
+ *   CLUT exact; D3D11 NV12 import (an array slice, an NT handle with a
+ *   keyed mutex, a legacy shared handle) 5.2e-7. 1080p: NV12 0.91 ms of
+ *   GPU and 0.30 to 0.39 ms to update, RGBA8 0.56 ms and 0.91 to 1.03 ms.
+ *   Instances: each element within 9.2e-6 of the same stimulus drawn
+ *   alone, the palette's integer entries exact, psygfx_hit_index() equal
+ *   to the GPU's coverage; 10000 gabors 177 to 191 us of CPU and 1.26 to
+ *   1.33 ms of GPU (5.5 ms one stimulus each). The draw order: 20 frames
+ *   reordered equal call order bit for bit; 1000 interleaved stimuli of 4
+ *   kinds 1.1 ms of GPU and 0.47 ms of CPU (7.2 and 3.3 in call order).
+ *   35 deliberate faults in v0.4, each caught. Fixed: v0.1's dot fields
+ *   with no aperture set drew nothing (aperture 0 was a 0 x 0 RECT): the
+ *   dot rows measured before v0.4 are void.
  *   Outside this block and docs/psy_gfx.md, a number in this header is a
  *   measurement only where the text says "measured".
  *
@@ -200,7 +292,7 @@
  *           psygfx_stim g = psygfx_gabor(&(psygfx_gabor_desc){
  *               .sf = 1 / 32.0f, .sigma = 32, .contrast = 0.5f });
  *           psyscr_frame f;
- *           while (psyscr_begin(&scr, &f) == PSYSCR_OK) {   // Esc ends it
+ *           while (psyscr_begin(&scr, &f) == PSYSCR_OK) {   // Shift+Esc ends it
  *               psygfx_begin(&gfx, &f);
  *               psygfx_draw(&gfx, &g);
  *               psygfx_end(&gfx);
@@ -284,7 +376,16 @@
  *     DOTS, a color IMAGE, a COLOR user shader) is blended over the scene
  *     with coverage * opacity * gate.
  *   DRAW ORDER
- *     Call order. No depth buffer, no sorting. visible < 0.5 skips a draw.
+ *     Call order wherever stimuli overlap; draws that do not overlap may be
+ *     reordered, with identical pixels. No depth buffer. visible < 0.5
+ *     skips a draw. (v0.4) end() lets a draw join an earlier run of its kind
+ *     when its bounds meet none of the draws it moves past: then no pixel
+ *     gets both, and blending reads only its own pixel, so no value can
+ *     change, whatever the blend. The bounds are the draw's quad (half size
+ *     plus the margin of its edge, stroke, offset and effects, turned) plus
+ *     1 px; instanced draws, dot fields and glyph runs have the whole pass
+ *     as bounds, so nothing passes them. Target passes keep their order.
+ *     Tested bit for bit against call order (docs/psy_gfx.md).
  *   NOTHING READS A CLOCK
  *     What a frame shows is a function of the psyscr_frame given to begin():
  *     f.onset, f.index, f.vblank. No call in the frame waits for the GPU
@@ -299,7 +400,9 @@
  *     0.5 ms of CPU this way, 2.1 to 5.0 ms one draw each; a longer batch
  *     makes ANGLE's compile slower: 64 took 2.2 s to open, 256 took 19 s).
  *     A vector stimulus whose data fills more than its block (VECTOR
- *     SHAPES) takes the blocks after it and draws alone.
+ *     SHAPES) takes the blocks after it and draws alone. Runs form across
+ *     interleaved kinds where they do not overlap (DRAW ORDER); a large
+ *     array of one stimulus is cheaper as INSTANCES.
  *
  *   ---------------------------------------------------------------------
  *   COORDINATES
@@ -421,6 +524,13 @@
  *            profile, at x, y float pairs (units, from the field's center)
  *            in a psygfx_buffer; drawn when the dot's center is in the
  *            field's aperture (RECT, CIRCLE or none). One instanced draw.
+ *            The aperture is none unless set with a w (aperture 0 is
+ *            PSYGFX_RECT; before v0.4 that zero default culled every dot).
+ *            first picks the first x, y pair of buf; count 0 draws nothing.
+ *   No area  a stimulus whose box, width or ring can cover no pixel is
+ *            refused by draw() with a message naming the field (v0.4): it
+ *            is never drawn as nothing. A POLYGON with no w, h takes its
+ *            vertices' extent.
  *   IMAGE    a texture, or its source rectangle src (texels from the
  *            top-left; a sprite from an atlas), 1:1 by texelFetch unless
  *            linear; color, the red channel as g (modulation), or rgb as an
@@ -588,11 +698,12 @@
  *   it is clamped. VERTEX gives each vertex of a convex POLYGON a color,
  *   mixed by Wachspress coordinates (barycentric on a triangle). The
  *   space is where colors mix: RGB (linear device RGB; XYZ, LMS and
- *   Cartesian DKL are linear maps of it and mix the same), OKLAB
- *   (Ottosson's Oklab from the calibration's XYZ, white at Y = 1; needs a
- *   calibration with chromaticities) or DKL_POLAR (elevation, azimuth and
- *   radius about the background; needs a calibration with spectra; the
- *   azimuth takes the shorter turn between stops). Stops convert on the
+ *   Cartesian DKL are maps of it and mix the same), OKLAB (psy_color.h's
+ *   Oklab: the calibration's absolute XYZ, black included, against the
+ *   display's white; needs a calibration with chromaticities) or
+ *   DKL_POLAR (elevation, azimuth and radius about the background, with
+ *   desc.cones and desc.lum; needs a calibration with spectra; the azimuth
+ *   takes the shorter turn between stops). Stops convert on the
  *   CPU; the shader mixes in the space and converts back per pixel. A
  *   path between in-gamut stops can leave the gamut in a nonlinear space:
  *   the CPU samples 64 points between neighbors and counts it as clipped.
@@ -675,6 +786,117 @@
  *   nothing there.
  *
  *   ---------------------------------------------------------------------
+ *   PROGRAM CACHE (v0.4)
+ *   ---------------------------------------------------------------------
+ *   Each built-in program costs ANGLE 0.15 to 0.75 s to compile at open.
+ *   desc.cache keeps the compiled programs: a pair of calls that load and
+ *   store bytes under a 64-bit key, in storage the caller owns. psy_gfx
+ *   reads or writes no file unless the caller gives a cache that does:
+ *       static psygfx_file_cache pc;
+ *       desc.cache = psygfx_file_cache_init(&pc, "C:/Users/me/AppData/Local/psy/gfx");
+ *   The key covers the GL vendor, renderer (ANGLE puts the adapter and the
+ *   driver version in it), version (the ANGLE build) and GLSL strings, the
+ *   binary format and the program's whole text. An entry is a 48-byte
+ *   header (the key, a second hash of the key's material and its length,
+ *   a hash of the binary) and the driver's binary. An entry is used only
+ *   when all of it matches; anything else is compiled from source and
+ *   stored again: a miss, a damaged or truncated entry, a key collision,
+ *   another driver's entry, a binary the driver refuses. ANGLE links a
+ *   binary with a byte changed and crashed on half a binary (measured), so
+ *   the hash is what keeps a damaged entry from the driver. The file cache
+ *   writes each entry whole under a temporary name and renames it; it
+ *   never deletes, so each ANGLE build and driver pair adds about 0.5 MB
+ *   until the folder is emptied by hand. psygfx_program_stats() and the
+ *   describe line give what the open did. User pipelines, the video
+ *   program and the instanced programs use the same cache. WebGL has no
+ *   binaries: the cache is then unused (PSYGFX_FEAT_PROGRAM_CACHE clear).
+ *
+ *   ---------------------------------------------------------------------
+ *   VIDEO (v0.4)
+ *   ---------------------------------------------------------------------
+ *   PSYGFX_NV12 and PSYGFX_I420 textures hold 8-bit 4:2:0 video as planes
+ *   (Y w x h; chroma ceil(w / 2) x ceil(h / 2)). psygfx_image() draws them
+ *   as color images, converted per pixel to linear light by texture_desc.
+ *   enc, which a planar texture must state in full (rig_spec principles 4
+ *   and 5: nothing is assumed):
+ *     matrix     BT601, BT709 or BT2020 (non-constant luminance)
+ *     range      LIMITED (Y' 16..235, C 16..240) or FULL (C = (code - 128)
+ *                / 255)
+ *     transfer   DEVICE: the R'G'B' codes are device values; they go
+ *                through the display's own transfer (the inverse of the
+ *                CLUT, a 256-entry table made at open), so the output stage
+ *                writes each code back, calibration or not (all 256 codes
+ *                tested). BT1886 (V^2.4, black at the display's black),
+ *                SRGB, LINEAR (values are linear already) or GAMMA22.
+ *     primaries  DEVICE passes the source's RGB through as the display's,
+ *                stated. BT709, BT601_525, BT601_625 or BT2020 convert
+ *                through the calibration's chromaticities (relative: the
+ *                source's D65 white at Y = 1 goes to the display's white,
+ *                no chromatic adaptation); without a calibration that has
+ *                them, refused. Light out of gamut is clamped by the scene,
+ *                not counted.
+ *     siting     LEFT (MPEG-2, H.264, HEVC: co-sited across, between rows),
+ *                CENTER (MPEG-1, JPEG) or TOP_LEFT. Chroma is interpolated
+ *                at that point, bilinear and clamped to its plane (at 1:1,
+ *                the same weights as psy_video.h's sixteenths), or
+ *                replicated with chroma_nearest.
+ *   R'G'B' is clamped to 0..1 before the transfer. An RGBA8, RGBA16F or
+ *   RGBA32F texture may state an encoding too (matrix RGB), to show a frame
+ *   sequence in linear light; all zero keeps the old meaning (the values
+ *   are linear). The values of the PSYGFX_MATRIX_, _RANGE_, _TRC_, _PRIM_
+ *   and _SITING_ names are psy_video.h's. A planar texture updates by
+ *   psygfx_texture_update_planes() (each plane, one call) or
+ *   psygfx_texture_update_plane() (a rectangle of one plane).
+ *   psygfx_texture_import() wraps a texture psy_gfx did not make: a GL
+ *   texture of this context, or on Windows a D3D11 texture on ANGLE's
+ *   device (psyscr_native()), RGBA or NV12, a slice of an array included
+ *   (EGL_ANGLE_image_d3d11_texture; its filters are set to NEAREST). A
+ *   texture shared from another D3D11 device is opened on ANGLE's device by
+ *   its handle first; the caller orders the producer's write before the
+ *   frame: a keyed mutex acquired before psygfx_end() and released after
+ *   the flip, or the producer's flush and a query it waits on (both read
+ *   back exactly). psygfx_texture_rebind(t, src) makes t show src's texels
+ *   with no GL call, so a movie's stimulus keeps its handle while the
+ *   decoder's surfaces rotate. The video program compiles at the first
+ *   encoded texture: an open without video costs nothing more.
+ *
+ *   ---------------------------------------------------------------------
+ *   INSTANCES (v0.4)
+ *   ---------------------------------------------------------------------
+ *   One template stimulus and an array of psygfx_inst elements draw in one
+ *   call (a gabor array, an element field, a search display):
+ *       static psygfx_inst items[400];
+ *       psygfx_inst_grid(items, 20, 20, 1.5f, 1.5f);          // deg
+ *       for (i = 0; i < 400; i++) items[i].ori = random_ori();
+ *       psygfx_stim gab = psygfx_gabor(&(psygfx_gabor_desc){ .sf = 4, .sigma = 0.15f });
+ *       psygfx_stim field = psygfx_instances(&gfx, &gab, &(psygfx_instances_desc){
+ *           .inst = items, .n = 400, .fields = PSYGFX_I_XY | PSYGFX_I_ORI });
+ *       psygfx_draw(&gfx, &field);
+ *       int k = psygfx_hit_index(&gfx, &field, mouse_x, mouse_y);   // which one
+ *   Element i is the template with: its anchor moved by (x, y) units along
+ *   the template's turned axes; its box turned by ori and scaled by scale
+ *   about that anchor (as a group's scale: what is in px, edge_width,
+ *   stroke, offset, does not scale); phase added; contrast multiplying
+ *   contrast and opacity; gate multiplying gate; color a position in the
+ *   palette (up to 16 rgb entries: color for a color stimulus, the tint for
+ *   an image, dir for a modulation, used as given), where an integer gives
+ *   that entry bit for bit and a fraction mixes two neighbors in linear
+ *   light. Only the fields in .fields are read. Templates: SHAPE (vector
+ *   kinds whose data fits their block), GRATING, GABOR, NOISE (no scale:
+ *   its check is px), IMAGE and USER (the body sees its own px and psy_size
+ *   scaled, as in a group); not DOTS or glyph runs (instanced already) or
+ *   a stimulus with extension blocks. A template field moves every element
+ *   (a psygfx_bind on the stimulus); psygfx_bind.field on items[k] moves
+ *   one. draw() copies the elements into the frame's buffer: up to
+ *   desc.max_instances (16384 by default) a frame; past it the draw is
+ *   refused with PSYGFX_ERR_FULL, and nothing of it is drawn.
+ *   psygfx_hit_index() gives the topmost element (the highest index) under
+ *   a pixel by the CPU's field, skipping gate 0; psygfx_inst_resolve() an
+ *   element's anchor. The gamut check covers the template, not each
+ *   element. Element angles come from a polynomial in degrees (D3D's sin
+ *   and cos are coarse): within 4.4e-7 of double.
+ *
+ *   ---------------------------------------------------------------------
  *   OUTPUT STAGE
  *   ---------------------------------------------------------------------
  *   CLUT     n entries per channel from linear to device value (2 to
@@ -698,36 +920,20 @@
  *   ---------------------------------------------------------------------
  *   CALIBRATION
  *   ---------------------------------------------------------------------
- *   psygfx_cal is the canonical form, in memory and on disk (61 KB, fixed
- *   offsets, little-endian, CRC-32). Fill it:
- *       psygfx_cal_init(&c);
- *       psygfx_cal_add(&c, PSYGFX_GUN_BLACK, 0, Y, x, y);     // all guns 0
- *       psygfx_cal_add(&c, gun, level, Y, x, y);              // per gun, to 1
- *       psygfx_cal_add(&c, PSYGFX_GUN_WHITE, 1, Y, x, y);     // additivity
- *       psygfx_cal_set_spectra(&c, 380, 4, n, r, g, b, black); // optional
- *       psygfx_cal_derive(&c, err, sizeof err);
- *   derive() linearizes each gun, Y' = (Y - Yblack) / (Y(1) - Yblack), by a
- *   monotone cubic (Fritsch and Carlson) inverted into the CLUT; refuses
- *   readings whose luminance does not rise, naming the level; gives RGB
- *   to XYZ (CIE 1931) from the full-level chromaticities, and RGB to LMS
- *   from the spectra with the Stockman and Sharpe (2000) 2-degree cone
- *   fundamentals (CVRL linss2_10e_1, embedded), the spectra interpolated
- *   linearly onto 1 nm. Black is removed from the matrices and kept apart
- *   (black_xyz, black_lms). Luminance in cone space is 0.68990272 L +
- *   0.34832189 M (the CIE 2006 2-degree function). Without spectra there
- *   is no cone space: the cone and DKL calls refuse (no 1931-to-cone
- *   approximation is made for you).
- *   psygfx_cal_dir_cone() gives the dir for cone contrasts at a background;
- *   psygfx_cal_dkl_matrix() is Psychtoolbox's ComputeDKL_M (Brainard 1996)
- *   at a background, and psygfx_cal_dir_dkl() the dir for a DKL vector
- *   (luminance, L-M, S); psygfx_dkl_from_sph() takes elevation and azimuth.
- *   psygfx_max_contrast() is the largest contrast that stays in gamut.
- *   save() sets the CRC and copies the bytes; load() refuses another size,
- *   magic or version, a bad CRC, and a file whose stored matrices or CLUT
- *   differ from what its readings give: a calibration can always be
- *   rebuilt from its readings. psygfx_cal_nominal() makes one from stated
- *   primaries and a gamma (an EDID's, sRGB's), flagged NOMINAL: not a
- *   measurement.
+ *   The calibration is psy_color.h's psycol_cal (the .psycal file, the same
+ *   bytes as v0.4's psygfx_cal): readings, spectra, derive(), the CLUT and
+ *   the matrices into XYZ and cone space; its manual has the recipe.
+ *   desc.cal gives it to open(), which checks it (psycol_cal_check()),
+ *   uploads its CLUT and makes PAINT's spaces and the video primaries from
+ *   it. Without it a scene value is a device value. For colors, cone
+ *   contrast and DKL directions (stim.dir), gamut questions and gamut
+ *   mapping, use psygfx_color(g): the psy_color.h context (psycol_ctx)
+ *   open() made with desc.background, desc.cones and desc.lum, the one
+ *   PAINT uses. v0.4's calls are
+ *   psy_color.h's raw layer under new names, the same bits:
+ *   psycol_cal_dir_cone(), psycol_cal_dkl_matrix(), psycol_cal_dir_dkl(),
+ *   psycol_dkl_from_sph(), psycol_max_contrast(),
+ *   psycol_cone_fundamentals(PSYCOL_CONES_SS2, nm, lms).
  *
  *   ---------------------------------------------------------------------
  *   SHADER CONTRACT
@@ -768,9 +974,20 @@
  *   ---------------------------------------------------------------------
  *   BACKENDS
  *   ---------------------------------------------------------------------
- *   psygfx_backend (version 2) is a table of 18 calls (pipelines from
+ *   psygfx_backend (version 3) is a table of 19 calls (pipelines from
  *   shader text, textures, buffers, passes, apply, draw, present, read,
- *   reset, pipeline_finish): the gfx backend of the rig's extensions.
+ *   reset, pipeline_finish, pipeline_binary): the gfx backend of the rig's
+ *   extensions. Version 3 (v0.4) asks an out-of-tree backend for: the caps
+ *   strings vendor, version and glsl and binary_format (0: no binaries);
+ *   pipeline_src.binary (try it, compile vs and fs when the driver refuses
+ *   it) with pipeline_make returning 1 when the binary was used; a
+ *   pipeline_binary call, or NULL; texture_src.gl_name and .d3d11, .plane,
+ *   .slice (wrap, not make; NOT_IMPLEMENTED is a fine answer);
+ *   bindings.tex[6] (units 4 and 5: the video program's Cr plane and the
+ *   display's transfer table); bindings.instances_off (the first record);
+ *   and caps.features (PSYGFX_FEAT_IMPORT_*). A backend that copies the
+ *   built-in table and changes some calls, as the tests do, needs none of
+ *   this.
  *   open() starts every built-in program with pipeline_src.deferred set,
  *   then calls pipeline_finish on each: a driver that compiles in parallel
  *   (ANGLE does) then overlaps them. A backend without it sets
@@ -797,10 +1014,16 @@
  *   ---------------------------------------------------------------------
  *   With desc.ring, source PSYRT_SRC_GFX:
  *     PSYGFX_EV_OPEN     at open: aux scene format; u.u32[0..6] CLUT n,
- *                        dither, output, calibration CRC, its flags, w, h
+ *                        dither, output, calibration CRC, its flags, w, h;
+ *                        [7] programs from desc.cache, [8] compiled, [9]
+ *                        open() in ms
  *     PSYGFX_EV_LUT      at psygfx_set_lut(): u.u32[0] n, [1] CRC-32 of it
  *     PSYGFX_EV_CLIPPED  a frame with clipped draws only: t_ns its onset,
  *                        aux the count, u.i64[0] the frame index
+ *     PSYGFX_EV_COLOR    at open, with a calibration: u.u32[0] the color
+ *                        context's id, [1] the calibration's CRC, [2] the
+ *                        lum record's CRC (0 = the standard luminance),
+ *                        [3] cones, [4] the context's PSYCOL_CAN_* levels
  *
  *   ---------------------------------------------------------------------
  *   MEMORY AND THREADS
@@ -810,7 +1033,12 @@
  *   blocks and 4.25 KB of frame blocks, one per target pass, 304 KB by
  *   default, and the shader text while it compiles); nothing after it
  *   (measured in v0.1: no C runtime heap call in the frame loop).
- *   The handle is about 10.8 KB. A target pass takes no memory of its own;
+ *   v0.4: the first psygfx_instances() allocates the element staging
+ *   (desc.max_instances x 32 bytes, 512 KB by default) and three element
+ *   buffers of that size on the GPU; the first encoded texture compiles the
+ *   video program; a user pipeline keeps a copy of its body for its
+ *   instanced program. The frame loop still allocates nothing.
+ *   The handle is about 11.5 KB. A target pass takes no memory of its own;
  *   psygfx_target() makes its texture and framebuffer at setup. One thread
  *   calls everything, the thread that owns the screen's context. Textures,
  *   buffers and pipelines are made and updated between frames, never
@@ -835,11 +1063,12 @@
 #define PSY_GFX_H_INCLUDED
 
 #define PSYGFX_VERSION_MAJOR 0
-#define PSYGFX_VERSION_MINOR 3
+#define PSYGFX_VERSION_MINOR 5
 #define PSYGFX_VERSION_PATCH 0
-#define PSYGFX_VERSION_STRING "0.3.0"
+#define PSYGFX_VERSION_STRING "0.5.0"
 
 #include "psy_screen.h"
+#include "psy_color.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -874,6 +1103,15 @@ extern "C" {
 #define PSYGFX_EV_OPEN    1u
 #define PSYGFX_EV_LUT     2u
 #define PSYGFX_EV_CLIPPED 3u
+#define PSYGFX_EV_COLOR   4u
+
+/* psygfx_features() */
+#define PSYGFX_FEAT_PROGRAM_CACHE 0x01u  /* the renderer gives program binaries      */
+#define PSYGFX_FEAT_PLANAR        0x02u  /* NV12 and I420 textures                   */
+#define PSYGFX_FEAT_IMPORT_GL     0x04u  /* PSYGFX_IMPORT_GL                         */
+#define PSYGFX_FEAT_IMPORT_D3D11  0x08u  /* PSYGFX_IMPORT_D3D11 of RGBA textures      */
+#define PSYGFX_FEAT_IMPORT_NV12   0x10u  /* PSYGFX_IMPORT_D3D11 of NV12 textures      */
+#define PSYGFX_FEAT_INSTANCES     0x20u  /* psygfx_instances()                       */
 
 /* --- resources ------------------------------------------------------------ */
 
@@ -891,8 +1129,51 @@ typedef enum psygfx_format {
     PSYGFX_R32F,     /* float                                                   */
     PSYGFX_RGBA32F,
     PSYGFX_R16UI,    /* uint16_t planes, read as k / 65535 (16-bit images)      */
+    /* v0.4: planar 8-bit 4:2:0 video, chroma ceil(w / 2) x ceil(h / 2)
+     * (VIDEO); one texture, two or three planes */
+    PSYGFX_NV12,     /* Y R8, then CbCr interleaved RG8                         */
+    PSYGFX_I420,     /* Y, Cb, Cr: three R8 planes                              */
     PSYGFX_FORMAT_COUNT
 } psygfx_format;
+
+/* How a texture's values encode light (VIDEO). The values are psy_video.h's
+ * PSYVID_* ones, so its fields pass through; 0 = unspecified, which a planar
+ * texture refuses. */
+#define PSYGFX_MATRIX_RGB      1   /* no matrix: R'G'B' texels                  */
+#define PSYGFX_MATRIX_BT601    2
+#define PSYGFX_MATRIX_BT709    3
+#define PSYGFX_MATRIX_BT2020   4   /* non-constant luminance                    */
+#define PSYGFX_RANGE_LIMITED   1   /* Y' 16..235, C 16..240 of 255              */
+#define PSYGFX_RANGE_FULL      2   /* 0..255; C = (code - 128) / 255            */
+#define PSYGFX_TRC_DEVICE      1   /* R'G'B' are device values: through the
+                                    * display's own transfer (the inverse of the
+                                    * CLUT), so the output stage writes the code
+                                    * back                                       */
+#define PSYGFX_TRC_BT1886      2   /* V^2.4 (black at the display's black)      */
+#define PSYGFX_TRC_SRGB        3   /* IEC 61966-2-1                             */
+#define PSYGFX_TRC_LINEAR      4   /* the values are linear already             */
+#define PSYGFX_TRC_GAMMA22     5   /* V^2.2                                     */
+#define PSYGFX_PRIM_DEVICE     1   /* the source's RGB is the display's: pass
+                                    * through, stated                            */
+#define PSYGFX_PRIM_BT709      2   /* the rest need a calibration with xy       */
+#define PSYGFX_PRIM_BT601_525  3
+#define PSYGFX_PRIM_BT601_625  4
+#define PSYGFX_PRIM_BT2020     5
+#define PSYGFX_SITING_NONE     1   /* not subsampled (an RGB texture)           */
+#define PSYGFX_SITING_LEFT     2   /* MPEG-2, H.264, HEVC: co-sited across,
+                                    * between rows                              */
+#define PSYGFX_SITING_CENTER   3   /* MPEG-1, JPEG: between both ways           */
+#define PSYGFX_SITING_TOP_LEFT 4   /* co-sited both ways                        */
+
+typedef struct psygfx_encoding {
+    uint8_t matrix, range, transfer, primaries, siting;
+    uint8_t chroma_nearest;      /* 1: chroma replicated, not interpolated      */
+    uint8_t reserved_[2];
+} psygfx_encoding;
+
+/* The planes of a planar texture: Y, then CbCr (NV12) or Cb and Cr (I420).
+ * stride 0 = tight. */
+typedef struct psygfx_planes { const void* data[3]; size_t stride[3]; } psygfx_planes;
 
 /* A render target (TARGETS): drawn with the normal API between
  * psygfx_begin_target() and psygfx_end_target(), then drawn as an IMAGE. */
@@ -922,8 +1203,29 @@ typedef struct psygfx_texture_desc {
     psygfx_sdf_kind sdf;         /* MSDF, MTSDF: RGBA8, RGBA16F or RGBA32F       */
     float         sdf_range;     /* MSDF, MTSDF: the atlas's distance range, the
                                   * full width in texels (msdf-atlas-gen's
-                                  * pxrange); required for them                 */
+                                  * pxrange); required for them.
+                                  * DIST (v0.4): twice its padding; rectangles
+                                  * and glyph runs on a DIST atlas need it      */
+    /* v0.4 */
+    psygfx_encoding enc;         /* VIDEO: required for NV12 and I420; RGBA8,
+                                  * RGBA16F: all 0 = values are linear          */
+    const psygfx_planes* planes; /* NV12, I420: the first frame; NULL = black   */
 } psygfx_texture_desc;
+
+/* A texture psy_gfx did not make (VIDEO): a GL texture of this context, or
+ * on Windows a D3D11 texture on ANGLE's device (psyscr_native()). */
+typedef enum psygfx_import_kind { PSYGFX_IMPORT_GL = 1, PSYGFX_IMPORT_D3D11 = 2 } psygfx_import_kind;
+typedef struct psygfx_import_desc {
+    psygfx_import_kind kind;     /* required                                     */
+    int32_t       w, h;          /* required: texels (the Y plane's for NV12)    */
+    psygfx_format format;        /* R8, RG8, RGBA8 (D3D11 BGRA8 too), RGBA16F,
+                                  * R32F, RGBA32F; NV12                          */
+    psygfx_encoding enc;         /* as psygfx_texture_desc                      */
+    uint32_t      gl_tex[2];     /* GL: names; NV12: Y (R8), CbCr (RG8)          */
+    void*         d3d11_tex;     /* D3D11: an ID3D11Texture2D* with
+                                  * D3D11_BIND_SHADER_RESOURCE                   */
+    uint32_t      d3d11_slice;   /* D3D11: the array slice (a decoder's output) */
+} psygfx_import_desc;
 
 /* --- open ------------------------------------------------------------------ */
 
@@ -961,8 +1263,25 @@ typedef enum psygfx_align {
  * the screen center. */
 typedef struct psygfx_view { float distance_mm, width_mm; } psygfx_view;
 
-struct psygfx_cal;
 struct psygfx_backend;
+
+/* Storage for compiled programs (PROGRAM CACHE): a map from a 64-bit key to
+ * bytes that the caller owns. psy_gfx frames and checks the bytes itself, so
+ * the two calls only move them. */
+typedef struct psygfx_cache {
+    /* Copies the entry for key into dst when it fits in cap; returns its
+     * size either way, 0 when there is none. */
+    size_t (*load)(void* user, uint64_t key, void* dst, size_t cap);
+    /* Stores n bytes under key, replacing any entry; < 0 = failed. */
+    int    (*store)(void* user, uint64_t key, const void* data, size_t n);
+    void*  user;
+} psygfx_cache;
+
+/* A cache in a folder: one file per program, <dir>/<key>.psyprog. */
+typedef struct psygfx_file_cache {
+    psygfx_cache cache;
+    char         dir[512];                  /* UTF-8                         */
+} psygfx_file_cache;
 
 typedef struct psygfx_desc {
     psyscr_screen*  screen;         /* required, unless gl_proc is set          */
@@ -973,7 +1292,7 @@ typedef struct psygfx_desc {
     float           background[3];  /* linear device RGB, 0..1; 0 = black       */
     psygfx_units    units;          /* 0 = PX                                   */
     psygfx_view     view;           /* DEG only                                 */
-    const struct psygfx_cal* cal;   /* NULL = identity: scene value = device value */
+    const psycol_cal* cal;          /* NULL = identity: scene value = device value */
     psygfx_dither   dither;         /* 0 = NONE                                 */
     uint32_t        seed;           /* NOISE dither                             */
     psygfx_output   output;         /* only OUT_8 opens in v0.1                 */
@@ -985,7 +1304,26 @@ typedef struct psygfx_desc {
                                      * backend, or the null backend on a screen
                                      * without GL                               */
     void*           backend_ctx;
+    /* v0.4 */
+    const psygfx_cache* cache;      /* compiled programs; NULL = compile each
+                                     * open. Keep it alive while the gfx is open */
+    int32_t         max_instances;  /* elements per frame (INSTANCES); 0 = 16384 */
+    /* v0.5 (COLOR) */
+    int32_t         cones;          /* psycol_cones for DKL_POLAR and
+                                     * psygfx_color(); 0 = the 2 degree cones   */
+    const psycol_lum* lum;          /* a participant's luminance; NULL = the
+                                     * standard one of `cones`                  */
 } psygfx_desc;
+
+/* What psygfx_open() and later program builds did with desc.cache. */
+typedef struct psygfx_programs {
+    uint32_t loaded;                /* from a cache entry                       */
+    uint32_t compiled;              /* from source                              */
+    uint32_t rejected;              /* an entry was there and was not used      */
+    uint32_t stored, store_failed;
+    int64_t  store_ns;              /* of open_ns: reading binaries back, storing */
+    int64_t  open_ns;               /* psygfx_open()'s wall time                */
+} psygfx_programs;
 
 /* --- stimuli -------------------------------------------------------------- */
 
@@ -1119,7 +1457,7 @@ typedef enum psygfx_paint_kind {
 typedef enum psygfx_space {
     PSYGFX_SPACE_RGB = 0,   /* linear device RGB (also XYZ, LMS, Cartesian DKL:
                              * linear maps of it give the same mix)             */
-    PSYGFX_SPACE_OKLAB,     /* Ottosson's Oklab from the calibration's XYZ      */
+    PSYGFX_SPACE_OKLAB,     /* psy_color.h's Oklab: absolute XYZ, display white */
     PSYGFX_SPACE_DKL_POLAR  /* elevation, azimuth, radius about the background  */
 } psygfx_space;
 
@@ -1142,6 +1480,32 @@ typedef struct psygfx_glyph {
                              * padding included                                  */
     float reserved[2];
 } psygfx_glyph;
+
+/* One element of an instanced stimulus (INSTANCES): 32 bytes, all float, so
+ * psygfx_bind.field binds any of them. Only the fields in the stimulus's
+ * inst_fields mask are read. */
+typedef struct psygfx_inst {
+    float x, y;             /* units along the template's turned axes, from its
+                             * anchor (PSYGFX_I_XY)                              */
+    float ori;              /* degrees, added to the template's (PSYGFX_I_ORI)   */
+    float phase;            /* cycles, added; GRATING, GABOR (PSYGFX_I_PHASE)    */
+    float contrast;         /* multiplies contrast and opacity (PSYGFX_I_CONTRAST) */
+    float scale;            /* multiplies what is in units, about the anchor, as a
+                             * group's scale; not NOISE (PSYGFX_I_SCALE)          */
+    float gate;             /* multiplies gate; 0 also hides it from
+                             * psygfx_hit_index() (PSYGFX_I_GATE)                */
+    float color;            /* a palette position: an integer is that entry, a
+                             * fraction mixes two in linear light (PSYGFX_I_COLOR) */
+} psygfx_inst;
+
+#define PSYGFX_I_XY       0x01u
+#define PSYGFX_I_ORI      0x02u
+#define PSYGFX_I_PHASE    0x04u
+#define PSYGFX_I_CONTRAST 0x08u
+#define PSYGFX_I_SCALE    0x10u
+#define PSYGFX_I_GATE     0x20u
+#define PSYGFX_I_COLOR    0x40u
+#define PSYGFX_MAX_PALETTE 16
 
 struct psygfx_group;
 
@@ -1219,7 +1583,24 @@ typedef struct psygfx_stim {
     const psygfx_prim*  prims;
     const psygfx_fx*    fx;   /* NULL = none                                     */
     const psygfx_paint* paint;   /* NULL = color                                 */
+    /* v0.4 */
+    uint32_t    first;        /* DOTS, glyph runs: the first record of buf drawn */
+    const psygfx_inst* inst;  /* INSTANCES: n_inst elements; NULL = one stimulus */
+    uint32_t    n_inst;
+    uint32_t    inst_fields;  /* PSYGFX_I_*                                      */
+    const float* palette;     /* rgb triples: color (color stimuli) or dir
+                               * (modulation) by PSYGFX_I_COLOR                  */
+    uint32_t    n_palette;    /* 1..PSYGFX_MAX_PALETTE                           */
 } psygfx_stim;
+
+/* psygfx_instances(): the elements and what they set. fields 0 = PSYGFX_I_XY. */
+typedef struct psygfx_instances_desc {
+    const psygfx_inst* inst;
+    int                n;
+    uint32_t           fields;
+    const float*       palette;
+    int                n_palette;
+} psygfx_instances_desc;
 
 #define PSYGFX_STIM_MODULATION    0x1u  /* IMAGE: the red channel modulates (g) */
 #define PSYGFX_STIM_LINEAR        0x2u  /* IMAGE: sample with the texture filter */
@@ -1293,6 +1674,7 @@ typedef struct psygfx_glyphs_desc {
     float stroke; psygfx_stroke_align stroke_align; psygfx_join join; float offset;
     psygfx_blend_mode blend;
     const psygfx_group* group;
+    uint32_t first;                                            /* v0.4: the first record in buf */
 } psygfx_glyphs_desc;
 
 typedef struct psygfx_grating_desc {
@@ -1302,6 +1684,7 @@ typedef struct psygfx_grating_desc {
     psygfx_shape_kind aperture;                                /* 0 = RECT */
     psygfx_edge edge; float edge_width; float dir[3];
     float stroke; psygfx_stroke_align stroke_align; psygfx_tex mask; const psygfx_group* group;
+    float shape_p[4];                                          /* v0.4: the aperture's */
 } psygfx_grating_desc;
 
 typedef struct psygfx_gabor_desc {
@@ -1322,6 +1705,7 @@ typedef struct psygfx_dots_desc {
                                                 * CIRCLE or NO_APERTURE (default) */
     float stroke; psygfx_stroke_align stroke_align;                 /* rings */
     const psygfx_group* group;
+    uint32_t first;                                            /* v0.4: the first x, y pair in buf */
 } psygfx_dots_desc;
 
 typedef struct psygfx_image_desc {
@@ -1333,6 +1717,9 @@ typedef struct psygfx_image_desc {
     float tint[4];                                             /* all 0 = 1 */
     bool add;                                                  /* PSYGFX_STIM_ADD */
     const psygfx_group* group;
+    /* v0.4 */
+    bool premultiplied;            /* the texture holds rgb x alpha (PSYGFX_STIM_PREMULTIPLIED);
+                                    * default straight alpha. A target sets it */
 } psygfx_image_desc;
 
 typedef struct psygfx_noise_desc {
@@ -1341,6 +1728,7 @@ typedef struct psygfx_noise_desc {
     psygfx_noise_dist dist; float contrast;                    /* 0 = 1 */
     psygfx_shape_kind aperture; psygfx_edge edge; float edge_width; float dir[3];
     float stroke; psygfx_stroke_align stroke_align; psygfx_tex mask; const psygfx_group* group;
+    float shape_p[4];                                          /* v0.4: the aperture's */
 } psygfx_noise_desc;
 
 typedef struct psygfx_user_desc {
@@ -1349,6 +1737,7 @@ typedef struct psygfx_user_desc {
     psygfx_shape_kind aperture; psygfx_edge edge; float edge_width;
     float color[3]; float dir[3]; const float* p; int n_p;
     float stroke; psygfx_stroke_align stroke_align; psygfx_tex mask; const psygfx_group* group;
+    float shape_p[4];                                          /* v0.4: the aperture's */
 } psygfx_user_desc;
 
 /* --- user shaders ---------------------------------------------------------- */
@@ -1413,63 +1802,10 @@ typedef struct psygfx_param {
     uint32_t    kinds;    /* bit (1 << psygfx_kind) for each kind that reads it  */
 } psygfx_param;
 
-/* --- calibration ------------------------------------------------------------ */
-
-#define PSYGFX_CAL_MAX_READINGS 256
-#define PSYGFX_CAL_MAX_WL       471   /* 360 to 830 nm at 1 nm                  */
-#define PSYGFX_CAL_MAX_LUT      4096
-
-#define PSYGFX_CAL_NOMINAL     0x1u   /* made from stated primaries and a gamma,
-                                       * not from a measurement                 */
-#define PSYGFX_CAL_HAS_XY      0x2u   /* the readings carry chromaticities      */
-#define PSYGFX_CAL_HAS_SPECTRA 0x4u   /* spd[] holds the primaries' spectra     */
-
-#define PSYGFX_GUN_BLACK (-1)
-#define PSYGFX_GUN_WHITE 3
-
-typedef struct psygfx_cal_reading {
-    int32_t gun;       /* 0, 1, 2; PSYGFX_GUN_BLACK (all 0); PSYGFX_GUN_WHITE    */
-    float   level;     /* device value of that gun, 0..1                          */
-    float   Y;         /* cd/m2                                                   */
-    float   x, y;      /* CIE 1931 chromaticity; 0, 0 = not measured             */
-} psygfx_cal_reading;
-
-/* A display calibration: the canonical in-memory and on-disk form (about 61
- * KB, little-endian, every offset fixed). Fill the identity, the readings
- * and the spectra, then psygfx_cal_derive() fills the rest. */
-typedef struct psygfx_cal {
-    char     magic[8];             /* "PSYCAL\0\1"                               */
-    uint32_t version;              /* 1                                          */
-    uint32_t bytes;                /* sizeof(psygfx_cal)                          */
-    uint32_t flags;                /* PSYGFX_CAL_*                                */
-    int32_t  mode_w, mode_h, refresh_num, refresh_den;
-    int32_t  n_readings;
-    int64_t  date;                 /* seconds since 1970, UTC                     */
-    char     display[64];
-    char     serial[64];
-    char     instrument[64];
-    char     screen[256];          /* psyscr_describe() at measurement            */
-    psygfx_cal_reading readings[PSYGFX_CAL_MAX_READINGS];
-    int32_t  n_wl;                 /* spectra samples                             */
-    float    wl_start, wl_step;    /* nm                                          */
-    int32_t  lut_n;                /* CLUT entries, 2..4096; 0 = 4096             */
-    float    spd[4][PSYGFX_CAL_MAX_WL];  /* R, G, B at full output, and black;
-                                    * W sr-1 m-2 nm-1                             */
-    /* derived by psygfx_cal_derive() */
-    double   rgb_to_xyz[9];        /* CIE 1931, row-major, black removed          */
-    double   rgb_to_lms[9];        /* Stockman-Sharpe 2 deg, black removed        */
-    double   black_xyz[3];
-    double   black_lms[3];
-    double   white_err;            /* white minus the sum of the guns, percent    */
-    float    lut[3][PSYGFX_CAL_MAX_LUT];   /* linear to device value, per gun     */
-    uint32_t reserved;
-    uint32_t crc;                  /* CRC-32 of every byte before it              */
-} psygfx_cal;
-
 /* --- backend (the gfx backend interface) ------------------------------------ */
 
-#define PSYGFX_BACKEND_VERSION 2   /* 2: v0.3, psygfx_bindings.blend and the
-                                    * 2-vec4 instance layout                    */
+#define PSYGFX_BACKEND_VERSION 3   /* 3: v0.4, program binaries (caps strings,
+                                    * pipeline_src.binary, pipeline_binary) */
 
 typedef struct psygfx_backend_open {
     psyscr_proc (*gl_proc)(void* ctx, const char* name);
@@ -1484,6 +1820,13 @@ typedef struct psygfx_backend_caps {
     int32_t  ubo_align;
     int32_t  max_ubo;
     char     renderer[160];
+    /* version 3: what a program binary is valid for (the cache key), and
+     * the binary format; 0 = no binaries */
+    char     vendor[64];
+    char     version[128];
+    char     glsl[128];
+    uint32_t binary_format;
+    uint32_t features;             /* PSYGFX_FEAT_IMPORT_*                       */
 } psygfx_backend_caps;
 
 #define PSYGFX_BLEND_NONE  0
@@ -1501,6 +1844,11 @@ typedef struct psygfx_pipeline_src {
                                     * status comes from pipeline_finish (when
                                     * the backend has it), so the driver can
                                     * compile several programs at once        */
+    /* version 3: a binary to try first; vs and fs stay valid, and the
+     * backend compiles them when the driver refuses it */
+    const void* binary;
+    uint32_t    binary_size, binary_format;
+    int32_t     retrievable;       /* the core will ask for the binary            */
 } psygfx_pipeline_src;
 
 typedef struct psygfx_texture_src {
@@ -1510,6 +1858,10 @@ typedef struct psygfx_texture_src {
     bool          target;          /* render target                               */
     const void*   data;
     size_t        stride;
+    /* version 3: wrap a texture instead of making one */
+    uint32_t      gl_name;         /* a GL name of this context; not deleted      */
+    void*         d3d11;           /* an ID3D11Texture2D* through EGL             */
+    int32_t       plane, slice;    /* d3d11: the plane (NV12 0 Y, 1 CbCr), slice   */
 } psygfx_texture_src;
 
 #define PSYGFX_BUFFER_UNIFORM  1
@@ -1519,9 +1871,10 @@ typedef struct psygfx_bindings {
     uint32_t pipeline;
     uint32_t ubo;                  /* frame block at frame_off, stims at stim_off */
     uint32_t frame_off, frame_size, stim_off, stim_size;
-    uint32_t tex[4];               /* units 0..3; 0 = none                        */
+    uint32_t tex[6];               /* units 0..5; 0 = none (version 3: 6)        */
     uint32_t instances;            /* buffer for attribute 0; 0 = none            */
     int32_t  blend;                /* PSYGFX_BLEND_*; 0 = the pipeline's own      */
+    uint32_t instances_off;        /* version 3: bytes into it                     */
 } psygfx_bindings;
 
 #define PSYGFX_READ_FLOAT 1        /* RGBA float                                  */
@@ -1552,6 +1905,11 @@ typedef struct psygfx_backend {
     /* version 2: waits for a deferred pipeline and checks it; NULL = every
      * pipeline_make is complete when it returns */
     int  (*pipeline_finish)(void* c, uint32_t id, char* err, size_t cap);
+    /* version 3. pipeline_make returns 1 when it linked pipeline_src.binary,
+     * 0 when it compiled. pipeline_binary copies a finished pipeline's binary
+     * into out when it fits in cap and returns its size (< 0: none); NULL =
+     * the backend has no binaries */
+    int  (*pipeline_binary)(void* c, uint32_t id, void* out, size_t cap, uint32_t* format);
 } psygfx_backend;
 
 /* --- the handle ------------------------------------------------------------ */
@@ -1566,7 +1924,7 @@ typedef struct psygfx_backend {
 #define PSYGFX_MAX_PIPELINES 32
 #endif
 #define PSYGFX__N_BUILTIN     10
-#define PSYGFX__BACKEND_WORDS 512
+#define PSYGFX__BACKEND_WORDS 1280
 #define PSYGFX__UBO_RING      3
 #ifndef PSYGFX_MAX_PASSES
 #define PSYGFX_MAX_PASSES    16          /* target passes per frame              */
@@ -1586,17 +1944,24 @@ typedef struct psygfx__res {
     int32_t  w, h, format, flags;
     int32_t  sdf;                  /* psygfx_sdf_kind                             */
     float    sdf_range;            /* texels                                      */
+    uint32_t plane_bid[2];         /* NV12: CbCr; I420: Cb, Cr                    */
+    psygfx_encoding enc;
+    int32_t  view;                 /* the slot whose texels it shows + 1; 0 = own  */
 } psygfx__res;
 
 typedef struct psygfx__cmd {
     uint32_t pipe;                 /* backend id                                  */
-    uint32_t tex[4];
+    uint32_t tex[6];
     uint32_t inst;                 /* DOTS buffer                                 */
     uint32_t count;                /* DOTS instances                              */
+    uint32_t inst_off;             /* bytes into inst                             */
     uint32_t block;                /* index of its stim block                      */
     uint32_t nblk;                 /* blocks it uses: 1, or 1 + its extension      */
     int32_t  blend;                /* PSYGFX_BLEND_*, 0 = the pipeline's          */
 } psygfx__cmd;
+
+/* A batch being gathered by the reorder (DRAW ORDER). */
+typedef struct psygfx__rbatch { int32_t head, tail, count, pad_; float box[4]; } psygfx__rbatch;
 
 /* The gfx. Caller-allocated and zeroed; every field is private. */
 typedef struct psygfx_gfx {
@@ -1625,6 +1990,11 @@ typedef struct psygfx_gfx {
     psygfx__cmd*           cmds;
     int32_t                max_draws, n_cmds, n_blocks;
     int32_t                max_batch;               /* a test seam               */
+    int32_t                no_reorder;              /* a test seam: call order   */
+    unsigned char*         staging2;                /* the reorder's copies       */
+    psygfx__cmd*           cmds2;
+    int32_t*               ro_next;
+    psygfx__rbatch*        ro_batch;
     psyscr_frame           frame;
     psygfx__seg            segs[2 * PSYGFX_MAX_PASSES + 1];
     int32_t                n_segs, n_targets, in_target;
@@ -1643,6 +2013,29 @@ typedef struct psygfx_gfx {
     psygfx__res            tex[PSYGFX_MAX_TEXTURES];
     psygfx__res            buf[PSYGFX_MAX_BUFFERS];
     psygfx__res            pipe[PSYGFX_MAX_PIPELINES];
+    /* v0.4 */
+    const psygfx_cache*    cache;
+    psygfx_programs        progs;
+    int32_t                calibrated;
+    uint32_t               features;                /* PSYGFX_FEAT_*             */
+    uint32_t               video_pipe;              /* backend id; made at the first
+                                                     * encoded texture           */
+    uint32_t               eotf;                    /* the display's transfer: 256 x 3
+                                                     * R32F, the inverse of the CLUT */
+    int32_t                has_xyz;                 /* the calibration has xy     */
+    /* v0.5: psy_color.h's context from the calibration (COLOR) */
+    int32_t                has_color;
+    psycol_ctx             color;
+    double                 ok_black[3], ok_off[3];  /* Oklab's black term, as the
+                                                     * cone response and in rgb   */
+    /* INSTANCES: the frame's element records and their buffers, made at the
+     * first psygfx_instances(); the instanced programs */
+    unsigned char*         inst_staging;
+    int32_t                inst_cap, inst_used;
+    uint32_t               inst_buf[PSYGFX__UBO_RING];
+    uint32_t               inst_pipe[PSYGFX__N_BUILTIN + 1];   /* + the video program */
+    uint32_t               pipe_inst[PSYGFX_MAX_PIPELINES];   /* users' */
+    char*                  pipe_body[PSYGFX_MAX_PIPELINES];   /* kept for them */
     char                   error[512];
     uint64_t               backend_mem[PSYGFX__BACKEND_WORDS];
 } psygfx_gfx;
@@ -1657,8 +2050,10 @@ PSYGFX_API const char* psygfx_strerror(int code);
  * uniform buffers, and allocates the per-frame staging once (max_draws x 256
  * bytes). Nothing is allocated after it. False with psygfx_error() set:
  * no EXT_color_buffer_float, an output, stereo or scene format v0.1 does not
- * have, a calibration that fails psygfx_cal_check(). On a screen without GL
- * (SIM) it opens the null backend: everything runs, nothing is drawn. */
+ * have, a calibration that fails psycol_cal_check() or is not sealed (seal it
+ * with psycol_cal_derive() or psycol_cal_save() after the last change). On a
+ * screen without GL (SIM) it opens the null backend: everything runs, nothing
+ * is drawn. */
 PSYGFX_API bool        psygfx_open(psygfx_gfx* g, const psygfx_desc* d);
 PSYGFX_API void        psygfx_close(psygfx_gfx* g);
 PSYGFX_API const char* psygfx_error(const psygfx_gfx* g);
@@ -1666,6 +2061,22 @@ PSYGFX_API bool        psygfx_is_open(const psygfx_gfx* g);
 /* One line for the log: backend, renderer, size, scene format, CLUT, dither,
  * units. Returns snprintf's count. */
 PSYGFX_API int         psygfx_describe(const psygfx_gfx* g, char* buf, size_t cap);
+/* v0.4. The screen it opened on (NULL headless or closed); whether it opened
+ * with a calibration; what desc.cache did. */
+PSYGFX_API psyscr_screen* psygfx_screen(const psygfx_gfx* g);
+PSYGFX_API bool           psygfx_calibrated(const psygfx_gfx* g);
+/* v0.5: the psy_color.h context open() made from desc.cal, desc.background,
+ * desc.cones and desc.lum (COLOR): colors, cone contrast and DKL directions
+ * with the background and luminance PAINT uses. NULL without a calibration. */
+PSYGFX_API const psycol_ctx* psygfx_color(const psygfx_gfx* g);
+PSYGFX_API void           psygfx_program_stats(const psygfx_gfx* g, psygfx_programs* out);
+/* What this gfx's renderer can do (PSYGFX_FEAT_*), after open. */
+PSYGFX_API uint32_t       psygfx_features(const psygfx_gfx* g);
+/* A program cache in the folder dir (UTF-8; made when missing), for
+ * desc.cache: files named by key, written whole under a temporary name and
+ * renamed. Nothing is ever deleted. NULL when dir is NULL, empty or too
+ * long. fc must outlive the gfx. */
+PSYGFX_API const psygfx_cache* psygfx_file_cache_init(psygfx_file_cache* fc, const char* dir);
 
 /* Stimuli. Zero desc fields take defaults; the result has real values in
  * every field (visible 1, gate 1, contrast and opacity 1 unless set). */
@@ -1681,6 +2092,21 @@ PSYGFX_API psygfx_stim psygfx_user(const psygfx_user_desc* d);
  * A glyph run: a SHAPE with MASK_TEX on the atlas and buf, count glyphs. */
 PSYGFX_API psygfx_stim psygfx_compound(const psygfx_compound_desc* d);
 PSYGFX_API psygfx_stim psygfx_glyphs(const psygfx_glyphs_desc* d);
+/* v0.4, INSTANCES. A copy of tmpl that draws d->n elements in one call. It
+ * makes the instanced program now (setup; through desc.cache), so the first
+ * draw compiles nothing. Keep d->inst and d->palette alive: the stimulus
+ * points at them, and draw() reads them. On failure the copy has n_inst 0
+ * and psygfx_error() says why. */
+PSYGFX_API psygfx_stim psygfx_instances(psygfx_gfx* g, const psygfx_stim* tmpl, const psygfx_instances_desc* d);
+/* x, y on an nx x ny grid of dx x dy units about 0, 0 (row by row from the
+ * top-left); contrast, scale and gate 1, the rest 0, in every element. */
+PSYGFX_API void psygfx_inst_grid(psygfx_inst* a, int nx, int ny, float dx, float dy);
+/* The topmost element (the highest index) whose hard shape holds the
+ * screen pixel, by the same field as the GPU's coverage >= 0.5; -1 for
+ * none. Elements with gate 0 are skipped. */
+PSYGFX_API int  psygfx_hit_index(const psygfx_gfx* g, const psygfx_stim* s, float px, float py);
+/* Element i's anchor on the screen. */
+PSYGFX_API void psygfx_inst_resolve(const psygfx_gfx* g, const psygfx_stim* s, int i, float* x, float* y);
 /* The length in px of what dashes and trim run along: the boundary, or the
  * center line of a LINE, CAPSULE, ARC, QBEZIER or POLYLINE. Negative: a
  * code (no length: a CROSS, a mask, a compound, a stimulus that is not a
@@ -1727,6 +2153,20 @@ PSYGFX_API psygfx_tex psygfx_texture(psygfx_gfx* g, const psygfx_texture_desc* d
 PSYGFX_API int        psygfx_texture_update(psygfx_gfx* g, psygfx_tex t, int x, int y, int w, int h,
                                             const void* data, size_t stride);
 PSYGFX_API void       psygfx_texture_free(psygfx_gfx* g, psygfx_tex t);
+/* v0.4, VIDEO. Every plane of an NV12 or I420 texture (two or three uploads),
+ * or one plane's rectangle in that plane's texels (0 Y, 1 CbCr or Cb, 2 Cr).
+ * Between frames. */
+PSYGFX_API int        psygfx_texture_update_planes(psygfx_gfx* g, psygfx_tex t, const psygfx_planes* p);
+PSYGFX_API int        psygfx_texture_update_plane(psygfx_gfx* g, psygfx_tex t, int plane, int x, int y, int w, int h,
+                                                  const void* data, size_t stride);
+/* Wraps a texture psy_gfx does not own; psygfx_texture_free() releases what
+ * the import made (a GL texture and an EGLImage per plane for D3D11), never
+ * the source. Setup only. PSYGFX_ERR_NOT_IMPLEMENTED without the feature. */
+PSYGFX_API psygfx_tex psygfx_texture_import(psygfx_gfx* g, const psygfx_import_desc* d);
+/* t shows src's texels from now on (the same format, size and encoding);
+ * src = t gives t its own back. No GL call, nothing allocated: per frame,
+ * between frames. Freeing src gives every texture that shows it its own. */
+PSYGFX_API int        psygfx_texture_rebind(psygfx_gfx* g, psygfx_tex t, psygfx_tex src);
 PSYGFX_API psygfx_buf psygfx_buffer(psygfx_gfx* g, size_t bytes);
 PSYGFX_API int        psygfx_buffer_update(psygfx_gfx* g, psygfx_buf b, size_t off, const void* data, size_t n);
 PSYGFX_API void       psygfx_buffer_free(psygfx_gfx* g, psygfx_buf b);
@@ -1790,26 +2230,6 @@ PSYGFX_API void  psygfx_noise_fill(float* out, int w, int h, uint32_t seed, psyg
 PSYGFX_API void  psygfx_noise_gauss(float* out, int w, int h, uint32_t seed);
 PSYGFX_API uint32_t psygfx_hash(uint32_t v);   /* pcg_hash, Jarzynski and Olano 2020 */
 
-/* Calibration (CALIBRATION in the manual). */
-PSYGFX_API void  psygfx_cal_init(psygfx_cal* c);   /* zero, magic, version, size  */
-PSYGFX_API int   psygfx_cal_add(psygfx_cal* c, int gun, float level, float Y, float x, float y);
-PSYGFX_API int   psygfx_cal_set_spectra(psygfx_cal* c, float wl_start, float wl_step, int n,
-                                        const float* r, const float* g, const float* b, const float* black);
-PSYGFX_API int   psygfx_cal_derive(psygfx_cal* c, char* err, size_t cap);
-PSYGFX_API int   psygfx_cal_check(const psygfx_cal* c, char* err, size_t cap);
-PSYGFX_API int   psygfx_cal_save(psygfx_cal* c, void* out, size_t cap);
-PSYGFX_API int   psygfx_cal_load(psygfx_cal* c, const void* bytes, size_t n, char* err, size_t cap);
-PSYGFX_API int   psygfx_cal_nominal(psygfx_cal* c, const float xy[4][2], float white_Y, double gamma);
-PSYGFX_API int   psygfx_cal_lms(const psygfx_cal* c, const float rgb[3], double lms[3]);
-PSYGFX_API int   psygfx_cal_dir_cone(const psygfx_cal* c, const float bg[3], const float cc[3], float dir[3]);
-PSYGFX_API int   psygfx_cal_dkl_matrix(const psygfx_cal* c, const float bg[3], double m[9]);
-PSYGFX_API int   psygfx_cal_dir_dkl(const psygfx_cal* c, const float bg[3], const float dkl[3], float dir[3]);
-PSYGFX_API void  psygfx_dkl_from_sph(float elevation_deg, float azimuth_deg, float radius, float dkl[3]);
-PSYGFX_API float psygfx_max_contrast(const float bg[3], const float dir[3]);
-/* Stockman and Sharpe (2000) 2-degree cone fundamentals, linear energy, from
- * CVRL (linss2_10e_1), 390 to 830 nm at 1 nm; S is 0 above 615 nm, as CVRL
- * gives it. Linear interpolation between samples, 0 outside. */
-PSYGFX_API void  psygfx_cone_fundamentals(double nm, double lms[3]);
 
 #ifdef __cplusplus
 }
@@ -1828,12 +2248,19 @@ PSYGFX_API void  psygfx_cone_fundamentals(double nm, double lms[3]);
     #define PSY_SCREEN_IMPLEMENTATION
     #include "psy_screen.h"
 #endif
+#ifndef PSY_COLOR_IMPLEMENTATION_GUARD
+    #define PSY_COLOR_IMPLEMENTATION
+    #include "psy_color.h"
+#endif
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <math.h>
+#if !defined(_WIN32)
+    #include <sys/stat.h>   /* mkdir, for the file cache */
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -1885,6 +2312,8 @@ static int psygfx__texel_bytes(psygfx_format f) {
     case PSYGFX_R32F:    return 4;
     case PSYGFX_RGBA32F: return 16;
     case PSYGFX_R16UI:   return 2;
+    case PSYGFX_NV12:    return 1;     /* the Y plane */
+    case PSYGFX_I420:    return 1;
     default:             return 0;
     }
 }
@@ -1975,6 +2404,12 @@ typedef struct psygfx__glf { PSYGFX__GL_FUNCS(PSYGFX__GL_FIELD) } psygfx__glf;
 #define PSYGFX__GL_EXTENSIONS           0x1F03
 #define PSYGFX__GL_RENDERER             0x1F01
 #define PSYGFX__GL_VERSION              0x1F02
+#define PSYGFX__GL_VENDOR               0x1F00
+#define PSYGFX__GL_SHADING_LANGUAGE_VERSION 0x8B8C
+#define PSYGFX__GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
+#define PSYGFX__GL_PROGRAM_BINARY_FORMATS 0x87FF
+#define PSYGFX__GL_PROGRAM_BINARY_LENGTH 0x8741
+#define PSYGFX__GL_PROGRAM_BINARY_RETRIEVABLE_HINT 0x8257
 #define PSYGFX__GL_NUM_EXTENSIONS       0x821D
 #define PSYGFX__GL_UBO_ALIGN            0x8A34
 #define PSYGFX__GL_MAX_UBO_SIZE         0x8A30
@@ -2034,16 +2469,40 @@ typedef struct psygfx__glf { PSYGFX__GL_FUNCS(PSYGFX__GL_FIELD) } psygfx__glf;
 #define PSYGFX__GL_TRIANGLE_STRIP       0x0005
 #define PSYGFX__GL_TRIANGLES            0x0004
 
-typedef struct psygfx__gltex { psygfx__GLuint tex, fbo; int32_t w, h, format; } psygfx__gltex;
+typedef struct psygfx__gltex {
+    psygfx__GLuint tex, fbo;
+    int32_t w, h, format;
+    int32_t borrowed;              /* an imported GL name: not ours to delete     */
+    void*   image;                 /* an EGLImage over a D3D11 texture            */
+} psygfx__gltex;
 typedef struct psygfx__glbuf { psygfx__GLuint buf; psygfx__GLenum target; uint32_t bytes; } psygfx__glbuf;
 typedef struct psygfx__glpipe { psygfx__GLuint prog, vao, vs, fs; int32_t blend, inst, pending; } psygfx__glpipe;
 
-#define PSYGFX__GL_TEX  (PSYGFX_MAX_TEXTURES + 4)
+#define PSYGFX__GL_TEX  (3 * PSYGFX_MAX_TEXTURES + 8)   /* three planes a texture */
 #define PSYGFX__GL_BUF  (PSYGFX_MAX_BUFFERS + PSYGFX__UBO_RING + 1)
 #define PSYGFX__GL_PIPE (PSYGFX_MAX_PIPELINES + PSYGFX__N_BUILTIN + 2)
 
+/* Program binaries: ES 3.0 has them, WebGL 2 does not, so they are loaded
+ * apart from the required table and may be NULL. */
+typedef void (PSYGFX__APIENTRY *psygfx__gl_getbin_fn)(psygfx__GLuint, psygfx__GLsizei, psygfx__GLsizei*, psygfx__GLenum*, void*);
+typedef void (PSYGFX__APIENTRY *psygfx__gl_bin_fn)(psygfx__GLuint, psygfx__GLenum, const void*, psygfx__GLsizei);
+typedef void (PSYGFX__APIENTRY *psygfx__gl_param_fn)(psygfx__GLuint, psygfx__GLenum, psygfx__GLint);
+/* Import of D3D11 textures through EGL images (ANGLE), also optional. */
+typedef void* (PSYGFX__APIENTRY *psygfx__egl_mkimg_fn)(void*, void*, unsigned, void*, const int32_t*);
+typedef unsigned (PSYGFX__APIENTRY *psygfx__egl_rmimg_fn)(void*, void*);
+typedef void* (PSYGFX__APIENTRY *psygfx__egl_dpy_fn)(void);
+typedef const char* (PSYGFX__APIENTRY *psygfx__egl_qs_fn)(void*, int32_t);
+typedef void (PSYGFX__APIENTRY *psygfx__gl_imgtgt_fn)(psygfx__GLenum, void*);
+
 typedef struct psygfx__gl {
     psygfx__glf    f;
+    psygfx__gl_getbin_fn GetProgramBinary;
+    psygfx__gl_bin_fn    ProgramBinary;
+    psygfx__gl_param_fn  ProgramParameteri;
+    psygfx__egl_mkimg_fn  CreateImage;
+    psygfx__egl_rmimg_fn  DestroyImage;
+    psygfx__gl_imgtgt_fn  ImageTarget;
+    void*                 dpy;     /* the EGL display of the context            */
     int32_t        w, h;
     psygfx__gltex  tex[PSYGFX__GL_TEX];
     psygfx__glbuf  buf[PSYGFX__GL_BUF];
@@ -2051,7 +2510,7 @@ typedef struct psygfx__gl {
     /* the state cache: what GL has bound, so apply() skips a call that
      * would not change anything; -1 = unknown */
     int64_t        c_prog, c_vao, c_blend, c_fbo, c_inst;
-    int64_t        c_tex[4];
+    int64_t        c_tex[6];
     int64_t        c_range_buf[2], c_range_off[2];
 } psygfx__gl;
 
@@ -2069,7 +2528,7 @@ static void psygfx__gl_reset(void* c) {
     psygfx__gl* gl = (psygfx__gl*)c;
     int i;
     gl->c_prog = gl->c_vao = gl->c_blend = gl->c_fbo = gl->c_inst = -1;
-    for (i = 0; i < 4; i++) gl->c_tex[i] = -1;
+    for (i = 0; i < 6; i++) gl->c_tex[i] = -1;
     for (i = 0; i < 2; i++) gl->c_range_buf[i] = gl->c_range_off[i] = -1;
 }
 
@@ -2096,6 +2555,44 @@ static int psygfx__gl_open(void* c, const psygfx_backend_open* in, psygfx_backen
     gl->f.GetIntegerv(PSYGFX__GL_MAX_UBO_SIZE, &caps->max_ubo);
     r = gl->f.GetString(PSYGFX__GL_RENDERER);
     snprintf(caps->renderer, sizeof caps->renderer, "%s", r ? (const char*)r : "?");
+    r = gl->f.GetString(PSYGFX__GL_VENDOR);
+    snprintf(caps->vendor, sizeof caps->vendor, "%s", r ? (const char*)r : "?");
+    r = gl->f.GetString(PSYGFX__GL_VERSION);
+    snprintf(caps->version, sizeof caps->version, "%s", r ? (const char*)r : "?");
+    r = gl->f.GetString(PSYGFX__GL_SHADING_LANGUAGE_VERSION);
+    snprintf(caps->glsl, sizeof caps->glsl, "%s", r ? (const char*)r : "?");
+    gl->GetProgramBinary = (psygfx__gl_getbin_fn)in->gl_proc(in->gl_ctx, "glGetProgramBinary");
+    gl->ProgramBinary = (psygfx__gl_bin_fn)in->gl_proc(in->gl_ctx, "glProgramBinary");
+    gl->ProgramParameteri = (psygfx__gl_param_fn)in->gl_proc(in->gl_ctx, "glProgramParameteri");
+    caps->binary_format = 0;
+    if (gl->GetProgramBinary && gl->ProgramBinary) {
+        psygfx__GLint n = 0, fmts[16];
+        gl->f.GetIntegerv(PSYGFX__GL_NUM_PROGRAM_BINARY_FORMATS, &n);
+        /* the format a binary comes back in is the driver's; the first one
+         * listed is only the key's, and every format so far lists one */
+        if (n >= 1 && n <= 16) {
+            gl->f.GetIntegerv(PSYGFX__GL_PROGRAM_BINARY_FORMATS, fmts);
+            caps->binary_format = (uint32_t)fmts[0];
+        }
+    }
+    caps->features = PSYGFX_FEAT_IMPORT_GL;
+#if defined(_WIN32)
+    {
+        psygfx__egl_dpy_fn cur = (psygfx__egl_dpy_fn)in->gl_proc(in->gl_ctx, "eglGetCurrentDisplay");
+        psygfx__egl_qs_fn qs = (psygfx__egl_qs_fn)in->gl_proc(in->gl_ctx, "eglQueryString");
+        const char* ext;
+        gl->CreateImage = (psygfx__egl_mkimg_fn)in->gl_proc(in->gl_ctx, "eglCreateImageKHR");
+        gl->DestroyImage = (psygfx__egl_rmimg_fn)in->gl_proc(in->gl_ctx, "eglDestroyImageKHR");
+        gl->ImageTarget = (psygfx__gl_imgtgt_fn)in->gl_proc(in->gl_ctx, "glEGLImageTargetTexture2DOES");
+        gl->dpy = cur ? cur() : NULL;
+        ext = gl->dpy && qs ? qs(gl->dpy, 0x3055) : NULL;   /* EGL_EXTENSIONS */
+        /* the NV12 plane and array slice attributes came with this extension
+         * in the ANGLE probed (2.1.23876, docs/psy_gfx.md) */
+        if (ext && strstr(ext, "EGL_ANGLE_image_d3d11_texture") && gl->CreateImage && gl->DestroyImage && gl->ImageTarget &&
+            psygfx__gl_ext(gl, "GL_OES_EGL_image"))
+            caps->features |= PSYGFX_FEAT_IMPORT_D3D11 | PSYGFX_FEAT_IMPORT_NV12;
+    }
+#endif
     psygfx__gl_reset(gl);
     while (gl->f.GetError() != PSYGFX__GL_NO_ERROR) {}
     return PSYGFX_OK;
@@ -2107,7 +2604,8 @@ static void psygfx__gl_close(void* c) {
     if (!gl->f.DeleteTextures) return;
     for (i = 0; i < PSYGFX__GL_TEX; i++) {
         if (gl->tex[i].fbo) gl->f.DeleteFramebuffers(1, &gl->tex[i].fbo);
-        if (gl->tex[i].tex) gl->f.DeleteTextures(1, &gl->tex[i].tex);
+        if (gl->tex[i].tex && !gl->tex[i].borrowed) gl->f.DeleteTextures(1, &gl->tex[i].tex);
+        if (gl->tex[i].image && gl->DestroyImage) gl->DestroyImage(gl->dpy, gl->tex[i].image);
     }
     for (i = 0; i < PSYGFX__GL_BUF; i++) if (gl->buf[i].buf) gl->f.DeleteBuffers(1, &gl->buf[i].buf);
     for (i = 0; i < PSYGFX__GL_PIPE; i++) {
@@ -2119,15 +2617,30 @@ static void psygfx__gl_close(void* c) {
     memset(gl, 0, sizeof *gl);
 }
 
-/* The link's status, the blocks' and samplers' bindings (ES 3.0 has no
- * layout(binding)); then the shaders go. */
+/* ES 3.0 has no layout(binding): the blocks' and samplers' bindings are set
+ * after every link, and after a binary load, which resets them. */
+static void psygfx__gl_slots(psygfx__gl* gl, psygfx__glpipe* p) {
+    static const char* const samplers[] = { "psy_tex0", "psy_tex1", "psy_tex2", "psy_utex0", "psy_tex3", "psy_tex4" };
+    psygfx__GLuint idx;
+    psygfx__GLint loc;
+    int i;
+    idx = gl->f.GetUniformBlockIndex(p->prog, "psy_frame_block");
+    if (idx != PSYGFX__GL_INVALID_INDEX) gl->f.UniformBlockBinding(p->prog, idx, 0);
+    idx = gl->f.GetUniformBlockIndex(p->prog, "psy_stim_block");
+    if (idx != PSYGFX__GL_INVALID_INDEX) gl->f.UniformBlockBinding(p->prog, idx, 1);
+    gl->f.UseProgram(p->prog);
+    for (i = 0; i < 6; i++) {
+        loc = gl->f.GetUniformLocation(p->prog, samplers[i]);
+        if (loc >= 0) gl->f.Uniform1i(loc, i);
+    }
+    gl->c_prog = (int64_t)p->prog;
+}
+
+/* The link's status and the bindings; then the shaders go. */
 static int psygfx__gl_pipeline_finish(void* c, uint32_t id, char* err, size_t cap) {
     psygfx__gl* gl = (psygfx__gl*)c;
-    static const char* const samplers[] = { "psy_tex0", "psy_tex1", "psy_tex2", "psy_utex0" };
     psygfx__glpipe* p;
-    psygfx__GLuint idx;
-    psygfx__GLint ok = 0, loc;
-    int i;
+    psygfx__GLint ok = 0;
     if (id < 1 || id > PSYGFX__GL_PIPE) return PSYGFX_ERR_ARG;
     p = &gl->pipe[id - 1];
     if (!p->pending) return PSYGFX_OK;
@@ -2162,16 +2675,7 @@ static int psygfx__gl_pipeline_finish(void* c, uint32_t id, char* err, size_t ca
     gl->f.DeleteShader(p->vs);
     gl->f.DeleteShader(p->fs);
     p->vs = p->fs = 0;
-    idx = gl->f.GetUniformBlockIndex(p->prog, "psy_frame_block");
-    if (idx != PSYGFX__GL_INVALID_INDEX) gl->f.UniformBlockBinding(p->prog, idx, 0);
-    idx = gl->f.GetUniformBlockIndex(p->prog, "psy_stim_block");
-    if (idx != PSYGFX__GL_INVALID_INDEX) gl->f.UniformBlockBinding(p->prog, idx, 1);
-    gl->f.UseProgram(p->prog);
-    for (i = 0; i < 4; i++) {
-        loc = gl->f.GetUniformLocation(p->prog, samplers[i]);
-        if (loc >= 0) gl->f.Uniform1i(loc, i);
-    }
-    gl->c_prog = (int64_t)p->prog;
+    psygfx__gl_slots(gl, p);
     return PSYGFX_OK;
 }
 
@@ -2185,6 +2689,25 @@ static int psygfx__gl_pipeline_make(void* c, const psygfx_pipeline_src* d, uint3
     for (slot = 0; slot < PSYGFX__GL_PIPE && gl->pipe[slot].prog; slot++) {}
     if (slot == PSYGFX__GL_PIPE) return PSYGFX_ERR_FULL;
     p = &gl->pipe[slot];
+    p->blend = d->blend;
+    p->inst = d->instance_attr;
+    if (d->binary && d->binary_size && gl->ProgramBinary) {
+        psygfx__GLint ok = 0;
+        p->prog = gl->f.CreateProgram();
+        gl->ProgramBinary(p->prog, (psygfx__GLenum)d->binary_format, d->binary, (psygfx__GLsizei)d->binary_size);
+        gl->f.GetProgramiv(p->prog, PSYGFX__GL_LINK_STATUS, &ok);
+        if (ok) {
+            gl->f.GenVertexArrays(1, &p->vao);
+            psygfx__gl_slots(gl, p);
+            *id = (uint32_t)slot + 1;
+            return 1;
+        }
+        /* another driver's, or damaged past what the header checks: the
+         * source is here, so compile it */
+        gl->f.DeleteProgram(p->prog);
+        p->prog = 0;
+        while (gl->f.GetError() != PSYGFX__GL_NO_ERROR) {}
+    }
     p->vs = gl->f.CreateShader(PSYGFX__GL_VERTEX_SHADER);
     gl->f.ShaderSource(p->vs, 1, &d->vs, NULL);
     gl->f.CompileShader(p->vs);
@@ -2194,9 +2717,8 @@ static int psygfx__gl_pipeline_make(void* c, const psygfx_pipeline_src* d, uint3
     p->prog = gl->f.CreateProgram();
     gl->f.AttachShader(p->prog, p->vs);
     gl->f.AttachShader(p->prog, p->fs);
+    if (d->retrievable && gl->ProgramParameteri) gl->ProgramParameteri(p->prog, PSYGFX__GL_PROGRAM_BINARY_RETRIEVABLE_HINT, 1);
     gl->f.LinkProgram(p->prog);
-    p->blend = d->blend;
-    p->inst = d->instance_attr;
     p->pending = 1;
     gl->f.GenVertexArrays(1, &p->vao);
     *id = (uint32_t)slot + 1;
@@ -2206,6 +2728,21 @@ static int psygfx__gl_pipeline_make(void* c, const psygfx_pipeline_src* d, uint3
         if (rc < 0) *id = 0;
         return rc;
     }
+}
+
+static int psygfx__gl_pipeline_binary(void* c, uint32_t id, void* out, size_t cap, uint32_t* format) {
+    psygfx__gl* gl = (psygfx__gl*)c;
+    psygfx__GLint len = 0;
+    psygfx__GLsizei got = 0;
+    psygfx__GLenum fmt = 0;
+    if (id < 1 || id > PSYGFX__GL_PIPE || !gl->pipe[id - 1].prog || gl->pipe[id - 1].pending || !gl->GetProgramBinary) return -1;
+    gl->f.GetProgramiv(gl->pipe[id - 1].prog, PSYGFX__GL_PROGRAM_BINARY_LENGTH, &len);
+    if (len <= 0) return -1;
+    if (!out || cap < (size_t)len) return len;
+    gl->GetProgramBinary(gl->pipe[id - 1].prog, (psygfx__GLsizei)cap, &got, &fmt, out);
+    if (gl->f.GetError() != PSYGFX__GL_NO_ERROR || got <= 0) return -1;
+    if (format) *format = (uint32_t)fmt;
+    return got;
 }
 
 static void psygfx__gl_pipeline_free(void* c, uint32_t id) {
@@ -2266,6 +2803,43 @@ static int psygfx__gl_texture_make(void* c, const psygfx_texture_src* d, uint32_
     psygfx__gl_fmt(d->format, &ifmt, &fmt, &type);
     if (!ifmt) return PSYGFX_ERR_ARG;
     t = &gl->tex[slot];
+    if (d->gl_name || d->d3d11) {
+        /* an import: texelFetch needs a complete texture, so its filters
+         * become NEAREST (the caller's texture, changed) */
+        if (d->gl_name) {
+            t->tex = d->gl_name;
+            t->borrowed = 1;
+        } else {
+            int32_t at[6];
+            int k = 0;
+            /* the plane only for an NV12 texture's planes, the slice only in
+             * an array */
+            if (d->format == PSYGFX_R8 || d->format == PSYGFX_RG8) { at[k++] = 0x3492; at[k++] = d->plane; }   /* EGL_D3D11_TEXTURE_PLANE_ANGLE */
+            if (d->slice > 0) { at[k++] = 0x3493; at[k++] = d->slice; }   /* EGL_D3D11_TEXTURE_ARRAY_SLICE_ANGLE */
+            at[k] = 0x3038;                                                /* EGL_NONE */
+            if (!gl->CreateImage || !gl->dpy) return PSYGFX_ERR_NOT_IMPLEMENTED;
+            t->image = gl->CreateImage(gl->dpy, NULL, 0x3484, d->d3d11, at);   /* EGL_D3D11_TEXTURE_ANGLE */
+            if (!t->image) { memset(t, 0, sizeof *t); return PSYGFX_ERR_GL; }
+            gl->f.GenTextures(1, &t->tex);
+            psygfx__gl_bind_tex(gl, 0, t->tex);
+            gl->ImageTarget(PSYGFX__GL_TEXTURE_2D, t->image);
+        }
+        psygfx__gl_bind_tex(gl, 0, t->tex);
+        gl->f.TexParameteri(PSYGFX__GL_TEXTURE_2D, PSYGFX__GL_TEXTURE_MIN_FILTER, PSYGFX__GL_NEAREST);
+        gl->f.TexParameteri(PSYGFX__GL_TEXTURE_2D, PSYGFX__GL_TEXTURE_MAG_FILTER, PSYGFX__GL_NEAREST);
+        gl->f.TexParameteri(PSYGFX__GL_TEXTURE_2D, PSYGFX__GL_TEXTURE_WRAP_S, PSYGFX__GL_CLAMP_TO_EDGE);
+        gl->f.TexParameteri(PSYGFX__GL_TEXTURE_2D, PSYGFX__GL_TEXTURE_WRAP_T, PSYGFX__GL_CLAMP_TO_EDGE);
+        t->w = d->w; t->h = d->h; t->format = d->format;
+        if (gl->f.GetError() != PSYGFX__GL_NO_ERROR) {
+            if (!t->borrowed) gl->f.DeleteTextures(1, &t->tex);
+            if (t->image) gl->DestroyImage(gl->dpy, t->image);
+            memset(t, 0, sizeof *t);
+            psygfx__gl_reset(gl);
+            return PSYGFX_ERR_GL;
+        }
+        *id = (uint32_t)slot + 1;
+        return PSYGFX_OK;
+    }
     gl->f.GenTextures(1, &t->tex);
     psygfx__gl_bind_tex(gl, 0, t->tex);
     gl->f.TexStorage2D(PSYGFX__GL_TEXTURE_2D, 1, ifmt, d->w, d->h);
@@ -2312,7 +2886,8 @@ static void psygfx__gl_texture_free(void* c, uint32_t id) {
     if (id < 1 || id > PSYGFX__GL_TEX) return;
     t = &gl->tex[id - 1];
     if (t->fbo) gl->f.DeleteFramebuffers(1, &t->fbo);
-    if (t->tex) gl->f.DeleteTextures(1, &t->tex);
+    if (t->tex && !t->borrowed) gl->f.DeleteTextures(1, &t->tex);
+    if (t->image && gl->DestroyImage) gl->DestroyImage(gl->dpy, t->image);
     memset(t, 0, sizeof *t);
     psygfx__gl_reset(gl);
 }
@@ -2415,23 +2990,26 @@ static void psygfx__gl_apply(void* c, const psygfx_bindings* b) {
             gl->c_range_buf[1] = (int64_t)ub; gl->c_range_off[1] = (int64_t)b->stim_off;
         }
     }
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < 6; i++) {
         psygfx__GLuint t = (b->tex[i] >= 1 && b->tex[i] <= PSYGFX__GL_TEX) ? gl->tex[b->tex[i] - 1].tex : 0;
         if (t && gl->c_tex[i] != (int64_t)t) psygfx__gl_bind_tex(gl, i, t);
     }
-    if (p->inst && b->instances >= 1 && b->instances <= PSYGFX__GL_BUF && gl->c_inst != (int64_t)b->instances) {
+    /* the cache key is the buffer and the offset: a run from its first record */
+    if (p->inst && b->instances >= 1 && b->instances <= PSYGFX__GL_BUF &&
+        gl->c_inst != ((int64_t)b->instances | ((int64_t)b->instances_off << 16))) {
+        size_t o = b->instances_off;
         gl->f.BindBuffer(PSYGFX__GL_ARRAY_BUFFER, gl->buf[b->instances - 1].buf);
         gl->f.EnableVertexAttribArray(0);
         if (p->inst == 2) {   /* glyphs: two vec4 per instance */
-            gl->f.VertexAttribPointer(0, 4, PSYGFX__GL_FLOAT, 0, 32, NULL);
+            gl->f.VertexAttribPointer(0, 4, PSYGFX__GL_FLOAT, 0, 32, (const void*)o);
             gl->f.EnableVertexAttribArray(1);
-            gl->f.VertexAttribPointer(1, 4, PSYGFX__GL_FLOAT, 0, 32, (const void*)(size_t)16);
+            gl->f.VertexAttribPointer(1, 4, PSYGFX__GL_FLOAT, 0, 32, (const void*)(o + 16));
             gl->f.VertexAttribDivisor(1, 1);
         } else {
-            gl->f.VertexAttribPointer(0, 2, PSYGFX__GL_FLOAT, 0, 8, NULL);
+            gl->f.VertexAttribPointer(0, 2, PSYGFX__GL_FLOAT, 0, 8, (const void*)o);
         }
         gl->f.VertexAttribDivisor(0, 1);
-        gl->c_inst = (int64_t)b->instances;
+        gl->c_inst = (int64_t)b->instances | ((int64_t)b->instances_off << 16);
     }
 }
 
@@ -2462,7 +3040,8 @@ static const psygfx_backend psygfx__gl_backend = {
     psygfx__gl_texture_make, psygfx__gl_texture_update, psygfx__gl_texture_free,
     psygfx__gl_buffer_make, psygfx__gl_buffer_update, psygfx__gl_buffer_free,
     psygfx__gl_pass_begin, psygfx__gl_apply, psygfx__gl_draw, psygfx__gl_pass_end,
-    psygfx__gl_present, psygfx__gl_read, psygfx__gl_reset, psygfx__gl_pipeline_finish
+    psygfx__gl_present, psygfx__gl_read, psygfx__gl_reset, psygfx__gl_pipeline_finish,
+    psygfx__gl_pipeline_binary
 };
 
 /* --- null backend: a screen without GL (SIM), and the interface's second
@@ -2512,7 +3091,7 @@ static const psygfx_backend psygfx__null_backend = {
     psygfx__null_texture_make, psygfx__null_texture_update, psygfx__null_free,
     psygfx__null_buffer_make, psygfx__null_buffer_update, psygfx__null_free,
     psygfx__null_pass_begin, psygfx__null_apply, psygfx__null_draw, psygfx__null_void,
-    psygfx__null_void, psygfx__null_read, psygfx__null_void, NULL
+    psygfx__null_void, psygfx__null_read, psygfx__null_void, NULL, NULL
 };
 
 typedef char psygfx__gl_fits[sizeof(psygfx__gl) <= sizeof(((psygfx_gfx*)0)->backend_mem) ? 1 : -1];
@@ -2551,14 +3130,39 @@ static const char psygfx__glsl_common[] =
     "layout(std140) uniform psy_stim_block { vec4 psy_v[" PSYGFX__STR(PSYGFX__BATCH_VEC4) "]; };\n";
 
 static const char psygfx__glsl_access[] =
+    /* An element of an instanced stimulus (INSTANCES) replaces its
+     * template's placement, look, color or dir and misc from the vertex
+     * shader. A built-in body sees the template's frame (p / psy_k); a user
+     * body its own px, with psy_size scaled, as in a group of that scale. */
+    "bool psy_umain_ = false;\n"
+    "#ifdef PSY_INST\n"
+    "flat in vec4 psy_ixf, psy_ilook, psy_icolor, psy_idir, psy_imisc, psy_isize;\n"
+    "flat in float psy_k;\n"
+    "#define psy_xf    psy_ixf\n"
+    "#define psy_look  psy_ilook\n"
+    "#define psy_color psy_icolor\n"
+    "#define psy_dir   psy_idir\n"
+    "#define psy_misc  psy_imisc\n"
+    "#ifdef PSY_INST_USER\n"
+    "#define psy_size  (psy_umain_ ? psy_isize : psy_v[psy_i * 16 + 1])\n"
+    "#define psy_mainp_(p) (p)\n"
+    "#else\n"
+    "#define psy_size  psy_v[psy_i * 16 + 1]\n"
+    "#define psy_mainp_(p) ((p) / psy_k)\n"
+    "#endif\n"
+    "#else\n"
     "#define psy_xf    psy_v[psy_i * 16]\n"
     "#define psy_size  psy_v[psy_i * 16 + 1]\n"
     "#define psy_look  psy_v[psy_i * 16 + 2]\n"
     "#define psy_color psy_v[psy_i * 16 + 3]\n"
     "#define psy_dir   psy_v[psy_i * 16 + 4]\n"
+    "#define psy_mainp_(p) (p)\n"
+    "#endif\n"
     "#define psy_edge  psy_v[psy_i * 16 + 5]\n"
     "#define psy_shape psy_v[psy_i * 16 + 6]\n"
+    "#ifndef PSY_INST\n"
     "#define psy_misc  psy_v[psy_i * 16 + 7]\n"
+    "#endif\n"
     "#define psy_param(k) (psy_v[psy_i * 16 + 8 + (k) / 4][(k) % 4])\n";
 
 /* Quads: one stimulus per instance, from the range bound at its first block.
@@ -2575,6 +3179,23 @@ static const char psygfx__glsl_vs_body[] =
     "flat out vec2 psy_gh;\n"
     "flat out vec4 psy_gr;\n"
     "#endif\n"
+    "#ifdef PSY_INST\n"
+    "layout(location = 0) in vec4 psy_a0;\n"     /* x, y units; ori deg; phase cyc */
+    "layout(location = 1) in vec4 psy_a1;\n"     /* contrast, scale, gate, color */
+    "flat out vec4 psy_ixf, psy_ilook, psy_icolor, psy_idir, psy_imisc, psy_isize;\n"
+    "flat out float psy_k;\n"
+    /* cosine and sine of degrees: reduced to a quarter turn's eighth, then
+     * Taylor polynomials, as D3D's sin and cos are coarse (VECTOR SHAPES) */
+    "vec2 psy_csd_(float deg) {\n"
+    "    float t = deg / 360.0;\n"
+    "    t -= floor(t + 0.5);\n"
+    "    float q = floor(t * 4.0 + 0.5), r = (t - 0.25 * q) * 6.28318530717959, r2 = r * r;\n"
+    "    float s = r * (1.0 + r2 * (-0.166666666666667 + r2 * (0.00833333333333333 + r2 * (-0.000198412698412698 + r2 * 2.75573192239859e-6))));\n"
+    "    float c = 1.0 + r2 * (-0.5 + r2 * (0.0416666666666667 + r2 * (-0.00138888888888889 + r2 * 2.48015873015873e-5)));\n"
+    "    int qi = int(q) & 3;\n"
+    "    return qi == 0 ? vec2(c, s) : (qi == 1 ? vec2(-s, c) : (qi == 2 ? vec2(-c, -s) : vec2(s, -c)));\n"
+    "}\n"
+    "#endif\n"
     "#ifdef PSY_DOTS\n"
     "layout(location = 0) in vec2 psy_dot;\n"
     "float psy_field_(vec2 q, vec4 f) {\n"     /* hx, hy, shape */
@@ -2584,13 +3205,60 @@ static const char psygfx__glsl_vs_body[] =
     "}\n"
     "#endif\n"
     "void main() {\n"
-    "#if defined(PSY_DOTS) || defined(PSY_GLYPHS)\n"
+    "#if defined(PSY_DOTS) || defined(PSY_GLYPHS) || defined(PSY_INST)\n"
     "    int i = 0;\n"
     "#else\n"
     "    int i = gl_InstanceID;\n"
     "#endif\n"
     "    vec4 xf = psy_v[i * 16];\n"
     "    vec4 sz = psy_v[i * 16 + 1];\n"
+    /* an element: the template's anchor moved along its turned axes, the
+     * box turned by ori and scaled by k about that anchor. Block 1: the
+     * anchor in the pass's GL px, the center from the anchor in box px;
+     * px per unit, the field mask, the palette's length. Block 2: the
+     * palette. */
+    "#ifdef PSY_INST\n"
+    "    vec4 H = psy_v[16], Q = psy_v[17];\n"
+    "    int m = int(Q.y);\n"
+    "    float sg = psy_axes.x, k = (m & 16) != 0 ? max(psy_a1.y, 0.0) : 1.0;\n"
+    "    vec2 cs = (m & 2) != 0 ? psy_csd_(psy_a0.z) : vec2(1.0, 0.0);\n"
+    "    float c0 = xf.z, s0 = sg * xf.w, ce = c0 * cs.x - s0 * cs.y, se = s0 * cs.x + c0 * cs.y;\n"
+    "    vec2 tx = xf.zw, ty = sg * vec2(-xf.w, xf.z), ex = vec2(ce, sg * se), ey = sg * vec2(-ex.y, ex.x);\n"
+    "    vec2 A = H.xy + ((m & 1) != 0 ? Q.x * (psy_a0.x * tx + psy_a0.y * ty) : vec2(0.0));\n"
+    "    xf = vec4(A + k * (H.z * ex + H.w * ey), ex);\n"
+    "    sz = vec4(sz.xyz * k, sz.w);\n"
+    "    psy_k = k;\n"
+    "    psy_ixf = xf;\n"
+    "    psy_isize = sz;\n"
+    "    float cf = (m & 8) != 0 ? psy_a1.x : 1.0, gf = (m & 32) != 0 ? psy_a1.z : 1.0;\n"
+    "#ifdef PSY_VECTOR\n"   /* its block 2 is (opacity, gate, offset, band center) */
+    "    psy_ilook = psy_v[2] * vec4(cf, gf, 1.0, 1.0);\n"
+    "#else\n"
+    "    psy_ilook = psy_v[2] * vec4(cf, cf, gf, 1.0);\n"
+    "#endif\n"
+    /* the palette: a fraction mixes two neighbors in linear light; an
+     * integer gives its entry, bit for bit */
+    "#ifdef PSY_INST_MOD\n"
+    "    vec3 pc = psy_v[4].rgb;\n"
+    "#else\n"
+    "    vec3 pc = psy_v[3].rgb;\n"
+    "#endif\n"
+    "    if ((m & 64) != 0) {\n"
+    "        int n = int(Q.z);\n"
+    "        float u = clamp(psy_a1.w, 0.0, float(n - 1));\n"
+    "        int i0 = int(floor(u));\n"
+    "        float f = u - float(i0);\n"
+    "        pc = f > 0.0 ? mix(psy_v[32 + i0].rgb, psy_v[32 + min(i0 + 1, n - 1)].rgb, f) : psy_v[32 + i0].rgb;\n"
+    "    }\n"
+    "#ifdef PSY_INST_MOD\n"
+    "    psy_icolor = psy_v[3];\n"
+    "    psy_idir = vec4(pc, psy_v[4].a);\n"
+    "#else\n"
+    "    psy_icolor = vec4(pc, psy_v[3].a);\n"
+    "    psy_idir = psy_v[4];\n"
+    "#endif\n"
+    "    psy_imisc = psy_v[7] + vec4(0.0, (m & 4) != 0 ? psy_a0.w : 0.0, 0.0, 0.0);\n"
+    "#endif\n"
     "    vec2 c = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2.0 - 1.0;\n"
     "    vec2 ax = xf.zw, ay = psy_axes.x * vec2(-xf.w, xf.z);\n"
     "    vec2 local = c * (sz.xy + sz.ww);\n"
@@ -2773,15 +3441,22 @@ static const char psygfx__glsl_fs_lib2[] =
     "#ifndef PSY_VECTOR\n"
     "float psy_aperture(vec2 p) {\n"
     "    int k = int(psy_edge.x);\n"
-    "    if (k == 6) return all(lessThanEqual(abs(p), psy_size.xy)) ? 1.0 : 0.0;\n"
+    /* an element at scale ki: the template's field at p / ki, times ki;
+     * the band and the offset are px, so they do not scale */
+    "#ifdef PSY_INST\n"
+    "    float ki = psy_k;\n"
+    "#else\n"
+    "    const float ki = 1.0;\n"
+    "#endif\n"
+    "    if (k == 6) return all(lessThanEqual(abs(p), ki * psy_v[psy_i * 16 + 1].xy)) ? 1.0 : 0.0;\n"
     "    float hw = psy_shape.w;\n"
     "    vec2 a = hw > 0.0 ? psy_look.w + vec2(-hw, hw) : vec2(0.0);\n"
     /* SHAPE's offset (misc.x): the field at the level a + offset, so a
      * bevel is the offset outline's */
     "#ifdef PSY_OFFSET\n"
-    "    vec2 d = psy_sdf2_(p, a + psy_misc.x) - psy_misc.x;\n"
+    "    vec2 d = ki * psy_sdf2_(p / ki, (a + psy_misc.x) / ki) - psy_misc.x;\n"
     "#else\n"
-    "    vec2 d = psy_sdf2_(p, a);\n"
+    "    vec2 d = ki * psy_sdf2_(p / ki, a / ki);\n"
     "#endif\n"
     "    if (hw <= 0.0) return psy_coverage(d.x);\n"
     "    return psy_coverage(d.y - a.y) - psy_coverage(d.x - a.x);\n"
@@ -2791,7 +3466,9 @@ static const char psygfx__glsl_fs_lib2[] =
 static const char psygfx__glsl_main_mod[] =
     "void main() {\n"
     "    psy_p = psy_local_();\n"
-    "    float g = psy_main(psy_p);\n"
+    "    psy_umain_ = true;\n"
+    "    float g = psy_main(psy_mainp_(psy_p));\n"
+    "    psy_umain_ = false;\n"
     "    float a = psy_aperture(psy_p);\n"
     "    psy_out = vec4(psy_dir.rgb * (psy_look.x * psy_look.z * g * a), 0.0);\n"
     "}\n";
@@ -2800,7 +3477,9 @@ static const char psygfx__glsl_main_mod[] =
 static const char psygfx__glsl_main_color[] =
     "void main() {\n"
     "    psy_p = psy_local_();\n"
-    "    vec4 c = psy_main(psy_p);\n"
+    "    psy_umain_ = true;\n"
+    "    vec4 c = psy_main(psy_mainp_(psy_p));\n"
+    "    psy_umain_ = false;\n"
     "    float k = psy_aperture(psy_p) * psy_look.y * psy_look.z;\n"
     "    psy_out = psy_misc.z > 0.5 ? c * k : vec4(c.rgb * (c.a * k), c.a * k);\n"
     "}\n";
@@ -2808,7 +3487,9 @@ static const char psygfx__glsl_main_color[] =
 static const char psygfx__glsl_main_add[] =
     "void main() {\n"
     "    psy_p = psy_local_();\n"
-    "    vec3 c = psy_main(psy_p);\n"
+    "    psy_umain_ = true;\n"
+    "    vec3 c = psy_main(psy_mainp_(psy_p));\n"
+    "    psy_umain_ = false;\n"
     "    psy_out = vec4(c * (psy_look.x * psy_look.z * psy_aperture(psy_p)), 0.0);\n"
     "}\n";
 
@@ -2841,14 +3522,35 @@ static const char psygfx__body_noise[] =
 /* The source rectangle's texel under p: nearest by texelFetch, clamped to
  * the rectangle; linear by hand, clamped the same way. */
 static const char psygfx__body_image_fetch[] =
+    /* A straight-alpha color image is filtered as premultiplied texels, then
+     * divided back: a clear texel's rgb has no weight, so it cannot darken
+     * its neighbors at the edges of a magnified sprite. */
+    "#ifdef PSY_STRAIGHT\n"
+    "vec4 psy_bilinear_s_(vec2 x, vec4 sr, int ach) {\n"
+    "    vec2 f = x - 0.5, i0 = floor(f), w = f - i0;\n"
+    "    ivec2 lo = ivec2(sr.xy), hi = ivec2(sr.xy + sr.zw) - 1;\n"
+    "    ivec2 a = clamp(ivec2(i0), lo, hi), b = clamp(ivec2(i0) + 1, lo, hi);\n"
+    "    vec4 c00 = texelFetch(psy_tex0, a, 0), c10 = texelFetch(psy_tex0, ivec2(b.x, a.y), 0);\n"
+    "    vec4 c01 = texelFetch(psy_tex0, ivec2(a.x, b.y), 0), c11 = texelFetch(psy_tex0, b, 0);\n"
+    "    vec4 q = mix(mix(vec4(c00.rgb * c00[ach], c00[ach]), vec4(c10.rgb * c10[ach], c10[ach]), w.x),\n"
+    "                 mix(vec4(c01.rgb * c01[ach], c01[ach]), vec4(c11.rgb * c11[ach], c11[ach]), w.x), w.y);\n"
+    "    return vec4(q.a > 0.0 ? q.rgb / q.a : vec3(0.0), q.a);\n"
+    "}\n"
+    "#endif\n"
     "vec4 psy_texel_(vec2 p) {\n"
     "    int mode = int(psy_misc.y);\n"
     "    vec2 r = vec2(p.x + psy_size.x, psy_size.y + p.y) / (2.0 * psy_size.xy);\n"
     "    vec4 sr = psy_v[psy_i * 16 + 8];\n"
     "    ivec2 t = ivec2(sr.xy) + clamp(ivec2(floor(r * sr.zw)), ivec2(0), ivec2(sr.zw) - 1);\n"
-    "    if (mode == 2) return vec4(vec3(float(texelFetch(psy_utex0, t, 0).r) * (1.0 / 65535.0)), 1.0);\n"
-    "    vec4 v = mode == 1 ? psy_bilinear(psy_tex0, sr.xy + r * sr.zw, sr) : texelFetch(psy_tex0, t, 0);\n"
     "    int ch = int(psy_misc.x);\n"
+    "    if (mode == 2) return vec4(vec3(float(texelFetch(psy_utex0, t, 0).r) * (1.0 / 65535.0)), 1.0);\n"
+    "#ifdef PSY_STRAIGHT\n"
+    "    if (mode == 1 && ch != 1 && psy_misc.z < 0.5) {\n"
+    "        vec4 s = psy_bilinear_s_(sr.xy + r * sr.zw, sr, ch == 2 ? 1 : 3);\n"
+    "        return ch == 2 ? vec4(s.rrr, s.a) : s;\n"
+    "    }\n"
+    "#endif\n"
+    "    vec4 v = mode == 1 ? psy_bilinear(psy_tex0, sr.xy + r * sr.zw, sr) : texelFetch(psy_tex0, t, 0);\n"
     "    if (ch == 1) return vec4(v.rrr, 1.0);\n"
     "    if (ch == 2) return vec4(v.rrr, v.g);\n"
     "    return v;\n"
@@ -3288,7 +3990,8 @@ static const char psygfx__glsl_vec5[] =
     "        vec3 l = vec3(c.x + 0.3963377774 * c.y + 0.2158037573 * c.z, c.x - 0.1055613458 * c.y - 0.0638541728 * c.z,\n"
     "                      c.x - 0.0894841775 * c.y - 1.2914855480 * c.z);\n"
     "        l = l * l * l;\n"
-    "        c = vec3(dot(psy_vd_(o + 18).xyz, l), dot(psy_vd_(o + 19).xyz, l), dot(psy_vd_(o + 20).xyz, l));\n"
+    "        vec4 q0 = psy_vd_(o + 18), q1 = psy_vd_(o + 19), q2 = psy_vd_(o + 20);\n"
+    "        c = vec3(q0.w + dot(q0.xyz, l), q1.w + dot(q1.xyz, l), q2.w + dot(q2.xyz, l));\n"
     "    } else if (sp == 2) {\n"
     "        vec3 k3 = c.z * vec3(sin(c.x), cos(c.x) * cos(c.y), cos(c.x) * sin(c.y));\n"
     "        vec4 r0 = psy_vd_(o + 18), r1 = psy_vd_(o + 19), r2 = psy_vd_(o + 20);\n"
@@ -3299,18 +4002,25 @@ static const char psygfx__glsl_vec5[] =
     "vec4 psy_over_(vec4 t, vec4 b) { return t + b * (1.0 - t.a); }\n"
     "void main() {\n"
     "    psy_p = psy_local_();\n"
-    "    vec4 V2 = psy_v[psy_i * 16 + 2], V3 = psy_v[psy_i * 16 + 3], V5 = psy_v[psy_i * 16 + 5];\n"
+    "    vec4 V2 = psy_look, V3 = psy_color, V5 = psy_v[psy_i * 16 + 5];\n"
     "    vec4 V7 = psy_v[psy_i * 16 + 7], V8 = psy_v[psy_i * 16 + 8];\n"
     "    int fl = int(V5.w);\n"
     "    vec4 f0, f1;\n"
-    "    psy_field_(psy_p, psy_p - V7.xy, int(V7.w), (fl & 8) != 0, f0, f1);\n"
+    "#ifdef PSY_INST\n"   /* the template's field at p / k, times k */
+    "    float ki = psy_k;\n"
+    "#else\n"
+    "    const float ki = 1.0;\n"
+    "#endif\n"
+    "    psy_field_(psy_p / ki, (psy_p - V7.xy) / ki, int(V7.w), (fl & 8) != 0, f0, f1);\n"
+    "    f0.x *= ki;\n"
+    "    f1.x *= ki;\n"
     "    if ((fl & 4) != 0) { f0.x /= max(length(f0.yz), 1e-3); f1.x /= max(length(f1.yz), 1e-3); }\n"
     "    if (V7.z > 0.0) { f0.x = abs(f0.x) - V7.z; f1.x = abs(f1.x) - V7.z; }\n"
     "    float d = f0.x - V2.z, d1 = f1.x - V2.z, hw = V3.w;\n"
     "    vec4 c0 = psy_cov4_(vec4(d - V2.w - hw, d - V2.w + hw, d, 0.0));\n"
     "    float cm = hw > 0.0 ? c0.x - c0.y : c0.z;\n"
     "    if ((fl & 3) != 0) cm = psy_along_(cm, hw > 0.0 ? d - V2.w : d + V8.w, hw > 0.0 ? hw : V8.w, f0.w);\n"
-    "    vec4 acc = vec4((fl & 16) != 0 ? psy_paint_(psy_p, f0, d) : V3.rgb, 1.0) * cm;\n"
+    "    vec4 acc = vec4((fl & 16) != 0 ? psy_paint_(psy_p / ki, f0, d / ki) : V3.rgb, 1.0) * cm;\n"
     "    if ((fl & 32) != 0) {\n"
     "        int o = int(V8.x);\n"
     "        vec4 Dp = psy_vd_(o), Gp = psy_vd_(o + 2), Ip = psy_vd_(o + 4), B0 = psy_vd_(o + 6), B1 = psy_vd_(o + 8);\n"
@@ -3439,11 +4149,150 @@ static int psygfx__test_scene32 = 0;
 #define PSYGFX__FRAME_BYTES ((uint32_t)PSYGFX__FRAME_SLOTS * PSYGFX__BLOCK)
 #define PSYGFX__STIM_RANGE ((uint32_t)PSYGFX__BATCH_VEC4 * 16u)   /* the block as declared */
 
-/* inst: 0 none, 1 dots (a vec2 per instance), 2 glyphs (two vec4); mode
- * below 0: the body has its own main and blends OVER. */
-static int psygfx__make_pipe(psygfx_gfx* g, const char* defs, const char* body, int mode, int inst, int deferred,
-                             uint32_t* id, const char* name) {
+/* --- the program cache (PROGRAM CACHE) ---------------------------------------- */
+
+/* Test seams, not API: the test forces key collisions (mask 0) and a new
+ * identity (another driver) with them. */
+static uint64_t psygfx__test_key_mask = ~(uint64_t)0;
+static const char* psygfx__test_ident = "";
+
+/* An entry: this header, then the driver's binary. ANGLE links a binary
+ * with a byte changed (measured: 10 of 11 programs), so nothing reaches the
+ * driver that does not match its hash under the same key material. */
+#define PSYGFX__PROG_MAGIC "PSYPROG1"
+#define PSYGFX__PROG_HEAD  48u
+typedef struct psygfx__prog_head {
+    char     magic[8];
+    uint32_t head_bytes, format;
+    uint64_t key;                  /* FNV-1a 64 of the key material            */
+    uint64_t key2;                 /* a second hash of it: a key collision is
+                                    * caught, not trusted                      */
+    uint64_t payload_hash;         /* FNV-1a 64 of the binary                  */
+    uint32_t material_bytes, payload_bytes;
+} psygfx__prog_head;
+typedef char psygfx__prog_head_size[sizeof(psygfx__prog_head) == PSYGFX__PROG_HEAD ? 1 : -1];
+
+/* Two unrelated byte hashes over the same bytes. */
+typedef struct psygfx__h2 { uint64_t a, b; uint32_t n; } psygfx__h2;
+static void psygfx__h2_add(psygfx__h2* h, const void* data, size_t n) {
+    const unsigned char* p = (const unsigned char*)data;
+    uint64_t a = h->a, b = h->b;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        a = (a ^ p[i]) * 0x100000001B3ull;
+        b = (b ^ p[i]) * 0x9E3779B97F4A7C15ull;
+        b ^= b >> 29;
+    }
+    h->a = a; h->b = b; h->n += (uint32_t)n;
+}
+static void psygfx__h2_str(psygfx__h2* h, const char* s) { psygfx__h2_add(h, s, strlen(s) + 1); }
+static uint64_t psygfx__fnv64(const void* data, size_t n) {
+    psygfx__h2 h;
+    h.a = 0xCBF29CE484222325ull; h.b = 0; h.n = 0;
+    psygfx__h2_add(&h, data, n);
+    return h.a;
+}
+
+/* What a build left to store once its program is finished. */
+typedef struct psygfx__prec { uint64_t key, key2; uint32_t material; int store; } psygfx__prec;
+
+static void psygfx__prog_store2(psygfx_gfx* g, uint32_t id, const psygfx__prec* r) {
+    psygfx__prog_head h;
+    unsigned char* buf;
+    uint32_t fmt = 0;
+    int n, m;
+    if (!r->store || !id) return;
+    n = g->be->pipeline_binary(g->bctx, id, NULL, 0, &fmt);
+    if (n <= 0) { g->progs.store_failed++; return; }
+    buf = (unsigned char*)malloc(PSYGFX__PROG_HEAD + (size_t)n);
+    if (!buf) { g->progs.store_failed++; return; }
+    m = g->be->pipeline_binary(g->bctx, id, buf + PSYGFX__PROG_HEAD, (size_t)n, &fmt);
+    if (m <= 0 || m > n) { free(buf); g->progs.store_failed++; return; }
+    memset(&h, 0, sizeof h);
+    memcpy(h.magic, PSYGFX__PROG_MAGIC, 8);
+    h.head_bytes = PSYGFX__PROG_HEAD; h.format = fmt;
+    h.key = r->key; h.key2 = r->key2; h.material_bytes = r->material;
+    h.payload_bytes = (uint32_t)m;
+    h.payload_hash = psygfx__fnv64(buf + PSYGFX__PROG_HEAD, (size_t)m);
+    memcpy(buf, &h, sizeof h);
+    if (g->cache->store(g->cache->user, r->key, buf, PSYGFX__PROG_HEAD + (size_t)m) < 0) g->progs.store_failed++;
+    else g->progs.stored++;
+    free(buf);
+}
+
+static void psygfx__prog_store(psygfx_gfx* g, uint32_t id, const psygfx__prec* r) {
+    int64_t t0;
+    if (!r->store || !id) return;
+    t0 = (int64_t)psyrt_now_ns();
+    psygfx__prog_store2(g, id, r);
+    g->progs.store_ns += (int64_t)psyrt_now_ns() - t0;
+}
+
+/* Builds one program from its text, from desc.cache when an entry there is
+ * whole and for this driver; else from source, leaving r to store it. inst:
+ * 0 none, 1 dots, 2 glyphs. */
+static int psygfx__build(psygfx_gfx* g, const char* vs, const char* fs, int blend, int inst, int deferred,
+                         uint32_t* id, psygfx__prec* r) {
     psygfx_pipeline_src src;
+    unsigned char* buf = NULL;
+    int rc, had = 0;
+    memset(&src, 0, sizeof src);
+    memset(r, 0, sizeof *r);
+    src.vs = vs;
+    src.fs = fs;
+    src.blend = blend;
+    src.instance_attr = inst;
+    src.deferred = deferred && g->be->pipeline_finish ? 1 : 0;
+    if (g->cache && g->cache->load && g->cache->store && g->caps.binary_format && g->be->pipeline_binary) {
+        psygfx__h2 h;
+        size_t n;
+        uint32_t f = g->caps.binary_format;
+        h.a = 0xCBF29CE484222325ull; h.b = 0x2545F4914F6CDD1Dull; h.n = 0;
+        psygfx__h2_str(&h, g->caps.vendor);
+        psygfx__h2_str(&h, g->caps.renderer);
+        psygfx__h2_str(&h, g->caps.version);
+        psygfx__h2_str(&h, g->caps.glsl);
+        psygfx__h2_str(&h, psygfx__test_ident);
+        psygfx__h2_add(&h, &f, sizeof f);
+        psygfx__h2_str(&h, vs);
+        psygfx__h2_str(&h, fs);
+        r->key = h.a & psygfx__test_key_mask;
+        r->key2 = h.b;
+        r->material = h.n;
+        r->store = 1;
+        src.retrievable = 1;
+        n = g->cache->load(g->cache->user, r->key, NULL, 0);
+        if (n > 0) {
+            psygfx__prog_head hd;
+            had = 1;
+            buf = n >= PSYGFX__PROG_HEAD && n < ((size_t)1 << 28) ? (unsigned char*)malloc(n) : NULL;
+            if (buf && g->cache->load(g->cache->user, r->key, buf, n) == n) {
+                memcpy(&hd, buf, sizeof hd);
+                if (memcmp(hd.magic, PSYGFX__PROG_MAGIC, 8) == 0 && hd.head_bytes == PSYGFX__PROG_HEAD &&
+                    hd.key == r->key && hd.key2 == r->key2 && hd.material_bytes == r->material &&
+                    (size_t)hd.payload_bytes == n - PSYGFX__PROG_HEAD &&
+                    hd.payload_hash == psygfx__fnv64(buf + PSYGFX__PROG_HEAD, hd.payload_bytes)) {
+                    src.binary = buf + PSYGFX__PROG_HEAD;
+                    src.binary_size = hd.payload_bytes;
+                    src.binary_format = hd.format;
+                }
+            }
+        }
+    }
+    rc = g->be->pipeline_make(g->bctx, &src, id, g->error, sizeof g->error);
+    free(buf);
+    if (rc == 1) { g->progs.loaded++; r->store = 0; return PSYGFX_OK; }
+    if (rc < 0) { r->store = 0; return rc; }
+    g->progs.compiled++;
+    if (had) g->progs.rejected++;
+    if (!src.deferred) psygfx__prog_store(g, *id, r);   /* finished already */
+    if (!src.deferred) r->store = 0;
+    return rc;
+}
+
+/* mode below 0: the body has its own main and blends OVER. */
+static int psygfx__make_pipe(psygfx_gfx* g, const char* defs, const char* body, int mode, int inst, int deferred,
+                             uint32_t* id, const char* name, psygfx__prec* r) {
     size_t nv, nf;
     char* vs;
     char* fs;
@@ -3456,13 +4305,9 @@ static int psygfx__make_pipe(psygfx_gfx* g, const char* defs, const char* body, 
     /* #version must come first, so the defines go after the common header. */
     snprintf(vs, nv, "%s%s%s", psygfx__glsl_common, defs, psygfx__glsl_vs_body);
     psygfx__fs_text2(defs, body, mode, fs, nf);
-    memset(&src, 0, sizeof src);
-    src.vs = vs;
-    src.fs = fs;
-    src.blend = (mode == PSYGFX_COLOR || mode < 0) ? PSYGFX_BLEND_OVER : PSYGFX_BLEND_ADD;   /* ADD and MODULATION add */
-    src.instance_attr = inst;
-    src.deferred = deferred && g->be->pipeline_finish ? 1 : 0;
-    rc = g->be->pipeline_make(g->bctx, &src, id, g->error, sizeof g->error);
+    /* ADD and MODULATION add */
+    rc = psygfx__build(g, vs, fs, (mode == PSYGFX_COLOR || mode < 0) ? PSYGFX_BLEND_OVER : PSYGFX_BLEND_ADD,
+                       inst, deferred, id, r);
     free(vs);
     if (rc < 0 && name) {
         char tmp[sizeof g->error];
@@ -3472,8 +4317,7 @@ static int psygfx__make_pipe(psygfx_gfx* g, const char* defs, const char* body, 
     return rc;
 }
 
-static int psygfx__make_output(psygfx_gfx* g) {
-    psygfx_pipeline_src src;
+static int psygfx__make_output(psygfx_gfx* g, psygfx__prec* r) {
     size_t nv = strlen(psygfx__glsl_common) + strlen(psygfx__glsl_vs_output) + 1;
     size_t nf = strlen(psygfx__glsl_common) + strlen(psygfx__glsl_output) + 1;
     char* vs = (char*)malloc(nv + nf);
@@ -3481,12 +4325,7 @@ static int psygfx__make_output(psygfx_gfx* g) {
     if (!vs) return PSYGFX_ERR_FULL;
     snprintf(vs, nv, "%s%s", psygfx__glsl_common, psygfx__glsl_vs_output);
     snprintf(vs + nv, nf, "%s%s", psygfx__glsl_common, psygfx__glsl_output);
-    memset(&src, 0, sizeof src);
-    src.vs = vs;
-    src.fs = vs + nv;
-    src.blend = PSYGFX_BLEND_NONE;
-    src.deferred = g->be->pipeline_finish ? 1 : 0;
-    rc = g->be->pipeline_make(g->bctx, &src, &g->output_pipe, g->error, sizeof g->error);
+    rc = psygfx__build(g, vs, vs + nv, PSYGFX_BLEND_NONE, 0, 1, &g->output_pipe, r);
     free(vs);
     return rc;
 }
@@ -3500,7 +4339,7 @@ static void psygfx__push(psygfx_gfx* g, uint16_t kind, uint64_t t, uint32_t aux,
     ev.kind = kind;
     ev.t_ns = t;
     ev.aux = aux;
-    if (u) for (i = 0; i < n && i < 16; i++) ev.u.u32[i] = u[i];
+    if (u) for (i = 0; i < n && i < (int)(sizeof ev.u.u32 / sizeof ev.u.u32[0]); i++) ev.u.u32[i] = u[i];
     else ev.u.i64[0] = i64;
     psyrt_ring_push(g->ring, &ev);
 }
@@ -3517,65 +4356,91 @@ static uint32_t psygfx__crc32(const void* data, size_t n) {
     return c ^ 0xFFFFFFFFu;
 }
 
+static int psygfx__eotf_upload(psygfx_gfx* g, const float* lut, int n);
+
 static int psygfx__lut_upload(psygfx_gfx* g, const float* lut, int n) {
     return g->be->texture_update(g->bctx, g->lut, 0, 0, n, 3, lut, (size_t)n * sizeof(float));
 }
 
-static int psygfx__inv3(const double* m, double* out);
 static void psygfx__mul3(const double* m, const double* v, double* out);
-static int psygfx__has_lms(const psygfx_cal* c);
 
-static void psygfx__mm3(const double* a, const double* b, double* out) {
-    int i, j, k;
-    for (i = 0; i < 3; i++)
-        for (j = 0; j < 3; j++) {
-            out[i * 3 + j] = 0.0;
-            for (k = 0; k < 3; k++) out[i * 3 + j] += a[i * 3 + k] * b[k * 3 + j];
-        }
+/* PAINT's spaces, from psy_color.h's context: Oklab's cone response
+ * (before the cube root) from device RGB, on absolute XYZ against the
+ * display's white (black included: ok_black), and DKL about desc.background
+ * with desc.cones and desc.lum. ok_off is the black term in rgb, which the
+ * shader adds after its matrix. */
+static void psygfx__paint_spaces(psygfx_gfx* g) {
+    const psycol_ctx* cx = &g->color;
+    int k;
+    if (cx->can & PSYCOL_CAN_XYZ) {
+        memcpy(g->ok_rgb2lms, cx->ok_rgb_to_lms, sizeof g->ok_rgb2lms);
+        memcpy(g->ok_lms2rgb, cx->ok_lms_to_rgb, sizeof g->ok_lms2rgb);
+        memcpy(g->ok_black, cx->ok_black, sizeof g->ok_black);
+        psygfx__mul3(g->ok_lms2rgb, g->ok_black, g->ok_off);
+        for (k = 0; k < 3; k++) g->ok_off[k] = -g->ok_off[k];
+        g->has_oklab = 1;
+    }
+    if (cx->can & PSYCOL_CAN_BG) {
+        memcpy(g->rgb2dkl, cx->rgb_to_dkl, sizeof g->rgb2dkl);
+        memcpy(g->dkl2rgb, cx->dkl_to_rgb, sizeof g->dkl2rgb);
+        g->has_dkl = 1;
+    }
 }
 
-/* PAINT's spaces: Oklab's cone response (before the cube root) from device
- * RGB, through the calibration's XYZ scaled to a white of Y = 1 (Ottosson's
- * M1, no chromatic adaptation); DKL about desc.background. */
-static void psygfx__paint_spaces(psygfx_gfx* g, const psygfx_cal* c) {
-    static const double m1[9] = { 0.8189330101, 0.3618667424, -0.1288597137, 0.0329845436, 0.9293118715, 0.0361456387,
-                                  0.0482003018, 0.2643662691, 0.6338517070 };
-    double yw = c->rgb_to_xyz[3] + c->rgb_to_xyz[4] + c->rgb_to_xyz[5], xn[9], m[9];
-    int k;
-    if (yw > 0.0 && c->rgb_to_xyz[4] != 0.0) {
-        for (k = 0; k < 9; k++) xn[k] = c->rgb_to_xyz[k] / yw;
-        psygfx__mm3(m1, xn, g->ok_rgb2lms);
-        g->has_oklab = psygfx__inv3(g->ok_rgb2lms, g->ok_lms2rgb) ? 1 : 0;
+/* The built-in programs. The defines change what a program holds, not what
+ * it computes: SHAPE's offset is 0 for a v0.2 stimulus, and d - 0 is d. */
+static const struct psygfx__builtin_def {
+    const char* defs; const char* body; int mode; int inst; const char* name;
+} psygfx__builtins[PSYGFX__N_BUILTIN] = {
+    { "#define PSY_OFFSET 1\n", psygfx__body_shape, PSYGFX_COLOR, 0, "shape" },
+    { "", psygfx__body_grating, PSYGFX_MODULATION, 0, "grating" },
+    { "", psygfx__body_gabor,   PSYGFX_MODULATION, 0, "gabor" },
+    { "", psygfx__body_noise,   PSYGFX_MODULATION, 0, "noise" },
+    { "#define PSY_STRAIGHT 1\n", NULL, PSYGFX_COLOR, 0, "image" },
+    { "", NULL,                 PSYGFX_MODULATION, 0, "image modulation" },
+    { "#define PSY_DOTS 1\n", psygfx__body_dots, PSYGFX_COLOR, 1, "dots" },
+    { "", NULL,                 PSYGFX_ADD,        0, "image add" },
+    { "#define PSY_VECTOR 1\n", NULL, -1, 0, "vector" },
+    { "#define PSY_GLYPHS 1\n#define PSY_OFFSET 1\n", psygfx__body_shape, PSYGFX_COLOR, 2, "glyphs" },
+};
+
+/* A built-in program's body, allocated (the vector program is in pieces, the
+ * image ones a fetch and a main); NULL when out of memory. */
+static char* psygfx__builtin_body(int i) {
+    const char* parts[8];
+    int np = 0, k;
+    size_t n = 1;
+    char* out;
+    if (psygfx__builtins[i].body) parts[np++] = psygfx__builtins[i].body;
+    else if (psygfx__builtins[i].mode < 0)
+        for (k = 0; k < (int)(sizeof psygfx__glsl_vec / sizeof psygfx__glsl_vec[0]); k++) parts[np++] = psygfx__glsl_vec[k];
+    else {
+        parts[np++] = psygfx__body_image_fetch;
+        parts[np++] = psygfx__builtins[i].mode == PSYGFX_COLOR ? psygfx__body_image_color
+                    : (psygfx__builtins[i].mode == PSYGFX_ADD ? psygfx__body_image_add : psygfx__body_image_mod);
     }
-    if (psygfx__has_lms(c) && psygfx_cal_dkl_matrix(c, g->bg, m) == PSYGFX_OK) {
-        psygfx__mm3(m, c->rgb_to_lms, g->rgb2dkl);
-        g->has_dkl = psygfx__inv3(g->rgb2dkl, g->dkl2rgb) ? 1 : 0;
-    }
+    for (k = 0; k < np; k++) n += strlen(parts[k]);
+    out = (char*)malloc(n);
+    if (!out) return NULL;
+    n = 0;
+    for (k = 0; k < np; k++) { size_t m = strlen(parts[k]); memcpy(out + n, parts[k], m); n += m; }
+    out[n] = '\0';
+    return out;
 }
 
 PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
     psygfx_backend_open in;
     psygfx_texture_src ts;
     int rc, i;
+    int64_t t_start = (int64_t)psyrt_now_ns();
+    psygfx__prec prec[PSYGFX__N_BUILTIN + 1];
     static const float identity[6] = { 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f };
-    /* the defines change what a program holds, not what it computes:
-     * SHAPE's offset is 0 for a v0.2 stimulus, and d - 0 is d */
-    struct { const char* defs; const char* body; int mode; int inst; const char* name; } builtins[] = {
-        { "#define PSY_OFFSET 1\n", psygfx__body_shape, PSYGFX_COLOR, 0, "shape" },
-        { "", psygfx__body_grating, PSYGFX_MODULATION, 0, "grating" },
-        { "", psygfx__body_gabor,   PSYGFX_MODULATION, 0, "gabor" },
-        { "", psygfx__body_noise,   PSYGFX_MODULATION, 0, "noise" },
-        { "", NULL,                 PSYGFX_COLOR,      0, "image" },
-        { "", NULL,                 PSYGFX_MODULATION, 0, "image modulation" },
-        { "#define PSY_DOTS 1\n", psygfx__body_dots, PSYGFX_COLOR, 1, "dots" },
-        { "", NULL,                 PSYGFX_ADD,        0, "image add" },
-        { "#define PSY_VECTOR 1\n", NULL, -1, 0, "vector" },
-        { "#define PSY_GLYPHS 1\n#define PSY_OFFSET 1\n", psygfx__body_shape, PSYGFX_COLOR, 2, "glyphs" },
-    };
     if (!g) return false;
     if (g->open) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: already open"); return false; }
     memset(g, 0, sizeof *g);
     if (!d) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: no desc"); return false; }
+    g->cache = d->cache;
+    g->calibrated = d->cal != NULL;
     if (d->output != PSYGFX_OUT_8) {
         psygfx__set_error(g->error, sizeof g->error, "psy_gfx: only 8-bit output in v0.1: 10-bit needs an "
                           "RGB10A2 back buffer from psy_screen, Mono++ and Color++ need a device to verify");
@@ -3597,7 +4462,7 @@ PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
     }
     if (d->cal) {
         char e[200];
-        if (psygfx_cal_check(d->cal, e, sizeof e) < 0) {
+        if (psycol_cal_check(d->cal, e, sizeof e) < 0) {
             psygfx__set_error(g->error, sizeof g->error, "psy_gfx: calibration: %s", e);
             return false;
         }
@@ -3640,6 +4505,8 @@ PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
     rc = g->be->open(g->bctx, &in, &g->caps, g->error, sizeof g->error);
     if (rc < 0) { if (!g->error[0]) psygfx__set_error(g->error, sizeof g->error, "psy_gfx: backend open failed"); return false; }
     g->open = 1;   /* from here psygfx_close() undoes what was made */
+    g->features = (g->caps.features & (PSYGFX_FEAT_IMPORT_GL | PSYGFX_FEAT_IMPORT_D3D11 | PSYGFX_FEAT_IMPORT_NV12)) | PSYGFX_FEAT_PLANAR | PSYGFX_FEAT_INSTANCES |
+                  (g->caps.binary_format && g->be->pipeline_binary ? PSYGFX_FEAT_PROGRAM_CACHE : 0u);
 #if defined(PSYSCR_HAS_GL_EPOCH)
     if (g->screen) { g->epoch = psyscr_gl_epoch(g->screen); g->generation = psyscr_gl_generation(g->screen); }
 #endif
@@ -3669,12 +4536,20 @@ PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
     g->ring = d->ring;
     g->max_draws = d->max_draws > 0 ? d->max_draws : 1024;
     g->max_batch = PSYGFX__BATCH;
+    g->inst_cap = d->max_instances > 0 ? d->max_instances : 16384;
     g->t_open = (int64_t)psyrt_now_ns();
     /* The one allocation: the frame's uniform staging and its draw queue. */
     g->staging = (unsigned char*)calloc((size_t)PSYGFX__FRAME_BYTES + ((size_t)g->max_draws + 16) * PSYGFX__BLOCK, 1);
     g->cur_w = g->w; g->cur_h = g->h; g->cur_top = 0;
     g->cmds = (psygfx__cmd*)calloc((size_t)g->max_draws, sizeof(psygfx__cmd));
-    if (!g->staging || !g->cmds) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory"); goto fail; }
+    g->staging2 = (unsigned char*)calloc((size_t)PSYGFX__FRAME_BYTES + ((size_t)g->max_draws + 16) * PSYGFX__BLOCK, 1);
+    g->cmds2 = (psygfx__cmd*)calloc((size_t)g->max_draws, sizeof(psygfx__cmd));
+    g->ro_next = (int32_t*)calloc((size_t)g->max_draws, sizeof(int32_t));
+    g->ro_batch = (psygfx__rbatch*)calloc((size_t)g->max_draws, sizeof(psygfx__rbatch));
+    if (!g->staging || !g->cmds || !g->staging2 || !g->cmds2 || !g->ro_next || !g->ro_batch) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory");
+        goto fail;
+    }
     /* A range starts at any block and is as long as the declared array. */
     g->ubo_bytes = PSYGFX__FRAME_BYTES + ((uint32_t)g->max_draws + 16) * PSYGFX__BLOCK + PSYGFX__STIM_RANGE;
     for (i = 0; i < PSYGFX__UBO_RING; i++) {
@@ -3690,73 +4565,90 @@ PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
         goto fail;
     }
     memset(&ts, 0, sizeof ts);
-    ts.w = PSYGFX_CAL_MAX_LUT; ts.h = 3; ts.format = PSYGFX_R32F;
+    ts.w = PSYCOL_CAL_MAX_LUT; ts.h = 3; ts.format = PSYGFX_R32F;
     if (g->be->texture_make(g->bctx, &ts, &g->lut) < 0) {
         psygfx__set_error(g->error, sizeof g->error, "psy_gfx: CLUT texture");
         goto fail;
     }
+    memset(&ts, 0, sizeof ts);
+    ts.w = 256; ts.h = 3; ts.format = PSYGFX_R32F;
+    if (g->be->texture_make(g->bctx, &ts, &g->eotf) < 0) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: transfer table texture");
+        goto fail;
+    }
     if (d->cal) {
-        int n = d->cal->lut_n ? d->cal->lut_n : PSYGFX_CAL_MAX_LUT, c;
+        int n = d->cal->lut_n ? d->cal->lut_n : PSYCOL_CAL_MAX_LUT, c;
         float* tmp = (float*)malloc((size_t)n * 3 * sizeof(float));
         if (!tmp) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory"); goto fail; }
         for (c = 0; c < 3; c++) memcpy(tmp + c * n, d->cal->lut[c], (size_t)n * sizeof(float));
         rc = psygfx__lut_upload(g, tmp, n);
+        if (rc >= 0) rc = psygfx__eotf_upload(g, tmp, n);
         free(tmp);
         g->lut_n = n;
         g->cal_crc = d->cal->crc;
     } else {
         rc = psygfx__lut_upload(g, identity, 2);
+        if (rc >= 0) rc = psygfx__eotf_upload(g, identity, 2);
         g->lut_n = 2;
     }
     if (rc < 0) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: CLUT upload"); goto fail; }
-    if (d->cal) psygfx__paint_spaces(g, d->cal);
-    for (i = 0; i < (int)(sizeof builtins / sizeof builtins[0]); i++) {
-        char body[sizeof psygfx__body_image_fetch + sizeof psygfx__body_image_color + 16];
-        const char* src = builtins[i].body;
-        char* vec = NULL;
-        if (!src && builtins[i].mode < 0) {   /* the vector program, from its pieces */
-            size_t n = 1, k;
-            for (k = 0; k < sizeof psygfx__glsl_vec / sizeof psygfx__glsl_vec[0]; k++) n += strlen(psygfx__glsl_vec[k]);
-            vec = (char*)malloc(n);
-            if (!vec) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory"); goto fail; }
-            n = 0;
-            for (k = 0; k < sizeof psygfx__glsl_vec / sizeof psygfx__glsl_vec[0]; k++) {
-                size_t m = strlen(psygfx__glsl_vec[k]);
-                memcpy(vec + n, psygfx__glsl_vec[k], m);
-                n += m;
-            }
-            vec[n] = '\0';
-            src = vec;
-        } else if (!src) {
-            snprintf(body, sizeof body, "%s%s", psygfx__body_image_fetch,
-                     builtins[i].mode == PSYGFX_COLOR ? psygfx__body_image_color
-                     : (builtins[i].mode == PSYGFX_ADD ? psygfx__body_image_add : psygfx__body_image_mod));
-            src = body;
+    if (d->cal) {   /* PAINT's spaces and VIDEO's primaries: psy_color.h's context */
+        psycol_ctx_desc cd;
+        char cerr[200];
+        int k;
+        memset(&cd, 0, sizeof cd);
+        cd.cal = d->cal;
+        cd.cones = d->cones;
+        cd.lum = d->lum;
+        for (k = 0; k < 3; k++) cd.background[k] = g->bg[k];
+        if (psycol_ctx_init(&g->color, &cd, cerr, sizeof cerr) < 0) {
+            psygfx__set_error(g->error, sizeof g->error, "psy_gfx: %s", cerr);
+            goto fail;
         }
-        rc = psygfx__make_pipe(g, builtins[i].defs, src, builtins[i].mode, builtins[i].inst, 1, &g->builtin[i], builtins[i].name);
-        free(vec);
+        g->has_color = 1;
+        psygfx__paint_spaces(g);
+        g->has_xyz = (g->color.can & PSYCOL_CAN_XYZ) != 0;
+    } else if (d->lum || d->cones) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: desc.lum and desc.cones need desc.cal");
+        goto fail;
+    }
+    for (i = 0; i < PSYGFX__N_BUILTIN; i++) {
+        char* src = psygfx__builtin_body(i);
+        if (!src) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory"); goto fail; }
+        rc = psygfx__make_pipe(g, psygfx__builtins[i].defs, src, psygfx__builtins[i].mode, psygfx__builtins[i].inst, 1,
+                               &g->builtin[i], psygfx__builtins[i].name, &prec[i]);
+        free(src);
         if (rc < 0) goto fail;
     }
-    if (psygfx__make_output(g) < 0) goto fail;
+    if (psygfx__make_output(g, &prec[PSYGFX__N_BUILTIN]) < 0) goto fail;
     if (g->be->pipeline_finish) {   /* the statuses, once every program is under way */
-        for (i = 0; i < (int)(sizeof builtins / sizeof builtins[0]); i++) {
+        for (i = 0; i < PSYGFX__N_BUILTIN; i++) {
             if (g->be->pipeline_finish(g->bctx, g->builtin[i], g->error, sizeof g->error) < 0) {
                 char tmp[sizeof g->error];
                 g->builtin[i] = 0;
                 memcpy(tmp, g->error, sizeof tmp);
-                psygfx__set_error(g->error, sizeof g->error, "%s (%s)", tmp, builtins[i].name);
+                psygfx__set_error(g->error, sizeof g->error, "%s (%s)", tmp, psygfx__builtins[i].name);
                 goto fail;
             }
         }
         if (g->be->pipeline_finish(g->bctx, g->output_pipe, g->error, sizeof g->error) < 0) { g->output_pipe = 0; goto fail; }
     }
+    for (i = 0; i < PSYGFX__N_BUILTIN; i++) psygfx__prog_store(g, g->builtin[i], &prec[i]);
+    psygfx__prog_store(g, g->output_pipe, &prec[PSYGFX__N_BUILTIN]);
     g->be->reset(g->bctx);
     g->error[0] = '\0';
     {
-        uint32_t u[7];
+        uint32_t u[10];
         u[0] = (uint32_t)g->lut_n; u[1] = (uint32_t)g->dither; u[2] = (uint32_t)d->output;
         u[3] = g->cal_crc; u[4] = d->cal ? d->cal->flags : 0u; u[5] = (uint32_t)g->w; u[6] = (uint32_t)g->h;
-        psygfx__push(g, (uint16_t)PSYGFX_EV_OPEN, 0, (uint32_t)g->scene_format, u, 7, 0);
+        g->progs.open_ns = (int64_t)psyrt_now_ns() - t_start;
+        u[7] = g->progs.loaded; u[8] = g->progs.compiled; u[9] = (uint32_t)(g->progs.open_ns / 1000000);
+        psygfx__push(g, (uint16_t)PSYGFX_EV_OPEN, 0, (uint32_t)g->scene_format, u, 10, 0);
+        if (g->has_color) {
+            u[0] = g->color.id; u[1] = d->cal->crc; u[2] = d->lum ? d->lum->crc : 0u;
+            u[3] = (uint32_t)d->cones; u[4] = g->color.can;
+            psygfx__push(g, (uint16_t)PSYGFX_EV_COLOR, 0, 0, u, 5, 0);
+        }
     }
     return true;
 fail:
@@ -3777,6 +4669,15 @@ PSYGFX_API void psygfx_close(psygfx_gfx* g) {
     }
     free(g->staging);
     free(g->cmds);
+    free(g->staging2);
+    free(g->cmds2);
+    free(g->ro_next);
+    free(g->ro_batch);
+    free(g->inst_staging);
+    {
+        int i;
+        for (i = 0; i < PSYGFX_MAX_PIPELINES; i++) free(g->pipe_body[i]);
+    }
     {
         char keep[sizeof g->error];
         memcpy(keep, g->error, sizeof keep);
@@ -3792,11 +4693,130 @@ PSYGFX_API uint64_t psygfx_clipped(const psygfx_gfx* g) { return g ? g->clipped_
 PSYGFX_API int psygfx_describe(const psygfx_gfx* g, char* buf, size_t cap) {
     static const char* const dith[] = { "none", "ordered", "noise" };
     if (!g || !g->open) return snprintf(buf, cap, "psy_gfx: closed");
-    return snprintf(buf, cap, "psy_gfx %s: %s, %s, %dx%d, scene %s, CLUT %d%s, dither %s, %.4g px/unit, origin %s",
+    return snprintf(buf, cap, "psy_gfx %s: %s, %s, %dx%d, scene %s, CLUT %d%s, dither %s, %.4g px/unit, origin %s, programs %u cached / %u compiled / %u rejected",
                     PSYGFX_VERSION_STRING, g->be->name, g->caps.renderer, g->w, g->h,
                     g->scene_format == PSYGFX_RGBA32F ? "RGBA32F" : "RGBA16F", g->lut_n,
                     g->cal_crc ? " (calibration)" : " (identity)", dith[g->dither <= 2 ? g->dither : 0],
-                    (double)g->ppu, g->origin_top ? "top" : "bottom");
+                    (double)g->ppu, g->origin_top ? "top" : "bottom",
+                    g->progs.loaded, g->progs.compiled, g->progs.rejected);
+}
+
+PSYGFX_API psyscr_screen* psygfx_screen(const psygfx_gfx* g) { return g && g->open ? g->screen : NULL; }
+PSYGFX_API bool psygfx_calibrated(const psygfx_gfx* g) { return g && g->open && g->calibrated; }
+PSYGFX_API const psycol_ctx* psygfx_color(const psygfx_gfx* g) { return g && g->open && g->has_color ? &g->color : NULL; }
+PSYGFX_API uint32_t psygfx_features(const psygfx_gfx* g) { return g && g->open ? g->features : 0u; }
+PSYGFX_API void psygfx_program_stats(const psygfx_gfx* g, psygfx_programs* out) {
+    if (!out) return;
+    if (g) *out = g->progs; else memset(out, 0, sizeof *out);
+}
+
+/* --- the file cache ------------------------------------------------------------ */
+
+#if defined(_WIN32)
+static FILE* psygfx__wopen(const char* path, const wchar_t* mode) {
+    wchar_t w[600];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, w, 600) <= 0) return NULL;
+#if defined(_MSC_VER)
+    {
+        FILE* f = NULL;
+        return _wfopen_s(&f, w, mode) == 0 ? f : NULL;
+    }
+#else
+    return _wfopen(w, mode);
+#endif
+}
+#endif
+
+static void psygfx__fc_path(const psygfx_file_cache* fc, uint64_t key, const char* ext, char* out, size_t cap) {
+    snprintf(out, cap, "%s/%08x%08x.%s", fc->dir, (unsigned)(key >> 32), (unsigned)(key & 0xFFFFFFFFu), ext);
+}
+
+static size_t psygfx__fc_load(void* user, uint64_t key, void* dst, size_t cap) {
+    const psygfx_file_cache* fc = (const psygfx_file_cache*)user;
+    char path[600];
+    FILE* f;
+    long n;
+    psygfx__fc_path(fc, key, "psyprog", path, sizeof path);
+#if defined(_WIN32)
+    f = psygfx__wopen(path, L"rb");
+#else
+    f = fopen(path, "rb");
+#endif
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) <= 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
+    if (dst && cap >= (size_t)n && fread(dst, 1, (size_t)n, f) != (size_t)n) n = 0;
+    fclose(f);
+    return (size_t)n;
+}
+
+/* Makes dir and its parents; the ones that exist are left alone. */
+static void psygfx__fc_mkdirs(const char* dir) {
+    char p[512];
+    size_t i, n = strlen(dir);
+    if (n >= sizeof p) return;
+    memcpy(p, dir, n + 1);
+    for (i = 1; i <= n; i++) {
+        if (p[i] == '/' || p[i] == '\\' || p[i] == '\0') {
+            char c = p[i];
+            p[i] = '\0';
+#if defined(_WIN32)
+            {
+                wchar_t w[520];
+                if (MultiByteToWideChar(CP_UTF8, 0, p, -1, w, 520) > 0) CreateDirectoryW(w, NULL);
+            }
+#else
+            mkdir(p, 0777);
+#endif
+            p[i] = c;
+        }
+    }
+}
+
+/* Whole or not at all: written under a name no reader looks for, then
+ * renamed over the entry, so a reader never sees half a file. */
+static int psygfx__fc_store(void* user, uint64_t key, const void* data, size_t n) {
+    const psygfx_file_cache* fc = (const psygfx_file_cache*)user;
+    char tmp[620], path[600], ext[40];
+    FILE* f;
+    int ok;
+    snprintf(ext, sizeof ext, "tmp%08x", (unsigned)(psyrt_now_ns() & 0xFFFFFFFFu));
+    psygfx__fc_path(fc, key, ext, tmp, sizeof tmp);
+    psygfx__fc_path(fc, key, "psyprog", path, sizeof path);
+#if defined(_WIN32)
+    f = psygfx__wopen(tmp, L"wb");
+    if (!f) { psygfx__fc_mkdirs(fc->dir); f = psygfx__wopen(tmp, L"wb"); }
+#else
+    f = fopen(tmp, "wb");
+    if (!f) { psygfx__fc_mkdirs(fc->dir); f = fopen(tmp, "wb"); }
+#endif
+    if (!f) return PSYGFX_ERR_ARG;
+    ok = fwrite(data, 1, n, f) == n;
+    ok = fclose(f) == 0 && ok;
+#if defined(_WIN32)
+    if (ok) {
+        wchar_t wa[600], wb[600];
+        ok = MultiByteToWideChar(CP_UTF8, 0, tmp, -1, wa, 600) > 0 && MultiByteToWideChar(CP_UTF8, 0, path, -1, wb, 600) > 0 &&
+             MoveFileExW(wa, wb, MOVEFILE_REPLACE_EXISTING) != 0;
+    }
+#else
+    ok = ok && rename(tmp, path) == 0;
+#endif
+    if (!ok) remove(tmp);
+    return ok ? PSYGFX_OK : PSYGFX_ERR_ARG;
+}
+
+PSYGFX_API const psygfx_cache* psygfx_file_cache_init(psygfx_file_cache* fc, const char* dir) {
+    size_t n;
+    if (!fc || !dir || !dir[0]) return NULL;
+    n = strlen(dir);
+    if (n >= sizeof fc->dir) return NULL;
+    memset(fc, 0, sizeof *fc);
+    memcpy(fc->dir, dir, n + 1);
+    while (n > 1 && (fc->dir[n - 1] == '/' || fc->dir[n - 1] == '\\')) fc->dir[--n] = '\0';
+    fc->cache.load = psygfx__fc_load;
+    fc->cache.store = psygfx__fc_store;
+    fc->cache.user = fc;
+    return &fc->cache;
 }
 
 PSYGFX_API void psygfx_reset_state(psygfx_gfx* g) {
@@ -3844,8 +4864,16 @@ PSYGFX_API psygfx_stim psygfx_shape(const psygfx_shape_desc* d) {
     for (i = 0; i < 4; i++) s.shape_p[i] = d->shape_p[i];
     if (d->shape == PSYGFX_POLYGON && d->vertices) {
         int n = (int)d->shape_p[0];
+        float mx = 0.0f, my = 0.0f;
         if (n > 16) n = 16;
-        for (i = 0; i < 2 * n; i++) s.p[i] = d->vertices[i];
+        for (i = 0; i < 2 * n; i++) {
+            s.p[i] = d->vertices[i];
+            if (i % 2 == 0 && fabsf(s.p[i]) > mx) mx = fabsf(s.p[i]);
+            if (i % 2 == 1 && fabsf(s.p[i]) > my) my = fabsf(s.p[i]);
+        }
+        /* no box: the vertices' own (they are from its center), so the zero
+         * default draws the polygon given */
+        if (d->w == 0.0f && d->h == 0.0f) { s.w = 2.0f * mx; s.h = 2.0f * my; }
     }
     s.stroke = d->stroke; s.stroke_align = (uint8_t)d->stroke_align; s.join = (uint8_t)d->join;
     s.miter_limit = d->miter_limit; s.mask = d->mask; s.group = d->group;
@@ -3882,7 +4910,7 @@ PSYGFX_API psygfx_stim psygfx_glyphs(const psygfx_glyphs_desc* d) {
     s.shape = PSYGFX_MASK_TEX;
     if (!d) return s;
     psygfx__align(&s, d->place, d->anchor);
-    s.mask = d->atlas; s.buf = d->buf; s.count = d->count;
+    s.mask = d->atlas; s.buf = d->buf; s.count = d->count; s.first = d->first;
     s.shape_p[0] = d->scale;   /* units per atlas texel */
     s.x = d->x; s.y = d->y; s.w = d->w; s.h = d->h; s.ori = d->ori;
     s.edge = (uint16_t)d->edge; s.edge_width = d->edge_width;
@@ -3905,6 +4933,7 @@ PSYGFX_API psygfx_stim psygfx_grating(const psygfx_grating_desc* d) {
     s.shape = (uint16_t)d->aperture; s.edge = (uint16_t)d->edge; s.edge_width = d->edge_width;
     psygfx__copy3(s.dir, d->dir);
     s.stroke = d->stroke; s.stroke_align = (uint8_t)d->stroke_align; s.mask = d->mask; s.group = d->group;
+    memcpy(s.shape_p, d->shape_p, sizeof s.shape_p);
     return s;
 }
 
@@ -3931,10 +4960,13 @@ PSYGFX_API psygfx_stim psygfx_dots(const psygfx_dots_desc* d) {
     if (!d) return s;
     psygfx__align(&s, d->place, d->anchor);
     s.buf = d->buf; s.count = d->count; s.x = d->x; s.y = d->y; s.ori = d->ori;
+    s.first = d->first;
     s.dot_size = d->dot_size; s.edge = (uint16_t)d->edge; s.edge_width = d->edge_width;
     psygfx__copy3(s.color, d->color);
     if (d->opacity != 0.0f) s.opacity = d->opacity;
-    s.shape = (uint16_t)(d->aperture == PSYGFX_RECT || d->aperture == PSYGFX_CIRCLE ? d->aperture : PSYGFX_NO_APERTURE);
+    /* RECT is aperture 0: with no box it is the zero default, no aperture
+     * (v0.3 and before drew nothing then) */
+    s.shape = (uint16_t)((d->aperture == PSYGFX_RECT && d->w > 0.0f) || d->aperture == PSYGFX_CIRCLE ? d->aperture : PSYGFX_NO_APERTURE);
     s.w = d->w; s.h = d->h ? d->h : d->w;
     s.stroke = d->stroke; s.stroke_align = (uint8_t)d->stroke_align; s.group = d->group;
     return s;
@@ -3962,6 +4994,7 @@ PSYGFX_API psygfx_stim psygfx_image(const psygfx_gfx* g, const psygfx_image_desc
     }
     if (d->modulation) s.flags |= PSYGFX_STIM_MODULATION;
     if (d->add) s.flags |= PSYGFX_STIM_ADD;
+    if (d->premultiplied) s.flags |= PSYGFX_STIM_PREMULTIPLIED;
     if (d->linear) s.flags |= PSYGFX_STIM_LINEAR;
     if (d->contrast != 0.0f) s.contrast = d->contrast;
     if (d->opacity != 0.0f) s.opacity = d->opacity;
@@ -3983,6 +5016,7 @@ PSYGFX_API psygfx_stim psygfx_noise(const psygfx_noise_desc* d) {
     s.shape = (uint16_t)d->aperture; s.edge = (uint16_t)d->edge; s.edge_width = d->edge_width;
     psygfx__copy3(s.dir, d->dir);
     s.stroke = d->stroke; s.stroke_align = (uint8_t)d->stroke_align; s.mask = d->mask; s.group = d->group;
+    memcpy(s.shape_p, d->shape_p, sizeof s.shape_p);
     return s;
 }
 
@@ -4000,6 +5034,7 @@ PSYGFX_API psygfx_stim psygfx_user(const psygfx_user_desc* d) {
     psygfx__copy3(s.dir, d->dir);
     if (d->p) for (i = 0; i < d->n_p && i < 32; i++) s.p[i] = d->p[i];
     s.stroke = d->stroke; s.stroke_align = (uint8_t)d->stroke_align; s.mask = d->mask; s.group = d->group;
+    memcpy(s.shape_p, d->shape_p, sizeof s.shape_p);
     return s;
 }
 
@@ -4097,6 +5132,7 @@ PSYGFX_API int psygfx_begin(psygfx_gfx* g, const psyscr_frame* f) {
     g->n_blocks = 0;
     g->clipped = 0;
     g->n_targets = 0;
+    g->inst_used = 0;
     g->in_target = 0;
     g->cur_target_tex = 0;
     g->cur_w = g->w; g->cur_h = g->h; g->cur_top = 0;
@@ -4507,6 +5543,35 @@ static int32_t psygfx__blend_of(const psygfx_stim* s) {
     }
 }
 
+/* The video program's constants (VIDEO), b[36..59] of an IMAGE's block:
+ * range, matrix, kind, transfer, siting, chroma filter, and the primaries'
+ * matrix into device RGB (relative: the source's D65 white at Y = 1 goes to
+ * the display's white, no chromatic adaptation: psycol_prim_to_rgb()). */
+static void psygfx__video_consts(const psygfx_gfx* g, const psygfx__res* r, float* b) {
+    const psygfx_encoding* e = &r->enc;
+    double kr = 0.299, kb = 0.114, kg, m[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    int lim = e->range == PSYGFX_RANGE_LIMITED;
+    if (e->matrix == PSYGFX_MATRIX_BT709) { kr = 0.2126; kb = 0.0722; }
+    else if (e->matrix == PSYGFX_MATRIX_BT2020) { kr = 0.2627; kb = 0.0593; }
+    kg = 1.0 - kr - kb;
+    b[36] = (float)(lim ? 255.0 / 219.0 : 1.0);  b[37] = (float)(lim ? -16.0 / 219.0 : 0.0);
+    b[38] = (float)(lim ? 255.0 / 224.0 : 1.0);  b[39] = (float)(lim ? -128.0 / 224.0 : -128.0 / 255.0);
+    b[40] = (float)(2.0 * (1.0 - kr));           b[41] = (float)(2.0 * kb * (1.0 - kb) / kg);
+    b[42] = (float)(2.0 * kr * (1.0 - kr) / kg); b[43] = (float)(2.0 * (1.0 - kb));
+    b[44] = (float)(r->format == PSYGFX_NV12 ? 1 : (r->format == PSYGFX_I420 ? 2 : 0));
+    b[45] = (float)e->transfer;
+    b[46] = e->siting == PSYGFX_SITING_LEFT || e->siting == PSYGFX_SITING_TOP_LEFT ? 0.25f : 0.0f;
+    b[47] = e->siting == PSYGFX_SITING_TOP_LEFT ? 0.25f : 0.0f;
+    b[48] = (float)e->chroma_nearest;
+    if (e->primaries > PSYGFX_PRIM_DEVICE && e->primaries <= PSYGFX_PRIM_BT2020 && g->has_xyz) {
+        double mp[9];   /* relative, no adaptation: the source's D65 white to the display's white */
+        if (psycol_prim_to_rgb(&g->color, e->primaries, mp, NULL) == PSYCOL_OK) memcpy(m, mp, sizeof mp);
+    }
+    b[49] = (float)m[0]; b[50] = (float)m[1]; b[51] = (float)m[2];
+    b[52] = (float)m[3]; b[53] = (float)m[4]; b[54] = (float)m[5]; b[55] = (float)m[6];
+    b[56] = (float)m[7]; b[57] = (float)m[8];
+}
+
 static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psygfx__cmd* cmd, int* why) {
     const float k = psygfx__scale(s), ppu = g->ppu * k;
     float hx, hy, sp[3], ew = s->edge_width, ml = 0.0f, mrect[4] = { 0, 0, 0, 0 };
@@ -4543,19 +5608,20 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
     switch (s->kind) {
     case PSYGFX_SHAPE:
         if (psygfx__is_glyphs(s)) {
-            if (s->buf.id > PSYGFX_MAX_BUFFERS || !g->buf[s->buf.id - 1].used ||
-                (size_t)s->count * sizeof(psygfx_glyph) > (size_t)g->buf[s->buf.id - 1].w)
+            if (s->buf.id < 1 || s->buf.id > PSYGFX_MAX_BUFFERS || !g->buf[s->buf.id - 1].used ||
+                ((size_t)s->first + s->count) * sizeof(psygfx_glyph) > (size_t)g->buf[s->buf.id - 1].w)
                 return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a glyph run's buffer holds fewer than count glyphs");
             pipe = g->builtin[PSYGFX__B_GLYPHS];
             cmd->inst = g->buf[s->buf.id - 1].bid;
             cmd->count = s->count;
+            cmd->inst_off = s->first * (uint32_t)sizeof(psygfx_glyph);
         } else {
             pipe = g->builtin[PSYGFX__B_SHAPE];
         }
         break;
     case PSYGFX_GRATING: pipe = g->builtin[PSYGFX__B_GRATING]; mod = 1; break;
     case PSYGFX_GABOR:
-        if (s->sigma <= 0) return 0;
+        if (!(s->sigma > 0)) return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a gabor needs sigma > 0");
         pipe = g->builtin[PSYGFX__B_GABOR];
         mod = 1;
         break;
@@ -4563,12 +5629,22 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
     case PSYGFX_IMAGE: {
         const psygfx__res* r;
         float sx, sy, sw, sh;
-        if (s->tex.id < 1 || s->tex.id > PSYGFX_MAX_TEXTURES || !g->tex[s->tex.id - 1].used) return 0;
+        if (s->tex.id < 1 || s->tex.id > PSYGFX_MAX_TEXTURES || !g->tex[s->tex.id - 1].used)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "an image needs a texture of this gfx (tex)");
         r = &g->tex[s->tex.id - 1];
+        if (r->view) r = &g->tex[r->view - 1];   /* rebound (VIDEO) */
         mod = (s->flags & PSYGFX_STIM_MODULATION) != 0;
-        pipe = g->builtin[(s->flags & PSYGFX_STIM_ADD) ? PSYGFX__B_IMAGE_ADD
-                          : (mod ? PSYGFX__B_IMAGE_MOD : PSYGFX__B_IMAGE_COLOR)];
-        if (r->format == PSYGFX_R16UI) cmd->tex[3] = r->bid; else cmd->tex[0] = r->bid;
+        if (r->enc.matrix) {
+            if (mod || (s->flags & PSYGFX_STIM_ADD))
+                return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "an encoded (video) texture draws as a color image only");
+            pipe = g->video_pipe;
+            cmd->tex[0] = r->bid; cmd->tex[2] = r->plane_bid[0]; cmd->tex[4] = r->plane_bid[1]; cmd->tex[5] = g->eotf;
+            psygfx__video_consts(g, r, b);
+        } else {
+            pipe = g->builtin[(s->flags & PSYGFX_STIM_ADD) ? PSYGFX__B_IMAGE_ADD
+                              : (mod ? PSYGFX__B_IMAGE_MOD : PSYGFX__B_IMAGE_COLOR)];
+            if (r->format == PSYGFX_R16UI) cmd->tex[3] = r->bid; else cmd->tex[0] = r->bid;
+        }
         b[28] = (r->format == PSYGFX_R8 || r->format == PSYGFX_R16F || r->format == PSYGFX_R32F ||
                  r->format == PSYGFX_R16UI) ? 1.0f : (r->format == PSYGFX_RG8 ? 2.0f : 4.0f);
         b[29] = r->format == PSYGFX_R16UI ? 2.0f : ((s->flags & PSYGFX_STIM_LINEAR) ? 1.0f : 0.0f);
@@ -4577,24 +5653,46 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
         sx = s->src[0]; sy = s->src[1]; sw = s->src[2]; sh = s->src[3];
         if (!(sw > 0.0f && sh > 0.0f)) { sx = 0; sy = 0; sw = (float)r->w; sh = (float)r->h; }
         sx = floorf(sx); sy = floorf(sy); sw = floorf(sw); sh = floorf(sh);
-        if (sx < 0 || sy < 0 || sw < 1 || sh < 1 || sx + sw > (float)r->w || sy + sh > (float)r->h) return 0;
+        if (sx < 0 || sy < 0 || sw < 1 || sh < 1 || sx + sw > (float)r->w || sy + sh > (float)r->h)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "the image's src rectangle is not inside its texture");
         b[32] = sx; b[33] = sy; b[34] = sw; b[35] = sh;
         break;
     }
     case PSYGFX_DOTS:
-        if (s->buf.id < 1 || s->buf.id > PSYGFX_MAX_BUFFERS || !g->buf[s->buf.id - 1].used || s->count == 0) return 0;
-        if ((size_t)s->count * 8u > (size_t)g->buf[s->buf.id - 1].w) return 0;
+        if (s->buf.id < 1 || s->buf.id > PSYGFX_MAX_BUFFERS || !g->buf[s->buf.id - 1].used)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a dot field needs a buffer of this gfx (buf)");
+        if (((size_t)s->first + s->count) * 8u > (size_t)g->buf[s->buf.id - 1].w)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a dot field's buffer holds fewer than first + count x, y pairs");
+        if (!(s->dot_size > 0.0f)) return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a dot field needs dot_size > 0 (px)");
+        if ((shape == PSYGFX_RECT || shape == PSYGFX_CIRCLE) && !(hx > 0.0f && hy > 0.0f))
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a dot field's RECT or CIRCLE aperture has no area: set w (and h), or no aperture");
         pipe = g->builtin[PSYGFX__B_DOTS];
         cmd->inst = g->buf[s->buf.id - 1].bid;
         cmd->count = s->count;
+        cmd->inst_off = s->first * 8u;
         break;
     case PSYGFX_USER:
-        if (s->pipe.id < 1 || s->pipe.id > PSYGFX_MAX_PIPELINES || !g->pipe[s->pipe.id - 1].used) return 0;
+        if (s->pipe.id < 1 || s->pipe.id > PSYGFX_MAX_PIPELINES || !g->pipe[s->pipe.id - 1].used)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a user stimulus needs a pipeline of this gfx (pipe)");
         pipe = g->pipe[s->pipe.id - 1].bid;
         mod = g->pipe[s->pipe.id - 1].flags != PSYGFX_COLOR;
         break;
     default:
         return 0;
+    }
+    /* a stimulus that can cover no pixel is refused, not drawn as nothing
+     * (v0.3's dot fields drew nothing by their zero default) */
+    if (s->kind != PSYGFX_DOTS && !psygfx__is_glyphs(s)) {
+        char msg[200];
+        const char* no = NULL;
+        if (!(hx > 0.0f && hy > 0.0f)) no = shape == PSYGFX_LINE ? "a LINE needs a length w and a width shape_p[0] > 0" : "its box has no area: set w and h";
+        else if (shape == PSYGFX_ANNULUS && !(sp[0] < hx)) no = "an ANNULUS's inner radius shape_p[0] reaches its outer radius";
+        else if (shape == PSYGFX_CROSS && !(sp[0] > 0.0f)) no = "a CROSS needs an arm width shape_p[0] > 0";
+        else if (shape == PSYGFX_POLYGON && !(sp[2] >= 3.0f && sp[2] <= 16.0f)) no = "a POLYGON has 3 to 16 vertices (shape_p[0])";
+        if (no) {
+            snprintf(msg, sizeof msg, "%s; it would cover no pixel (box %.4g x %.4g px)", no, 2.0 * hx, 2.0 * hy);
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, msg);
+        }
     }
     if (mod && s->blend != PSYGFX_BLEND_MODE_OVER)
         return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a modulation adds: blend is for color stimuli");
@@ -4603,10 +5701,12 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
     if (shape == PSYGFX_MASK_TEX) {
         const psygfx__res* m;
         double pxpt, reach, out_r, in_r, er = psygfx__edge_reach(s);
-        if (s->kind == PSYGFX_DOTS || s->mask.id < 1 || s->mask.id > PSYGFX_MAX_TEXTURES || !g->tex[s->mask.id - 1].used) return 0;
+        if (s->kind == PSYGFX_DOTS || s->mask.id < 1 || s->mask.id > PSYGFX_MAX_TEXTURES || !g->tex[s->mask.id - 1].used)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "MASK_TEX needs a texture of this gfx (mask); dots have no mask");
         m = &g->tex[s->mask.id - 1];
         mask_kind = m->sdf ? m->sdf : PSYGFX_SDF_DIST;
-        if (mask_kind == PSYGFX_SDF_DIST && m->format != PSYGFX_R16F && m->format != PSYGFX_R32F) return 0;
+        if (mask_kind == PSYGFX_SDF_DIST && m->format != PSYGFX_R16F && m->format != PSYGFX_R32F)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a distance mask is R16F or R32F");
         if (mask_kind != PSYGFX_SDF_DIST && !(m->sdf_range > 0.0f && (m->format == PSYGFX_RGBA8 || m->format == PSYGFX_RGBA16F ||
                                                                     m->format == PSYGFX_RGBA32F)))
             return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "an MSDF or MTSDF mask is RGBA with an sdf_range");
@@ -4628,7 +5728,8 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
                     return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "the mask's src rectangle is not inside its texture");
             }
             /* one scale on both axes, or the distance would be wrong */
-            if (fabs((double)hx / hy - (double)mrect[2] / mrect[3]) > 1e-3 * ((double)mrect[2] / mrect[3])) return 0;
+            if (!(hy > 0.0f) || fabs((double)hx / hy - (double)mrect[2] / mrect[3]) > 1e-3 * ((double)mrect[2] / mrect[3]))
+                return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a mask's box must have its texture's (or src rectangle's) aspect ratio");
             pxpt = 2.0 * hx / mrect[2];
         }
         /* The range rule: the atlas encodes distances to range / 2 texels;
@@ -4639,7 +5740,17 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
         in_r = (s->stroke > 0.0f && s->stroke_align != PSYGFX_STROKE_OUTSIDE ?
                 (s->stroke_align == PSYGFX_STROKE_INSIDE ? s->stroke : 0.5 * s->stroke) : 0.0) - s->offset + er;
         reach = out_r > in_r ? out_r : in_r;
-        if (mask_kind != PSYGFX_SDF_DIST && reach > (0.5 * m->sdf_range - 1.5) * pxpt) {
+        /* A DIST atlas holds true distances inside, so only the outside reach
+         * meets its padding (sdf_range = twice the padding). A DIST mask with
+         * no sdf_range is v0.2's whole-texture mask, unchecked; rectangles and
+         * glyph runs on one must state it. */
+        if (mask_kind == PSYGFX_SDF_DIST) {
+            if (!(m->sdf_range > 0.0f) && (psygfx__is_glyphs(s) || (s->kind != PSYGFX_IMAGE && s->src[2] > 0.0f && s->src[3] > 0.0f)))
+                return psygfx__refuse(g, why, PSYGFX_ERR_RANGE, "a DIST atlas drawn by rectangles or as a glyph run needs "
+                                      "texture_desc.sdf_range (twice its padding in texels), so the range rule can be checked");
+            reach = m->sdf_range > 0.0f ? out_r : 0.0;
+        }
+        if (m->sdf_range > 0.0f && reach > (0.5 * m->sdf_range - 1.5) * pxpt) {
             char msg[240];
             snprintf(msg, sizeof msg, "the atlas range %.3g texels is too small: the edge, stroke and offset reach %.3g px "
                      "at %.4g px per texel, which needs a range of %.3g", (double)m->sdf_range, reach, pxpt, 2.0 * (reach / pxpt + 1.5));
@@ -4648,11 +5759,12 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
         cmd->tex[1] = m->bid;
     }
     if (s->kind != PSYGFX_DOTS && shape != PSYGFX_NO_APERTURE && shape != PSYGFX_MASK_TEX) {
-        if (psygfx__miter(s, shape, &ml) < 0) return 0;
+        if (psygfx__miter(s, shape, &ml) < 0)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "MITER is for RECT without a corner radius, CROSS and a convex POLYGON");
     }
     /* a target pass must not sample its own target */
     if (g->in_target)
-        for (i = 0; i < 4; i++)
+        for (i = 0; i < 6; i++)
             if (cmd->tex[i] && cmd->tex[i] == g->tex[g->cur_target_tex - 1].bid) { *why = PSYGFX_ERR_ORDER; return 0; }
     psygfx__place(g, s, b);                 /* xf */
     if (s->kind == PSYGFX_DOTS) {
@@ -4728,6 +5840,306 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
     return pipe;
 }
 
+static const char psygfx__body_image_video[] =
+    "uniform sampler2D psy_tex3;\n"   /* Cr (I420), unit 4 */
+    "uniform sampler2D psy_tex4;\n"   /* the display's transfer, 256 x 3, unit 5 */
+    "float psy_eotf_(float v, int tr, int ch) {\n"
+    "    if (tr == 1) {\n"
+    "        float x = v * 255.0;\n"
+    "        int i0 = min(int(x), 254);\n"
+    "        float a = texelFetch(psy_tex4, ivec2(i0, ch), 0).r, b = texelFetch(psy_tex4, ivec2(i0 + 1, ch), 0).r;\n"
+    "        return a + (b - a) * (x - float(i0));\n"
+    "    }\n"
+    "    if (tr == 2) return pow(v, 2.4);\n"
+    "    if (tr == 3) return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);\n"
+    "    if (tr == 5) return pow(v, 2.2);\n"
+    "    return v;\n"
+    "}\n"
+    /* Y' at the image point; chroma at the stated siting in its own plane
+     * (texel-edge coordinates c = L / 2 + offset), bilinear and clamped
+     * to the plane, or replicated; the matrix and range; R'G'B' clamped;
+     * the transfer; the primaries */
+    "vec4 psy_texel_(vec2 p) {\n"
+    "    vec2 r = vec2(p.x + psy_size.x, psy_size.y + p.y) / (2.0 * psy_size.xy);\n"
+    "    vec4 sr = psy_v[psy_i * 16 + 8], K = psy_v[psy_i * 16 + 9], C = psy_v[psy_i * 16 + 10];\n"
+    "    vec4 F = psy_v[psy_i * 16 + 11], M0 = psy_v[psy_i * 16 + 12], M1 = psy_v[psy_i * 16 + 13], M2 = psy_v[psy_i * 16 + 14];\n"
+    "    bool lin = psy_misc.y > 0.5;\n"
+    "    vec2 L = sr.xy + r * sr.zw;\n"
+    "    ivec2 t = ivec2(sr.xy) + clamp(ivec2(floor(r * sr.zw)), ivec2(0), ivec2(sr.zw) - 1);\n"
+    "    vec4 y = lin ? psy_bilinear(psy_tex0, L, sr) : texelFetch(psy_tex0, t, 0);\n"
+    "    int kind = int(F.x);\n"
+    "    vec3 e;\n"
+    "    float a = 1.0;\n"
+    "    if (kind == 0) { e = y.rgb * K.x + K.y; a = y.a; }\n"
+    "    else {\n"
+    "        vec2 Lc = lin ? L : vec2(t) + 0.5;\n"
+    "        vec2 c0 = floor(sr.xy * 0.5);\n"
+    "        vec4 cr = vec4(c0, ceil((sr.xy + sr.zw) * 0.5) - c0);\n"
+    "        vec2 q;\n"
+    "        if (M0.x > 0.5) {\n"
+    "            ivec2 n = clamp(ivec2(floor(Lc)) / 2, ivec2(cr.xy), ivec2(cr.xy + cr.zw) - 1);\n"
+    "            q = kind == 1 ? texelFetch(psy_tex2, n, 0).rg : vec2(texelFetch(psy_tex2, n, 0).r, texelFetch(psy_tex3, n, 0).r);\n"
+    "        } else {\n"
+    "            vec2 c = Lc * 0.5 + F.zw;\n"
+    "            q = kind == 1 ? psy_bilinear(psy_tex2, c, cr).rg : vec2(psy_bilinear(psy_tex2, c, cr).r, psy_bilinear(psy_tex3, c, cr).r);\n"
+    "        }\n"
+    "        float Y = y.r * K.x + K.y;\n"
+    "        q = q * K.z + K.w;\n"   /* Cb, Cr */
+    "        e = vec3(Y + C.x * q.y, Y - C.y * q.x - C.z * q.y, Y + C.w * q.x);\n"
+    "    }\n"
+    "    e = clamp(e, 0.0, 1.0);\n"
+    "    int tr = int(F.y);\n"
+    "    vec3 l = vec3(psy_eotf_(e.r, tr, 0), psy_eotf_(e.g, tr, 1), psy_eotf_(e.b, tr, 2));\n"
+    "    return vec4(dot(M0.yzw, l), dot(M1.xyz, l), dot(vec3(M1.w, M2.xy), l), a);\n"
+    "}\n";
+
+/* --- instances (INSTANCES) ------------------------------------------------------ */
+
+#define PSYGFX__I_ALL 0x7Fu
+
+/* The instanced program of a base program (backend id), 0 when none was
+ * made: built-in i, the video program, or a user's. */
+static uint32_t* psygfx__inst_slot(psygfx_gfx* g, uint32_t pipe) {
+    int i;
+    for (i = 0; i < PSYGFX__N_BUILTIN; i++) if (g->builtin[i] == pipe) return &g->inst_pipe[i];
+    if (g->video_pipe && g->video_pipe == pipe) return &g->inst_pipe[PSYGFX__N_BUILTIN];
+    for (i = 0; i < PSYGFX_MAX_PIPELINES; i++) if (g->pipe[i].used && g->pipe[i].bid == pipe) return &g->pipe_inst[i];
+    return NULL;
+}
+
+/* Makes the instanced program of base program pipe: its text with PSY_INST
+ * (and the palette going to dir for a modulation, a user body's own px). */
+static int psygfx__inst_program(psygfx_gfx* g, uint32_t pipe) {
+    uint32_t* slot = psygfx__inst_slot(g, pipe);
+    psygfx__prec r;
+    char defs[160];
+    char* body = NULL;
+    int mode, rc, i;
+    if (!slot) return PSYGFX_ERR_ARG;
+    if (*slot) return PSYGFX_OK;
+    for (i = 0; i < PSYGFX__N_BUILTIN && g->builtin[i] != pipe; i++) {}
+    if (i < PSYGFX__N_BUILTIN) {
+        mode = psygfx__builtins[i].mode;
+        body = psygfx__builtin_body(i);
+        snprintf(defs, sizeof defs, "%s#define PSY_INST 1\n%s", psygfx__builtins[i].defs,
+                 mode == PSYGFX_MODULATION ? "#define PSY_INST_MOD 1\n" : "");
+    } else if (pipe == g->video_pipe) {
+        size_t n = sizeof psygfx__body_image_video + sizeof psygfx__body_image_color;
+        mode = PSYGFX_COLOR;
+        body = (char*)malloc(n);
+        if (body) snprintf(body, n, "%s%s", psygfx__body_image_video, psygfx__body_image_color);
+        snprintf(defs, sizeof defs, "#define PSY_VIDEO 1\n#define PSY_INST 1\n");
+    } else {
+        for (i = 0; i < PSYGFX_MAX_PIPELINES && !(g->pipe[i].used && g->pipe[i].bid == pipe); i++) {}
+        if (i == PSYGFX_MAX_PIPELINES || !g->pipe_body[i]) return PSYGFX_ERR_FULL;
+        mode = g->pipe[i].flags;
+        body = (char*)malloc(strlen(g->pipe_body[i]) + 1);
+        if (body) memcpy(body, g->pipe_body[i], strlen(g->pipe_body[i]) + 1);
+        snprintf(defs, sizeof defs, "#define PSY_INST 1\n#define PSY_INST_USER 1\n%s",
+                 mode == PSYGFX_MODULATION ? "#define PSY_INST_MOD 1\n" : "");
+    }
+    if (!body) return PSYGFX_ERR_FULL;
+    rc = psygfx__make_pipe(g, defs, body, mode, 2, 0, slot, "instanced", &r);
+    free(body);
+    g->be->reset(g->bctx);
+    return rc < 0 ? rc : PSYGFX_OK;
+}
+
+/* The element records' staging and their buffers, at the first instanced
+ * stimulus: an open without instances allocates nothing for them. */
+static int psygfx__inst_memory(psygfx_gfx* g) {
+    int i;
+    if (g->inst_staging) return PSYGFX_OK;
+    g->inst_staging = (unsigned char*)malloc((size_t)g->inst_cap * sizeof(psygfx_inst));
+    if (!g->inst_staging) return PSYGFX_ERR_FULL;
+    for (i = 0; i < PSYGFX__UBO_RING; i++)
+        if (g->be->buffer_make(g->bctx, PSYGFX_BUFFER_INSTANCE, (size_t)g->inst_cap * sizeof(psygfx_inst), &g->inst_buf[i]) < 0) {
+            free(g->inst_staging);
+            g->inst_staging = NULL;
+            return PSYGFX_ERR_GL;
+        }
+    return PSYGFX_OK;
+}
+
+/* What an element may set, for this template: NULL when it can be drawn. */
+static const char* psygfx__inst_refusal(const psygfx_gfx* g, const psygfx_stim* s, uint32_t f) {
+    if (s->kind == PSYGFX_DOTS) return "DOTS are instanced already: a dot field cannot be a template";
+    if (psygfx__is_glyphs(s)) return "a glyph run is instanced already: it cannot be a template";
+    if (s->kind != PSYGFX_SHAPE && s->kind != PSYGFX_GRATING && s->kind != PSYGFX_GABOR && s->kind != PSYGFX_NOISE &&
+        s->kind != PSYGFX_IMAGE && s->kind != PSYGFX_USER) return "the template's kind cannot be instanced";
+    if (f & ~PSYGFX__I_ALL) return "inst_fields holds bits that are not PSYGFX_I_*";
+    if ((f & PSYGFX_I_PHASE) && s->kind != PSYGFX_GRATING && s->kind != PSYGFX_GABOR) return "PSYGFX_I_PHASE is for GRATING and GABOR";
+    if ((f & PSYGFX_I_SCALE) && s->kind == PSYGFX_NOISE) return "PSYGFX_I_SCALE is not for NOISE: its check is px";
+    if ((f & PSYGFX_I_SCALE) && s->dash[0] > 0.0f) return "PSYGFX_I_SCALE with dashes: the dash and gap are px";
+    if ((f & PSYGFX_I_SCALE) && s->fx && (s->fx->flags & PSYGFX_FX_EXACT_BLUR)) return "PSYGFX_I_SCALE with EXACT_BLUR";
+    if ((f & PSYGFX_I_COLOR) && (!s->palette || s->n_palette < 1 || s->n_palette > PSYGFX_MAX_PALETTE))
+        return "PSYGFX_I_COLOR needs a palette of 1 to PSYGFX_MAX_PALETTE (16) rgb triples";
+    if (!s->inst || s->n_inst < 1) return "no elements";
+    if ((int32_t)s->n_inst > g->inst_cap) return "more elements than desc.max_instances";
+    return NULL;
+}
+
+/* What a refused instanced stimulus points at: no elements, so it draws
+ * nothing, never its template alone. */
+static const psygfx_inst psygfx__no_inst = { 0, 0, 0, 0, 0, 0, 0, 0 };
+
+PSYGFX_API psygfx_stim psygfx_instances(psygfx_gfx* g, const psygfx_stim* tmpl, const psygfx_instances_desc* d) {
+    psygfx_stim s;
+    psygfx__cmd cmd;
+    float blk[16 * 64];
+    const char* why;
+    uint32_t pipe;
+    int rc;
+    memset(&s, 0, sizeof s);
+    s.inst = &psygfx__no_inst;
+    if (!g || !g->open || !tmpl || !d) return s;
+    s = *tmpl;
+    s.inst = d->inst ? d->inst : &psygfx__no_inst;
+    s.inst_fields = d->fields ? d->fields : PSYGFX_I_XY;
+    s.palette = d->palette;
+    s.n_palette = d->n_palette > 0 ? (uint32_t)d->n_palette : 0u;
+    s.n_inst = d->n > 0 ? (uint32_t)d->n : 0u;
+    g->error[0] = '\0';
+    if (g->in_frame) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: psygfx_instances() inside begin..end"); goto fail; }
+    if ((why = psygfx__inst_refusal(g, &s, s.inst_fields)) != NULL) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: %s", why);
+        goto fail;
+    }
+    /* the template packed as it will draw: its program, and one block */
+    pipe = psygfx__pack(g, tmpl, blk, &cmd, &rc);
+    if (!pipe) { if (!g->error[0]) psygfx__set_error(g->error, sizeof g->error, "psy_gfx: the template cannot be drawn"); goto fail; }
+    if (cmd.nblk != 1) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a vector stimulus whose data fills more than its block cannot be a template");
+        goto fail;
+    }
+    if (psygfx__sync(g) < 0 || psygfx__inst_memory(g) < 0 || psygfx__inst_program(g, pipe) < 0) {
+        if (!g->error[0]) psygfx__set_error(g->error, sizeof g->error, "psy_gfx: the instanced program or its buffers");
+        goto fail;
+    }
+    return s;
+fail:
+    s.n_inst = 0;
+    return s;
+}
+
+PSYGFX_API void psygfx_inst_grid(psygfx_inst* a, int nx, int ny, float dx, float dy) {
+    int i, j;
+    if (!a || nx < 1 || ny < 1) return;
+    for (j = 0; j < ny; j++)
+        for (i = 0; i < nx; i++) {
+            psygfx_inst* e = &a[j * nx + i];
+            memset(e, 0, sizeof *e);
+            e->x = ((float)i - 0.5f * (float)(nx - 1)) * dx;
+            e->y = ((float)j - 0.5f * (float)(ny - 1)) * dy;
+            e->contrast = e->scale = e->gate = 1.0f;
+        }
+}
+
+/* Whether an element's palette entry is a dir (a modulation) or a color. */
+static int psygfx__inst_mod(const psygfx_gfx* g, const psygfx_stim* s) {
+    if (s->kind == PSYGFX_GRATING || s->kind == PSYGFX_GABOR || s->kind == PSYGFX_NOISE) return 1;
+    if (s->kind == PSYGFX_IMAGE) return (s->flags & PSYGFX_STIM_MODULATION) && !(s->flags & PSYGFX_STIM_ADD);
+    if (s->kind == PSYGFX_USER) return s->pipe.id >= 1 && s->pipe.id <= PSYGFX_MAX_PIPELINES && g->pipe[s->pipe.id - 1].flags == PSYGFX_MODULATION;
+    return 0;
+}
+
+/* Element i as a stimulus of its own (hit tests, the test's references):
+ * the template in a one-point group at the element's anchor, turned and
+ * scaled there, with its fields applied. */
+static void psygfx__inst_elem(const psygfx_gfx* g, const psygfx_stim* s, int i, psygfx_stim* e, psygfx_group* gr) {
+    const psygfx_inst* it = &s->inst[i];
+    const uint32_t f = s->inst_fields;
+    const double ppu = (double)g->ppu * psygfx__scale(s);
+    double a[2], m[2], c, sn, ax, ay;
+    psygfx__frame_px(g, s, (double)g->w, (double)g->h, a, m, &c, &sn);
+    ax = a[0]; ay = a[1];
+    if (f & PSYGFX_I_XY) { ax += ppu * ((double)it->x * c - (double)it->y * sn); ay += ppu * ((double)it->x * sn + (double)it->y * c); }
+    *e = *s;
+    e->inst = NULL; e->n_inst = 0;
+    memset(gr, 0, sizeof *gr);
+    gr->place = PSYGFX_TOP_LEFT;
+    gr->visible = 1.0f;
+    gr->x = (float)(ax / g->ppu); gr->y = (float)(ay / g->ppu);
+    gr->scale = (float)(psygfx__scale(s) * ((f & PSYGFX_I_SCALE) ? (it->scale > 0.0f ? it->scale : 0.0f) : 1.0f));
+    gr->opacity = s->group ? s->group->opacity : 1.0f;
+    e->group = gr;
+    e->place = PSYGFX_CENTER;
+    e->x = e->y = 0.0f;
+    e->ori = (float)(atan2(sn, c) * (180.0 / 3.14159265358979323846) + ((f & PSYGFX_I_ORI) ? it->ori : 0.0f));
+    if (f & PSYGFX_I_PHASE) e->phase += it->phase;
+    if (f & PSYGFX_I_CONTRAST) { e->contrast *= it->contrast; e->opacity *= it->contrast; }
+    if (f & PSYGFX_I_GATE) e->gate *= it->gate;
+    if ((f & PSYGFX_I_COLOR) && s->palette && s->n_palette) {
+        double u = it->color < 0.0f ? 0.0 : (it->color > (float)(s->n_palette - 1) ? (double)(s->n_palette - 1) : it->color);
+        int i0 = (int)floor(u), i1 = i0 + 1 < (int)s->n_palette ? i0 + 1 : i0, k;
+        double fr = u - i0;
+        float* dst = psygfx__inst_mod(g, s) ? e->dir : (s->kind == PSYGFX_IMAGE ? e->tint : e->color);
+        for (k = 0; k < 3; k++) dst[k] = (float)((1.0 - fr) * s->palette[3 * i0 + k] + fr * s->palette[3 * i1 + k]);
+    }
+}
+
+PSYGFX_API int psygfx_hit_index(const psygfx_gfx* g, const psygfx_stim* s, float px, float py) {
+    int i;
+    if (!g || !g->open || !s || !s->inst || !(s->visible >= 0.5f)) return -1;
+    for (i = (int)s->n_inst - 1; i >= 0; i--) {
+        psygfx_stim e;
+        psygfx_group gr;
+        psygfx__inst_elem(g, s, i, &e, &gr);
+        if (!(e.gate != 0.0f)) continue;
+        if (psygfx_hit(g, &e, px, py)) return i;
+    }
+    return -1;
+}
+
+PSYGFX_API void psygfx_inst_resolve(const psygfx_gfx* g, const psygfx_stim* s, int i, float* x, float* y) {
+    psygfx_stim e;
+    psygfx_group gr;
+    if (!g || !s || !s->inst || i < 0 || i >= (int)s->n_inst) { if (x) *x = 0.0f; if (y) *y = 0.0f; return; }
+    psygfx__inst_elem(g, s, i, &e, &gr);
+    psygfx_resolve(g, &e, x, y);
+}
+
+/* draw()'s part: the instanced program, block 1 (the anchor and the
+ * fields), block 2 (the palette), and the elements copied for end(). */
+static uint32_t psygfx__inst_draw(psygfx_gfx* g, const psygfx_stim* s, float* b, psygfx__cmd* cmd, uint32_t pipe, int* why) {
+    const uint32_t f = s->inst_fields;
+    uint32_t* slot = psygfx__inst_slot(g, pipe);
+    const char* no = psygfx__inst_refusal(g, s, f);
+    double a[2], m[2], c, sn;
+    float hx, hy, sp[3];
+    size_t bytes;
+    uint32_t k;
+    if (no) return psygfx__refuse(g, why, PSYGFX_ERR_ARG, no);
+    if (!slot || !*slot || !g->inst_staging)
+        return psygfx__refuse(g, why, PSYGFX_ERR_ORDER, "psygfx_instances() makes the instanced program: make the stimulus "
+                                                        "with it again after changing the template's kind or image");
+    if (cmd->nblk != 1)
+        return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a vector stimulus whose data fills more than its block cannot be a template");
+    bytes = (size_t)s->n_inst * sizeof(psygfx_inst);
+    if ((size_t)g->inst_used + bytes > (size_t)g->inst_cap * sizeof(psygfx_inst))
+        return psygfx__refuse(g, why, PSYGFX_ERR_FULL, "the frame's elements pass desc.max_instances: none of this draw is drawn");
+    psygfx__frame_px(g, s, (double)g->cur_w, (double)g->cur_h, a, m, &c, &sn);
+    psygfx__geom(g, s, &hx, &hy, sp);
+    memset(b + 64, 0, 2 * PSYGFX__BLOCK);
+    b[64] = (float)a[0];
+    b[65] = g->cur_top ? (float)a[1] : (float)((double)g->cur_h - a[1]);
+    b[66] = (float)((0.5 - (double)s->ax) * 2.0 * hx);
+    b[67] = (float)((0.5 - (double)s->ay) * 2.0 * hy);
+    b[68] = g->ppu * psygfx__scale(s);
+    b[69] = (float)f;
+    b[70] = (float)s->n_palette;
+    if ((f & PSYGFX_I_COLOR) && s->palette)
+        for (k = 0; k < s->n_palette; k++) { b[128 + 4 * k] = s->palette[3 * k]; b[129 + 4 * k] = s->palette[3 * k + 1]; b[130 + 4 * k] = s->palette[3 * k + 2]; }
+    memcpy(g->inst_staging + g->inst_used, s->inst, bytes);
+    cmd->inst = g->inst_buf[g->ubo_i];
+    cmd->inst_off = (uint32_t)g->inst_used;
+    cmd->count = s->n_inst;
+    cmd->nblk = 3;
+    g->inst_used += (int32_t)bytes;
+    *why = PSYGFX_OK;
+    return *slot;
+}
+
 PSYGFX_API int psygfx_draw(psygfx_gfx* g, const psygfx_stim* s) {
     psygfx__cmd* cmd;
     uint32_t pipe;
@@ -4737,11 +6149,19 @@ PSYGFX_API int psygfx_draw(psygfx_gfx* g, const psygfx_stim* s) {
     if (!g->in_frame) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ORDER; }
     if (!s) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ARG; }
     if (!(s->visible >= 0.5f) || (s->group && !(s->group->visible >= 0.5f))) { PSYRT_ZONE_END(z); return PSYGFX_OK; }
+    /* an empty dot field, glyph run or element array is legal and draws
+     * nothing (a refused psygfx_instances() gives one) */
+    if (((s->kind == PSYGFX_DOTS || psygfx__is_glyphs(s)) && s->count == 0) || (s->inst && s->n_inst == 0)) {
+        PSYRT_ZONE_END(z);
+        return PSYGFX_OK;
+    }
     if (g->n_cmds >= g->max_draws || g->n_blocks >= g->max_draws) { PSYRT_ZONE_END(z); return PSYGFX_ERR_FULL; }
     cmd = &g->cmds[g->n_cmds];
     /* the staging has 16 blocks of slack, so a vector stimulus packs
      * before its blocks are counted */
     pipe = psygfx__pack(g, s, (float*)(g->staging + PSYGFX__FRAME_BYTES + (size_t)g->n_blocks * PSYGFX__BLOCK), cmd, &why);
+    if (pipe && s->inst && s->n_inst)
+        pipe = psygfx__inst_draw(g, s, (float*)(g->staging + PSYGFX__FRAME_BYTES + (size_t)g->n_blocks * PSYGFX__BLOCK), cmd, pipe, &why);
     if (!pipe) {
         PSYRT_ZONE_END(z);
         return s->kind == PSYGFX_TEXT ? PSYGFX_ERR_NOT_IMPLEMENTED : why;
@@ -4768,7 +6188,7 @@ PSYGFX_API int psygfx_draw_n(psygfx_gfx* g, const psygfx_stim* s, int n) {
 
 static int psygfx__same_batch(const psygfx__cmd* a, const psygfx__cmd* b) {
     return a->pipe == b->pipe && a->inst == 0 && b->inst == 0 && a->nblk == 1 && b->nblk == 1 && a->blend == b->blend &&
-           a->tex[0] == b->tex[0] && a->tex[1] == b->tex[1] && a->tex[2] == b->tex[2] && a->tex[3] == b->tex[3];
+           memcmp(a->tex, b->tex, sizeof a->tex) == 0;
 }
 
 /* Closes the segment being recorded and opens the next. */
@@ -4808,6 +6228,90 @@ PSYGFX_API int psygfx_end_target(psygfx_gfx* g) {
     return PSYGFX_OK;
 }
 
+/* --- the draw order (DRAW ORDER) ------------------------------------------------- */
+
+/* A command's bounds in the pass's GL px, from its packed block: every
+ * fragment it can write lies in its quad, center +- (half size + margin)
+ * along its axes, effects, strokes and soft edges included; plus 1 px for
+ * the pixel centers. Instanced draws, dots and glyph runs place their
+ * pieces anywhere: the whole pass. */
+static void psygfx__cmd_box(const psygfx_gfx* g, const psygfx__cmd* c, float box[4]) {
+    const float* b = (const float*)(g->staging + PSYGFX__FRAME_BYTES + (size_t)c->block * PSYGFX__BLOCK);
+    float hx, hy, ex, ey;
+    if (c->inst) { box[0] = box[1] = -1e30f; box[2] = box[3] = 1e30f; return; }
+    hx = b[4] + b[7]; hy = b[5] + b[7];
+    ex = fabsf(b[2]) * hx + fabsf(b[3]) * hy + 1.0f;
+    ey = fabsf(b[3]) * hx + fabsf(b[2]) * hy + 1.0f;
+    box[0] = b[0] - ex; box[1] = b[1] - ey; box[2] = b[0] + ex; box[3] = b[1] + ey;
+}
+
+static int psygfx__box_meet(const float* a, const float* b) {
+    return a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
+}
+
+#ifndef PSYGFX__REORDER_LOOK
+#define PSYGFX__REORDER_LOOK 64    /* batches a draw may move back past */
+#endif
+
+/* Within each pass, a draw joins an earlier batch of its kind when its
+ * bounds meet none of the batches it moves past (then no pixel gets both,
+ * so the order cannot change a value, whatever the blend). The commands
+ * and their blocks are written in the new order to the second staging,
+ * blocks of a batch next to each other, and the two are swapped. */
+static void psygfx__reorder(psygfx_gfx* g) {
+    psygfx__rbatch* B = g->ro_batch;
+    int32_t* next = g->ro_next;
+    int s, out = 0, blk = 0;
+    memcpy(g->staging2, g->staging, PSYGFX__FRAME_BYTES);
+    for (s = 0; s < g->n_segs; s++) {
+        psygfx__seg* sg = &g->segs[s];
+        int i, nb = 0, k;
+        for (i = sg->first; i < sg->end; i++) {
+            const psygfx__cmd* c = &g->cmds[i];
+            float box[4];
+            int j, at = -1;
+            psygfx__cmd_box(g, c, box);
+            next[i] = -1;
+            for (j = nb - 1; j >= 0 && j >= nb - PSYGFX__REORDER_LOOK; j--) {
+                if (B[j].count < g->max_batch && psygfx__same_batch(&g->cmds[B[j].head], c)) { at = j; break; }
+                if (psygfx__box_meet(B[j].box, box)) break;
+            }
+            if (at < 0) {
+                at = nb++;
+                B[at].head = B[at].tail = i;
+                B[at].count = 0;
+                memcpy(B[at].box, box, sizeof box);
+            } else {
+                next[B[at].tail] = i;
+                B[at].tail = i;
+                if (box[0] < B[at].box[0]) B[at].box[0] = box[0];
+                if (box[1] < B[at].box[1]) B[at].box[1] = box[1];
+                if (box[2] > B[at].box[2]) B[at].box[2] = box[2];
+                if (box[3] > B[at].box[3]) B[at].box[3] = box[3];
+            }
+            B[at].count++;
+        }
+        /* the segment's commands, batch by batch, in their new places */
+        sg->first = out;
+        for (k = 0; k < nb; k++)
+            for (i = B[k].head; i >= 0; i = next[i]) {
+                psygfx__cmd* d = &g->cmds2[out++];
+                *d = g->cmds[i];
+                memcpy(g->staging2 + PSYGFX__FRAME_BYTES + (size_t)blk * PSYGFX__BLOCK,
+                       g->staging + PSYGFX__FRAME_BYTES + (size_t)d->block * PSYGFX__BLOCK, (size_t)d->nblk * PSYGFX__BLOCK);
+                d->block = (uint32_t)blk;
+                blk += (int)d->nblk;
+            }
+        sg->end = out;
+    }
+    {
+        unsigned char* t = g->staging;
+        psygfx__cmd* u = g->cmds;
+        g->staging = g->staging2; g->staging2 = t;
+        g->cmds = g->cmds2; g->cmds2 = u;
+    }
+}
+
 PSYGFX_API int psygfx_end(psygfx_gfx* g) {
     psygfx_bindings bd;
     uint32_t ubo;
@@ -4820,10 +6324,14 @@ PSYGFX_API int psygfx_end(psygfx_gfx* g) {
     g->in_frame = 0;
     g->segs[g->n_segs - 1].end = g->n_cmds;
     if (psygfx__sync(g) < 0) { PSYRT_ZONE_END(z); return PSYGFX_ERR_LOST; }
+    if (!g->no_reorder && g->n_cmds > 1) psygfx__reorder(g);
     ubo = g->ubo[g->ubo_i];
     g->ubo_i = (g->ubo_i + 1) % PSYGFX__UBO_RING;
     /* One upload for the frame: the frame blocks and every stim block. */
     rc = g->be->buffer_update(g->bctx, ubo, 0, g->staging, PSYGFX__FRAME_BYTES + (size_t)g->n_blocks * PSYGFX__BLOCK);
+    if (rc >= 0 && g->inst_used)   /* the elements, in the same ring slot */
+        rc = g->be->buffer_update(g->bctx, g->inst_buf[(g->ubo_i + PSYGFX__UBO_RING - 1) % PSYGFX__UBO_RING], 0, g->inst_staging,
+                                  (size_t)g->inst_used);
     if (rc < 0) { PSYRT_ZONE_END(z); return PSYGFX_ERR_GL; }
     clear[0] = g->bg[0]; clear[1] = g->bg[1]; clear[2] = g->bg[2]; clear[3] = 1.0f;
     memset(&bd, 0, sizeof bd);
@@ -4850,6 +6358,7 @@ PSYGFX_API int psygfx_end(psygfx_gfx* g) {
             bd.stim_off = PSYGFX__FRAME_BYTES + c->block * PSYGFX__BLOCK;
             memcpy(bd.tex, c->tex, sizeof bd.tex);
             bd.instances = c->inst;
+            bd.instances_off = c->inst_off;
             bd.blend = c->blend;
             g->be->apply(g->bctx, &bd);
             g->be->draw(g->bctx, 4, c->inst ? (int)c->count : j - i);
@@ -4889,10 +6398,132 @@ static int psygfx__slot(psygfx__res* pool, int n) {
     return -1;
 }
 
+static int psygfx__planar(int format) { return format == PSYGFX_NV12 || format == PSYGFX_I420; }
+static int psygfx__nplanes(int format) { return format == PSYGFX_NV12 ? 2 : (format == PSYGFX_I420 ? 3 : 1); }
+
+/* A plane's size and its texture format. */
+static void psygfx__plane_dims(int format, int w, int h, int plane, int* pw, int* ph, psygfx_format* pf) {
+    *pw = plane ? (w + 1) / 2 : w;
+    *ph = plane ? (h + 1) / 2 : h;
+    *pf = !psygfx__planar(format) ? (psygfx_format)format : (plane == 1 && format == PSYGFX_NV12 ? PSYGFX_RG8 : PSYGFX_R8);
+}
+
+/* An encoding is all or nothing, stated (rig_spec principles 4 and 5):
+ * every field of a planar one; an RGB texture's all zero (linear values) or
+ * all set with matrix RGB. Primaries other than the display's own need the
+ * calibration's chromaticities. */
+static int psygfx__enc_check(psygfx_gfx* g, int format, const psygfx_encoding* e) {
+    const char* msg = NULL;
+    int any = e->matrix || e->range || e->transfer || e->primaries || e->siting || e->chroma_nearest;
+    if (!psygfx__planar(format) && !any) return PSYGFX_OK;
+    if (!psygfx__planar(format) && format != PSYGFX_RGBA8 && format != PSYGFX_RGBA16F && format != PSYGFX_RGBA32F)
+        msg = "an encoding is for NV12, I420, RGBA8, RGBA16F and RGBA32F textures";
+    else if (psygfx__planar(format) && !(e->matrix >= PSYGFX_MATRIX_BT601 && e->matrix <= PSYGFX_MATRIX_BT2020))
+        msg = "a planar texture needs enc.matrix (BT601, BT709 or BT2020)";
+    else if (!psygfx__planar(format) && e->matrix != PSYGFX_MATRIX_RGB)
+        msg = "an RGB texture's enc.matrix is PSYGFX_MATRIX_RGB";
+    else if (!(e->range >= PSYGFX_RANGE_LIMITED && e->range <= PSYGFX_RANGE_FULL))
+        msg = "enc.range is unspecified (LIMITED or FULL)";
+    else if (!(e->transfer >= PSYGFX_TRC_DEVICE && e->transfer <= PSYGFX_TRC_GAMMA22))
+        msg = "enc.transfer is unspecified (DEVICE, BT1886, SRGB, LINEAR or GAMMA22)";
+    else if (!(e->primaries >= PSYGFX_PRIM_DEVICE && e->primaries <= PSYGFX_PRIM_BT2020))
+        msg = "enc.primaries is unspecified: PSYGFX_PRIM_DEVICE passes the source's RGB through as the display's";
+    else if (psygfx__planar(format) && !(e->siting >= PSYGFX_SITING_LEFT && e->siting <= PSYGFX_SITING_TOP_LEFT))
+        msg = "a 4:2:0 texture needs enc.siting (LEFT, CENTER or TOP_LEFT)";
+    else if (!psygfx__planar(format) && e->siting > PSYGFX_SITING_NONE)
+        msg = "an RGB texture is not subsampled: enc.siting 0 or NONE";
+    else if (e->chroma_nearest > 1)
+        msg = "enc.chroma_nearest is 0 or 1";
+    else if (e->primaries != PSYGFX_PRIM_DEVICE && !g->has_xyz)
+        msg = "enc.primaries other than DEVICE convert through the calibration's chromaticities: open with a calibration "
+              "that has them, or state PSYGFX_PRIM_DEVICE to pass the source's RGB through";
+    if (!msg) return PSYGFX_OK;
+    psygfx__set_error(g->error, sizeof g->error, "psy_gfx: %s", msg);
+    return PSYGFX_ERR_ARG;
+}
+
+
+/* The video program, made at the first encoded texture: an open without
+ * video compiles nothing more. */
+static int psygfx__video_pipe(psygfx_gfx* g) {
+    char* body;
+    size_t n;
+    int rc;
+    psygfx__prec r;
+    if (g->video_pipe) return PSYGFX_OK;
+    n = sizeof psygfx__body_image_video + sizeof psygfx__body_image_color;
+    body = (char*)malloc(n);
+    if (!body) return PSYGFX_ERR_FULL;
+    snprintf(body, n, "%s%s", psygfx__body_image_video, psygfx__body_image_color);
+    rc = psygfx__make_pipe(g, "#define PSY_VIDEO 1\n", body, PSYGFX_COLOR, 0, 0, &g->video_pipe, "image video", &r);
+    free(body);
+    g->be->reset(g->bctx);
+    return rc < 0 ? rc : PSYGFX_OK;
+}
+
+/* The display's transfer: per gun, the linear value the CLUT maps to each
+ * code, so the output stage writes a code that went through it back. */
+static int psygfx__eotf_upload(psygfx_gfx* g, const float* lut, int n) {
+    float tab[3 * 256];
+    int c, k;
+    if (!g->eotf) return PSYGFX_OK;
+    for (c = 0; c < 3; c++) {
+        const float* l = lut + (size_t)c * (size_t)n;
+        int i = 0;
+        for (k = 0; k < 256; k++) {
+            double y = k / 255.0, L;
+            if (y <= l[0]) L = 0.0;
+            else if (y >= l[n - 1]) L = 1.0;
+            else {
+                while (i < n - 2 && l[i + 1] < y) i++;
+                while (i > 0 && l[i] > y) i--;
+                L = l[i + 1] > l[i] ? (i + (y - l[i]) / (l[i + 1] - l[i])) / (n - 1) : (double)i / (n - 1);
+            }
+            tab[c * 256 + k] = (float)L;
+        }
+    }
+    return g->be->texture_update(g->bctx, g->eotf, 0, 0, 256, 3, tab, 256 * sizeof(float));
+}
+
+/* The planes' backend textures: made, or imported (src_kind 1 GL names, 2
+ * a D3D11 texture). */
+static int psygfx__make_planes(psygfx_gfx* g, psygfx__res* r, int w, int h, int format, int linear, const psygfx_planes* pl,
+                               const psygfx_import_desc* imp) {
+    int k, n = psygfx__nplanes(format), rc = PSYGFX_OK;
+    unsigned char* black = NULL;
+    uint32_t* ids[3];
+    ids[0] = &r->bid; ids[1] = &r->plane_bid[0]; ids[2] = &r->plane_bid[1];
+    for (k = 0; k < n && rc >= 0; k++) {
+        psygfx_texture_src src;
+        int pw, ph;
+        psygfx_format pf;
+        psygfx__plane_dims(format, w, h, k, &pw, &ph, &pf);
+        memset(&src, 0, sizeof src);
+        src.w = pw; src.h = ph; src.format = pf; src.linear = linear != 0;
+        if (imp && imp->kind == PSYGFX_IMPORT_GL) src.gl_name = imp->gl_tex[k];
+        else if (imp) { src.d3d11 = imp->d3d11_tex; src.plane = k; src.slice = (int32_t)imp->d3d11_slice; }
+        else if (pl && pl->data[k]) { src.data = pl->data[k]; src.stride = pl->stride[k]; }
+        else if (psygfx__planar(format)) {
+            /* black in the texture's range: Y 16 or 0, chroma 128 */
+            if (!black && !(black = (unsigned char*)malloc(((size_t)w + 1) * ((size_t)h + 1)))) { rc = PSYGFX_ERR_FULL; break; }
+            memset(black, k ? 128 : (r->enc.range == PSYGFX_RANGE_LIMITED ? 16 : 0), (size_t)pw * (size_t)ph * (pf == PSYGFX_RG8 ? 2u : 1u));
+            src.data = black;
+        }
+        if (imp && imp->kind == PSYGFX_IMPORT_GL && !src.gl_name) rc = PSYGFX_ERR_ARG;
+        else rc = g->be->texture_make(g->bctx, &src, ids[k]);
+    }
+    free(black);
+    if (rc < 0)
+        for (k = 0; k < n; k++)
+            if (*ids[k]) { g->be->texture_free(g->bctx, *ids[k]); *ids[k] = 0; }
+    return rc;
+}
+
 PSYGFX_API psygfx_tex psygfx_texture(psygfx_gfx* g, const psygfx_texture_desc* d) {
     psygfx_tex t;
-    psygfx_texture_src src;
-    int slot;
+    psygfx__res* r;
+    psygfx_planes one;
+    int slot, rc;
     t.id = 0;
     if (!g || !g->open || !d) return t;
     if (g->in_frame) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: texture made inside begin..end"); return t; }
@@ -4910,44 +6541,152 @@ PSYGFX_API psygfx_tex psygfx_texture(psygfx_gfx* g, const psygfx_texture_desc* d
         psygfx__set_error(g->error, sizeof g->error, "psy_gfx: linear filtering of a 32-bit float texture needs GL_OES_texture_float_linear");
         return t;
     }
+    if (psygfx__enc_check(g, d->format, &d->enc) < 0) return t;
     slot = psygfx__slot(g->tex, PSYGFX_MAX_TEXTURES);
     if (slot < 0) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: %d textures in use", PSYGFX_MAX_TEXTURES); return t; }
     if (psygfx__sync(g) < 0) return t;
-    memset(&src, 0, sizeof src);
-    src.w = d->w; src.h = d->h; src.format = d->format; src.linear = d->linear;
-    src.data = d->data; src.stride = d->stride;
-    if (g->be->texture_make(g->bctx, &src, &g->tex[slot].bid) < 0) {
+    if (d->enc.matrix && psygfx__video_pipe(g) < 0) return t;
+    r = &g->tex[slot];
+    memset(r, 0, sizeof *r);
+    r->enc = d->enc;
+    memset(&one, 0, sizeof one);
+    one.data[0] = d->data; one.stride[0] = d->stride;
+    rc = psygfx__make_planes(g, r, d->w, d->h, d->format, d->linear, psygfx__planar(d->format) ? d->planes : &one, NULL);
+    if (rc < 0) {
+        memset(r, 0, sizeof *r);
         psygfx__set_error(g->error, sizeof g->error, "psy_gfx: texture %dx%d", d->w, d->h);
         return t;
     }
-    g->tex[slot].used = 1;
-    g->tex[slot].w = d->w; g->tex[slot].h = d->h; g->tex[slot].format = d->format;
-    g->tex[slot].sdf = (int32_t)d->sdf; g->tex[slot].sdf_range = d->sdf_range;
+    r->used = 1;
+    r->w = d->w; r->h = d->h; r->format = d->format;
+    r->sdf = (int32_t)d->sdf; r->sdf_range = d->sdf_range;
     t.id = (uint32_t)slot + 1;
     return t;
 }
 
+PSYGFX_API psygfx_tex psygfx_texture_import(psygfx_gfx* g, const psygfx_import_desc* d) {
+    psygfx_tex t;
+    psygfx__res* r;
+    uint32_t need;
+    int slot, rc;
+    t.id = 0;
+    if (!g || !g->open || !d) return t;
+    if (g->in_frame) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: texture imported inside begin..end"); return t; }
+    if (d->w <= 0 || d->h <= 0 || psygfx__texel_bytes(d->format) == 0 || d->format == PSYGFX_I420 || d->format == PSYGFX_R16UI ||
+        (d->kind != PSYGFX_IMPORT_GL && d->kind != PSYGFX_IMPORT_D3D11) || (d->kind == PSYGFX_IMPORT_D3D11 && !d->d3d11_tex)) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: import kind, size, format (not I420 or R16UI) or source");
+        return t;
+    }
+    need = d->kind == PSYGFX_IMPORT_GL ? PSYGFX_FEAT_IMPORT_GL : (d->format == PSYGFX_NV12 ? PSYGFX_FEAT_IMPORT_NV12 : PSYGFX_FEAT_IMPORT_D3D11);
+    if (!(g->features & need)) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: this renderer cannot import %s (%s): EGL_ANGLE_image_d3d11_texture "
+                          "and GL_OES_EGL_image are needed", d->kind == PSYGFX_IMPORT_GL ? "GL textures" : "D3D11 textures", g->caps.renderer);
+        return t;
+    }
+    if (psygfx__enc_check(g, d->format, &d->enc) < 0) return t;
+    slot = psygfx__slot(g->tex, PSYGFX_MAX_TEXTURES);
+    if (slot < 0) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: %d textures in use", PSYGFX_MAX_TEXTURES); return t; }
+    if (psygfx__sync(g) < 0) return t;
+    if (d->enc.matrix && psygfx__video_pipe(g) < 0) return t;
+    r = &g->tex[slot];
+    memset(r, 0, sizeof *r);
+    r->enc = d->enc;
+    rc = psygfx__make_planes(g, r, d->w, d->h, d->format, 0, NULL, d);
+    if (rc < 0) {
+        memset(r, 0, sizeof *r);
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: the import failed (%s): a D3D11 texture must be on ANGLE's "
+                          "device with D3D11_BIND_SHADER_RESOURCE, of the format and size given", rc == PSYGFX_ERR_ARG ? "no GL name" : "EGL");
+        return t;
+    }
+    r->used = 1;
+    r->w = d->w; r->h = d->h; r->format = d->format;
+    t.id = (uint32_t)slot + 1;
+    return t;
+}
+
+PSYGFX_API int psygfx_texture_rebind(psygfx_gfx* g, psygfx_tex t, psygfx_tex src) {
+    psygfx__res *a, *b;
+    if (!g || !g->open) return PSYGFX_ERR_CLOSED;
+    if (g->in_frame) return PSYGFX_ERR_ORDER;
+    if (t.id < 1 || t.id > PSYGFX_MAX_TEXTURES || src.id < 1 || src.id > PSYGFX_MAX_TEXTURES) return PSYGFX_ERR_ARG;
+    a = &g->tex[t.id - 1];
+    b = &g->tex[src.id - 1];
+    if (!a->used || !b->used || a->w != b->w || a->h != b->h || a->format != b->format ||
+        memcmp(&a->enc, &b->enc, sizeof a->enc) != 0 || ((a->flags ^ b->flags) & PSYGFX__RES_TARGET)) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: rebind needs two textures of one format, size and encoding");
+        return PSYGFX_ERR_ARG;
+    }
+    a->view = src.id == t.id ? 0 : (b->view ? b->view : (int32_t)src.id);
+    return PSYGFX_OK;
+}
+
+static int psygfx__update(psygfx_gfx* g, psygfx_tex t, int plane, int x, int y, int w, int h, const void* data, size_t stride) {
+    const psygfx__res* r;
+    int pw, ph;
+    psygfx_format pf;
+    if (!g || !g->open) return PSYGFX_ERR_CLOSED;
+    if (g->in_frame) return PSYGFX_ERR_ORDER;
+    if (t.id < 1 || t.id > PSYGFX_MAX_TEXTURES || !g->tex[t.id - 1].used || !data) return PSYGFX_ERR_ARG;
+    r = &g->tex[t.id - 1];
+    if (plane < 0 || plane >= psygfx__nplanes(r->format)) return PSYGFX_ERR_ARG;
+    psygfx__plane_dims(r->format, r->w, r->h, plane, &pw, &ph, &pf);
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > pw || y + h > ph) return PSYGFX_ERR_ARG;
+    if (psygfx__sync(g) < 0) return PSYGFX_ERR_LOST;
+    return g->be->texture_update(g->bctx, plane ? r->plane_bid[plane - 1] : r->bid, x, y, w, h, data, stride);
+}
+
 PSYGFX_API int psygfx_texture_update(psygfx_gfx* g, psygfx_tex t, int x, int y, int w, int h,
                                      const void* data, size_t stride) {
-    const psygfx__res* r;
     int rc;
     PSYRT_ZONE(z, "psygfx.upload");
-    if (!g || !g->open) { PSYRT_ZONE_END(z); return PSYGFX_ERR_CLOSED; }
-    if (g->in_frame) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ORDER; }
-    if (t.id < 1 || t.id > PSYGFX_MAX_TEXTURES || !g->tex[t.id - 1].used || !data) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ARG; }
-    r = &g->tex[t.id - 1];
-    if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > r->w || y + h > r->h) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ARG; }
-    if (psygfx__sync(g) < 0) { PSYRT_ZONE_END(z); return PSYGFX_ERR_LOST; }
-    rc = g->be->texture_update(g->bctx, r->bid, x, y, w, h, data, stride);
+    if (g && g->open && t.id >= 1 && t.id <= PSYGFX_MAX_TEXTURES && psygfx__planar(g->tex[t.id - 1].format)) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a planar texture updates by psygfx_texture_update_planes()");
+        PSYRT_ZONE_END(z);
+        return PSYGFX_ERR_ARG;
+    }
+    rc = psygfx__update(g, t, 0, x, y, w, h, data, stride);
+    PSYRT_ZONE_END(z);
+    return rc;
+}
+
+PSYGFX_API int psygfx_texture_update_plane(psygfx_gfx* g, psygfx_tex t, int plane, int x, int y, int w, int h,
+                                           const void* data, size_t stride) {
+    int rc;
+    PSYRT_ZONE(z, "psygfx.upload");
+    rc = psygfx__update(g, t, plane, x, y, w, h, data, stride);
+    PSYRT_ZONE_END(z);
+    return rc;
+}
+
+PSYGFX_API int psygfx_texture_update_planes(psygfx_gfx* g, psygfx_tex t, const psygfx_planes* p) {
+    int k, n, rc = PSYGFX_OK;
+    PSYRT_ZONE(z, "psygfx.upload");
+    if (!g || !g->open || !p || t.id < 1 || t.id > PSYGFX_MAX_TEXTURES || !g->tex[t.id - 1].used) {
+        PSYRT_ZONE_END(z);
+        return !g || !g->open ? PSYGFX_ERR_CLOSED : PSYGFX_ERR_ARG;
+    }
+    n = psygfx__nplanes(g->tex[t.id - 1].format);
+    for (k = 0; k < n && rc >= 0; k++) {
+        int pw, ph;
+        psygfx_format pf;
+        psygfx__plane_dims(g->tex[t.id - 1].format, g->tex[t.id - 1].w, g->tex[t.id - 1].h, k, &pw, &ph, &pf);
+        rc = psygfx__update(g, t, k, 0, 0, pw, ph, p->data[k], p->stride[k]);
+    }
     PSYRT_ZONE_END(z);
     return rc;
 }
 
 PSYGFX_API void psygfx_texture_free(psygfx_gfx* g, psygfx_tex t) {
+    psygfx__res* r;
+    int i;
     if (!g || !g->open || g->in_frame || t.id < 1 || t.id > PSYGFX_MAX_TEXTURES || !g->tex[t.id - 1].used) return;
     if (psygfx__sync(g) < 0) return;
-    g->be->texture_free(g->bctx, g->tex[t.id - 1].bid);
-    memset(&g->tex[t.id - 1], 0, sizeof g->tex[0]);
+    r = &g->tex[t.id - 1];
+    g->be->texture_free(g->bctx, r->bid);
+    for (i = 0; i < 2; i++) if (r->plane_bid[i]) g->be->texture_free(g->bctx, r->plane_bid[i]);
+    memset(r, 0, sizeof *r);
+    /* whatever showed it shows its own again */
+    for (i = 0; i < PSYGFX_MAX_TEXTURES; i++) if (g->tex[i].view == (int32_t)t.id) g->tex[i].view = 0;
 }
 
 PSYGFX_API psygfx_buf psygfx_buffer(psygfx_gfx* g, size_t bytes) {
@@ -5000,10 +6739,18 @@ PSYGFX_API psygfx_pipe psygfx_pipeline(psygfx_gfx* g, const psygfx_pipeline_desc
     slot = psygfx__slot(g->pipe, PSYGFX_MAX_PIPELINES);
     if (slot < 0) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: %d pipelines in use", PSYGFX_MAX_PIPELINES); return p; }
     if (psygfx__sync(g) < 0) return p;
-    if (psygfx__make_pipe(g, "", d->body, (int)d->mode, 0, 0, &g->pipe[slot].bid, d->name ? d->name : "user") < 0) return p;
+    {
+        psygfx__prec r;
+        if (psygfx__make_pipe(g, "", d->body, (int)d->mode, 0, 0, &g->pipe[slot].bid, d->name ? d->name : "user", &r) < 0) return p;
+    }
     g->be->reset(g->bctx);
     g->pipe[slot].used = 1;
     g->pipe[slot].flags = (int32_t)d->mode;
+    {   /* kept for its instanced program (INSTANCES), made only when asked */
+        size_t n = strlen(d->body) + 1;
+        g->pipe_body[slot] = (char*)malloc(n);
+        if (g->pipe_body[slot]) memcpy(g->pipe_body[slot], d->body, n);
+    }
     g->error[0] = '\0';
     p.id = (uint32_t)slot + 1;
     return p;
@@ -5013,6 +6760,10 @@ PSYGFX_API void psygfx_pipeline_free(psygfx_gfx* g, psygfx_pipe p) {
     if (!g || !g->open || g->in_frame || p.id < 1 || p.id > PSYGFX_MAX_PIPELINES || !g->pipe[p.id - 1].used) return;
     if (psygfx__sync(g) < 0) return;
     g->be->pipeline_free(g->bctx, g->pipe[p.id - 1].bid);
+    if (g->pipe_inst[p.id - 1]) g->be->pipeline_free(g->bctx, g->pipe_inst[p.id - 1]);
+    free(g->pipe_body[p.id - 1]);
+    g->pipe_body[p.id - 1] = NULL;
+    g->pipe_inst[p.id - 1] = 0;
     memset(&g->pipe[p.id - 1], 0, sizeof g->pipe[0]);
 }
 
@@ -5021,9 +6772,10 @@ PSYGFX_API int psygfx_set_lut(psygfx_gfx* g, const float* lut, int n) {
     PSYRT_ZONE(z, "psygfx.upload");
     if (!g || !g->open) { PSYRT_ZONE_END(z); return PSYGFX_ERR_CLOSED; }
     if (g->in_frame) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ORDER; }
-    if (!lut || n < 2 || n > PSYGFX_CAL_MAX_LUT) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ARG; }
+    if (!lut || n < 2 || n > PSYCOL_CAL_MAX_LUT) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ARG; }
     if (psygfx__sync(g) < 0) { PSYRT_ZONE_END(z); return PSYGFX_ERR_LOST; }
     rc = psygfx__lut_upload(g, lut, n);
+    if (rc >= 0) rc = psygfx__eotf_upload(g, lut, n);
     if (rc >= 0) {
         uint32_t u[2];
         g->lut_n = n;
@@ -5130,159 +6882,6 @@ PSYGFX_API int psygfx_read_target(psygfx_gfx* g, psygfx_tex t, int x, int y, int
     g->be->reset(g->bctx);
     return rc;
 }
-/* Stockman and Sharpe (2000) 2-degree cone fundamentals, linear energy, normalized
- * to peak 1: CVRL linss2_10e_1 (cvrl.org), 390 to 830 nm at 1 nm, L, M, S. CVRL
- * leaves S blank above 615 nm; it is 0 here. */
-static const float psygfx__ss2[441][3] = {
-    /* 390 */ {4.15003E-04f, 3.68349E-04f, 9.54729E-03f}, {5.02650E-04f, 4.48015E-04f, 1.14794E-02f}, {6.07367E-04f, 5.43965E-04f, 1.37986E-02f},
-    /* 393 */ {7.31850E-04f, 6.58983E-04f, 1.65746E-02f}, {8.79012E-04f, 7.96121E-04f, 1.98869E-02f}, {1.05192E-03f, 9.58658E-04f, 2.38250E-02f},
-    /* 396 */ {1.25373E-03f, 1.15002E-03f, 2.84877E-02f}, {1.48756E-03f, 1.37367E-03f, 3.39832E-02f}, {1.75633E-03f, 1.63296E-03f, 4.04274E-02f},
-    /* 399 */ {2.06261E-03f, 1.93089E-03f, 4.79417E-02f}, {2.40836E-03f, 2.26991E-03f, 5.66498E-02f}, {2.79522E-03f, 2.65210E-03f, 6.66757E-02f},
-    /* 402 */ {3.22640E-03f, 3.08110E-03f, 7.81479E-02f}, {3.70617E-03f, 3.56156E-03f, 9.11925E-02f}, {4.23972E-03f, 4.09900E-03f, 1.05926E-01f},
-    /* 405 */ {4.83339E-03f, 4.70010E-03f, 1.22451E-01f}, {5.49335E-03f, 5.37186E-03f, 1.40844E-01f}, {6.21933E-03f, 6.11757E-03f, 1.61140E-01f},
-    /* 408 */ {7.00631E-03f, 6.93795E-03f, 1.83325E-01f}, {7.84503E-03f, 7.83144E-03f, 2.07327E-01f}, {8.72127E-03f, 8.79369E-03f, 2.33008E-01f},
-    /* 411 */ {9.61879E-03f, 9.81865E-03f, 2.60183E-01f}, {1.05324E-02f, 1.09044E-02f, 2.88723E-01f}, {1.14620E-02f, 1.20509E-02f, 3.18512E-01f},
-    /* 414 */ {1.24105E-02f, 1.32582E-02f, 3.49431E-01f}, {1.33837E-02f, 1.45277E-02f, 3.81363E-01f}, {1.43870E-02f, 1.58600E-02f, 4.14141E-01f},
-    /* 417 */ {1.54116E-02f, 1.72496E-02f, 4.47350E-01f}, {1.64424E-02f, 1.86878E-02f, 4.80439E-01f}, {1.74614E-02f, 2.01638E-02f, 5.12767E-01f},
-    /* 420 */ {1.84480E-02f, 2.16649E-02f, 5.43618E-01f}, {1.93852E-02f, 2.31801E-02f, 5.72399E-01f}, {2.02811E-02f, 2.47139E-02f, 5.99284E-01f},
-    /* 423 */ {2.11545E-02f, 2.62785E-02f, 6.24786E-01f}, {2.20286E-02f, 2.78905E-02f, 6.49576E-01f}, {2.29317E-02f, 2.95714E-02f, 6.74474E-01f},
-    /* 426 */ {2.38896E-02f, 3.13438E-02f, 7.00186E-01f}, {2.49026E-02f, 3.32151E-02f, 7.26460E-01f}, {2.59631E-02f, 3.51889E-02f, 7.52726E-01f},
-    /* 429 */ {2.70619E-02f, 3.72683E-02f, 7.78333E-01f}, {2.81877E-02f, 3.94566E-02f, 8.02555E-01f}, {2.93303E-02f, 4.17546E-02f, 8.24818E-01f},
-    /* 432 */ {3.04898E-02f, 4.41544E-02f, 8.45422E-01f}, {3.16694E-02f, 4.66432E-02f, 8.64961E-01f}, {3.28731E-02f, 4.92050E-02f, 8.84100E-01f},
-    /* 435 */ {3.41054E-02f, 5.18199E-02f, 9.03573E-01f}, {3.53670E-02f, 5.44645E-02f, 9.23844E-01f}, {3.66400E-02f, 5.71131E-02f, 9.44055E-01f},
-    /* 438 */ {3.78988E-02f, 5.97369E-02f, 9.62920E-01f}, {3.91148E-02f, 6.23038E-02f, 9.79057E-01f}, {4.02563E-02f, 6.47782E-02f, 9.91020E-01f},
-    /* 441 */ {4.12989E-02f, 6.71329E-02f, 9.97765E-01f}, {4.22582E-02f, 6.93844E-02f, 9.99982E-01f}, {4.31627E-02f, 7.15658E-02f, 9.98861E-01f},
-    /* 444 */ {4.40444E-02f, 7.37164E-02f, 9.95628E-01f}, {4.49380E-02f, 7.58812E-02f, 9.91515E-01f}, {4.58729E-02f, 7.80980E-02f, 9.87377E-01f},
-    /* 447 */ {4.68459E-02f, 8.03538E-02f, 9.82619E-01f}, {4.78446E-02f, 8.26198E-02f, 9.76301E-01f}, {4.88555E-02f, 8.48644E-02f, 9.67513E-01f},
-    /* 450 */ {4.98639E-02f, 8.70524E-02f, 9.55393E-01f}, {5.08618E-02f, 8.91640E-02f, 9.39499E-01f}, {5.18731E-02f, 9.12523E-02f, 9.20807E-01f},
-    /* 453 */ {5.29317E-02f, 9.33950E-02f, 9.00592E-01f}, {5.40746E-02f, 9.56775E-02f, 8.80040E-01f}, {5.53418E-02f, 9.81934E-02f, 8.60240E-01f},
-    /* 456 */ {5.67734E-02f, 1.01031E-01f, 8.42031E-01f}, {5.83973E-02f, 1.04229E-01f, 8.25572E-01f}, {6.02409E-02f, 1.07814E-01f, 8.10860E-01f},
-    /* 459 */ {6.23353E-02f, 1.11817E-01f, 7.97902E-01f}, {6.47164E-02f, 1.16272E-01f, 7.86704E-01f}, {6.74131E-02f, 1.21204E-01f, 7.77119E-01f},
-    /* 462 */ {7.04040E-02f, 1.26573E-01f, 7.68365E-01f}, {7.36489E-02f, 1.32311E-01f, 7.59538E-01f}, {7.70978E-02f, 1.38334E-01f, 7.49777E-01f},
-    /* 465 */ {8.06894E-02f, 1.44541E-01f, 7.38268E-01f}, {8.43613E-02f, 1.50828E-01f, 7.24389E-01f}, {8.80904E-02f, 1.57146E-01f, 7.08113E-01f},
-    /* 468 */ {9.18630E-02f, 1.63457E-01f, 6.89572E-01f}, {9.56637E-02f, 1.69721E-01f, 6.68927E-01f}, {9.94755E-02f, 1.75893E-01f, 6.46359E-01f},
-    /* 471 */ {1.03286E-01f, 1.81938E-01f, 6.22112E-01f}, {1.07103E-01f, 1.87872E-01f, 5.96591E-01f}, {1.10947E-01f, 1.93731E-01f, 5.70216E-01f},
-    /* 474 */ {1.14838E-01f, 1.99557E-01f, 5.43373E-01f}, {1.18802E-01f, 2.05398E-01f, 5.16411E-01f}, {1.22863E-01f, 2.11302E-01f, 4.89647E-01f},
-    /* 477 */ {1.27026E-01f, 2.17283E-01f, 4.63406E-01f}, {1.31293E-01f, 2.23347E-01f, 4.37965E-01f}, {1.35666E-01f, 2.29501E-01f, 4.13549E-01f},
-    /* 480 */ {1.40145E-01f, 2.35754E-01f, 3.90333E-01f}, {1.44731E-01f, 2.42108E-01f, 3.68394E-01f}, {1.49415E-01f, 2.48545E-01f, 3.47582E-01f},
-    /* 483 */ {1.54189E-01f, 2.55037E-01f, 3.27724E-01f}, {1.59038E-01f, 2.61554E-01f, 3.08676E-01f}, {1.63952E-01f, 2.68063E-01f, 2.90322E-01f},
-    /* 486 */ {1.68932E-01f, 2.74561E-01f, 2.72626E-01f}, {1.74063E-01f, 2.81180E-01f, 2.55772E-01f}, {1.79457E-01f, 2.88097E-01f, 2.39945E-01f},
-    /* 489 */ {1.85241E-01f, 2.95508E-01f, 2.25280E-01f}, {1.91556E-01f, 3.03630E-01f, 2.11867E-01f}, {1.98532E-01f, 3.12649E-01f, 1.99719E-01f},
-    /* 492 */ {2.06182E-01f, 3.22565E-01f, 1.88674E-01f}, {2.14485E-01f, 3.33319E-01f, 1.78557E-01f}, {2.23411E-01f, 3.44844E-01f, 1.69217E-01f},
-    /* 495 */ {2.32926E-01f, 3.57061E-01f, 1.60526E-01f}, {2.42992E-01f, 3.69895E-01f, 1.52368E-01f}, {2.53616E-01f, 3.83355E-01f, 1.44620E-01f},
-    /* 498 */ {2.64810E-01f, 3.97467E-01f, 1.37173E-01f}, {2.76587E-01f, 4.12260E-01f, 1.29937E-01f}, {2.88959E-01f, 4.27764E-01f, 1.22839E-01f},
-    /* 501 */ {3.01934E-01f, 4.44001E-01f, 1.15834E-01f}, {3.15508E-01f, 4.60947E-01f, 1.08922E-01f}, {3.29673E-01f, 4.78562E-01f, 1.02118E-01f},
-    /* 504 */ {3.44416E-01f, 4.96795E-01f, 9.54374E-02f}, {3.59716E-01f, 5.15587E-01f, 8.88965E-02f}, {3.75550E-01f, 5.34868E-01f, 8.25343E-02f},
-    /* 507 */ {3.91895E-01f, 5.54575E-01f, 7.64613E-02f}, {4.08722E-01f, 5.74640E-01f, 7.07769E-02f}, {4.25998E-01f, 5.94984E-01f, 6.55491E-02f},
-    /* 510 */ {4.43683E-01f, 6.15520E-01f, 6.08210E-02f}, {4.61731E-01f, 6.36162E-01f, 5.65919E-02f}, {4.80094E-01f, 6.56872E-01f, 5.27659E-02f},
-    /* 513 */ {4.98717E-01f, 6.77624E-01f, 4.92440E-02f}, {5.17539E-01f, 6.98393E-01f, 4.59470E-02f}, {5.36494E-01f, 7.19154E-01f, 4.28123E-02f},
-    /* 516 */ {5.55493E-01f, 7.39844E-01f, 3.98014E-02f}, {5.74386E-01f, 7.60235E-01f, 3.69227E-02f}, {5.92995E-01f, 7.80039E-01f, 3.41909E-02f},
-    /* 519 */ {6.11124E-01f, 7.98941E-01f, 3.16158E-02f}, {6.28561E-01f, 8.16610E-01f, 2.92033E-02f}, {6.45139E-01f, 8.32783E-01f, 2.69536E-02f},
-    /* 522 */ {6.60907E-01f, 8.47550E-01f, 2.48575E-02f}, {6.75993E-01f, 8.61113E-01f, 2.29047E-02f}, {6.90542E-01f, 8.73698E-01f, 2.10855E-02f},
-    /* 525 */ {7.04720E-01f, 8.85550E-01f, 1.93912E-02f}, {7.18662E-01f, 8.96873E-01f, 1.78145E-02f}, {7.32323E-01f, 9.07638E-01f, 1.63514E-02f},
-    /* 528 */ {7.45606E-01f, 9.17757E-01f, 1.49980E-02f}, {7.58410E-01f, 9.27137E-01f, 1.37497E-02f}, {7.70630E-01f, 9.35687E-01f, 1.26013E-02f},
-    /* 531 */ {7.82208E-01f, 9.43362E-01f, 1.15466E-02f}, {7.93290E-01f, 9.50309E-01f, 1.05766E-02f}, {8.04084E-01f, 9.56733E-01f, 9.68268E-03f},
-    /* 534 */ {8.14813E-01f, 9.62844E-01f, 8.85746E-03f}, {8.25711E-01f, 9.68858E-01f, 8.09453E-03f}, {8.36943E-01f, 9.74919E-01f, 7.38890E-03f},
-    /* 537 */ {8.48349E-01f, 9.80850E-01f, 6.73799E-03f}, {8.59676E-01f, 9.86388E-01f, 6.13947E-03f}, {8.70656E-01f, 9.91267E-01f, 5.59073E-03f},
-    /* 540 */ {8.81011E-01f, 9.95217E-01f, 5.08900E-03f}, {8.90496E-01f, 9.98007E-01f, 4.63120E-03f}, {8.99052E-01f, 9.99595E-01f, 4.21366E-03f},
-    /* 543 */ {9.06669E-01f, 9.99982E-01f, 3.83286E-03f}, {9.13341E-01f, 9.99177E-01f, 3.48559E-03f}, {9.19067E-01f, 9.97193E-01f, 3.16893E-03f},
-    /* 546 */ {9.23898E-01f, 9.94102E-01f, 2.88021E-03f}, {9.28099E-01f, 9.90204E-01f, 2.61698E-03f}, {9.31995E-01f, 9.85855E-01f, 2.37701E-03f},
-    /* 549 */ {9.35916E-01f, 9.81404E-01f, 2.15829E-03f}, {9.40198E-01f, 9.77193E-01f, 1.95896E-03f}, {9.45076E-01f, 9.73441E-01f, 1.77737E-03f},
-    /* 552 */ {9.50367E-01f, 9.69881E-01f, 1.61218E-03f}, {9.55775E-01f, 9.66133E-01f, 1.46215E-03f}, {9.61000E-01f, 9.61823E-01f, 1.32606E-03f},
-    /* 555 */ {9.65733E-01f, 9.56583E-01f, 1.20277E-03f}, {9.69744E-01f, 9.50167E-01f, 1.09118E-03f}, {9.73133E-01f, 9.42773E-01f, 9.90135E-04f},
-    /* 558 */ {9.76086E-01f, 9.34709E-01f, 8.98564E-04f}, {9.78793E-01f, 9.26271E-01f, 8.15524E-04f}, {9.81445E-01f, 9.17750E-01f, 7.40174E-04f},
-    /* 561 */ {9.84186E-01f, 9.09339E-01f, 6.71772E-04f}, {9.86965E-01f, 9.00895E-01f, 6.09693E-04f}, {9.89678E-01f, 8.92197E-01f, 5.53372E-04f},
-    /* 564 */ {9.92220E-01f, 8.83035E-01f, 5.02292E-04f}, {9.94486E-01f, 8.73205E-01f, 4.55979E-04f}, {9.96386E-01f, 8.62565E-01f, 4.13997E-04f},
-    /* 567 */ {9.97895E-01f, 8.51173E-01f, 3.75940E-04f}, {9.99004E-01f, 8.39132E-01f, 3.41439E-04f}, {9.99706E-01f, 8.26545E-01f, 3.10160E-04f},
-    /* 570 */ {9.99993E-01f, 8.13509E-01f, 2.81800E-04f}, {9.99837E-01f, 8.00082E-01f, 2.56084E-04f}, {9.99123E-01f, 7.86166E-01f, 2.32764E-04f},
-    /* 573 */ {9.97719E-01f, 7.71635E-01f, 2.11616E-04f}, {9.95491E-01f, 7.56376E-01f, 1.92436E-04f}, {9.92310E-01f, 7.40291E-01f, 1.75039E-04f},
-    /* 576 */ {9.88146E-01f, 7.23369E-01f, 1.59257E-04f}, {9.83345E-01f, 7.05890E-01f, 1.44940E-04f}, {9.78342E-01f, 6.88184E-01f, 1.31948E-04f},
-    /* 579 */ {9.73564E-01f, 6.70554E-01f, 1.20157E-04f}, {9.69429E-01f, 6.53274E-01f, 1.09454E-04f}, {9.66211E-01f, 6.36524E-01f, 9.97367E-05f},
-    /* 582 */ {9.63630E-01f, 6.20217E-01f, 9.09125E-05f}, {9.61273E-01f, 6.04211E-01f, 8.28976E-05f}, {9.58732E-01f, 5.88375E-01f, 7.56160E-05f},
-    /* 585 */ {9.55602E-01f, 5.72597E-01f, 6.89991E-05f}, {9.51569E-01f, 5.56783E-01f, 6.29846E-05f}, {9.46654E-01f, 5.40896E-01f, 5.75163E-05f},
-    /* 588 */ {9.40962E-01f, 5.24912E-01f, 5.25432E-05f}, {9.34600E-01f, 5.08817E-01f, 4.80192E-05f}, {9.27673E-01f, 4.92599E-01f, 4.39024E-05f},
-    /* 591 */ {9.20264E-01f, 4.76268E-01f, 4.01551E-05f}, {9.12391E-01f, 4.59893E-01f, 3.67431E-05f}, {9.04050E-01f, 4.43551E-01f, 3.36353E-05f},
-    /* 594 */ {8.95243E-01f, 4.27314E-01f, 3.08037E-05f}, {8.85969E-01f, 4.11246E-01f, 2.82228E-05f}, {8.76242E-01f, 3.95396E-01f, 2.58697E-05f},
-    /* 597 */ {8.66117E-01f, 3.79782E-01f, 2.37235E-05f}, {8.55658E-01f, 3.64410E-01f, 2.17653E-05f}, {8.44926E-01f, 3.49289E-01f, 1.99779E-05f},
-    /* 600 */ {8.33982E-01f, 3.34429E-01f, 1.83459E-05f}, {8.22859E-01f, 3.19843E-01f, 1.68551E-05f}, {8.11491E-01f, 3.05564E-01f, 1.54929E-05f},
-    /* 603 */ {7.99794E-01f, 2.91625E-01f, 1.42476E-05f}, {7.87689E-01f, 2.78053E-01f, 1.31087E-05f}, {7.75103E-01f, 2.64872E-01f, 1.20667E-05f},
-    /* 606 */ {7.61996E-01f, 2.52099E-01f, 1.11131E-05f}, {7.48425E-01f, 2.39747E-01f, 1.02399E-05f}, {7.34470E-01f, 2.27822E-01f, 9.43999E-06f},
-    /* 609 */ {7.20208E-01f, 2.16330E-01f, 8.70695E-06f}, {7.05713E-01f, 2.05273E-01f, 8.03488E-06f}, {6.91044E-01f, 1.94650E-01f, 7.41844E-06f},
-    /* 612 */ {6.76212E-01f, 1.84448E-01f, 6.85279E-06f}, {6.61220E-01f, 1.74654E-01f, 6.33352E-06f}, {6.46072E-01f, 1.65256E-01f, 5.85662E-06f},
-    /* 615 */ {6.30773E-01f, 1.56243E-01f, 5.41843E-06f}, {6.15349E-01f, 1.47602E-01f, 0.0f}, {5.99888E-01f, 1.39329E-01f, 0.0f},
-    /* 618 */ {5.84489E-01f, 1.31416E-01f, 0.0f}, {5.69240E-01f, 1.23856E-01f, 0.0f}, {5.54224E-01f, 1.16641E-01f, 0.0f},
-    /* 621 */ {5.39469E-01f, 1.09766E-01f, 0.0f}, {5.24827E-01f, 1.03226E-01f, 0.0f}, {5.10124E-01f, 9.70205E-02f, 0.0f},
-    /* 624 */ {4.95206E-01f, 9.11430E-02f, 0.0f}, {4.79941E-01f, 8.55872E-02f, 0.0f}, {4.64270E-01f, 8.03428E-02f, 0.0f},
-    /* 627 */ {4.48338E-01f, 7.53913E-02f, 0.0f}, {4.32329E-01f, 7.07136E-02f, 0.0f}, {4.16406E-01f, 6.62924E-02f, 0.0f},
-    /* 630 */ {4.00711E-01f, 6.21120E-02f, 0.0f}, {3.85355E-01f, 5.81595E-02f, 0.0f}, {3.70377E-01f, 5.44276E-02f, 0.0f},
-    /* 633 */ {3.55793E-01f, 5.09098E-02f, 0.0f}, {3.41618E-01f, 4.75991E-02f, 0.0f}, {3.27864E-01f, 4.44879E-02f, 0.0f},
-    /* 636 */ {3.14541E-01f, 4.15659E-02f, 0.0f}, {3.01662E-01f, 3.88152E-02f, 0.0f}, {2.89239E-01f, 3.62181E-02f, 0.0f},
-    /* 639 */ {2.77278E-01f, 3.37599E-02f, 0.0f}, {2.65784E-01f, 3.14282E-02f, 0.0f}, {2.54740E-01f, 2.92176E-02f, 0.0f},
-    /* 642 */ {2.44054E-01f, 2.71403E-02f, 0.0f}, {2.33634E-01f, 2.52084E-02f, 0.0f}, {2.23399E-01f, 2.34286E-02f, 0.0f},
-    /* 645 */ {2.13284E-01f, 2.18037E-02f, 0.0f}, {2.03257E-01f, 2.03285E-02f, 0.0f}, {1.93370E-01f, 1.89779E-02f, 0.0f},
-    /* 648 */ {1.83688E-01f, 1.77272E-02f, 0.0f}, {1.74263E-01f, 1.65560E-02f, 0.0f}, {1.65141E-01f, 1.54480E-02f, 0.0f},
-    /* 651 */ {1.56354E-01f, 1.43924E-02f, 0.0f}, {1.47916E-01f, 1.33896E-02f, 0.0f}, {1.39834E-01f, 1.24414E-02f, 0.0f},
-    /* 654 */ {1.32111E-01f, 1.15488E-02f, 0.0f}, {1.24749E-01f, 1.07120E-02f, 0.0f}, {1.17744E-01f, 9.92994E-03f, 0.0f},
-    /* 657 */ {1.11081E-01f, 9.20057E-03f, 0.0f}, {1.04747E-01f, 8.52126E-03f, 0.0f}, {9.87277E-02f, 7.88945E-03f, 0.0f},
-    /* 660 */ {9.30085E-02f, 7.30255E-03f, 0.0f}, {8.75769E-02f, 6.75820E-03f, 0.0f}, {8.24219E-02f, 6.25474E-03f, 0.0f},
-    /* 663 */ {7.75328E-02f, 5.79045E-03f, 0.0f}, {7.28989E-02f, 5.36347E-03f, 0.0f}, {6.85100E-02f, 4.97179E-03f, 0.0f},
-    /* 666 */ {6.43554E-02f, 4.61300E-03f, 0.0f}, {6.04242E-02f, 4.28339E-03f, 0.0f}, {5.67057E-02f, 3.97940E-03f, 0.0f},
-    /* 669 */ {5.31896E-02f, 3.69803E-03f, 0.0f}, {4.98661E-02f, 3.43667E-03f, 0.0f}, {4.67258E-02f, 3.19326E-03f, 0.0f},
-    /* 672 */ {4.37598E-02f, 2.96653E-03f, 0.0f}, {4.09594E-02f, 2.75543E-03f, 0.0f}, {3.83165E-02f, 2.55896E-03f, 0.0f},
-    /* 675 */ {3.58233E-02f, 2.37617E-03f, 0.0f}, {3.34725E-02f, 2.20618E-03f, 0.0f}, {3.12583E-02f, 2.04809E-03f, 0.0f},
-    /* 678 */ {2.91751E-02f, 1.90110E-03f, 0.0f}, {2.72173E-02f, 1.76442E-03f, 0.0f}, {2.53790E-02f, 1.63734E-03f, 0.0f},
-    /* 681 */ {2.36541E-02f, 1.51916E-03f, 0.0f}, {2.20336E-02f, 1.40913E-03f, 0.0f}, {2.05092E-02f, 1.30655E-03f, 0.0f},
-    /* 684 */ {1.90735E-02f, 1.21078E-03f, 0.0f}, {1.77201E-02f, 1.12128E-03f, 0.0f}, {1.64451E-02f, 1.03766E-03f, 0.0f},
-    /* 687 */ {1.52510E-02f, 9.59892E-04f, 0.0f}, {1.41404E-02f, 8.87951E-04f, 0.0f}, {1.31137E-02f, 8.21729E-04f, 0.0f},
-    /* 690 */ {1.21701E-02f, 7.61051E-04f, 0.0f}, {1.13063E-02f, 7.05623E-04f, 0.0f}, {1.05131E-02f, 6.54874E-04f, 0.0f},
-    /* 693 */ {9.78127E-03f, 6.08240E-04f, 0.0f}, {9.10300E-03f, 5.65240E-04f, 0.0f}, {8.47170E-03f, 5.25457E-04f, 0.0f},
-    /* 696 */ {7.88227E-03f, 4.88550E-04f, 0.0f}, {7.33213E-03f, 4.54277E-04f, 0.0f}, {6.81928E-03f, 4.22436E-04f, 0.0f},
-    /* 699 */ {6.34173E-03f, 3.92839E-04f, 0.0f}, {5.89749E-03f, 3.65317E-04f, 0.0f}, {5.48444E-03f, 3.39710E-04f, 0.0f},
-    /* 702 */ {5.09978E-03f, 3.15856E-04f, 0.0f}, {4.74086E-03f, 2.93607E-04f, 0.0f}, {4.40538E-03f, 2.72834E-04f, 0.0f},
-    /* 705 */ {4.09129E-03f, 2.53417E-04f, 0.0f}, {3.79703E-03f, 2.35265E-04f, 0.0f}, {3.52187E-03f, 2.18331E-04f, 0.0f},
-    /* 708 */ {3.26520E-03f, 2.02574E-04f, 0.0f}, {3.02632E-03f, 1.87948E-04f, 0.0f}, {2.80447E-03f, 1.74402E-04f, 0.0f},
-    /* 711 */ {2.59882E-03f, 1.61878E-04f, 0.0f}, {2.40849E-03f, 1.50305E-04f, 0.0f}, {2.23259E-03f, 1.39612E-04f, 0.0f},
-    /* 714 */ {2.07024E-03f, 1.29734E-04f, 0.0f}, {1.92058E-03f, 1.20608E-04f, 0.0f}, {1.78269E-03f, 1.12176E-04f, 0.0f},
-    /* 717 */ {1.65540E-03f, 1.04373E-04f, 0.0f}, {1.53762E-03f, 9.71383E-05f, 0.0f}, {1.42839E-03f, 9.04202E-05f, 0.0f},
-    /* 720 */ {1.32687E-03f, 8.41716E-05f, 0.0f}, {1.23238E-03f, 7.83538E-05f, 0.0f}, {1.14456E-03f, 7.29425E-05f, 0.0f},
-    /* 723 */ {1.06308E-03f, 6.79164E-05f, 0.0f}, {9.87592E-04f, 6.32542E-05f, 0.0f}, {9.17777E-04f, 5.89349E-05f, 0.0f},
-    /* 726 */ {8.53264E-04f, 5.49360E-05f, 0.0f}, {7.93589E-04f, 5.12291E-05f, 0.0f}, {7.38306E-04f, 4.77872E-05f, 0.0f},
-    /* 729 */ {6.87018E-04f, 4.45862E-05f, 0.0f}, {6.39373E-04f, 4.16049E-05f, 0.0f}, {5.95057E-04f, 3.88245E-05f, 0.0f},
-    /* 732 */ {5.53797E-04f, 3.62302E-05f, 0.0f}, {5.15350E-04f, 3.38086E-05f, 0.0f}, {4.79496E-04f, 3.15474E-05f, 0.0f},
-    /* 735 */ {4.46035E-04f, 2.94354E-05f, 0.0f}, {4.14809E-04f, 2.74634E-05f, 0.0f}, {3.85749E-04f, 2.56268E-05f, 0.0f},
-    /* 738 */ {3.58792E-04f, 2.39217E-05f, 0.0f}, {3.33861E-04f, 2.23432E-05f, 0.0f}, {3.10869E-04f, 2.08860E-05f, 0.0f},
-    /* 741 */ {2.89699E-04f, 1.95424E-05f, 0.0f}, {2.70145E-04f, 1.82990E-05f, 0.0f}, {2.52007E-04f, 1.71423E-05f, 0.0f},
-    /* 744 */ {2.35117E-04f, 1.60611E-05f, 0.0f}, {2.19329E-04f, 1.50458E-05f, 0.0f}, {2.04535E-04f, 1.40893E-05f, 0.0f},
-    /* 747 */ {1.90692E-04f, 1.31899E-05f, 0.0f}, {1.77771E-04f, 1.23462E-05f, 0.0f}, {1.65736E-04f, 1.15569E-05f, 0.0f},
-    /* 750 */ {1.54549E-04f, 1.08200E-05f, 0.0f}, {1.44167E-04f, 1.01334E-05f, 0.0f}, {1.34528E-04f, 9.49367E-06f, 0.0f},
-    /* 753 */ {1.25574E-04f, 8.89736E-06f, 0.0f}, {1.17251E-04f, 8.34135E-06f, 0.0f}, {1.09508E-04f, 7.82271E-06f, 0.0f},
-    /* 756 */ {1.02300E-04f, 7.33865E-06f, 0.0f}, {9.55828E-05f, 6.88612E-06f, 0.0f}, {8.93161E-05f, 6.46228E-06f, 0.0f},
-    /* 759 */ {8.34631E-05f, 6.06462E-06f, 0.0f}, {7.79912E-05f, 5.69093E-06f, 0.0f}, {7.28730E-05f, 5.33942E-06f, 0.0f},
-    /* 762 */ {6.80921E-05f, 5.00929E-06f, 0.0f}, {6.36342E-05f, 4.69984E-06f, 0.0f}, {5.94841E-05f, 4.41034E-06f, 0.0f},
-    /* 765 */ {5.56264E-05f, 4.13998E-06f, 0.0f}, {5.20430E-05f, 3.88772E-06f, 0.0f}, {4.87063E-05f, 3.65186E-06f, 0.0f},
-    /* 768 */ {4.55900E-05f, 3.43070E-06f, 0.0f}, {4.26710E-05f, 3.22278E-06f, 0.0f}, {3.99295E-05f, 3.02683E-06f, 0.0f},
-    /* 771 */ {3.73509E-05f, 2.84192E-06f, 0.0f}, {3.49326E-05f, 2.66795E-06f, 0.0f}, {3.26730E-05f, 2.50491E-06f, 0.0f},
-    /* 774 */ {3.05690E-05f, 2.35267E-06f, 0.0f}, {2.86163E-05f, 2.21100E-06f, 0.0f}, {2.68077E-05f, 2.07946E-06f, 0.0f},
-    /* 777 */ {2.51286E-05f, 1.95700E-06f, 0.0f}, {2.35645E-05f, 1.84258E-06f, 0.0f}, {2.21026E-05f, 1.73528E-06f, 0.0f},
-    /* 780 */ {2.07321E-05f, 1.63433E-06f, 0.0f}, {1.94444E-05f, 1.53910E-06f, 0.0f}, {1.82351E-05f, 1.44932E-06f, 0.0f},
-    /* 783 */ {1.71008E-05f, 1.36478E-06f, 0.0f}, {1.60380E-05f, 1.28526E-06f, 0.0f}, {1.50432E-05f, 1.21054E-06f, 0.0f},
-    /* 786 */ {1.41127E-05f, 1.14038E-06f, 0.0f}, {1.32420E-05f, 1.07446E-06f, 0.0f}, {1.24263E-05f, 1.01247E-06f, 0.0f},
-    /* 789 */ {1.16618E-05f, 9.54130E-07f, 0.0f}, {1.09446E-05f, 8.99170E-07f, 0.0f}, {1.02716E-05f, 8.47379E-07f, 0.0f},
-    /* 792 */ {9.64036E-06f, 7.98635E-07f, 0.0f}, {9.04897E-06f, 7.52832E-07f, 0.0f}, {8.49535E-06f, 7.09857E-07f, 0.0f},
-    /* 795 */ {7.97750E-06f, 6.69594E-07f, 0.0f}, {7.49341E-06f, 6.31907E-07f, 0.0f}, {7.04079E-06f, 5.96604E-07f, 0.0f},
-    /* 798 */ {6.61744E-06f, 5.63495E-07f, 0.0f}, {6.22133E-06f, 5.32408E-07f, 0.0f}, {5.85057E-06f, 5.03187E-07f, 0.0f},
-    /* 801 */ {5.50333E-06f, 4.75686E-07f, 0.0f}, {5.17756E-06f, 4.49753E-07f, 0.0f}, {4.87135E-06f, 4.25249E-07f, 0.0f},
-    /* 804 */ {4.58300E-06f, 4.02050E-07f, 0.0f}, {4.31102E-06f, 3.80046E-07f, 0.0f}, {4.05422E-06f, 3.59156E-07f, 0.0f},
-    /* 807 */ {3.81213E-06f, 3.39356E-07f, 0.0f}, {3.58438E-06f, 3.20633E-07f, 0.0f}, {3.37053E-06f, 3.02966E-07f, 0.0f},
-    /* 810 */ {3.17009E-06f, 2.86329E-07f, 0.0f}, {2.98248E-06f, 2.70687E-07f, 0.0f}, {2.80691E-06f, 2.55980E-07f, 0.0f},
-    /* 813 */ {2.64257E-06f, 2.42147E-07f, 0.0f}, {2.48873E-06f, 2.29130E-07f, 0.0f}, {2.34468E-06f, 2.16878E-07f, 0.0f},
-    /* 816 */ {2.20974E-06f, 2.05338E-07f, 0.0f}, {2.08315E-06f, 1.94449E-07f, 0.0f}, {1.96419E-06f, 1.84155E-07f, 0.0f},
-    /* 819 */ {1.85222E-06f, 1.74407E-07f, 0.0f}, {1.74666E-06f, 1.65158E-07f, 0.0f}, {1.64705E-06f, 1.56373E-07f, 0.0f},
-    /* 822 */ {1.55307E-06f, 1.48031E-07f, 0.0f}, {1.46448E-06f, 1.40117E-07f, 0.0f}, {1.38100E-06f, 1.32615E-07f, 0.0f},
-    /* 825 */ {1.30241E-06f, 1.25508E-07f, 0.0f}, {1.22844E-06f, 1.18781E-07f, 0.0f}, {1.15888E-06f, 1.12416E-07f, 0.0f},
-    /* 828 */ {1.09348E-06f, 1.06398E-07f, 0.0f}, {1.03203E-06f, 1.00711E-07f, 0.0f}, {9.74306E-07f, 9.53411E-08f, 0.0f},
-
-};
 
 /* --- noise ------------------------------------------------------------------- */
 
@@ -5399,427 +6998,13 @@ PSYGFX_API int psygfx_sdf_from_mask(float* out, const uint8_t* mask, int w, int 
     return PSYGFX_OK;
 }
 
-/* --- calibration ------------------------------------------------------------ */
-
-PSYGFX_API void psygfx_cone_fundamentals(double nm, double lms[3]) {
-    int i0;
-    double f;
-    lms[0] = lms[1] = lms[2] = 0.0;
-    if (!(nm >= 390.0 && nm <= 830.0)) return;
-    i0 = (int)(nm - 390.0);
-    if (i0 >= 440) i0 = 439;
-    f = nm - 390.0 - i0;
-    lms[0] = psygfx__ss2[i0][0] + (psygfx__ss2[i0 + 1][0] - psygfx__ss2[i0][0]) * f;
-    lms[1] = psygfx__ss2[i0][1] + (psygfx__ss2[i0 + 1][1] - psygfx__ss2[i0][1]) * f;
-    lms[2] = psygfx__ss2[i0][2] + (psygfx__ss2[i0 + 1][2] - psygfx__ss2[i0][2]) * f;
-}
-
-static const char psygfx__cal_magic[8] = { 'P', 'S', 'Y', 'C', 'A', 'L', '\0', '\1' };
-
-/* The canonical layout is fixed: every offset, on every compiler. */
-#define PSYGFX__AT(f, off) typedef char psygfx__cal_at_##f[offsetof(psygfx_cal, f) == (off) ? 1 : -1]
-PSYGFX__AT(version, 8);
-PSYGFX__AT(n_readings, 36);
-PSYGFX__AT(date, 40);
-PSYGFX__AT(display, 48);
-PSYGFX__AT(screen, 240);
-PSYGFX__AT(readings, 496);
-PSYGFX__AT(n_wl, 5616);
-PSYGFX__AT(lut_n, 5628);
-PSYGFX__AT(spd, 5632);
-PSYGFX__AT(rgb_to_xyz, 13168);
-PSYGFX__AT(white_err, 13360);
-PSYGFX__AT(lut, 13368);
-PSYGFX__AT(crc, 62524);
-typedef char psygfx__cal_size[sizeof(psygfx_cal) == 62528 ? 1 : -1];
-typedef char psygfx__reading_size[sizeof(psygfx_cal_reading) == 20 ? 1 : -1];
-#undef PSYGFX__AT
-
-PSYGFX_API void psygfx_cal_init(psygfx_cal* c) {
-    if (!c) return;
-    memset(c, 0, sizeof *c);
-    memcpy(c->magic, psygfx__cal_magic, 8);
-    c->version = 1;
-    c->bytes = (uint32_t)sizeof *c;
-}
-
-PSYGFX_API int psygfx_cal_add(psygfx_cal* c, int gun, float level, float Y, float x, float y) {
-    psygfx_cal_reading* r;
-    if (!c) return PSYGFX_ERR_ARG;
-    if (c->n_readings < 0 || c->n_readings >= PSYGFX_CAL_MAX_READINGS) return PSYGFX_ERR_FULL;
-    if (gun < PSYGFX_GUN_BLACK || gun > PSYGFX_GUN_WHITE || !(level >= 0.0f && level <= 1.0f) || !(Y >= 0.0f))
-        return PSYGFX_ERR_ARG;
-    r = &c->readings[c->n_readings++];
-    r->gun = gun; r->level = level; r->Y = Y; r->x = x; r->y = y;
-    if (x > 0.0f && y > 0.0f) c->flags |= PSYGFX_CAL_HAS_XY;
-    return PSYGFX_OK;
-}
-
-PSYGFX_API int psygfx_cal_set_spectra(psygfx_cal* c, float wl_start, float wl_step, int n,
-                                      const float* r, const float* g, const float* b, const float* black) {
-    int i;
-    if (!c || !r || !g || !b || n < 2 || n > PSYGFX_CAL_MAX_WL || !(wl_step > 0.0f)) return PSYGFX_ERR_ARG;
-    memset(c->spd, 0, sizeof c->spd);
-    for (i = 0; i < n; i++) {
-        c->spd[0][i] = r[i]; c->spd[1][i] = g[i]; c->spd[2][i] = b[i];
-        c->spd[3][i] = black ? black[i] : 0.0f;
-    }
-    c->n_wl = n; c->wl_start = wl_start; c->wl_step = wl_step;
-    c->flags |= PSYGFX_CAL_HAS_SPECTRA;
-    return PSYGFX_OK;
-}
-
-static int psygfx__inv3(const double* m, double* out) {
-    double a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
-    double A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
-    double det = a * A + b * B + c * C;
-    if (!(fabs(det) > 1e-300)) return 0;
-    out[0] = A / det; out[1] = -(b * i - c * h) / det; out[2] = (b * f - c * e) / det;
-    out[3] = B / det; out[4] = (a * i - c * g) / det;  out[5] = -(a * f - c * d) / det;
-    out[6] = C / det; out[7] = -(a * h - b * g) / det; out[8] = (a * e - b * d) / det;
-    return 1;
-}
+/* --- 3 x 3 (the calibration's math is psy_color.h's) ------------------------ */
 
 static void psygfx__mul3(const double* m, const double* v, double* out) {
     double t0 = m[0] * v[0] + m[1] * v[1] + m[2] * v[2];
     double t1 = m[3] * v[0] + m[4] * v[1] + m[5] * v[2];
     double t2 = m[6] * v[0] + m[7] * v[1] + m[8] * v[2];
     out[0] = t0; out[1] = t1; out[2] = t2;
-}
-
-/* Monotone cubic Hermite (Fritsch and Carlson 1980) through (x[i], y[i]),
- * x and y strictly increasing. */
-static double psygfx__hermite(const double* x, const double* y, const double* m, int n, double t) {
-    int lo = 0, hi = n - 1;
-    double h, s, s2, s3;
-    if (t <= x[0]) return y[0];
-    if (t >= x[n - 1]) return y[n - 1];
-    while (hi - lo > 1) { int mid = (lo + hi) / 2; if (x[mid] <= t) lo = mid; else hi = mid; }
-    h = x[hi] - x[lo];
-    s = (t - x[lo]) / h; s2 = s * s; s3 = s2 * s;
-    return (2 * s3 - 3 * s2 + 1) * y[lo] + (s3 - 2 * s2 + s) * h * m[lo] + (-2 * s3 + 3 * s2) * y[hi] + (s3 - s2) * h * m[hi];
-}
-
-/* Everything psygfx_cal_derive() computes. verify != 0: compare with what is
- * stored instead of writing, and fail when they differ beyond rounding. */
-static int psygfx__cal_derive(psygfx_cal* c, int verify, char* err, size_t cap) {
-    double lx[3][PSYGFX_CAL_MAX_READINGS + 1], ly[3][PSYGFX_CAL_MAX_READINGS + 1], lm[PSYGFX_CAL_MAX_READINGS + 1];
-    int np[3] = { 0, 0, 0 }, i, k, gun, lut_n, nblack = 0, full[3] = { -1, -1, -1 }, white = -1;
-    double Ybk = 0.0, Y1[3], xyz[9], lms[9], bxyz[3] = { 0, 0, 0 }, blms[3] = { 0, 0, 0 }, werr = 0.0;
-    const psygfx_cal_reading* black = NULL;
-    double maxd = 0.0;
-    if (memcmp(c->magic, psygfx__cal_magic, 8) != 0 || c->version != 1 || c->bytes != (uint32_t)sizeof *c) {
-        psygfx__set_error(err, cap, "not a canonical calibration (magic, version 1, %u bytes); the pack tool writes one",
-                          (unsigned)sizeof *c);
-        return PSYGFX_ERR_FORMAT;
-    }
-    if (c->n_readings < 1 || c->n_readings > PSYGFX_CAL_MAX_READINGS) {
-        psygfx__set_error(err, cap, "%d readings; a calibration is rebuilt from its readings", c->n_readings);
-        return PSYGFX_ERR_RANGE;
-    }
-    lut_n = c->lut_n ? c->lut_n : PSYGFX_CAL_MAX_LUT;
-    if (lut_n < 2 || lut_n > PSYGFX_CAL_MAX_LUT) { psygfx__set_error(err, cap, "lut_n %d outside 2..4096", c->lut_n); return PSYGFX_ERR_RANGE; }
-    for (i = 0; i < c->n_readings; i++) {
-        const psygfx_cal_reading* r = &c->readings[i];
-        if (r->gun == PSYGFX_GUN_BLACK) { black = r; nblack++; }
-        else if (r->gun == PSYGFX_GUN_WHITE) white = i;
-        else if (r->gun < 0 || r->gun > 2) { psygfx__set_error(err, cap, "reading %d: gun %d", i, r->gun); return PSYGFX_ERR_RANGE; }
-    }
-    if (nblack != 1) { psygfx__set_error(err, cap, "%d black readings; one is needed", nblack); return PSYGFX_ERR_RANGE; }
-    Ybk = black->Y;
-    for (gun = 0; gun < 3; gun++) {
-        lx[gun][0] = 0.0; ly[gun][0] = Ybk; np[gun] = 1;
-        for (i = 0; i < c->n_readings; i++) {
-            const psygfx_cal_reading* r = &c->readings[i];
-            int j;
-            if (r->gun != gun) continue;
-            /* insertion by level */
-            for (j = np[gun]; j > 1 && lx[gun][j - 1] > r->level; j--) { lx[gun][j] = lx[gun][j - 1]; ly[gun][j] = ly[gun][j - 1]; }
-            lx[gun][j] = r->level; ly[gun][j] = r->Y;
-            np[gun]++;
-            if (r->level == 1.0f) full[gun] = i;
-        }
-        if (full[gun] < 0) { psygfx__set_error(err, cap, "gun %d has no reading at level 1", gun); return PSYGFX_ERR_RANGE; }
-        for (k = 1; k < np[gun]; k++) {
-            if (!(lx[gun][k] > lx[gun][k - 1]) || !(ly[gun][k] > ly[gun][k - 1])) {
-                psygfx__set_error(err, cap, "gun %d: luminance does not rise at level %.6g (%.6g cd/m2 after %.6g); "
-                                  "non-monotone readings are refused", gun, lx[gun][k], ly[gun][k], ly[gun][k - 1]);
-                return PSYGFX_ERR_RANGE;
-            }
-        }
-        Y1[gun] = ly[gun][np[gun] - 1];
-        for (k = 0; k < np[gun]; k++) ly[gun][k] = (ly[gun][k] - Ybk) / (Y1[gun] - Ybk);
-    }
-    if (white >= 0) {
-        double sum = Ybk + (Y1[0] - Ybk) + (Y1[1] - Ybk) + (Y1[2] - Ybk);
-        werr = (c->readings[white].Y - sum) / c->readings[white].Y * 100.0;
-    }
-    /* XYZ (1931) from the chromaticities of the full-level readings */
-    memset(xyz, 0, sizeof xyz);
-    {
-        int have = 1;
-        for (gun = 0; gun < 3; gun++) {
-            const psygfx_cal_reading* r = &c->readings[full[gun]];
-            if (!(r->x > 0.0f && r->y > 0.0f)) have = 0;
-        }
-        if (have && Ybk > 0.0) {
-            if (black->x > 0.0f && black->y > 0.0f) {
-                bxyz[0] = black->x / black->y * Ybk; bxyz[1] = Ybk; bxyz[2] = (1.0 - black->x - black->y) / black->y * Ybk;
-            } else {
-                have = 0;   /* a black with light needs its chromaticity */
-            }
-        }
-        if (have) {
-            for (gun = 0; gun < 3; gun++) {
-                const psygfx_cal_reading* r = &c->readings[full[gun]];
-                double Y = r->Y, x = r->x, y = r->y;
-                xyz[0 * 3 + gun] = x / y * Y - bxyz[0];
-                xyz[1 * 3 + gun] = Y - bxyz[1];
-                xyz[2 * 3 + gun] = (1.0 - x - y) / y * Y - bxyz[2];
-            }
-        }
-    }
-    /* LMS from the spectra: the 1-nm cone table against each spectrum
-     * interpolated linearly onto it, 0 outside the measured range. */
-    memset(lms, 0, sizeof lms);
-    if ((c->flags & PSYGFX_CAL_HAS_SPECTRA) && c->n_wl >= 2 && c->n_wl <= PSYGFX_CAL_MAX_WL && c->wl_step > 0) {
-        double acc[4][3];
-        int j, nm;
-        memset(acc, 0, sizeof acc);
-        for (nm = 390; nm <= 830; nm++) {
-            double t = ((double)nm - c->wl_start) / c->wl_step, f;
-            int i0 = (int)floor(t);
-            if (t < 0.0 || t > (double)(c->n_wl - 1)) continue;
-            if (i0 >= c->n_wl - 1) i0 = c->n_wl - 2;
-            f = t - i0;
-            for (j = 0; j < 4; j++) {
-                double v = c->spd[j][i0] + (c->spd[j][i0 + 1] - c->spd[j][i0]) * f;
-                acc[j][0] += psygfx__ss2[nm - 390][0] * v;
-                acc[j][1] += psygfx__ss2[nm - 390][1] * v;
-                acc[j][2] += psygfx__ss2[nm - 390][2] * v;
-            }
-        }
-        for (k = 0; k < 3; k++) {
-            blms[k] = acc[3][k];
-            for (j = 0; j < 3; j++) lms[k * 3 + j] = acc[j][k] - acc[3][k];
-        }
-    }
-    if (!verify) {
-        memcpy(c->rgb_to_xyz, xyz, sizeof xyz);
-        memcpy(c->rgb_to_lms, lms, sizeof lms);
-        memcpy(c->black_xyz, bxyz, sizeof bxyz);
-        memcpy(c->black_lms, blms, sizeof blms);
-        c->white_err = werr;
-        c->lut_n = lut_n;
-    } else {
-        for (k = 0; k < 9; k++) {
-            double s1 = fabs(xyz[k] - c->rgb_to_xyz[k]) / (fabs(xyz[k]) + 1e-30);
-            double s2 = fabs(lms[k] - c->rgb_to_lms[k]) / (fabs(lms[k]) + 1e-30);
-            if ((xyz[k] != c->rgb_to_xyz[k] && s1 > 1e-9) || (lms[k] != c->rgb_to_lms[k] && s2 > 1e-9)) {
-                psygfx__set_error(err, cap, "the stored matrices differ from the ones its readings give");
-                return PSYGFX_ERR_FORMAT;
-            }
-        }
-        if (c->lut_n != lut_n) { psygfx__set_error(err, cap, "lut_n differs"); return PSYGFX_ERR_FORMAT; }
-    }
-    /* The CLUT: entry k is the level whose normalized luminance is k/(n-1). */
-    for (gun = 0; gun < 3; gun++) {
-        int n = np[gun];
-        const double* x = lx[gun];
-        const double* y = ly[gun];
-        double dk[PSYGFX_CAL_MAX_READINGS + 1];
-        dk[0] = 1.0;   /* n >= 2 always: black and the full level */
-        for (k = 0; k < n - 1; k++) dk[k] = (y[k + 1] - y[k]) / (x[k + 1] - x[k]);
-        lm[0] = dk[0];
-        lm[n - 1] = dk[n - 2];
-        for (k = 1; k < n - 1; k++) lm[k] = 0.5 * (dk[k - 1] + dk[k]);
-        for (k = 0; k < n - 1; k++) {
-            double a = lm[k] / dk[k], b = lm[k + 1] / dk[k], s = a * a + b * b;
-            if (s > 9.0) { double t = 3.0 / sqrt(s); lm[k] = t * a * dk[k]; lm[k + 1] = t * b * dk[k]; }
-        }
-        for (k = 0; k < lut_n; k++) {
-            double target = (double)k / (double)(lut_n - 1), lo = 0.0, hi = 1.0, v;
-            int it;
-            if (k == 0) v = 0.0;
-            else if (k == lut_n - 1) v = 1.0;
-            else {
-                for (it = 0; it < 64; it++) {
-                    double mid = 0.5 * (lo + hi);
-                    if (psygfx__hermite(x, y, lm, n, mid) < target) lo = mid; else hi = mid;
-                }
-                v = 0.5 * (lo + hi);
-            }
-            if (!verify) c->lut[gun][k] = (float)v;
-            else if (fabs((double)c->lut[gun][k] - v) > maxd) maxd = fabs((double)c->lut[gun][k] - v);
-        }
-    }
-    if (verify && maxd > 1e-6) {
-        psygfx__set_error(err, cap, "the stored CLUT differs from the one its readings give by %.3g", maxd);
-        return PSYGFX_ERR_FORMAT;
-    }
-    return PSYGFX_OK;
-}
-
-PSYGFX_API int psygfx_cal_derive(psygfx_cal* c, char* err, size_t cap) {
-    if (!c) return PSYGFX_ERR_ARG;
-    if (err && cap) err[0] = '\0';
-    return psygfx__cal_derive(c, 0, err, cap);
-}
-
-PSYGFX_API int psygfx_cal_check(const psygfx_cal* c, char* err, size_t cap) {
-    if (!c) return PSYGFX_ERR_ARG;
-    if (err && cap) err[0] = '\0';
-    if (c->crc && c->crc != psygfx__crc32(c, offsetof(psygfx_cal, crc))) {
-        psygfx__set_error(err, cap, "CRC mismatch");
-        return PSYGFX_ERR_FORMAT;
-    }
-    /* verify mode reads only; the cast does not write */
-    return psygfx__cal_derive((psygfx_cal*)c, 1, err, cap);
-}
-
-PSYGFX_API int psygfx_cal_save(psygfx_cal* c, void* out, size_t cap) {
-    if (!c) return PSYGFX_ERR_ARG;
-    c->crc = psygfx__crc32(c, offsetof(psygfx_cal, crc));
-    if (!out) return (int)sizeof *c;
-    if (cap < sizeof *c) return PSYGFX_ERR_FULL;
-    memcpy(out, c, sizeof *c);
-    return (int)sizeof *c;
-}
-
-PSYGFX_API int psygfx_cal_load(psygfx_cal* c, const void* bytes, size_t n, char* err, size_t cap) {
-    int rc;
-    if (err && cap) err[0] = '\0';
-    if (!c || !bytes) return PSYGFX_ERR_ARG;
-    if (n != sizeof *c || memcmp(bytes, psygfx__cal_magic, 8) != 0) {
-        psygfx__set_error(err, cap, "not a canonical calibration (%lu bytes, want %u with magic PSYCAL); "
-                          "the pack tool writes one", (unsigned long)n, (unsigned)sizeof *c);
-        return PSYGFX_ERR_FORMAT;
-    }
-    memcpy(c, bytes, sizeof *c);
-    if (c->crc != psygfx__crc32(c, offsetof(psygfx_cal, crc))) {
-        memset(c, 0, sizeof *c);
-        psygfx__set_error(err, cap, "CRC mismatch: the file was changed or truncated");
-        return PSYGFX_ERR_FORMAT;
-    }
-    rc = psygfx__cal_derive(c, 1, err, cap);
-    if (rc < 0) memset(c, 0, sizeof *c);
-    return rc;
-}
-
-PSYGFX_API int psygfx_cal_nominal(psygfx_cal* c, const float xy[4][2], float white_Y, double gamma) {
-    double m[9], inv[9], w[3], Yp[3];
-    int gun, k, rc;
-    if (!c || !xy || !(white_Y > 0.0f) || !(gamma > 0.0)) return PSYGFX_ERR_ARG;
-    for (k = 0; k < 4; k++) if (!(xy[k][1] > 0.0f)) return PSYGFX_ERR_ARG;
-    psygfx_cal_init(c);
-    /* luminance of each primary so that the three sum to the white point */
-    for (gun = 0; gun < 3; gun++) {
-        m[0 * 3 + gun] = xy[gun][0] / xy[gun][1];
-        m[1 * 3 + gun] = 1.0;
-        m[2 * 3 + gun] = (1.0 - xy[gun][0] - xy[gun][1]) / xy[gun][1];
-    }
-    w[0] = xy[3][0] / xy[3][1] * white_Y; w[1] = white_Y; w[2] = (1.0 - xy[3][0] - xy[3][1]) / xy[3][1] * white_Y;
-    if (!psygfx__inv3(m, inv)) return PSYGFX_ERR_RANGE;
-    psygfx__mul3(inv, w, Yp);
-    psygfx_cal_add(c, PSYGFX_GUN_BLACK, 0.0f, 0.0f, 0.0f, 0.0f);
-    for (gun = 0; gun < 3; gun++) {
-        if (!(Yp[gun] > 0.0)) return PSYGFX_ERR_RANGE;
-        for (k = 1; k <= 32; k++) {
-            double l = k / 32.0;
-            psygfx_cal_add(c, gun, (float)l, (float)(Yp[gun] * pow(l, gamma)), xy[gun][0], xy[gun][1]);
-        }
-    }
-    psygfx_cal_add(c, PSYGFX_GUN_WHITE, 1.0f, white_Y, xy[3][0], xy[3][1]);
-    c->flags |= PSYGFX_CAL_NOMINAL;
-    snprintf(c->instrument, sizeof c->instrument, "nominal: stated primaries, gamma %.4g", gamma);
-    rc = psygfx_cal_derive(c, NULL, 0);
-    if (rc >= 0) psygfx_cal_save(c, NULL, 0);
-    return rc;
-}
-
-static int psygfx__has_lms(const psygfx_cal* c) {
-    return c && (c->flags & PSYGFX_CAL_HAS_SPECTRA) && (c->rgb_to_lms[0] != 0.0 || c->rgb_to_lms[4] != 0.0);
-}
-
-PSYGFX_API int psygfx_cal_lms(const psygfx_cal* c, const float rgb[3], double out[3]) {
-    double v[3];
-    if (!psygfx__has_lms(c) || !rgb || !out) return PSYGFX_ERR_REFUSED;
-    v[0] = rgb[0]; v[1] = rgb[1]; v[2] = rgb[2];
-    psygfx__mul3(c->rgb_to_lms, v, out);
-    out[0] += c->black_lms[0]; out[1] += c->black_lms[1]; out[2] += c->black_lms[2];
-    return PSYGFX_OK;
-}
-
-PSYGFX_API int psygfx_cal_dir_cone(const psygfx_cal* c, const float bg[3], const float cc[3], float dir[3]) {
-    double lb[3], d[3], inv[9], r[3];
-    int k;
-    if (!bg || !cc || !dir) return PSYGFX_ERR_ARG;
-    if (psygfx_cal_lms(c, bg, lb) < 0) return PSYGFX_ERR_REFUSED;
-    if (!psygfx__inv3(c->rgb_to_lms, inv)) return PSYGFX_ERR_RANGE;
-    for (k = 0; k < 3; k++) d[k] = (double)cc[k] * lb[k];
-    psygfx__mul3(inv, d, r);
-    for (k = 0; k < 3; k++) dir[k] = (float)r[k];
-    return PSYGFX_OK;
-}
-
-/* Psychtoolbox's ComputeDKL_M (Brainard 1996, the appendix in Kaiser and
- * Boynton), with luminance V = 0.68990272 L + 0.34832189 M. */
-PSYGFX_API int psygfx_cal_dkl_matrix(const psygfx_cal* c, const float bg[3], double m[9]) {
-    static const double w0 = 0.68990272, w1 = 0.34832189;
-    double b[3], raw[9], inv[9], col[3], pooled[3], resp[3];
-    int k, j;
-    if (!bg || !m) return PSYGFX_ERR_ARG;
-    if (psygfx_cal_lms(c, bg, b) < 0) return PSYGFX_ERR_REFUSED;
-    if (!(b[0] > 0 && b[1] > 0 && b[2] > 0)) return PSYGFX_ERR_RANGE;
-    raw[0] = w0;  raw[1] = w1;            raw[2] = 0.0;
-    raw[3] = 1.0; raw[4] = -b[0] / b[1];  raw[5] = 0.0;
-    raw[6] = -w0; raw[7] = -w1;           raw[8] = (w0 * b[0] + w1 * b[1]) / b[2];
-    if (!psygfx__inv3(raw, inv)) return PSYGFX_ERR_RANGE;
-    /* each isolating stimulus, scaled to unit pooled cone contrast, must
-     * give a unit response: rescale the rows */
-    for (j = 0; j < 3; j++) {
-        double s = 0.0;
-        for (k = 0; k < 3; k++) { col[k] = inv[k * 3 + j]; s += (col[k] / b[k]) * (col[k] / b[k]); }
-        pooled[j] = sqrt(s);
-        for (k = 0; k < 3; k++) col[k] /= pooled[j];
-        psygfx__mul3(raw, col, resp);
-        for (k = 0; k < 3; k++) m[j * 3 + k] = raw[j * 3 + k] / resp[j];
-    }
-    return PSYGFX_OK;
-}
-
-PSYGFX_API int psygfx_cal_dir_dkl(const psygfx_cal* c, const float bg[3], const float dkl[3], float dir[3]) {
-    double m[9], inv[9], v[3], cone[3], linv[9], r[3];
-    int k, rc;
-    if (!dkl || !dir) return PSYGFX_ERR_ARG;
-    rc = psygfx_cal_dkl_matrix(c, bg, m);
-    if (rc < 0) return rc;
-    if (!psygfx__inv3(m, inv) || !psygfx__inv3(c->rgb_to_lms, linv)) return PSYGFX_ERR_RANGE;
-    v[0] = dkl[0]; v[1] = dkl[1]; v[2] = dkl[2];
-    psygfx__mul3(inv, v, cone);
-    psygfx__mul3(linv, cone, r);
-    for (k = 0; k < 3; k++) dir[k] = (float)r[k];
-    return PSYGFX_OK;
-}
-
-PSYGFX_API void psygfx_dkl_from_sph(float elevation_deg, float azimuth_deg, float radius, float dkl[3]) {
-    const double e = (double)elevation_deg * 3.14159265358979323846 / 180.0;
-    const double a = (double)azimuth_deg * 3.14159265358979323846 / 180.0;
-    if (!dkl) return;
-    dkl[0] = (float)(radius * sin(e));
-    dkl[1] = (float)(radius * cos(e) * cos(a));
-    dkl[2] = (float)(radius * cos(e) * sin(a));
-}
-
-PSYGFX_API float psygfx_max_contrast(const float bg[3], const float dir[3]) {
-    float best = 3.4e38f;
-    int k;
-    if (!bg || !dir) return 0.0f;
-    for (k = 0; k < 3; k++) {
-        float a = fabsf(dir[k]), room = bg[k] < 1.0f - bg[k] ? bg[k] : 1.0f - bg[k];
-        if (a > 0.0f && room / a < best) best = room / a;
-    }
-    return best;
 }
 
 /* --- v0.3: the vector program's data and its CPU form ----------------------- */
@@ -6553,7 +7738,7 @@ static void psygfx__to_space(const psygfx_gfx* g, int space, const float rgb[3],
         double v[3], l[3];
         for (k = 0; k < 3; k++) v[k] = rgb[k];
         psygfx__mul3(g->ok_rgb2lms, v, l);
-        for (k = 0; k < 3; k++) l[k] = cbrt(l[k]);
+        for (k = 0; k < 3; k++) l[k] = cbrt(l[k] + g->ok_black[k]);
         psygfx__mul3(m2, l, out);
     } else if (space == PSYGFX_SPACE_DKL_POLAR) {
         double v[3], d[3], r;
@@ -6576,7 +7761,7 @@ static void psygfx__from_space(const psygfx_gfx* g, int space, const double c[3]
         l[0] = c[0] + 0.3963377774 * c[1] + 0.2158037573 * c[2];
         l[1] = c[0] - 0.1055613458 * c[1] - 0.0638541728 * c[2];
         l[2] = c[0] - 0.0894841775 * c[1] - 1.2914855480 * c[2];
-        for (k = 0; k < 3; k++) l[k] = l[k] * l[k] * l[k];
+        for (k = 0; k < 3; k++) l[k] = l[k] * l[k] * l[k] - g->ok_black[k];
         psygfx__mul3(g->ok_lms2rgb, l, rgb);
     } else if (space == PSYGFX_SPACE_DKL_POLAR) {
         double d[3];
@@ -6635,7 +7820,7 @@ static int psygfx__vpaint(const psygfx_gfx* g, const psygfx_stim* s, const psygf
     if (pt->space != PSYGFX_SPACE_RGB) {
         const double* m = pt->space == PSYGFX_SPACE_OKLAB ? g->ok_lms2rgb : g->dkl2rgb;
         for (k = 0; k < 3; k++)
-            if (!psygfx__vput(vd, o + 18 + k, m[3 * k], m[3 * k + 1], m[3 * k + 2], pt->space == PSYGFX_SPACE_DKL_POLAR ? g->bg[k] : 0.0))
+            if (!psygfx__vput(vd, o + 18 + k, m[3 * k], m[3 * k + 1], m[3 * k + 2], pt->space == PSYGFX_SPACE_DKL_POLAR ? g->bg[k] : g->ok_off[k]))
                 return PSYGFX_ERR_FULL;
         *used = 21;
     } else {
@@ -7096,6 +8281,7 @@ static const psyscr_param psygfx__desc_params[] = {
     { "output", "enum", 0, 0, 0, "", "0 8-bit (the only one in v0.1)" },
     { "stereo", "enum", 0, 0, 0, "", "0 mono (the only one in v0.1)" },
     { "max_draws", "i32", 0, 65536, 1024, "", "draws per frame" },
+    { "cones", "enum", 0, 1, 0, "", "cones for DKL paint and psygfx_color(): 0 2 degree (SS2), 1 10 degree (SS10)" },
 };
 
 PSYGFX_API const psyscr_param* psygfx_desc_params(int* n) {

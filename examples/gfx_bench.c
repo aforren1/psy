@@ -13,7 +13,10 @@
  *
  * Usage: gfx_bench [--device hardware|warp|swiftshader|mesa|llvmpipe]
  *                  [--size W H] [--frames N] [--only NAME] [--scene 16|32]
+ *                  [--cache DIR] [--open-only]
  *   --scene  the scene format of the workloads after the empty frames
+ *   --cache  a program cache in DIR (psygfx_file_cache_init); :mem: one in memory
+ *   --open-only  print psygfx_open()'s time and what the cache did, then exit
  * Exit code: 0, 1 when no GL ES 3.0 context opened, 2 for a bad argument.
  * On Windows set PSYSCR_ANGLE_DIR to ANGLE's directory.
  */
@@ -40,6 +43,9 @@ static psygfx_gfx gfx;
 static int W = 1920, H = 1200, FRAMES = 120;
 static const char* only = NULL;
 static psygfx_format scene_fmt = PSYGFX_FORMAT_NONE;   /* the workloads' scene; 0 = the default */
+static psygfx_file_cache pcache;          /* --cache DIR */
+static const psygfx_cache* cache_desc = NULL;
+static int open_only = 0;
 static void (GLCALL *glFinish_)(void);
 
 #define MAXF 2000
@@ -99,6 +105,25 @@ static void bench(const char* name, const psygfx_stim* s, int n, void (*prep)(in
     report(name, FRAMES < MAXF ? FRAMES : MAXF, (double)(psyrt_now_ns() - t0), FRAMES);
 }
 
+/* --cache :mem: keeps the programs in memory: the cache's cost without the
+ * file system's */
+static struct { uint64_t key[64]; void* p[64]; size_t n[64]; int count; } memc;
+static size_t memc_load(void* u, uint64_t key, void* dst, size_t cap) {
+    int i;
+    (void)u;
+    for (i = 0; i < memc.count; i++)
+        if (memc.key[i] == key) { if (dst && cap >= memc.n[i]) memcpy(dst, memc.p[i], memc.n[i]); return memc.n[i]; }
+    return 0;
+}
+static int memc_store(void* u, uint64_t key, const void* data, size_t n) {
+    (void)u;
+    if (memc.count == 64 || !(memc.p[memc.count] = malloc(n))) return -1;
+    memcpy(memc.p[memc.count], data, n);
+    memc.key[memc.count] = key; memc.n[memc.count++] = n;
+    return 0;
+}
+static const psygfx_cache memc_cache = { memc_load, memc_store, NULL };
+
 static bool reopen(psygfx_format fmt, psygfx_dither dither, int lut) {
     psygfx_desc gd;
     psygfx_close(&gfx);
@@ -108,6 +133,7 @@ static bool reopen(psygfx_format fmt, psygfx_dither dither, int lut) {
     psygfx__test_scene32 = fmt == PSYGFX_RGBA32F;   /* a private seam: measured, then removed from the API */
     gd.dither = dither;
     gd.max_draws = 1100;
+    gd.cache = cache_desc;
     if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_bench: %s\n", psygfx_error(&gfx)); return false; }
     if (lut) {
         static float t[3 * 4096];
@@ -317,13 +343,13 @@ static double median_of(const double* v, int n) {
 
 static void cmp_frame(const bench_work* w, psyscr_frame* f, int i) {
     static const float zero[4] = { 0, 0, 0, 0 };
+    if (w->prep) w->prep(i);   /* before begin: an upload must be */
     psygfx_begin(&gfx, f);
     if (w->pass) {
         psygfx_begin_target(&gfx, w->t, zero);
         if (w->n_in) psygfx_draw_n(&gfx, w->in, w->n_in);
         psygfx_end_target(&gfx);
     }
-    if (w->prep) w->prep(i);
     if (w->n) psygfx_draw_n(&gfx, w->s, w->n);
     psygfx_end(&gfx);
 }
@@ -366,6 +392,274 @@ static void bench_cmp(const char* title, const bench_work* w, int nw) {
         printf("| %-48s | %8.3f | %8.3f | %8.1f | %8.1f |\n", w[k].name, gm, gd, cm, cd);
     }
     fflush(stdout);
+}
+
+/* --- v0.4: video ---------------------------------------------------------------- */
+
+static psygfx_tex vid_t[3];
+static psygfx_planes vid_p[3];
+static void prep_vid_rgba(int frame) { (void)frame; psygfx_texture_update(&gfx, vid_t[0], 0, 0, 1920, 1080, vid_p[0].data[0], 0); }
+static void prep_vid_nv12(int frame) { (void)frame; psygfx_texture_update_planes(&gfx, vid_t[1], &vid_p[1]); }
+
+/* The CPU time of one update call, mean and p99 over n calls. */
+static void vid_update_cpu(const char* name, int k, int n) {
+    int i;
+    for (i = 0; i < n && i < MAXF; i++) {
+        uint64_t a = psyrt_now_ns();
+        if (k == 0) psygfx_texture_update(&gfx, vid_t[0], 0, 0, 1920, 1080, vid_p[0].data[0], 0);
+        else psygfx_texture_update_planes(&gfx, vid_t[k], &vid_p[k]);
+        cpu_us[i] = (double)(psyrt_now_ns() - a) * 1e-3;
+        if (i % 4 == 3) glFinish_();   /* a frame loop's pace, not a queue of uploads */
+    }
+    glFinish_();
+    {
+        double mean = 0;
+        int m = n < MAXF ? n : MAXF;
+        for (i = 0; i < m; i++) mean += cpu_us[i];
+        printf("| %-48s | %8.1f | %8.1f |\n", name, mean / m, p99(cpu_us, m));
+    }
+}
+
+static void bench_v04_video(void) {
+    static psygfx_stim st[8];
+    bench_work w[CMP_MAX];
+    psygfx_texture_desc td;
+    psygfx_image_desc idd;
+    unsigned char* mem;
+    size_t ny = 1920 * 1080;
+    int k, i;
+    static const char* const tname[] = { "LINEAR", "BT1886", "DEVICE" };
+    if (!run("v0.4 video")) return;
+    if (W < 1920 || H < 1080) { printf("v0.4 video: needs a 1920 x 1080 scene or larger\n"); return; }
+    if (!reopen(scene_fmt, PSYGFX_DITHER_NONE, 0)) return;
+    mem = (unsigned char*)malloc(ny * 4 + ny * 3);
+    if (!mem) return;
+    for (i = 0; i < (int)(ny * 7); i++) mem[i] = (unsigned char)(16 + (i * 37) % 220);
+    memset(vid_p, 0, sizeof vid_p);
+    vid_p[0].data[0] = mem;                                                         /* RGBA8 */
+    vid_p[1].data[0] = mem + ny * 4; vid_p[1].data[1] = mem + ny * 5;               /* NV12 */
+    vid_p[2].data[0] = mem + ny * 4; vid_p[2].data[1] = mem + ny * 5; vid_p[2].data[2] = mem + ny * 5 + ny / 4;   /* I420 */
+    for (k = 0; k < 3; k++) {
+        memset(&td, 0, sizeof td);
+        td.w = 1920; td.h = 1080; td.format = k == 0 ? PSYGFX_RGBA8 : (k == 1 ? PSYGFX_NV12 : PSYGFX_I420);
+        if (k) {
+            td.enc.matrix = PSYGFX_MATRIX_BT709; td.enc.range = PSYGFX_RANGE_LIMITED; td.enc.transfer = PSYGFX_TRC_BT1886;
+            td.enc.primaries = PSYGFX_PRIM_DEVICE; td.enc.siting = PSYGFX_SITING_LEFT;
+            td.planes = &vid_p[k];
+        } else {
+            td.data = mem;
+        }
+        vid_t[k] = psygfx_texture(&gfx, &td);
+        if (!vid_t[k].id) { fprintf(stderr, "gfx_bench: %s\n", psygfx_error(&gfx)); free(mem); return; }
+    }
+    memset(&idd, 0, sizeof idd);
+    for (k = 0; k < 3; k++) { idd.tex = vid_t[k]; st[k] = psygfx_image(&gfx, &idd); }
+    memset(w, 0, sizeof w);
+    w[0].name = "empty frame";
+    w[1].name = "RGBA8 1920x1080, draw"; w[1].s = &st[0]; w[1].n = 1;
+    w[2].name = "NV12 1920x1080 BT.709 BT1886, draw"; w[2].s = &st[1]; w[2].n = 1;
+    w[3].name = "I420 1920x1080 BT.709 BT1886, draw"; w[3].s = &st[2]; w[3].n = 1;
+    w[4].name = "RGBA8, upload + draw"; w[4].s = &st[0]; w[4].n = 1; w[4].prep = prep_vid_rgba;
+    w[5].name = "NV12, upload planes + draw"; w[5].s = &st[1]; w[5].n = 1; w[5].prep = prep_vid_nv12;
+    bench_cmp("v0.4 video, 1080p", w, 6);
+    /* the transfers: the same NV12 frame, one texture per transfer */
+    {
+        psygfx_tex tt[3];
+        for (k = 0; k < 3; k++) {
+            memset(&td, 0, sizeof td);
+            td.w = 1920; td.h = 1080; td.format = PSYGFX_NV12; td.planes = &vid_p[1];
+            td.enc.matrix = PSYGFX_MATRIX_BT709; td.enc.range = PSYGFX_RANGE_LIMITED;
+            td.enc.transfer = (uint8_t)(k == 0 ? PSYGFX_TRC_LINEAR : (k == 1 ? PSYGFX_TRC_BT1886 : PSYGFX_TRC_DEVICE));
+            td.enc.primaries = PSYGFX_PRIM_DEVICE; td.enc.siting = PSYGFX_SITING_LEFT;
+            tt[k] = psygfx_texture(&gfx, &td);
+            idd.tex = tt[k];
+            st[3 + k] = psygfx_image(&gfx, &idd);
+        }
+        memset(w, 0, sizeof w);
+        w[0].name = "empty frame";
+        w[1].name = "RGBA8 1920x1080, draw"; w[1].s = &st[0]; w[1].n = 1;
+        for (k = 0; k < 3; k++) {
+            static char nm[3][64];
+            snprintf(nm[k], sizeof nm[k], "NV12 1920x1080, transfer %s, draw", tname[k]);
+            w[2 + k].name = nm[k]; w[2 + k].s = &st[3 + k]; w[2 + k].n = 1;
+        }
+        bench_cmp("v0.4 video transfers, 1080p", w, 5);
+        for (k = 0; k < 3; k++) psygfx_texture_free(&gfx, tt[k]);
+    }
+    printf("\nv0.4 video: the update call's CPU time, 1920 x 1080, 400 calls (a glFinish every 4)\n\n");
+    printf("| %-48s | %8s | %8s |\n", "update", "mean us", "p99 us");
+    printf("|--------------------------------------------------|----------|----------|\n");
+    for (i = 0; i < 2; i++) {   /* A/B/A/B */
+        vid_update_cpu("RGBA8, psygfx_texture_update (8.3 MB)", 0, 400);
+        vid_update_cpu("NV12, psygfx_texture_update_planes (3.1 MB)", 1, 400);
+        vid_update_cpu("I420, psygfx_texture_update_planes (3.1 MB)", 2, 400);
+    }
+    {   /* rebind: per frame, nothing but a store */
+        uint64_t a = psyrt_now_ns();
+        for (i = 0; i < 100000; i++) psygfx_texture_rebind(&gfx, vid_t[1], (i & 1) ? vid_t[1] : vid_t[1]);
+        printf("\npsygfx_texture_rebind: %.3f us per call (100000 calls)\n", (double)(psyrt_now_ns() - a) * 1e-3 / 100000);
+    }
+    for (k = 0; k < 3; k++) psygfx_texture_free(&gfx, vid_t[k]);
+    free(mem);
+}
+
+/* --- v0.4: instances and interleaved kinds ------------------------------------- */
+
+static psygfx_inst bi_el[10000];
+static void prep_ring(int frame) { (void)frame; }
+static void prep_turn(int frame) {   /* the elements change every frame, as a drifting field */
+    int i;
+    for (i = 0; i < 10000; i++) bi_el[i].ori = (float)((i * 7 + frame) % 360);
+}
+
+static bool open_big(int max_draws) {
+    psygfx_desc gd;
+    psygfx_close(&gfx);
+    memset(&gd, 0, sizeof gd);
+    gd.screen = &scr;
+    gd.background[0] = gd.background[1] = gd.background[2] = 0.5f;
+    psygfx__test_scene32 = 0;
+    gd.max_draws = max_draws;
+    gd.cache = cache_desc;
+    if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_bench: %s\n", psygfx_error(&gfx)); return false; }
+    return true;
+}
+
+static void bench_v04_inst(void) {
+    static psygfx_stim plain[10000];
+    psygfx_stim inst[6];
+    psygfx_instances_desc id;
+    psygfx_gabor_desc gd;
+    psygfx_shape_desc sd;
+    bench_work w[CMP_MAX];
+    int i;
+    if (!run("v0.4 inst")) return;
+    if (!open_big(10100)) return;
+    /* 10000 gabors of 32 x 32 on a 100 x 100 grid */
+    psygfx_inst_grid(bi_el, 100, 100, 19, 12);
+    memset(&gd, 0, sizeof gd);
+    gd.sigma = 4; gd.sf = 1 / 8.0f; gd.contrast = 0.2f;
+    for (i = 0; i < 10000; i++) {
+        gd.x = bi_el[i].x; gd.y = bi_el[i].y; gd.ori = (float)((i * 7) % 360);
+        plain[i] = psygfx_gabor(&gd);
+        bi_el[i].ori = (float)((i * 7) % 360);
+    }
+    gd.x = gd.y = 0; gd.ori = 0;
+    memset(&id, 0, sizeof id);
+    id.inst = bi_el; id.n = 10000; id.fields = PSYGFX_I_XY | PSYGFX_I_ORI;
+    inst[0] = psygfx_gabor(&gd);
+    inst[0] = psygfx_instances(&gfx, &inst[0], &id);
+    memset(&sd, 0, sizeof sd);
+    sd.shape = PSYGFX_LINE; sd.w = 16; sd.shape_p[0] = 2; sd.edge = PSYGFX_EDGE_COSINE; sd.edge_width = 1;
+    sd.color[0] = sd.color[1] = sd.color[2] = 0.8f;
+    inst[1] = psygfx_shape(&sd);
+    inst[1] = psygfx_instances(&gfx, &inst[1], &id);
+    sd.shape = PSYGFX_RRECT; sd.w = 14; sd.h = 9; sd.shape_p[0] = sd.shape_p[1] = sd.shape_p[2] = sd.shape_p[3] = 3;
+    inst[2] = psygfx_shape(&sd);
+    inst[2] = psygfx_instances(&gfx, &inst[2], &id);
+    if (!inst[0].n_inst || !inst[1].n_inst || !inst[2].n_inst) { fprintf(stderr, "gfx_bench: %s\n", psygfx_error(&gfx)); return; }
+    memset(w, 0, sizeof w);
+    w[0].name = "empty frame"; w[0].prep = prep_ring;
+    w[1].name = "10000 gabors 32x32, one stimulus each"; w[1].s = plain; w[1].n = 10000; w[1].prep = prep_ring;
+    w[2].name = "10000 gabors 32x32, instanced, ring"; w[2].s = &inst[0]; w[2].n = 1; w[2].prep = prep_ring;
+    w[3].name = "10000 gabors, instanced, ori set each frame"; w[3].s = &inst[0]; w[3].n = 1; w[3].prep = prep_turn;
+    w[4].name = "10000 LINE 16 px, instanced"; w[4].s = &inst[1]; w[4].n = 1; w[4].prep = prep_ring;
+    w[5].name = "10000 RRECT 14x9 (vector), instanced"; w[5].s = &inst[2]; w[5].n = 1; w[5].prep = prep_ring;
+    bench_cmp("v0.4 inst, 10000 elements", w, 6);
+    {   /* 1000 gabors of 256 x 256: the GPU should not care */
+        static psygfx_stim big[1000];
+        psygfx_inst_grid(bi_el, 40, 25, 45, 45);
+        gd.sigma = 32; gd.sf = 1 / 32.0f;
+        for (i = 0; i < 1000; i++) { gd.x = bi_el[i].x; gd.y = bi_el[i].y; big[i] = psygfx_gabor(&gd); }
+        gd.x = gd.y = 0;
+        id.n = 1000; id.fields = PSYGFX_I_XY;
+        inst[3] = psygfx_gabor(&gd);
+        inst[3] = psygfx_instances(&gfx, &inst[3], &id);
+        memset(w, 0, sizeof w);
+        w[0].name = "empty frame"; w[0].prep = prep_ring;
+        w[1].name = "1000 gabors 256x256, one stimulus each"; w[1].s = big; w[1].n = 1000; w[1].prep = prep_ring;
+        w[2].name = "1000 gabors 256x256, instanced"; w[2].s = &inst[3]; w[2].n = 1; w[2].prep = prep_ring;
+        bench_cmp("v0.4 inst, 1000 large gabors", w, 3);
+    }
+    {   /* the hit test over 10000 rects: the target in a search array */
+        uint64_t t0;
+        int hits = 0;
+        id.n = 10000; id.fields = PSYGFX_I_XY | PSYGFX_I_ORI;
+        psygfx_inst_grid(bi_el, 100, 100, 19, 12);
+        sd.shape = PSYGFX_RECT; sd.w = 14; sd.h = 4;
+        inst[4] = psygfx_shape(&sd);
+        inst[4] = psygfx_instances(&gfx, &inst[4], &id);
+        t0 = psyrt_now_ns();
+        for (i = 0; i < 100; i++) hits += psygfx_hit_index(&gfx, &inst[4], 960.0f + (float)(i % 10), 600.0f + (float)(i / 10)) >= 0;
+        printf("\npsygfx_hit_index over 10000 RECT elements: %.1f us per call (100 calls, %d hits)\n",
+               (double)(psyrt_now_ns() - t0) * 1e-3 / 100, hits);
+    }
+}
+
+static void prep_order(int frame) { (void)frame; gfx.no_reorder = 0; }
+static void prep_call_order(int frame) { (void)frame; gfx.no_reorder = 1; }
+
+/* Interleaved kinds: 1000 stimuli, four kinds in turn, against the same
+ * stimuli in groups of one kind (what batching gets today). */
+static void bench_v04_mixed(void) {
+    static psygfx_stim inter[1000], grouped[1000], over[1000], dense[1000];
+    psygfx_gabor_desc gd;
+    psygfx_shape_desc sd;
+    psygfx_grating_desc rd;
+    bench_work w[CMP_MAX];
+    int i, k, n = 0;
+    if (!run("v0.4 mixed")) return;
+    if (!open_big(1100)) return;
+    psygfx_inst_grid(bi_el, 40, 25, 46, 46);
+    for (i = 0; i < 1000; i++) {
+        float x = bi_el[i].x, y = bi_el[i].y;
+        switch (i % 4) {
+        case 0:
+            memset(&gd, 0, sizeof gd);
+            gd.x = x; gd.y = y; gd.sigma = 5; gd.sf = 1 / 8.0f; gd.contrast = 0.2f; gd.ori = (float)(i % 180);
+            inter[i] = psygfx_gabor(&gd);
+            break;
+        case 1:
+            memset(&sd, 0, sizeof sd);
+            sd.shape = PSYGFX_CIRCLE; sd.x = x; sd.y = y; sd.w = 30; sd.edge = PSYGFX_EDGE_COSINE; sd.edge_width = 1.5f;
+            sd.color[0] = 0.8f; sd.color[1] = 0.3f; sd.color[2] = 0.2f;
+            inter[i] = psygfx_shape(&sd);
+            break;
+        case 2:
+            memset(&rd, 0, sizeof rd);
+            rd.x = x; rd.y = y; rd.w = 32; rd.sf = 1 / 6.0f; rd.contrast = 0.2f; rd.aperture = PSYGFX_CIRCLE;
+            inter[i] = psygfx_grating(&rd);
+            break;
+        default:
+            memset(&sd, 0, sizeof sd);
+            sd.shape = PSYGFX_RRECT; sd.x = x; sd.y = y; sd.w = 34; sd.h = 20;
+            sd.shape_p[0] = sd.shape_p[1] = sd.shape_p[2] = sd.shape_p[3] = 5;
+            sd.color[0] = 0.2f; sd.color[1] = 0.4f; sd.color[2] = 0.8f;
+            inter[i] = psygfx_shape(&sd);
+            break;
+        }
+    }
+    for (k = 0; k < 4; k++) for (i = k; i < 1000; i += 4) grouped[n++] = inter[i];
+    /* 10 % overlap their neighbor: every tenth moved onto the next cell */
+    for (i = 0; i < 1000; i++) { over[i] = inter[i]; if (i % 10 == 0) over[i].x += 30.0f; }
+    /* dense: random places, most draws overlap something (the reorder's
+     * cost with little to gain) */
+    for (i = 0; i < 1000; i++) {
+        dense[i] = inter[i];
+        dense[i].x = (float)((i * 7919) % 1800) - 900.0f;
+        dense[i].y = (float)((i * 104729) % 1100) - 550.0f;
+    }
+    memset(w, 0, sizeof w);
+    w[0].name = "empty frame"; w[0].prep = prep_order;
+    w[1].name = "1000, 4 kinds interleaved, call order"; w[1].s = inter; w[1].n = 1000; w[1].prep = prep_call_order;
+    w[2].name = "the same, reordered"; w[2].s = inter; w[2].n = 1000; w[2].prep = prep_order;
+    w[3].name = "the same, grouped by kind by the caller"; w[3].s = grouped; w[3].n = 1000; w[3].prep = prep_call_order;
+    w[4].name = "10 % overlapping, call order"; w[4].s = over; w[4].n = 1000; w[4].prep = prep_call_order;
+    w[5].name = "10 % overlapping, reordered"; w[5].s = over; w[5].n = 1000; w[5].prep = prep_order;
+    w[6].name = "random places (dense), call order"; w[6].s = dense; w[6].n = 1000; w[6].prep = prep_call_order;
+    w[7].name = "random places (dense), reordered"; w[7].s = dense; w[7].n = 1000; w[7].prep = prep_order;
+    bench_cmp("v0.4 mixed kinds", w, 8);
+    gfx.no_reorder = 0;
 }
 
 static psygfx_group bench_group;
@@ -544,7 +838,7 @@ static void bench_v02(psygfx_stim* g) {
 static void bench_v03(void) {
     static psygfx_stim st[8], comp[6], many[100], glyphs;
     static psygfx_prim pr[6][32], sprims[100][4];
-    static psygfx_cal cal;
+    static psycol_cal cal;
     static psygfx_paint rgbp, okp;
     static psygfx_fx fx;
     static float msdf[64 * 64 * 4];
@@ -561,7 +855,7 @@ static void bench_v03(void) {
     double open_ms[3];
     int i, k;
     /* open time with every program, three times */
-    psygfx_cal_nominal(&cal, xy, 80.0f, 2.2);
+    psycol_cal_nominal(&cal, xy, 80.0f, 2.2);
     for (k = 0; k < 3; k++) {
         uint64_t t0;
         psygfx_close(&gfx);
@@ -713,12 +1007,17 @@ int main(int argc, char** argv) {
             FRAMES = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--only") && i + 1 < argc) {
             only = argv[++i];
+        } else if (!strcmp(argv[i], "--cache") && i + 1 < argc) {
+            i++;
+            cache_desc = strcmp(argv[i], ":mem:") ? psygfx_file_cache_init(&pcache, argv[i]) : &memc_cache;
+        } else if (!strcmp(argv[i], "--open-only")) {
+            open_only = 1;
         } else if (!strcmp(argv[i], "--scene") && i + 1 < argc) {
             i++;
             scene_fmt = !strcmp(argv[i], "16") ? PSYGFX_RGBA16F : (!strcmp(argv[i], "32") ? PSYGFX_RGBA32F : PSYGFX_FORMAT_NONE);
         } else {
             fprintf(stderr, "usage: gfx_bench [--device hardware|warp|swiftshader|mesa|llvmpipe] [--size W H] "
-                            "[--frames N] [--only NAME] [--scene 16|32]\n");
+                            "[--frames N] [--only NAME] [--scene 16|32] [--cache DIR] [--open-only]\n");
             return 2;
         }
     }
@@ -737,6 +1036,16 @@ int main(int argc, char** argv) {
         if (!reopen(scene_fmt, PSYGFX_DITHER_NONE, 0)) return 1;
         printf("psygfx_open (all built-in programs): %.0f ms, batch %d stimuli\n",
                (double)(psyrt_now_ns() - t0) * 1e-6, PSYGFX__BATCH);
+        if (open_only) {
+            psygfx_programs ps;
+            psygfx_program_stats(&gfx, &ps);
+            printf("open_ms %.1f internal_ms %.1f loaded %u compiled %u rejected %u stored %u store_ms %.1f\n",
+                   (double)(psyrt_now_ns() - t0) * 1e-6, (double)ps.open_ns * 1e-6, ps.loaded, ps.compiled,
+                   ps.rejected, ps.stored, (double)ps.store_ns * 1e-6);
+            psygfx_close(&gfx);
+            psyscr_close(&scr);
+            return 0;
+        }
     }
     psygfx_describe(&gfx, line, sizeof line);
     printf("%s\n%d x %d, %d frames per row\n\n", line, W, H, FRAMES);
@@ -858,6 +1167,7 @@ int main(int argc, char** argv) {
     }
     if (run("v0.2")) bench_v02(g);
     if (run("v0.3")) bench_v03();
+    bench_v04_video(); bench_v04_inst(); bench_v04_mixed();   /* each checks --only */
     psygfx_close(&gfx);
     psyscr_close(&scr);
     return 0;

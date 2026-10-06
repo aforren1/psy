@@ -47,6 +47,17 @@
  *     is. Without a TTL it reports the round trip, an upper bound on the
  *     output latency. Never run here: no hardware (docs/psy_audio.md).
  *
+ *   psy_audio_loopback --line --stream ... (the same options)
+ *     The clicks go out as ONE stream (STREAMS in psy_audio.h) instead of N
+ *     sounds: sample i x 0.3 s of the stream starts click i, the main thread
+ *     is the producer, and each click's time is psyau_stream_time_of() of
+ *     its sample. Besides the latency it reports placement through the
+ *     stream: the capture's frame distance between clicks minus the planned
+ *     0.3 s. With the input and output on one converter clock that is 0 for
+ *     every click when no frame was inserted or dropped anywhere in the
+ *     stream; with two clocks it is the drift between them (about 0.7
+ *     frames per click at 50 ppm). The stream's GAP count must be 0.
+ *
  * Exit: 0 when the run completed and every check passed, 1 when a check
  * failed, 2 usage or setup error, 3 a mode this platform does not have.
  */
@@ -78,6 +89,7 @@ static int g_onsets = 500;
 static double g_db = -60;
 static const char* g_dev = NULL;
 static const char* g_csv = NULL;
+static int g_stream = 0;
 static float g_vol = -1;
 
 #define BURST 64
@@ -503,6 +515,59 @@ static int digital(int mute, int exclusive, int leads) {
 /* ===================================================================== */
 /* --line: line out to line in, with an optional TTL on a second channel.  */
 
+/* --line --stream: the clicks as one stream, the main thread its producer.
+ * Click i starts on stream sample i x 0.3 s; its time is the fit's time of
+ * that sample, read once the stream has started (psyau_stream_time_of). */
+static int64_t* g_click_t;
+static uint32_t g_stream_gaps = 0;
+static void stream_clicks(int n, psys_port* ttl, int64_t* t_ttl, psyau_id* ids, uint32_t rate) {
+    static psyau_stream st;
+    psyau_stream_desc sd;
+    psyau_stream_info in;
+    psyau_onset r;
+    int64_t spacing = (int64_t)rate * 3 / 10, total = spacing * n, next = 0;
+    int i_t = 0, i;
+    g_click_t = (int64_t*)calloc((size_t)n, sizeof *g_click_t);
+    memset(&sd, 0, sizeof sd);
+    sd.channels = 1;
+    if (!g_click_t || psyau_stream_init(&au, &st, &sd) != 0) { fprintf(stderr, "stream: %s\n", psyau_error(&au)); return; }
+    for (;;) {
+        int64_t k;
+        float* p;
+        while (next < total && (p = psyau_stream_acquire(&st, &k)) != NULL) {
+            if (k > total - next) k = total - next;
+            for (i = 0; i < k; i++) {
+                int64_t q = (next + i) % spacing;
+                p[i] = q < BURST ? g_burst[q] : 0.0f;
+            }
+            psyau_stream_commit(&st, k);
+            next += k;
+        }
+        if (next >= total) psyau_stream_end(&st);
+        if (!ids[0]) ids[0] = psyau_play_stream(&au, &st, (int64_t)psyrt_now_ns() + 300000000);
+        psyau_update(&au);
+        psyau_stream_get_info(&st, &in);
+        if (in.started) {
+            for (i = 0; i < n; i++)
+                if (!g_click_t[i]) (void)psyau_stream_time_of(&au, &st, (int64_t)i * spacing, &g_click_t[i]);
+            if (ttl && i_t < n && (int64_t)psyrt_now_ns() >= g_click_t[i_t] - 2000000) {
+                psyrt_sleep_until((uint64_t)g_click_t[i_t], PSYRT_DEFAULT_SPIN_NS);
+                psys_set_dtr(ttl, true);
+                t_ttl[i_t] = (int64_t)psyrt_now_ns();
+                psyrt_sleep_until(psyrt_now_ns() + 5000000, 0);
+                psys_set_dtr(ttl, false);
+                i_t++;
+            }
+        }
+        if (in.state == PSYAU_STREAM_ENDED) break;
+        psyrt_sleep_until(psyrt_now_ns() + 1000000, 0);
+    }
+    if (psyau_result(&au, ids[0], &r) == PSYAU_OK)
+        printf("line: stream onset tier %d, flags 0x%x, %lld silent frames\n", r.tier, (unsigned)r.flags, (long long)r.gap_frames);
+    g_stream_gaps = in.gaps;
+    (void)psyau_stream_release(&au, &st);
+}
+
 #define LINE_MAX_FRAMES (48000 * 120)
 static float*   g_in;           /* the capture, channel 0 and the TTL channel */
 static float*   g_in_ttl;
@@ -565,7 +630,7 @@ static int line_mode(const char* in_name, const char* dtr_port, int64_t ttl_lat)
     if (ma_device_init(&ctx, &dc, &dv) != MA_SUCCESS) { fprintf(stderr, "the capture device did not open\n"); return 2; }
     memset(&d, 0, sizeof d);
     d.device = g_dev;
-    d.arena_bytes = 1 << 16;
+    d.arena_bytes = g_stream ? 1 << 20 : 1 << 16;
     if (!psyau_open(&au, &d)) { fprintf(stderr, "%s\n", psyau_error(&au)); return 2; }
     psyau_get_caps(&au, &caps);
     psyau_describe(&au, line, sizeof line);
@@ -574,6 +639,10 @@ static int line_mode(const char* in_name, const char* dtr_port, int64_t ttl_lat)
     psyrt_sleep_until(psyrt_now_ns() + 500000000, 0);
     memset(&b, 0, sizeof b);
     b.frames = g_burst; b.n = BURST; b.channels = 1;
+    if (g_stream) {
+        stream_clicks(n, have_ttl ? &port : NULL, t_ttl, ids, caps.rate);
+        n = 0;   /* the clicks are out; the loop below has nothing to play */
+    }
     for (i = 0; i < n; i++) {
         int64_t t = (int64_t)psyrt_now_ns() + 150000000;
         ids[i] = psyau_play_at(&au, b, t);
@@ -588,17 +657,29 @@ static int line_mode(const char* in_name, const char* dtr_port, int64_t ttl_lat)
     }
     psyrt_sleep_until(psyrt_now_ns() + 500000000, 0);
     ma_device_uninit(&dv);
+    if (g_stream) n = g_onsets;
     {
         /* find each click and TTL edge in the capture, in order */
-        int64_t pos = 0, tpos = 0;
+        int64_t pos = 0, tpos = 0, prev = -1, dmin = INT64_MAX, dmax = INT64_MIN;
         double thr = 0.5 * fabs(g_burst[0]);
         for (i = 0; i < n; i++) {
             psyau_onset r;
             int64_t a = -1, e = -1, j;
-            if (psyau_wait(&au, ids[i], 1000000000, &r) != PSYAU_OK) continue;
+            if (g_stream) {
+                /* the click's time: the fit's time of its stream sample */
+                memset(&r, 0, sizeof r);
+                r.onset = g_click_t[i];
+                if (r.onset <= 0) continue;
+            } else if (psyau_wait(&au, ids[i], 1000000000, &r) != PSYAU_OK) continue;
             for (j = pos; j < g_in_n; j++) if (fabs(g_in[j]) > thr) { a = j; break; }
             if (a < 0) break;
             pos = a + 4800;
+            if (g_stream && prev >= 0) {
+                int64_t dev = (a - prev) - (int64_t)caps.rate * 3 / 10;
+                if (dev < dmin) dmin = dev;
+                if (dev > dmax) dmax = dev;
+            }
+            prev = a;
             if (have_ttl) {
                 for (j = tpos; j < g_in_n; j++) if (g_in_ttl[j] > 0.25f) { e = j; break; }
                 if (e < 0) break;
@@ -612,6 +693,9 @@ static int line_mode(const char* in_name, const char* dtr_port, int64_t ttl_lat)
                 lat[nl++] = (double)(g_in_t[blk] - r.onset);
             }
         }
+        if (g_stream && prev >= 0 && dmin <= dmax)
+            printf("line: stream placement, capture frame distance minus the planned 0.3 s: min %lld, max %lld frames; gaps %u\n",
+                   (long long)dmin, (long long)dmax, (unsigned)g_stream_gaps);
     }
     psyau_close(&au);
     if (have_ttl) psys_close(&port);
@@ -650,6 +734,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) g_vol = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--exclusive")) exclusive = 1;
         else if (!strcmp(argv[i], "--leads")) leads = 1;
+        else if (!strcmp(argv[i], "--stream")) g_stream = 1;
 #if defined(_WIN32)
         else if (!strcmp(argv[i], "--load") && i + 1 < argc) g_load = atoi(argv[++i]);
 #endif
@@ -664,6 +749,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: psy_audio_loopback --digital --device NAME [...] | --line --device OUT --in IN [...]\n");
         return 2;
     }
+    if (g_stream && mode != 2) { fprintf(stderr, "--stream: with --line only\n"); return 2; }
     if (exclusive && (double)g_onsets * 0.12 > 25) { fprintf(stderr, "--exclusive: at most 200 onsets (30 s)\n"); return 2; }
     make_burst(psyau_db((float)g_db));
     if (mode == 1) {

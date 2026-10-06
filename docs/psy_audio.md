@@ -311,10 +311,278 @@ ThreadSanitizer, C++17 compile check; the null device runs there), emcc
 backend compiled as gnu11 and gnu++17, because miniaudio's `EM_ASM`
 needs a GNU dialect). Not built here: clang on Linux and macOS (CI does).
 
+## Streams (v0.2.0)
+
+Movie sound must take the same path as every other sound. In
+Psychtoolbox it does not: a movie's audio goes through GStreamer's own
+sink, outside PsychPortAudio's schedule and records. A first soundtrack
+design for `psy_video.h` used `desc.source`. That slot is fixed at
+`psyau_open()` and there is only one. A soundtrack there would be
+scheduled differently from every other sound, and psy_audio confirms only
+its own voices. So v0.2.0 adds a voice whose samples come from a ring.
+`desc.source` stays the Audio source extension slot.
+
+### Design
+
+- A stream is a voice. It takes a voice slot and an id. It uses the same
+  plan, the same confirmation by position reports, the same ONSET and END
+  records and the same stop, gain and cancel commands as a buffer. Only
+  the source of the samples differs. The gain, fade and channel-routing
+  loops are one kernel for buffers and streams. The kernel was moved out
+  of the buffer path with no change to its arithmetic. A regression tape
+  of buffer voices through every path of the kernel (mono to stereo,
+  masks, a stereo buffer, a gain ramp, a stop fade, loops, clipping, on
+  f32 and s16 devices) is byte-identical between v0.1.0 and v0.2.0, on
+  MSVC and on MinGW gcc. `psy_audio_test --tape FILE` writes the tape.
+- The lock rule. At the start the callback fixes origin, the stream frame
+  of sample 0. Sample s plays on frame origin + s for the whole play. A
+  ring underrun leaves the frame silent and moves the stream's position
+  on by exactly that frame. A sample that arrives after its frame is
+  discarded. A late start skips the samples it missed. Neither moves
+  origin, so a movie clock that follows the stream stays on its sound
+  frame for frame. The read index never passes the write index. The
+  device thread keeps the play position separately, so the producer never
+  writes a slot that the device thread reads.
+- GAP records are not confirmed. A gap's frames are exact by
+  construction, because the mixer wrote the silence on them. Its time is
+  the fit's, as an END record's time is, and END records are not
+  confirmed either. Whether the device timing held during a gap is in the
+  XRUN records, in stream frames. A GAP record has the XRUN flag when a
+  device underrun came while it lasted.
+- GAP and STREAM records go only to the event ring. The callback-to-frame
+  queue carries ONSET and END, and the loss of one of those would leak a
+  voice count. Every gap is counted also without an event ring: in
+  `psyau_stream_get_info()` (gaps, gap_frames, discarded), in
+  `psyau_onset.gap_frames` and in `psyau_caps.gaps`. A test with 300 gaps
+  in one play dropped no message.
+- Loops are the producer's job. The ring is read once. A loop held in
+  memory is a buffer, and buffers already loop. The sample count must go
+  on across cycles, or the lock rule breaks at each wrap. `psyau_wav`
+  loops by reading sample s from file frame s mod A.
+- A play at 0 waits for the preroll (a quarter of the ring by default;
+  `PSYAU_PREROLL_NONE` for no wait), so an "as soon as it can" stream
+  does not begin with a gap. A timed play checks nothing at the call. The
+  producer can catch up before a start that is seconds away, and a start
+  with an empty ring is a recorded gap. `ready` and `frames_to_start` in
+  `psyau_stream_get_info()` let the caller check before the start.
+- A reset and a play cannot race. Each takes the stream's state by
+  compare-and-swap, and only the frame thread and the producer use it.
+  The device thread only loads and stores, and it stores the read index
+  before it stores ENDED.
+- Memory. A stream is 256 bytes, one cache line for each writer. A stream
+  voice keeps its stream pointer in the place of the buffer pointer, so
+  the voice array stays 200 bytes a voice. A `psyau_wav` is about 17 KB,
+  of which 16 KB is its read buffer.
+- The ring holds float samples. M-S2 measured an int16 ring, widened in
+  the callback and fused with the mix: no benefit, so it was deleted.
+
+### WAV files
+
+The parser is in `psy_audio.h` for three reasons. The psy_video
+soundtrack and every long sound need the same parser. `psy_video.h`
+already includes `psy_audio.h` for the soundtrack. Loading audio is this
+header's job (rig_spec 5.2: audio is widened to float exactly at load).
+The parser accepts RIFF, RF64 and BW64 files with 16-bit, 24-bit,
+24-in-32 or 32-bit float samples, and refuses everything else by name.
+
+A path is read with stdio and `setvbuf(f, NULL, _IONBF, 0)`. So the C
+runtime allocates no stdio buffer on the producer thread, and each read
+(at most 16 KB) goes to the OS (`ReadFile` on Windows, `read()` on POSIX),
+which still caches the file. The header does not use
+`FILE_FLAG_NO_BUFFERING` or `O_DIRECT`, which bypass the OS cache and
+need sector-aligned offsets, sizes and buffers. `psyau_wav_load()` reads a
+whole file into the arena and widens it in place.
+
+### Tests
+
+`tests/adapt/psy_audio_test.c` uses the scripted device and the virtual
+clock, as before. The stream cases use identity samples. Every value is a
+multiple of 2^-13, so sums are exact, and the checks compare every output
+frame to the bit.
+
+| Case | What it checks |
+|---|---|
+| Placement | A 60 s stream through a 1000-frame ring (2880 wraps), written in chunks of 1, 13, 479, 997 and 4097 frames: 2879016 frames checked, 0 wrong. 50 timed starts at every phase between frames, at +37, +100 and -100 ppm: each start on the truth's frame (or within 2 us of a tie), `sample` = first, tier 2, confirmed |
+| Ring | Regions up to the wrap, a commit past the region refused, the space after a block, end, reset, the states. Refusals: loops, offset or a buffer with a stream; 3 channels; a ring under 2 periods; a negative first; a preroll over the ring; another handle's stream; an arena that is too small |
+| Gaps | Three producer stalls, the gaps starting inside a block: silence exactly on the frames whose samples were missing, every later sample on its planned frame, one GAP record per run; records, counters and output agree. A gap at the start keeps the ONSET on its planned frame, flagged GAP |
+| Late start | origin from the target, the skipped samples in the STREAM record and in the discard count. A late start with too little data is LATE and GAP |
+| At 0 | Waits for the preroll, starts on the next block when the preroll is there. `PSYAU_PREROLL_NONE` starts at once. An end inside the preroll starts the play. A cancel while it waits gives CANCELED |
+| Mix | 2 streams (mono to the right channel only, stereo) and a buffer voice in one run: the output is the model sum, bit for bit. A buffer and a stream with the same samples, gain ramp and stop fade on the two channels give identical output. CLIPPED reaches the stream |
+| Device | Both kinds of device underrun while a stream plays (XRUN, UNCONFIRMED, the identity kept in stream frames), a device with callback times only (tier 3), close in the middle of a stream (ENDED) |
+| Gap storm | 300 gaps in one play: 300 counted, 0 messages dropped, ONSET and END complete |
+| Threads | A producer thread (random chunks, random stalls of up to 40 ms) races the device thread while the frame thread plays, stops and replays the stream 40 times and the producer resets it between plays. Every output frame is checked against the record of its play, and the silent frames equal the records' gap counts |
+| WAV | Seven forms (s16, s24 mono, 24 in 32, float, EXTENSIBLE float, RF64 with ds64, BW64 with an odd chunk) parsed, streamed through a 1000-frame ring, played and checked to the bit, signs included. `psyau_wav_load` of each gives the same values. Loops over a ring smaller than the file, a seek after the end, a seek message during a play that waits for the end. Path, reader and memory give identical samples. A NaN ends the stream before it. Ten refusals with their reasons, and the speaker mask against the project map |
+| WAV on a pump | `psyau_wav_step` and `psyau_wav_on_msg` on a real `psyrt_pump`, the device on a real thread, 12 plays with seeks sent as messages: every play starts on its seek sample, every frame checked |
+| Regression tape | Buffer voices through every kernel path on f32 and s16 devices: byte-identical to v0.1.0 (MSVC and MinGW) |
+
+Builds: MSVC 19.44 (C /W4 /WX; the compile check as C and C++17),
+MinGW-w64 gcc 16.1 (C11 test; C11, C++17 and C99 compile checks; the
+loopback test and audio_clockstats), gcc 11.4 in WSL2 (C99 -O3, C11 under
+ASan and UBSan, C11 under ThreadSanitizer: 0 reports in 3 runs), emcc
+6.0.10 (the core test under node with threads; the header with
+miniaudio's Web Audio backend compiled as gnu11 and gnu++17). The compile
+checks play a stream on miniaudio's null device.
+
+Mutations of the header, each in a scratch copy. All 18 below made the
+core test fail. The last two are races that only ThreadSanitizer can see:
+
+| Mutation | Failed checks |
+|---|---|
+| An underrun moves origin instead of discarding | 11 |
+| A late start plays the first sample on its first frame (no skip) | 3 |
+| The late skip off by one | 1 |
+| The ring slot off by one at the wrap | 68 |
+| Producer space one frame too large | 36 |
+| A gap counts the whole block, not its missing frames | 5 (it survived until the gap test made gaps start inside a block) |
+| A play at 0 starts without the preroll | 7 |
+| Stream onsets skipped by the confirmation | 354 |
+| `end` ignored | 459 |
+| Late samples played instead of discarded | 12 |
+| The stream path without the kernel's gain and fade | 7 |
+| 24-bit samples without sign extension | 6 |
+| ds64 sizes ignored | 4 |
+| Reset allowed in any state | 15 |
+| WAV loops without the modulo | 4 |
+| GAP records not pushed | 2 |
+| origin without the first sample's index | 300 |
+| The ONSET record's `sample` off by one | 76 |
+| `w` committed with a plain store (TSan) | 4, 4, 4 reports in 3 runs |
+| The read index stored after ENDED (TSan) | 2, 2, 2 reports in 3 runs |
+
+### Measurements
+
+Conditions for every row: the laptop above, on AC power (battery status
+2), the measurement lock held for each row and released between rows,
+`C:\tmp\psy-quiet` checked before each row, MSVC 19.44 /O2, WASAPI shared
+mode on the default endpoint with no format request. The endpoint stayed
+muted at volume 0 and no endpoint setting was touched. All streams and
+voices played silence or a -60 dBFS tone, and the mix cost does not
+depend on the values. Rows were interleaved, one round after the other.
+The tool is `examples/audio_clockstats.c` (`--streams`, `--wav`, `--ring`).
+The baseline is v0.1.0 from `git show HEAD:psy_audio.h`, built from the
+same tool source.
+
+M-S1 and M-S2, render cost per callback, 60 s a row, 3 rounds. A stream
+here is stereo, with a 1 s ring that a producer thread fills with
+silence in 4096-frame steps.
+
+| Row | Mean us, rounds 1 / 2 / 3 (average) | p99 us | max us | Gaps | Underruns |
+|---|---|---|---|---|---|
+| a. v0.1.0, 32 voices | 12.16 / 13.76 / 8.22 (11.38) | 29.4 / 27.2 / 27.2 | 123 / 70 / 65 | | 0 |
+| b. v0.2.0, 32 voices | 9.92 / 12.87 / 8.26 (10.35) | 26.9 / 30.7 / 23.2 | 128 / 67 / 118 | | 0 |
+| c. v0.2.0, 32 voices + 1 stream | 11.73 / 11.03 / 8.67 (10.48) | 30.3 / 30.5 / 25.5 | 68 / 112 / 113 | 0 | 0 |
+| d. v0.2.0, 32 voices + 4 streams | 13.06 / 12.59 / 10.56 (12.07) | 33.7 / 34.7 / 30.5 | 75 / 91 / 115 | 0 | 0 |
+| e. v0.2.0, 0 voices + 1 stream | 4.95 / 5.56 / 4.01 (4.84) | 13.8 / 13.4 / 11.2 | 87 / 64 / 34 | 0 | 0 |
+| f. int16 ring, 32 voices + 4 streams | 13.14 / 11.18 / 12.09 (12.14) | 32.3 / 33.0 / 27.8 | 89 / 102 / 293 | 0 | 0 |
+
+Bars and results:
+
+- (b) against (a), no regression for buffer voices: met. The mean was
+  1.0 us lower, inside the spread of the rounds (8.2 to 13.8 us for the
+  same row). The 32-voice means are lower than v0.1.0's 18.7 us of
+  2026-10-05 in both headers; the comparison is the interleaved one.
+- (c) at most (b) + 2 us: met (+0.13 us).
+- (d) at most (b) + 6 us and 25 us, p99 at most 100 us: met (+1.7 us,
+  12.07 us, p99 34.7 us).
+- M-S2: keep the int16 ring only if it is at least 1 us faster at 4
+  streams. It was 0.07 us slower (12.14 against 12.07 us), so it was
+  deleted and the ring holds float.
+
+M-S3, the producer, no device. `acquire` + `commit`: 10000 calls each.
+`psyau_wav_feed` of 4096 frames: one 3-minute stereo file per format
+(34.6, 51.8 and 69.1 MB), every 4096-frame block of it, from the path
+twice and from memory once.
+
+| Operation | Mean us | p50 us | p99 us | max us |
+|---|---|---|---|---|
+| acquire + commit, 480 frames | 0.04 | 0.00 | 0.10 | 0.10 |
+| acquire + commit, 4096 frames | 0.05 | 0.00 | 0.10 | 0.20 |
+| feed s16, path, pass 1 | 15.2 | 11.8 | 63.8 | 199.1 |
+| feed s16, path, pass 2 | 15.4 | 14.1 | 58.8 | 109.7 |
+| feed s16, memory | 5.1 | 4.5 | 8.7 | 35.0 |
+| feed s24, path, pass 1 | 24.4 | 18.9 | 76.7 | 119.0 |
+| feed s24, path, pass 2 | 22.1 | 18.9 | 71.0 | 129.7 |
+| feed s24, memory | 13.9 | 15.1 | 19.6 | 47.4 |
+| feed f32, path, pass 1 | 22.3 | 19.4 | 66.7 | 119.3 |
+| feed f32, path, pass 2 | 21.8 | 19.7 | 65.9 | 150.5 |
+| feed f32, memory | 11.9 | 8.4 | 19.1 | 48.9 |
+
+Bars: acquire + commit at most 1 us p99, and feed at most 0.5 ms p99 per
+4096 frames: both met. The page cache: each file was written just before
+the run, so pass 1 was already served from the OS cache. Pass 1 and pass
+2 do not differ, so this run says nothing about a cold read from the
+disk. That was not measured, because Windows gives no user-level way to
+drop a file from the cache. A cold read is a producer cost: the ring
+(500 ms of margin at the default size, M-S4) absorbs it, and the device
+thread never waits for it.
+
+M-S4, the default ring size. One `psyau_wav` stream (the 3-minute s16
+file, looped) on a `psyrt_pump`, woken by a 60 Hz frame loop when the
+ring is under half. Load: 8 threads spinning at normal priority, and a
+frame loop at TIME_CRITICAL that spins 8 ms of each frame. 3 minutes a
+row, 2 rounds.
+
+| Ring | Gaps | Lowest fill seen by the frame loop | Render mean us | Frame thread mean / p99 us |
+|---|---|---|---|---|
+| 0.25 s | 0, 0 | 110 ms, 110 ms | 8.46, 8.35 | 3.49 / 15.8, 3.11 / 14.7 |
+| 0.5 s | 0, 0 | 230 ms, 230 ms | 8.11, 8.35 | 2.77 / 13.9, 2.64 / 12.8 |
+| 1 s | 0, 0 | 480 ms, 480 ms | 8.34, 9.40 | 2.36 / 11.3, 2.51 / 11.2 |
+
+The bar was 0 gaps and a lowest fill of at least half the ring. No row
+met the second half, and the bar was wrong. The frame loop wakes the pump
+when the ring falls under half, so the lowest fill is half the ring minus
+one wake interval and a block (about 20 ms) at every size. It measures
+the wake rule, not the producer. What the runs show is that a step of the
+pump refills the ring before the next frame: no gap at any size. The
+default stays 1 s. The margin against a producer stall is the half ring
+that is left when the pump is woken: 480 ms at 1 s, 110 ms at 0.25 s. A
+psy_video pump that also decodes a 1080p frame (about 15 ms a step) and
+reads a cold file shares that margin. The cost is memory: 384 KB at 48
+kHz stereo. A smaller ring is one desc field for a program that wants
+less memory.
+
+M-S5, heap calls, MSVC debug build with `_CrtSetAllocHook`, 20 s, 4
+voices and 4 streams, a frame loop playing a sound every frame:
+
+| Run | C runtime heap calls in the run | miniaudio |
+|---|---|---|
+| 4 WAV streams on a pump | 0 | 0 |
+| 4 streams from a producer thread | 0 | 0 |
+| control (one malloc and free per callback, 10 s) | 2000 | 0 |
+
+The first run of the producer-thread row counted 2 calls. In that run
+the tool started the producer thread just before the count began. With
+the thread started 100 ms before the count, the row reads 0, so the 2
+calls are put down to the thread's start (they were not traced). The C
+runtime calls of `fopen` in `psyau_wav_open` come at open, on the frame
+thread, before the count. None follow, because the stdio buffer is off.
+
+M-S6, the frame thread under the same load as M-S4: `psyau_play_at` and
+`psyau_update` per 60 Hz frame, plus, with streams,
+`psyau_stream_get_info` and `psyau_wav_wants` for each stream and a pump
+wake when one is under half. 60 s a row, 2 rounds, 8 voices.
+
+| Row | Mean us | p99 us | max us | Render mean us |
+|---|---|---|---|---|
+| 4 WAV streams | 2.93, 2.70 | 13.0, 11.5 | 20, 18 | 13.77, 13.77 |
+| no streams | 1.74, 1.97 | 2.6, 2.7 | 13, 8 | 9.30, 9.49 |
+
+Bar: mean at most 5 us and p99 at most 20 us: met. The p99 with streams
+is about 10 us higher. That difference was not broken down. The one
+system call that streams add to the path is the pump wake
+(`psyrt_pump_submit` takes the pump's mutex and signals its condition
+variable), which comes about once every 10 frames.
+
+Not run: the line-in check of a stream (`tests/loopback/psy_audio_loopback.c
+--line --stream`, built, not run: the user runs the hardware checks).
+WASAPI's loopback capture with a stream was not run either, because it
+needs the endpoint unmuted.
+
 ## Not measured
 
 - Latency to sound. No loopback cable; `--line` is built, not run. It
   reports the measured latency minus the OS's claim when it does.
+  `--line --stream` (stream placement and latency) is built, not run.
 - CoreAudio, ALSA, PulseAudio, Web Audio: compiled, never run. PulseAudio
   under WSLg plays to the Windows speakers and was not run.
 - Exclusive mode beyond the 3 runs above.

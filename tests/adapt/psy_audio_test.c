@@ -21,6 +21,9 @@
  *         -o audio_test tests/adapt/psy_audio_test.c -lm -pthread && ./audio_test
  *     cl /nologo /W4 /WX /I. tests\adapt\psy_audio_test.c
  */
+#if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
+#define _CRT_SECURE_NO_WARNINGS   /* fopen for the tape and a WAV file */
+#endif
 #ifndef PSYAU_NO_MINIAUDIO
 #define PSYAU_NO_MINIAUDIO
 #endif
@@ -69,6 +72,7 @@ static void fail_i(int line, const char* what, long long got, long long want) {
 
 #define TAPE_FRAMES (48000 * 20)
 
+struct sdev;
 typedef struct sdev {
     /* what the device is */
     uint32_t rate;
@@ -92,6 +96,7 @@ typedef struct sdev {
     void*    host;
     psyau_render_fn render;
     float*   tape;          /* channels floats per stream frame, or NULL       */
+    void   (*on_block)(struct sdev* s, const float* out, int32_t n);  /* f32 only */
     unsigned char out_mem[8192 * 8 * 4];
     int      started, stopped, closed;
 } sdev;
@@ -196,6 +201,7 @@ static void sd_block(sdev* s) {
         tk.pos = -1;
     }
     s->render(s->host, s->out_mem, s->period, &tk);
+    if (s->on_block) s->on_block(s, (const float*)(const void*)s->out_mem, s->period);
     if (s->tape && s->W + s->period <= TAPE_FRAMES) {
         for (i = 0; i < (int64_t)s->period * s->channels; i++) {
             float v;
@@ -932,6 +938,8 @@ static void* thr_main(void* p)
         tk.pos = s->W > s->L ? s->W - s->L : 0;
         tk.pos_t = tk.t_entry;
         s->render(s->host, s->out_mem, s->period, &tk);
+        if (s->tape && s->W + s->period <= TAPE_FRAMES)
+            memcpy(s->tape + s->W * 2, s->out_mem, sizeof(float) * 2 * (size_t)s->period);
         s->W += s->period;
         psyrt_sleep_until(psyrt_now_ns() + 1000000, 0);
     }
@@ -995,6 +1003,1232 @@ static void test_threads(void) {
     g_virtual = 1;
 }
 
+/* The mixer's regression tape: buffer voices through every path of the
+ * gain, fade and routing kernel (mono to stereo, masks, a stereo buffer,
+ * a gain ramp, a stop fade, loops, clipping), on f32 and s16 devices. With
+ * --tape FILE the tape is written there; the v0.2.0 kernel refactor was
+ * checked against the file the v0.1.0 header wrote, byte for byte. */
+static uint64_t tape_regression(const char* path) {
+    sdev* s = &g_sd;
+    int outs[2] = { PSYAU_OUT_F32, PSYAU_OUT_S16 };
+    uint64_t h = 1469598103934665603ull;
+    FILE* fp = path ? fopen(path, "wb") : NULL;
+    int j;
+    for (j = 0; j < 2; j++) {
+        psyau_desc d;
+        psyau_buf mono, st2;
+        psyau_play_desc pd;
+        psyau_id id;
+        int64_t i, t0, n;
+        memset(&d, 0, sizeof d);
+        if (outs[j] == PSYAU_OUT_S16) d.format.sample = PSYAU_S16;
+        sd_default(s);
+        s->out = (uint16_t)outs[j];
+        if (!open_dev(s, &d)) { fail(__LINE__, psyau_error(&g_au)); continue; }
+        sd_run_s(s, 1.0);
+        for (i = 0; i < 48000; i++) g_buf[i] = (float)((i % 997) + 1) / 2000.0f;
+        for (i = 0; i < 24000; i++) { g_buf[48000 + 2 * i] = 0.3f; g_buf[48000 + 2 * i + 1] = -(float)((i % 101) + 1) / 400.0f; }
+        memset(&mono, 0, sizeof mono);
+        mono.frames = g_buf; mono.n = 9000; mono.channels = 1;
+        memset(&st2, 0, sizeof st2);
+        st2.frames = g_buf + 48000; st2.n = 7000; st2.channels = 2;
+        t0 = g_vt + 80000000;
+        (void)psyau_play_at(&g_au, mono, t0);
+        memset(&pd, 0, sizeof pd);
+        pd.buf = mono; pd.at = t0 + 3000000; pd.channels = 2; pd.db = -3.0f;
+        id = psyau_play(&g_au, &pd);
+        (void)psyau_gain_at(&g_au, id, t0 + 50000000, -12.0f, PSYAU_MS(3));
+        pd.buf = st2; pd.at = t0 + 7777; pd.channels = 0; pd.db = 0;
+        id = psyau_play(&g_au, &pd);
+        (void)psyau_stop_at(&g_au, id, t0 + 120000000, PSYAU_MS(5));
+        pd.buf = st2; pd.at = t0 + 20000000; pd.channels = 1; pd.db = 2.0f;
+        (void)psyau_play(&g_au, &pd);
+        pd.buf = mono; pd.buf.n = 333; pd.loops = 4; pd.at = t0 + 40000000; pd.channels = 0; pd.db = 6.0f;
+        (void)psyau_play(&g_au, &pd);
+        pd.loops = 0; pd.buf = mono; pd.at = 0;
+        (void)psyau_play(&g_au, &pd);
+        sd_run_s(s, 1.0);
+        n = s->W < TAPE_FRAMES ? s->W : TAPE_FRAMES;
+        for (i = 0; i < n * 2; i++) {
+            uint32_t b;
+            memcpy(&b, &g_tape[i], 4);
+            h = (h ^ b) * 1099511628211ull;
+        }
+        if (fp) fwrite(g_tape, sizeof(float), (size_t)(n * 2), fp);
+        psyau_close(&g_au);
+    }
+    if (fp) fclose(fp);
+    printf("tape: FNV-1a %016llx\n", (unsigned long long)h);
+    return h;
+}
+
+#if PSYAU_VERSION_MINOR >= 2
+/* ----------------------------------------------------------------- streams */
+
+/* Identity samples: never 0, and multiples of 2^-13 below 0.5, so a sum of
+ * a few of them, or of them and the buffers below, is exact in float in
+ * any order. */
+static float idv(int64_t s, int c) { return (float)((((s * 2 + c) % 4093) + 1)) / 8192.0f; }
+
+static psyau_stream g_st, g_st2;
+static float g_ring_a[1000 * 2], g_ring_b[48000 * 2];
+
+/* The producer: writes identity samples from *next on, through acquire and
+ * commit, in chunks that cycle through awkward sizes; at most `max`. */
+static int64_t feed(psyau_stream* st, int64_t* next, int64_t max, int ch) {
+    static const int64_t sizes[5] = { 1, 479, 997, 4097, 13 };
+    static int k = 0;
+    int64_t done = 0;
+    for (;;) {
+        int64_t n, i;
+        int c;
+        float* p;
+        if (done >= max) break;
+        p = psyau_stream_acquire(st, &n);
+        if (!p) break;
+        if (n > sizes[k % 5]) n = sizes[k % 5];
+        if (n > max - done) n = max - done;
+        k++;
+        for (i = 0; i < n; i++) for (c = 0; c < ch; c++) p[i * ch + c] = idv(*next + i, c);
+        if (psyau_stream_commit(st, n) != 0) { fail(__LINE__, "commit refused"); break; }
+        *next += n;
+        done += n;
+    }
+    return done;
+}
+
+/* Checks every output frame of one stream play against the identity: zero
+ * before its start and after its end, sample f - origin or silence (a gap)
+ * between. */
+typedef struct chk {
+    psyau_stream* st;
+    int     ch;
+    int64_t bad, data, silent, first_bad;
+} chk;
+static chk g_chk;
+static float (*g_chk_val)(int64_t, int) = NULL;   /* NULL = idv */
+static void chk_val(float (*val)(int64_t, int)) { g_chk_val = val; }
+
+static void chk_block(sdev* s, const float* out, int32_t n) {
+    psyau_stream_info in;
+    int64_t i, endf = INT64_MAX;
+    psyau_stream_get_info(g_chk.st, &in);
+    if (in.started && in.state == PSYAU_STREAM_ENDED) endf = in.origin + in.next;
+    for (i = 0; i < n; i++) {
+        int64_t f = s->W + i;
+        float a = out[i * 2], b = out[i * 2 + 1];
+        int ok;
+        if (!in.started || f < in.start_frame || f >= endf) ok = a == 0.0f && b == 0.0f;
+        else if (a == 0.0f && b == 0.0f) { ok = 1; g_chk.silent++; }
+        else {
+            int64_t smp = f - in.origin;
+            float (*val)(int64_t, int) = g_chk_val ? g_chk_val : idv;
+            ok = a == val(smp, 0) && b == val(smp, g_chk.ch == 1 ? 0 : 1);
+            g_chk.data++;
+        }
+        if (!ok && g_chk.bad++ == 0) g_chk.first_bad = f;
+    }
+}
+
+static void chk_start(psyau_stream* st, int ch) {
+    memset(&g_chk, 0, sizeof g_chk);
+    g_chk.st = st;
+    g_chk.ch = ch;
+    g_chk_val = NULL;
+    g_sd.on_block = chk_block;
+}
+
+/* Blocks of the scripted device with the producer keeping the ring full. */
+static void run_fed(sdev* s, psyau_stream* st, int64_t* next, int ch, double sec) {
+    int64_t b, nb = (int64_t)(sec * s->rate / s->period + 0.5);
+    for (b = 0; b < nb; b++) { (void)feed(st, next, INT64_MAX, ch); sd_block(s); }
+}
+
+static int near_tie(const sdev* s, int64_t t) {
+    double x = (double)(t - s->T0) / sd_kd(s) - (double)(s->L + s->g);
+    return fabs((x - floor(x)) - 0.5) * sd_kd(s) < 2000.0;
+}
+
+/* Placement exact to the frame: a 60 s stream through a 1000-frame ring
+ * (2880 wraps), then short plays at every phase between frames, at three
+ * drifts, with a reset before each. */
+static void test_stream_placement(void) {
+    sdev* s = &g_sd;
+    double drifts[3] = { 37.0, 100.0, -100.0 };
+    int j;
+    for (j = 0; j < 3; j++) {
+        psyau_stream_info in;
+        psyau_onset r = { 0 };
+        psyau_id id;
+        int64_t next, t, want;
+        int k, exact = 0, plays = j == 0 ? 10 : 20;
+        sd_default(s);
+        s->tape = NULL;
+        s->drift_ppm = drifts[j];
+        CHECK(open_dev(s, NULL));
+        sd_run_s(s, 8.0);
+        CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_a, .frames = 1000, .id = 31, .first = 5 }), 0);
+        next = 5;
+        (void)feed(&g_st, &next, INT64_MAX, 2);
+        chk_start(&g_st, 2);
+        if (j == 0) {
+            t = g_vt + 70000000 + 12345;
+            id = psyau_play_stream(&g_au, &g_st, t);
+            CHECK(id > 0);
+            run_fed(s, &g_st, &next, 2, 60.0);
+            CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+            psyau_stream_get_info(&g_st, &in);
+            want = sd_frame_of(s, t);
+            if (!near_tie(s, t)) CHECK_I(r.start_frame, want);
+            CHECK_I(in.origin, r.start_frame - 5);
+            CHECK_I(r.sample, 5);
+            CHECK_I(r.tier, PSYAU_TIER_2);
+            CHECK(!(r.flags & (PSYAU_ONSET_UNCONFIRMED | PSYAU_ONSET_LATE | PSYAU_ONSET_GAP)));
+            CHECK_I(r.buffer_id, 31);
+            CHECK_I(in.gaps, 0);
+            CHECK(g_chk.data > 48000 * 59);
+            printf("stream: 60 s through a 1000-frame ring, %lld frames checked, %lld wrong\n",
+                   (long long)g_chk.data, (long long)g_chk.bad);
+            CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+            run_fed(s, &g_st, &next, 2, 0.2);
+            CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+            CHECK(r.end_frame > 0 && (r.flags & PSYAU_ONSET_STOPPED));
+            CHECK_I(g_chk.bad, 0);
+        }
+        for (k = 0; k < plays; k++) {
+            int64_t first = 1000 + k * 7919;
+            CHECK_I(psyau_stream_reset(&g_st, first), 0);
+            next = first;
+            (void)feed(&g_st, &next, 900, 2);
+            CHECK_I(psyau_stream_end(&g_st), 0);
+            chk_start(&g_st, 2);
+            t = g_vt + 60000000 + (int64_t)(sd_rand(s) * 100000000.0);
+            id = psyau_play_stream(&g_au, &g_st, t);
+            CHECK(id > 0);
+            sd_run_s(s, 0.25);
+            CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+            want = sd_frame_of(s, t);
+            if (r.start_frame == want || near_tie(s, t)) exact++;
+            else fail_i(__LINE__, "stream start off the truth", r.start_frame, want);
+            CHECK_I(r.end_frame, r.start_frame + 900);
+            CHECK_I(r.sample, first);
+            CHECK(r.tier == PSYAU_TIER_2 && !(r.flags & PSYAU_ONSET_STOPPED));
+            CHECK_I(g_chk.data, 900);
+            CHECK_I(g_chk.bad, 0);
+        }
+        printf("stream: drift %+.0f ppm, %d of %d starts exact\n", drifts[j], exact, plays);
+        CHECK_I(exact, plays);
+        s->on_block = NULL;
+        CHECK_I(psyau_stream_release(&g_au, &g_st), 0);
+        psyau_close(&g_au);
+    }
+}
+
+/* The producer side alone: regions, refusals, space after a block. */
+static void test_stream_ring(void) {
+    sdev* s = &g_sd;
+    int64_t n, n2, next = 0;
+    float* p;
+    float tmp[600 * 2];
+    int i;
+    psyau_stream_info in;
+    sd_default(s);
+    CHECK(open_dev(s, NULL));
+    sd_run_s(s, 1.0);
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_a, .frames = 1000 }), 0);
+    p = psyau_stream_acquire(&g_st, &n);
+    CHECK(p == g_ring_a && n == 1000);
+    CHECK_I(psyau_stream_commit(&g_st, 1001), PSYAU_ERR_ARG);
+    CHECK_I(psyau_stream_commit(&g_st, 700), 0);
+    p = psyau_stream_acquire(&g_st, &n);
+    CHECK(p == g_ring_a + 1400 && n == 300);
+    CHECK_I(psyau_stream_commit(&g_st, 300), 0);
+    CHECK(psyau_stream_acquire(&g_st, &n) == NULL && n == 0);
+    for (i = 0; i < 1200; i++) tmp[i] = 0.25f;
+    CHECK_I(psyau_stream_write(&g_st, tmp, 600), 0);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK(in.fill == 1000 && in.written == 1000 && in.read == 0 && in.state == PSYAU_STREAM_IDLE);
+    CHECK(in.ready && in.preroll == 250 && !in.started && in.start_frame == -1);
+    /* the device reads 480: the space is exactly that, and wraps */
+    CHECK(psyau_play_stream(&g_au, &g_st, 0) > 0);
+    CHECK_I(psyau_play_stream(&g_au, &g_st, 0), PSYAU_ERR_BUSY);
+    CHECK_I(psyau_stream_reset(&g_st, 0), PSYAU_ERR_BUSY);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK_I(in.state, PSYAU_STREAM_QUEUED);
+    sd_block(s);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK_I(in.state, PSYAU_STREAM_PLAYING);
+    CHECK_I(in.read, 480);
+    CHECK_I(psyau_stream_write(&g_st, tmp, 600), 480);
+    CHECK(psyau_stream_acquire(&g_st, &n) == NULL);
+    sd_block(s);
+    p = psyau_stream_acquire(&g_st, &n);
+    CHECK(p == g_ring_a + 2 * 480 && n == 480);
+    (void)feed(&g_st, &next, 100, 2);
+    p = psyau_stream_acquire(&g_st, &n2);
+    CHECK(p != NULL && n2 == 380);
+    CHECK_I(psyau_stream_release(&g_au, &g_st), PSYAU_ERR_BUSY);
+    CHECK_I(psyau_stream_end(&g_st), 0);
+    CHECK(psyau_stream_acquire(&g_st, &n) == NULL);
+    CHECK_I(psyau_stream_commit(&g_st, 0), PSYAU_ERR_ARG);
+    sd_run_s(s, 0.3);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK_I(in.state, PSYAU_STREAM_ENDED);
+    CHECK_I(in.next, 1580);
+    CHECK_I(psyau_stream_reset(&g_st, 77), 0);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK(in.state == PSYAU_STREAM_IDLE && in.first == 77 && in.written == 77 && in.fill == 0 && in.end == -1);
+    /* refusals */
+    {
+        psyau_play_desc pd;
+        memset(&pd, 0, sizeof pd);
+        pd.stream = &g_st; pd.loops = 1;
+        CHECK_I(psyau_play(&g_au, &pd), PSYAU_ERR_ARG);
+        pd.loops = 0; pd.offset = 3;
+        CHECK_I(psyau_play(&g_au, &pd), PSYAU_ERR_ARG);
+        pd.offset = 0; pd.buf.frames = g_buf; pd.buf.n = 10;
+        CHECK_I(psyau_play(&g_au, &pd), PSYAU_ERR_ARG);
+    }
+    CHECK_I(psyau_stream_init(&g_au, &g_st2, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 959 }), PSYAU_ERR_ARG);
+    CHECK_I(psyau_stream_init(&g_au, &g_st2, &(psyau_stream_desc){ .memory = g_ring_b, .channels = 3 }), PSYAU_ERR_FORMAT);
+    CHECK_I(psyau_stream_init(&g_au, &g_st2, &(psyau_stream_desc){ .memory = g_ring_b, .first = -1 }), PSYAU_ERR_ARG);
+    CHECK_I(psyau_stream_init(&g_au, &g_st2, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 1000, .preroll = 1001 }), PSYAU_ERR_ARG);
+    /* the arena: a stream holds it until released */
+    CHECK_I(psyau_stream_init(&g_au, &g_st2, &(psyau_stream_desc){ .frames = 48000 }), 0);
+    CHECK_I(psyau_arena_reset(&g_au), PSYAU_ERR_BUSY);
+    CHECK_I(psyau_stream_release(&g_au, &g_st2), 0);
+    CHECK_I(psyau_arena_reset(&g_au), 0);
+    CHECK_I(psyau_stream_init(&g_au, &g_st2, &(psyau_stream_desc){ .frames = (int64_t)sizeof g_arena }), PSYAU_ERR_FULL);
+    CHECK(strstr(psyau_error(&g_au), "arena") != NULL);
+    /* the stream of another handle */
+    {
+        static psyau_audio other;
+        psyau_play_desc pd;
+        memset(&pd, 0, sizeof pd);
+        pd.stream = &g_st;
+        other.open = 1;   /* enough to reach the check: the stream is not its */
+        other.voices_max = 4;
+        CHECK_I(psyau_play(&other, &pd), PSYAU_ERR_ARG);
+        other.open = 0;
+    }
+    CHECK_I(psyau_stream_release(&g_au, &g_st), 0);
+    psyau_close(&g_au);
+}
+
+/* Underruns of the ring: silence exactly on the frames whose samples were
+ * missing, every later sample on its planned frame, one GAP per run. */
+static void test_stream_gaps(void) {
+    sdev* s = &g_sd;
+    psyau_onset r = { 0 };
+    psyau_stream_info in;
+    psyau_id id;
+    int64_t next = 0, t, b, origin;
+    psyrt_event ev[512];
+    int n, i, ngap = 0, nstream = 0, nend = 0;
+    int64_t gsum = 0;
+    sd_default(s);
+    s->tape = NULL;
+    CHECK(open_dev(s, NULL));
+    sd_run_s(s, 6.0);
+    while (psyrt_ring_drain(&g_ring, ev, 512) > 0) {}
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 4801, .id = 9 }), 0);
+    (void)feed(&g_st, &next, 4800, 2);
+    chk_start(&g_st, 2);
+    t = g_vt + 80000000;
+    id = psyau_play_stream(&g_au, &g_st, t);
+    run_fed(s, &g_st, &next, 2, 1.0);
+    psyau_stream_get_info(&g_st, &in);
+    origin = in.origin;
+    /* three gaps: the producer stops for 5, 2 and 7 blocks after the ring
+     * runs dry and then writes on from where it stopped, so the first
+     * samples it writes have missed their frames */
+    for (i = 0; i < 3; i++) {
+        int stall = i == 0 ? 5 : i == 1 ? 2 : 7;
+        int64_t before = g_chk.silent;
+        for (b = 0; b < stall + 10; b++) sd_block(s);   /* 10 blocks drain the ring */
+        run_fed(s, &g_st, &next, 2, 0.5);
+        CHECK(g_chk.silent > before);
+    }
+    psyau_stream_end(&g_st);
+    run_fed(s, &g_st, &next, 2, 0.5);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    psyau_stream_get_info(&g_st, &in);
+    printf("stream gaps: %u runs, %lld silent frames, %lld discarded, %lld wrong\n", (unsigned)in.gaps,
+           (long long)in.gap_frames, (long long)in.discarded, (long long)g_chk.bad);
+    CHECK_I(g_chk.bad, 0);
+    CHECK_I(in.gaps, 3);
+    CHECK_I(in.gap_frames, g_chk.silent);
+    CHECK_I(r.gap_frames, g_chk.silent);
+    CHECK_I(in.discarded, in.gap_frames);   /* every missing sample came, late */
+    CHECK(r.flags & PSYAU_ONSET_GAP);
+    CHECK(!(r.flags & PSYAU_ONSET_STOPPED));
+    CHECK_I(r.end_frame, origin + next);
+    CHECK_I(in.state, PSYAU_STREAM_ENDED);
+    {
+        psyau_caps c;
+        psyau_get_caps(&g_au, &c);
+        CHECK_I(c.gaps, 3);
+    }
+    while ((n = psyrt_ring_drain(&g_ring, ev, 512)) > 0) {
+        for (i = 0; i < n; i++) {
+            const psyrt_event* e = &ev[i];
+            if (e->source != PSYRT_SRC_AUDIO || e->aux != (uint32_t)id) continue;
+            if (e->kind == PSYAU_EV_GAP) {
+                ngap++;
+                gsum += e->u.i64[1];
+                CHECK_I(e->u.i64[2], e->u.i64[0] - origin);
+                CHECK_I(e->u.u32[8], 9);
+                /* the fit's time when the gap closed; refits since move it a little */
+                CHECK(llabs((int64_t)e->t_ns - psyau__fit_time(&g_au.fit, e->u.i64[0])) < 2000);
+                CHECK_I(e->u.u16[18], 0);
+            }
+            if (e->kind == PSYAU_EV_STREAM) {
+                nstream++;
+                CHECK_I(e->u.i64[0], origin);
+                CHECK_I(e->u.i64[1], r.start_frame);
+                CHECK_I(e->u.i64[2], 0);
+                CHECK_I(e->u.i64[3], 0);
+                CHECK_I(e->u.u32[8], 9);
+            }
+            if (e->kind == PSYAU_EV_END) {
+                nend++;
+                CHECK_I(e->u.i64[2], in.gap_frames);
+                CHECK_I(e->u.i64[3], next);
+                CHECK_I(e->u.i64[1], next - in.gap_frames);
+            }
+        }
+    }
+    CHECK_I(ngap, 3);
+    CHECK_I(nstream, 1);
+    CHECK_I(nend, 1);
+    CHECK_I(gsum, in.gap_frames);
+    s->on_block = NULL;
+
+    /* a gap at the start: an empty ring at the start frame */
+    CHECK_I(psyau_stream_reset(&g_st, 0), 0);
+    next = 0;
+    chk_start(&g_st, 2);
+    t = g_vt + 80000000;
+    id = psyau_play_stream(&g_au, &g_st, t);
+    sd_run_s(s, 0.15);
+    run_fed(s, &g_st, &next, 2, 0.3);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK(r.flags & PSYAU_ONSET_GAP);
+    if (!near_tie(s, t)) CHECK_I(r.start_frame, sd_frame_of(s, t));
+    CHECK_I(r.sample, 0);
+    CHECK_I(r.tier, PSYAU_TIER_2);
+    CHECK(in.gaps == 1 && in.gap_frames > 0);
+    CHECK_I(g_chk.bad, 0);
+    CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+    sd_run_s(s, 0.1);
+    s->on_block = NULL;
+    psyau_close(&g_au);
+}
+
+/* A late start skips the samples it missed: origin from the plan. At 0 it
+ * waits for the preroll, or not with PSYAU_PREROLL_NONE. */
+static void test_stream_late_and_asap(void) {
+    sdev* s = &g_sd;
+    psyau_onset r = { 0 };
+    psyau_stream_info in;
+    psyau_id id;
+    int64_t next = 0, t, plan;
+    psyrt_event ev[512];
+    int n, i, seen = 0;
+    sd_default(s);
+    s->tape = NULL;
+    s->jitter_ns = 0;
+    CHECK(open_dev(s, NULL));
+    sd_run_s(s, 6.0);
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 9600 }), 0);
+    (void)feed(&g_st, &next, INT64_MAX, 2);
+    chk_start(&g_st, 2);
+    t = g_vt - 30000000;
+    plan = psyau__fit_frame(&g_au.fit, t);
+    while (psyrt_ring_drain(&g_ring, ev, 512) > 0) {}
+    id = psyau_play_stream(&g_au, &g_st, t);
+    run_fed(s, &g_st, &next, 2, 0.3);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK(r.flags & PSYAU_ONSET_LATE);
+    CHECK(!(r.flags & PSYAU_ONSET_GAP));
+    CHECK(llabs(in.origin - plan) <= 1);
+    CHECK_I(r.sample, r.start_frame - in.origin);
+    CHECK(r.sample > 1400);   /* 30 ms and more of samples skipped */
+    CHECK_I(in.discarded, r.sample);
+    CHECK_I(g_chk.bad, 0);
+    while ((n = psyrt_ring_drain(&g_ring, ev, 512)) > 0)
+        for (i = 0; i < n; i++)
+            if (ev[i].source == PSYRT_SRC_AUDIO && ev[i].kind == PSYAU_EV_STREAM) {
+                seen++;
+                CHECK_I(ev[i].u.i64[3], r.sample);
+                CHECK(ev[i].u.u16[18] & PSYAU_ONSET_LATE);
+            }
+    CHECK_I(seen, 1);
+    CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+    run_fed(s, &g_st, &next, 2, 0.1);
+
+    /* late with too little data: LATE and GAP */
+    CHECK_I(psyau_stream_reset(&g_st, 0), 0);
+    next = 0;
+    (void)feed(&g_st, &next, 100, 2);
+    chk_start(&g_st, 2);
+    id = psyau_play_stream(&g_au, &g_st, g_vt - 30000000);
+    sd_run_s(s, 0.1);
+    run_fed(s, &g_st, &next, 2, 0.2);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    CHECK((r.flags & PSYAU_ONSET_LATE) && (r.flags & PSYAU_ONSET_GAP));
+    CHECK_I(g_chk.bad, 0);
+    CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+    sd_run_s(s, 0.1);
+
+    /* at 0: waits for the preroll (a quarter ring, 2400 frames) */
+    CHECK_I(psyau_stream_reset(&g_st, 0), 0);
+    next = 0;
+    chk_start(&g_st, 2);
+    id = psyau_play_stream(&g_au, &g_st, 0);
+    sd_run(s, 3);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK(!in.started && in.state == PSYAU_STREAM_WAITING && !in.ready);
+    (void)feed(&g_st, &next, 2399, 2);
+    sd_run(s, 2);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK(!in.started);
+    (void)feed(&g_st, &next, 1, 2);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK(in.ready);
+    {
+        int64_t w_next = g_au.w;
+        sd_block(s);
+        psyau_stream_get_info(&g_st, &in);
+        CHECK(in.started);
+        CHECK_I(in.start_frame, w_next);
+        CHECK_I(in.origin, w_next);
+    }
+    run_fed(s, &g_st, &next, 2, 0.3);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    CHECK(!(r.flags & (PSYAU_ONSET_GAP | PSYAU_ONSET_LATE)));
+    CHECK_I(r.target, 0);
+    CHECK_I(g_chk.bad, 0);
+    CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+    sd_run_s(s, 0.1);
+
+    /* at 0 with fewer frames than the preroll and the end in: starts */
+    CHECK_I(psyau_stream_reset(&g_st, 0), 0);
+    next = 0;
+    (void)feed(&g_st, &next, 300, 2);
+    psyau_stream_end(&g_st);
+    id = psyau_play_stream(&g_au, &g_st, 0);
+    sd_run_s(s, 0.2);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    CHECK_I(r.end_frame - r.start_frame, 300);
+
+    /* PSYAU_PREROLL_NONE: at once, a gap when empty */
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 9600, .preroll = PSYAU_PREROLL_NONE }), 0);
+    id = psyau_play_stream(&g_au, &g_st, 0);
+    sd_run(s, 2);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK(in.started && in.gaps == 1);
+    CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+    sd_run_s(s, 0.1);
+    /* a cancel of an at-0 stream still waiting for data: CANCELED */
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 9600 }), 0);
+    id = psyau_play_stream(&g_au, &g_st, 0);
+    sd_run(s, 2);
+    CHECK(psyau_cancel(&g_au, id) == 0);
+    sd_run_s(s, 0.1);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    CHECK((r.flags & PSYAU_ONSET_CANCELED) && r.start_frame == -1 && r.sample == -1);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK_I(in.state, PSYAU_STREAM_ENDED);
+    s->on_block = NULL;
+    psyau_close(&g_au);
+}
+
+/* Voices and streams in one run: the tape is the model sum, bit for bit.
+ * Then a stream and a buffer with the same samples, targets, gain change
+ * and stop fade on the two channels give the same values: one kernel. */
+static void test_stream_mix(void) {
+    sdev* s = &g_sd;
+    psyau_play_desc pd;
+    psyau_onset r = { 0 }, rb = { 0 }, rs = { 0 };
+    psyau_stream_info in;
+    psyau_id ida, idb, ids, idv1;
+    int64_t i, f, t, next = 0, n2 = 0, bad = 0;
+    sd_default(s);
+    s->jitter_ns = 0;
+    CHECK(open_dev(s, NULL));
+    sd_run_s(s, 1.0);
+    /* buffer samples are multiples of 2^-13 too, so every sum is exact */
+    for (i = 0; i < 48000; i++) g_buf[i] = (float)((i % 511) + 1) / 8192.0f;
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 9600, .channels = 1 }), 0);
+    CHECK_I(psyau_stream_init(&g_au, &g_st2, &(psyau_stream_desc){ .frames = 9600 }), 0);
+    (void)feed(&g_st, &next, INT64_MAX, 1);
+    (void)feed(&g_st2, &n2, INT64_MAX, 2);
+    t = g_vt + 100000000;
+    memset(&pd, 0, sizeof pd);
+    pd.stream = &g_st; pd.at = t; pd.channels = 2;              /* mono stream, right only */
+    ida = psyau_play(&g_au, &pd);
+    pd.stream = &g_st2; pd.at = t + 1000000; pd.channels = 0;   /* stereo stream */
+    idb = psyau_play(&g_au, &pd);
+    memset(&pd, 0, sizeof pd);
+    pd.buf.frames = g_buf; pd.buf.n = 3000; pd.buf.channels = 1; pd.at = t + 2000000; pd.channels = 1;
+    idv1 = psyau_play(&g_au, &pd);
+    sd_run_s(s, 0.25);
+    CHECK_I(psyau_result(&g_au, ida, &r), PSYAU_OK);
+    CHECK_I(psyau_result(&g_au, idb, &rb), PSYAU_OK);
+    CHECK_I(psyau_result(&g_au, idv1, &rs), PSYAU_OK);
+    for (f = r.start_frame - 5; f < r.start_frame + 6000; f++) {
+        float L = 0, R = 0;
+        if (f >= r.start_frame) R += idv(f - r.start_frame, 0);
+        if (f >= rb.start_frame) { L += idv(f - rb.start_frame, 0); R += idv(f - rb.start_frame, 1); }
+        if (f >= rs.start_frame && f < rs.start_frame + 3000) L += g_buf[f - rs.start_frame];
+        if (g_tape[f * 2] != L || g_tape[f * 2 + 1] != R) bad++;
+    }
+    CHECK_I(bad, 0);
+    psyau_stop_at(&g_au, 0, 0, 0);
+    sd_run_s(s, 0.2);
+
+    /* the same sound as a buffer on the left and a stream on the right */
+    for (i = 0; i < 48000; i++) g_buf[i] = 0.5f - (float)(i % 97) / 1000.0f;
+    CHECK_I(psyau_stream_reset(&g_st, 0), 0);
+    CHECK_I(psyau_stream_write(&g_st, g_buf, 9600), 9600);
+    t = g_vt + 100000000;
+    memset(&pd, 0, sizeof pd);
+    pd.buf.frames = g_buf; pd.buf.n = 9600; pd.buf.channels = 1; pd.at = t; pd.channels = 1; pd.db = -2.0f;
+    idv1 = psyau_play(&g_au, &pd);
+    memset(&pd, 0, sizeof pd);
+    pd.stream = &g_st; pd.at = t; pd.channels = 2; pd.db = -2.0f;
+    ids = psyau_play(&g_au, &pd);
+    CHECK(psyau_gain_at(&g_au, idv1, t + 30000000, -9.0f, PSYAU_MS(4)) == 0);
+    CHECK(psyau_gain_at(&g_au, ids, t + 30000000, -9.0f, PSYAU_MS(4)) == 0);
+    CHECK(psyau_stop_at(&g_au, idv1, t + 120000000, PSYAU_MS(5)) == 0);
+    CHECK(psyau_stop_at(&g_au, ids, t + 120000000, PSYAU_MS(5)) == 0);
+    sd_run_s(s, 0.4);
+    CHECK_I(psyau_result(&g_au, idv1, &rb), PSYAU_OK);
+    CHECK_I(psyau_result(&g_au, ids, &rs), PSYAU_OK);
+    CHECK_I(rb.start_frame, rs.start_frame);
+    CHECK_I(rb.end_frame, rs.end_frame);
+    CHECK((rs.flags & PSYAU_ONSET_STOPPED) && (rb.flags & PSYAU_ONSET_STOPPED));
+    bad = 0;
+    for (f = rb.start_frame - 5; f < rb.end_frame + 5; f++) if (g_tape[f * 2] != g_tape[f * 2 + 1]) bad++;
+    CHECK_I(bad, 0);
+    CHECK(g_tape[(rb.end_frame - 120) * 2] > 0.0f && g_tape[rb.end_frame * 2] == 0.0f);
+    CHECK(g_tape[(rb.start_frame + 2400) * 2] < g_tape[(rb.start_frame + 100) * 2] * 0.5f);   /* -7 dB */
+    psyau_stream_get_info(&g_st, &in);
+    CHECK_I(in.state, PSYAU_STREAM_ENDED);
+    /* clipping flags every contributor, the stream included */
+    CHECK_I(psyau_stream_reset(&g_st, 0), 0);
+    for (i = 0; i < 4800; i++) g_buf[i] = 0.7f;
+    CHECK_I(psyau_stream_write(&g_st, g_buf, 4800), 4800);
+    t = g_vt + 100000000;
+    ids = psyau_play_stream(&g_au, &g_st, t);
+    memset(&pd, 0, sizeof pd);
+    pd.buf.frames = g_buf; pd.buf.n = 4800; pd.buf.channels = 1; pd.at = t;
+    idv1 = psyau_play(&g_au, &pd);
+    sd_run_s(s, 0.3);
+    CHECK_I(psyau_result(&g_au, ids, &rs), PSYAU_OK);
+    CHECK(rs.flags & PSYAU_ONSET_CLIPPED);
+    CHECK_I(psyau_stream_release(&g_au, &g_st2), 0);
+    psyau_close(&g_au);
+}
+
+/* Device underruns while a stream plays; a device with callback times only;
+ * close in the middle of a stream. */
+static void test_stream_device(void) {
+    sdev* s = &g_sd;
+    psyau_onset r = { 0 };
+    psyau_stream_info in;
+    psyau_id id;
+    int64_t next = 0;
+    int halts;
+    for (halts = 0; halts < 2; halts++) {
+        sd_default(s);
+        s->tape = NULL;
+        s->stall_halts = halts;
+        CHECK(open_dev(s, NULL));
+        sd_run_s(s, 6.0);
+        CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 48000 }), 0);
+        next = 0;
+        (void)feed(&g_st, &next, INT64_MAX, 2);
+        chk_start(&g_st, 2);
+        /* rendered, not yet confirmed when the device stalls */
+        id = psyau_play_stream(&g_au, &g_st, g_vt + 80000000);
+        run_fed(s, &g_st, &next, 2, 0.06);
+        s->stall_ns = 80000000;
+        run_fed(s, &g_st, &next, 2, 1.0);
+        CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+        CHECK(r.flags & PSYAU_ONSET_XRUN);
+        CHECK(r.flags & PSYAU_ONSET_UNCONFIRMED);
+        psyau_stream_get_info(&g_st, &in);
+        CHECK_I(in.gaps, 0);
+        CHECK_I(g_chk.bad, 0);    /* in stream frames, the identity holds */
+        s->on_block = NULL;
+        psyau_close(&g_au);
+    }
+    /* callback times only: unconfirmed, tier 3 */
+    sd_default(s);
+    s->tape = NULL;
+    s->pos_source = PSYAU_POS_CALLBACK;
+    s->tier = 0;
+    CHECK(open_dev(s, NULL));
+    sd_run_s(s, 3.0);
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 48000 }), 0);
+    next = 0;
+    (void)feed(&g_st, &next, 4800, 2);
+    psyau_stream_end(&g_st);
+    id = psyau_play_stream(&g_au, &g_st, g_vt + 80000000);
+    sd_run_s(s, 0.3);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    CHECK((r.flags & PSYAU_ONSET_UNCONFIRMED) && r.tier == PSYAU_TIER_3 && r.device_pos == -1);
+    CHECK_I(r.end_frame - r.start_frame, 4800);
+    /* close mid-stream: the stream ENDED, its position kept */
+    CHECK_I(psyau_stream_reset(&g_st, 0), 0);
+    next = 0;
+    (void)feed(&g_st, &next, 48000, 2);
+    id = psyau_play_stream(&g_au, &g_st, 0);
+    sd_run_s(s, 0.2);
+    psyau_close(&g_au);
+    psyau_stream_get_info(&g_st, &in);
+    CHECK_I(in.state, PSYAU_STREAM_ENDED);
+    CHECK(in.next > 0 && in.next < 48000);
+}
+
+/* Many gaps in one play go to the event ring and the counters only: the
+ * queue that carries ONSET and END loses nothing. */
+static void test_stream_gap_storm(void) {
+    sdev* s = &g_sd;
+    psyau_onset r = { 0 };
+    psyau_stream_info in;
+    psyau_id id;
+    int64_t next = 0;
+    int k;
+    sd_default(s);
+    s->tape = NULL;
+    CHECK(open_dev(s, NULL));
+    sd_run_s(s, 2.0);
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 960, .preroll = PSYAU_PREROLL_NONE }), 0);
+    id = psyau_play_stream(&g_au, &g_st, 0);
+    /* every third block the producer writes nothing, then twice a block:
+     * one gap of one block each time, and its samples come late */
+    for (k = 0; k < 900; k++) {
+        (void)feed(&g_st, &next, k % 3 == 2 ? 0 : k % 3 == 0 && k > 0 ? 960 : 480, 2);
+        sd_block(s);
+    }
+    psyau_stream_end(&g_st);
+    sd_run_s(s, 0.2);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    psyau_stream_get_info(&g_st, &in);
+    printf("stream gap storm: %u gaps, %u messages dropped\n", (unsigned)in.gaps, (unsigned)g_au.msgs_dropped);
+    CHECK_I(in.gaps, 300);
+    CHECK_I(in.gap_frames, 300 * 480);
+    CHECK_I(g_au.msgs_dropped, 0);
+    CHECK(r.end_frame > 0);
+    CHECK_I(r.gap_frames, in.gap_frames);
+    psyau_close(&g_au);
+    CHECK_I(g_au.outstanding, 0);
+}
+
+/* The producer on a real thread, racing the device thread: identity
+ * samples in random chunks with random stalls that cause gaps, while the
+ * frame thread plays, stops and replays the stream 40 times and the
+ * producer resets it between plays. Checked after the run from the tape
+ * and each play's record. ThreadSanitizer checks the ring and the state. */
+static uint32_t g_prod_stop = 0, g_prod_reset = 0;
+static uint64_t g_prod_rng = 99;
+static double prod_rand(void) {
+    g_prod_rng = g_prod_rng * 6364136223846793005ull + 1442695040888963407ull;
+    return ((double)(g_prod_rng >> 11) + 0.5) / 9007199254740992.0;
+}
+#if defined(_WIN32)
+static unsigned __stdcall prod_main(void* p)
+#else
+static void* prod_main(void* p)
+#endif
+{
+    psyau_stream* st = (psyau_stream*)p;
+    int64_t next = 0;
+    while (!psyau__ld32(&g_prod_stop)) {
+        if (psyau__ld32(&g_prod_reset)) {
+            if (psyau_stream_reset(st, 0) == 0) { next = 0; psyau__st32(&g_prod_reset, 0); }
+            psyrt_sleep_until(psyrt_now_ns() + 200000, 0);
+            continue;
+        }
+        (void)feed(st, &next, 1 + (int64_t)(prod_rand() * 3000.0), 2);
+        if (prod_rand() < 0.1) psyrt_sleep_until(psyrt_now_ns() + (uint64_t)(prod_rand() * 40e6), 0);
+        else psyrt_sleep_until(psyrt_now_ns() + 2000000, 0);
+    }
+#if defined(_WIN32)
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+static void test_stream_threads(void) {
+    sdev* s = &g_sd;
+    psyau_onset recs[40];
+    int i, n = 40, done = 0;
+    int64_t bad = 0, frames = 0, silent_total = 0, gaps_total = 0;
+    sd_default(s);
+    s->period = 48;
+    s->L = 96;
+    g_virtual = 0;
+    CHECK(open_dev(s, NULL));
+    CHECK_I(psyau_stream_init(&g_au, &g_st, &(psyau_stream_desc){ .memory = g_ring_b, .frames = 960, .preroll = 480 }), 0);
+    psyau__st32(&g_thr_stop, 0);
+    psyau__st32(&g_prod_stop, 0);
+    psyau__st32(&g_prod_reset, 0);
+    {
+#if defined(_WIN32)
+        HANDLE th = (HANDLE)_beginthreadex(NULL, 0, thr_main, s, 0, NULL);
+        HANDLE ph = (HANDLE)_beginthreadex(NULL, 0, prod_main, &g_st, 0, NULL);
+#else
+        pthread_t th, ph;
+        pthread_create(&th, NULL, thr_main, s);
+        pthread_create(&ph, NULL, prod_main, &g_st);
+#endif
+        for (i = 0; i < n; i++) {
+            psyau_stream_info in;
+            psyau_id id;
+            int k, rc = PSYAU_PENDING;
+            memset(&recs[i], 0, sizeof recs[i]);
+            for (k = 0; k < 2000; k++) {
+                psyau_stream_get_info(&g_st, &in);
+                if (in.state == PSYAU_STREAM_IDLE && !psyau__ld32(&g_prod_reset)) break;
+                psyrt_sleep_until(psyrt_now_ns() + 1000000, 0);
+            }
+            id = psyau_play_stream(&g_au, &g_st, 0);
+            if (id <= 0) { fail_i(__LINE__, "stream play refused", id, 1); break; }
+            psyrt_sleep_until(psyrt_now_ns() + 20000000 + (uint64_t)(sd_rand(s) * 30e6), 0);
+            CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+            for (k = 0; k < 2000; k++) {
+                rc = psyau_result(&g_au, id, &recs[i]);
+                if (rc == PSYAU_OK && (recs[i].end_frame > 0 || (recs[i].flags & PSYAU_ONSET_CANCELED))) break;
+                psyrt_sleep_until(psyrt_now_ns() + 1000000, 0);
+            }
+            CHECK_I(rc, PSYAU_OK);
+            if (rc == PSYAU_OK) done++;
+            psyau__st32(&g_prod_reset, 1);
+        }
+        psyau__st32(&g_prod_stop, 1);
+        psyau__st32(&g_thr_stop, 1);
+#if defined(_WIN32)
+        WaitForSingleObject(ph, INFINITE); CloseHandle(ph);
+        WaitForSingleObject(th, INFINITE); CloseHandle(th);
+#else
+        pthread_join(ph, NULL);
+        pthread_join(th, NULL);
+#endif
+    }
+    /* every frame: zero outside the plays; inside one, its identity or a
+     * gap; the gaps add up to each record's count */
+    {
+        int64_t f, lim = s->W < TAPE_FRAMES ? s->W : TAPE_FRAMES;
+        int p = 0;
+        for (f = 0; f < lim; f++) {
+            float a = g_tape[f * 2], b = g_tape[f * 2 + 1];
+            while (p < done && (recs[p].start_frame < 0 || f >= recs[p].end_frame)) p++;
+            if (p < done && f >= recs[p].start_frame) {
+                int64_t smp = f - (recs[p].start_frame - recs[p].sample);
+                if (a == 0.0f && b == 0.0f) silent_total++;
+                else if (a != idv(smp, 0) || b != idv(smp, 1)) bad++;
+                frames++;
+            } else if (a != 0.0f || b != 0.0f) {
+                bad++;
+            }
+        }
+        for (i = 0; i < done; i++) gaps_total += recs[i].gap_frames;
+    }
+    printf("stream threads: %d plays, %lld frames, %lld silent, %lld wrong\n", done, (long long)frames,
+           (long long)silent_total, (long long)bad);
+    CHECK_I(done, n);
+    CHECK_I(bad, 0);
+    CHECK_I(silent_total, gaps_total);
+    CHECK(frames > 0);
+    psyau_close(&g_au);
+    g_virtual = 1;
+}
+
+/* ------------------------------------------------------------------- WAV */
+
+/* WAV files built in memory. The values are the identity values with a
+ * sign (so the 24-bit sign extension is checked), each exact in 16 bits,
+ * in 24 bits and in float. */
+enum { WK_S16, WK_S24, WK_S24_32, WK_F32, WK_F32X, WK_RF64, WK_BW64, WK_N };
+static const char* g_wk_name[WK_N] = { "s16", "s24", "s24in32", "f32", "f32 extensible", "rf64 s16", "bw64 s24" };
+static unsigned char g_wavmem[1 << 20];
+static size_t g_fmt_off, g_data_off;
+static int64_t g_wav_A = 1;
+static float wv(int64_t s, int c) { float v = idv(s, c); return s % 3 == 0 ? -v : v; }
+static float wv_loop(int64_t s, int c) { return wv(s % g_wav_A, c); }
+static void put16(unsigned char* p, uint32_t v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
+static void put32(unsigned char* p, uint32_t v) { put16(p, v); put16(p + 2, v >> 16); }
+static void put64(unsigned char* p, uint64_t v) { put32(p, (uint32_t)v); put32(p + 4, (uint32_t)(v >> 32)); }
+
+static size_t make_wav(int kind, int ch, int64_t frames, uint32_t rate, int64_t nan_at) {
+    unsigned char* p = g_wavmem;
+    int bytes = kind == WK_S16 || kind == WK_RF64 ? 2 : kind == WK_S24 || kind == WK_BW64 ? 3 : 4;
+    int ext = kind == WK_S24_32 || kind == WK_F32X;
+    int isf = kind == WK_F32 || kind == WK_F32X;
+    int big = kind == WK_RF64 || kind == WK_BW64;
+    size_t o = 12, data_bytes = (size_t)frames * (size_t)ch * (size_t)bytes;
+    int64_t i;
+    int c;
+    memcpy(p, kind == WK_RF64 ? "RF64" : kind == WK_BW64 ? "BW64" : "RIFF", 4);
+    memcpy(p + 8, "WAVE", 4);
+    if (big) {
+        memcpy(p + o, "ds64", 4); put32(p + o + 4, 28);
+        put64(p + o + 16, (uint64_t)data_bytes); put64(p + o + 24, (uint64_t)frames); put32(p + o + 32, 0);
+        o += 36;
+    }
+    g_fmt_off = o;
+    memcpy(p + o, "fmt ", 4); put32(p + o + 4, ext ? 40 : 16);
+    put16(p + o + 8, ext ? 0xFFFE : isf ? 3 : 1);
+    put16(p + o + 10, (uint32_t)ch);
+    put32(p + o + 12, rate);
+    put32(p + o + 16, rate * (uint32_t)(ch * bytes));
+    put16(p + o + 20, (uint32_t)(ch * bytes));
+    put16(p + o + 22, (uint32_t)(bytes * 8));
+    if (ext) {
+        static const unsigned char tail[14] = { 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 };
+        put16(p + o + 24, 22);
+        put16(p + o + 26, isf ? 32 : 24);
+        put32(p + o + 28, ch == 2 ? 3u : 4u);
+        put16(p + o + 32, isf ? 3 : 1);
+        memcpy(p + o + 34, tail, 14);
+    }
+    o += ext ? 48 : 24;
+    if (kind == WK_BW64) {   /* an odd chunk: its pad byte must be skipped */
+        memcpy(p + o, "LIST", 4); put32(p + o + 4, 5); memset(p + o + 8, 'x', 6);
+        o += 14;
+    }
+    memcpy(p + o, "data", 4); put32(p + o + 4, big ? 0xFFFFFFFFu : (uint32_t)data_bytes);
+    o += 8;
+    g_data_off = o;
+    for (i = 0; i < frames; i++) {
+        for (c = 0; c < ch; c++) {
+            unsigned char* q = p + o + (size_t)((i * ch + c) * bytes);
+            float v = wv(i, c);
+            if (bytes == 2) put16(q, (uint32_t)(int32_t)(v * 32768.0f));
+            else if (bytes == 3) { uint32_t u = (uint32_t)(int32_t)(v * 8388608.0f); q[0] = (unsigned char)u; q[1] = (unsigned char)(u >> 8); q[2] = (unsigned char)(u >> 16); }
+            else if (!isf) put32(q, (uint32_t)(int32_t)(v * 8388608.0f) << 8);
+            else {
+                uint32_t u;
+                if (i == nan_at) v = (float)NAN;
+                memcpy(&u, &v, 4);
+                put32(q, u);
+            }
+        }
+    }
+    o += data_bytes;
+    put32(p + 4, big ? 0xFFFFFFFFu : (uint32_t)(o - 8));
+    if (big) put64(p + 20, (uint64_t)(o - 8));
+    return o;
+}
+
+/* A byte-range reader over g_wavmem, as a pack entry would be. */
+static int64_t mem_read(void* ctx, int64_t off, void* dst, int64_t n) {
+    (void)ctx;
+    memcpy(dst, g_wavmem + off, (size_t)n);
+    return n;
+}
+
+static psyau_wav g_wav, g_wav2;
+static float g_ring_c[48000 * 2];
+
+
+static void test_wav(void) {
+    sdev* s = &g_sd;
+    psyau_onset r = { 0 };
+    psyau_stream_info in;
+    psyau_id id;
+    int k;
+    size_t n;
+    sd_default(s);
+    s->tape = NULL;
+    CHECK(open_dev(s, NULL));
+    sd_run_s(s, 3.0);
+    /* every form: parsed, streamed, played, each sample exact */
+    for (k = 0; k < WK_N; k++) {
+        int ch = k == WK_S24 ? 1 : 2;
+        n = make_wav(k, ch, 3000, 48000, -1);
+        CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = n, .ring = 1000, .memory = g_ring_c, .id = 70 + (uint32_t)k }), 0);
+        if (!g_wav.open_) { fail(__LINE__, psyau_wav_error(&g_wav)); continue; }
+        CHECK_I(g_wav.info.frames, 3000);
+        CHECK_I(g_wav.info.channels, ch);
+        CHECK_I(g_wav.info.rf64, k == WK_RF64 || k == WK_BW64);
+        CHECK_I(g_wav.info.data_offset, (int64_t)g_data_off);
+        CHECK_I(psyau_wav_feed(&g_wav, 0), 1000);
+        g_wav_A = 3000;
+        chk_start(&g_wav.stream, ch);
+        chk_val(wv_loop);
+        id = psyau_play_stream(&g_au, &g_wav.stream, g_vt + 80000000);
+        {
+            int b;
+            for (b = 0; b < 60; b++) { (void)psyau_wav_feed(&g_wav, 0); sd_block(s); }
+        }
+        CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+        CHECK_I(r.end_frame - r.start_frame, 3000);
+        CHECK(!(r.flags & (PSYAU_ONSET_GAP | PSYAU_ONSET_STOPPED)));
+        CHECK_I(r.buffer_id, 70 + k);
+        CHECK_I(g_chk.data, 3000);
+        if (g_chk.bad) printf("wav %s: %lld wrong from frame %lld\n", g_wk_name[k], (long long)g_chk.bad, (long long)g_chk.first_bad);
+        CHECK_I(g_chk.bad, 0);
+        /* the whole file into the arena: the same values */
+        {
+            psyau_buf b = psyau_wav_load(&g_au, &(psyau_wav_desc){ .data = g_wavmem, .size = n, .id = 5 });
+            int64_t i, wrong = 0;
+            CHECK(b.frames && b.n == 3000 && b.channels == ch && b.id == 5);
+            if (b.frames) for (i = 0; i < 3000 * ch; i++) if (b.frames[i] != wv(i / ch, (int)(i % ch))) wrong++;
+            CHECK_I(wrong, 0);
+            CHECK_I(psyau_arena_reset(&g_au), 0);
+        }
+        CHECK_I(psyau_wav_close(&g_au, &g_wav), 0);
+    }
+    s->on_block = NULL;
+
+    /* loops over a ring smaller than the file; seek after the end; a seek
+     * through on_msg while playing waits for the end */
+    n = make_wav(WK_S16, 2, 3000, 48000, -1);
+    CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = n, .loops = 2, .ring = 1000, .memory = g_ring_c }), 0);
+    (void)psyau_wav_feed(&g_wav, 0);
+    chk_start(&g_wav.stream, 2);
+    chk_val(wv_loop);
+    id = psyau_play_stream(&g_au, &g_wav.stream, 0);
+    {
+        int b;
+        for (b = 0; b < 40; b++) { (void)psyau_wav_feed(&g_wav, 0); sd_block(s); }
+    }
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    CHECK_I(r.end_frame - r.start_frame, 9000);
+    CHECK_I(g_chk.data, 9000);
+    CHECK_I(g_chk.bad, 0);
+    CHECK_I(psyau_wav_seek(&g_wav, 9000), PSYAU_ERR_ARG);
+    CHECK_I(psyau_wav_seek(&g_wav, 4567), 0);
+    (void)psyau_wav_feed(&g_wav, 0);
+    chk_start(&g_wav.stream, 2);
+    chk_val(wv_loop);
+    id = psyau_play_stream(&g_au, &g_wav.stream, 0);
+    sd_run(s, 3);
+    CHECK_I(psyau_wav_seek(&g_wav, 100), PSYAU_ERR_BUSY);
+    {
+        psyau_wav_msg m;
+        m.seek = 100;
+        psyau_wav_on_msg(&g_wav, &m, 1);
+        CHECK(psyau_wav_wants(&g_wav));
+        CHECK_I(psyau_wav_feed(&g_wav, 0), 0);   /* the play has not ended */
+    }
+    CHECK(psyau_stop_at(&g_au, id, 0, PSYAU_MS(2)) == 0);
+    sd_run(s, 10);
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    CHECK_I(r.sample, 4567);
+    CHECK_I(g_chk.bad, 0);
+    (void)psyau_wav_step(&g_wav);   /* applies the seek, feeds a block */
+    psyau_stream_get_info(&g_wav.stream, &in);
+    CHECK(in.state == PSYAU_STREAM_IDLE && in.first == 100 && in.fill > 0);
+    chk_start(&g_wav.stream, 2);
+    chk_val(wv_loop);
+    while (psyau_wav_step(&g_wav)) {}
+    id = psyau_play_stream(&g_au, &g_wav.stream, 0);
+    {
+        int b;
+        for (b = 0; b < 20; b++) { (void)psyau_wav_step(&g_wav); sd_block(s); }
+    }
+    CHECK_I(psyau_result(&g_au, id, &r), PSYAU_OK);
+    CHECK_I(r.sample, 100);
+    CHECK_I(g_chk.bad, 0);
+    CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+    sd_run(s, 3);
+    CHECK_I(psyau_wav_close(&g_au, &g_wav), 0);
+    s->on_block = NULL;
+
+    /* a path and a reader give the same samples as memory */
+    {
+        static float ring_a[4000 * 2], ring_b[4000 * 2], ring_d[4000 * 2];
+        static psyau_reader rd = { mem_read, 0 };
+        const char* path = "psy_audio_test_tmp.wav";
+        FILE* f;
+        n = make_wav(WK_S24_32, 2, 3000, 48000, -1);
+        f = fopen(path, "wb");
+        CHECK(f != NULL);
+        if (f) { fwrite(g_wavmem, 1, n, f); fclose(f); }
+        rd.size = (int64_t)n;
+        CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .path = path, .ring = 4000, .memory = ring_a }), 0);
+        CHECK_I(psyau_wav_open(&g_au, &g_wav2, &(psyau_wav_desc){ .reader = &rd, .ring = 4000, .memory = ring_b }), 0);
+        CHECK_I(psyau_wav_feed(&g_wav, 0), 3000);
+        CHECK_I(psyau_wav_feed(&g_wav2, 0), 3000);
+        CHECK(memcmp(ring_a, ring_b, sizeof(float) * 6000) == 0);
+        CHECK_I(psyau_wav_close(&g_au, &g_wav2), 0);
+        CHECK_I(psyau_wav_open(&g_au, &g_wav2, &(psyau_wav_desc){ .data = g_wavmem, .size = n, .ring = 4000, .memory = ring_d }), 0);
+        CHECK_I(psyau_wav_feed(&g_wav2, 0), 3000);
+        CHECK(memcmp(ring_a, ring_d, sizeof(float) * 6000) == 0);
+        CHECK_I(psyau_wav_close(&g_au, &g_wav), 0);
+        CHECK_I(psyau_wav_close(&g_au, &g_wav2), 0);
+        remove(path);
+        CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .path = "no_such_file.wav" }), PSYAU_ERR_IO);
+    }
+
+    /* a float that is not a number ends the stream before it */
+    n = make_wav(WK_F32, 2, 3000, 48000, 1234);
+    CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = n, .ring = 4000, .memory = g_ring_c }), 0);
+    CHECK_I(psyau_wav_feed(&g_wav, 0), PSYAU_ERR_FORMAT);
+    psyau_stream_get_info(&g_wav.stream, &in);
+    CHECK_I(in.end, 1234);
+    CHECK_I(in.written, 1234);
+    CHECK(strstr(psyau_wav_error(&g_wav), "1234") != NULL);
+    CHECK(psyau_wav_load(&g_au, &(psyau_wav_desc){ .data = g_wavmem, .size = n }).frames == NULL);
+    CHECK_I(psyau_wav_close(&g_au, &g_wav), 0);
+
+    /* refusals, each with its message */
+    {
+        struct { int kind, ch; uint32_t rate; size_t patch_at; uint32_t patch16; int cut; const char* says; } cases[] = {
+            { WK_S16, 2, 44100, 0, 0, 0, "44100" },
+            { WK_S16, 3, 48000, 0, 0, 0, "3 channels" },
+            { WK_S16, 2, 48000, 22, 8, 0, "8 bits" },          /* bits */
+            { WK_S24_32, 2, 48000, 26, 32, 0, "32 valid" },    /* valid bits */
+            { WK_F32, 2, 48000, 22, 64, 0, "64 bits" },
+            { WK_S16, 2, 48000, 8, 7, 0, "tag 7" },            /* mu-law */
+            { WK_S16, 2, 48000, 20, 5, 0, "block align" },
+            { WK_S24_32, 2, 48000, 40, 1, 0, "subformat" },    /* the GUID */
+            { WK_S16, 2, 48000, 0, 0, 100, "past the end" },
+            { WK_S16, 2, 48000, 0, 0, -1, "no data chunk" },
+        };
+        size_t i;
+        for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            size_t len = make_wav(cases[i].kind, cases[i].ch, 3000, cases[i].rate, -1);
+            if (cases[i].patch_at) put16(g_wavmem + g_fmt_off + cases[i].patch_at, cases[i].patch16);
+            if (cases[i].cut > 0) len -= (size_t)cases[i].cut;
+            if (cases[i].cut < 0) len = g_data_off - 8;
+            CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = len }), PSYAU_ERR_FORMAT);
+            if (!strstr(psyau_wav_error(&g_wav), cases[i].says)) {
+                printf("wav refusal %d says: %s\n", (int)i, psyau_wav_error(&g_wav));
+                fail(__LINE__, "a WAV refusal without its reason");
+            }
+        }
+        memcpy(g_wavmem, "RIFX", 4);
+        CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = 100 }), PSYAU_ERR_FORMAT);
+        CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = 100, .path = "x.wav" }), PSYAU_ERR_ARG);
+        printf("wav: refusal example: %s\n", psyau_wav_error(&g_wav));
+    }
+    psyau_close(&g_au);
+
+    /* the EXTENSIBLE speaker mask against the project map */
+    {
+        static const uint8_t lr[2] = { PSYAU_CH_FL, PSYAU_CH_FR };
+        psyau_desc d;
+        sd_default(s);
+        s->tape = NULL;
+        memset(&d, 0, sizeof d);
+        d.format.map = lr;
+        CHECK(open_dev(s, &d));
+        n = make_wav(WK_S24_32, 2, 3000, 48000, -1);
+        CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = n, .ring = 4000, .memory = g_ring_c }), 0);
+        CHECK_I(psyau_wav_close(&g_au, &g_wav), 0);
+        put32(g_wavmem + g_fmt_off + 28, 6u);   /* FR, FC */
+        CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = n }), PSYAU_ERR_FORMAT);
+        CHECK(strstr(psyau_wav_error(&g_wav), "speaker") != NULL);
+        psyau_close(&g_au);
+    }
+}
+
+#if !defined(PSYRT_NO_THREADS)
+/* A WAV on a real psyrt_pump (psyau_wav_step and psyau_wav_on_msg), the
+ * device on a real thread, the frame thread waking the pump and seeking
+ * through messages between plays. ThreadSanitizer checks the lot. */
+static void test_wav_pump(void) {
+    sdev* s = &g_sd;
+    static psyrt_pump pump;
+    psyau_onset recs[12];
+    int i, nplay = 12, done = 0;
+    int64_t bad = 0, frames = 0, seeks[12];
+    size_t n;
+    sd_default(s);
+    s->period = 48;
+    s->L = 96;
+    g_virtual = 0;
+    CHECK(open_dev(s, NULL));
+    n = make_wav(WK_S16, 2, 5000, 48000, -1);
+    g_wav_A = 5000;
+    CHECK_I(psyau_wav_open(&g_au, &g_wav, &(psyau_wav_desc){ .data = g_wavmem, .size = n, .loops = PSYAU_FOREVER, .ring = 1920, .memory = g_ring_c }), 0);
+    memset(&pump, 0, sizeof pump);
+    CHECK(psyrt_pump_start(&pump, &(psyrt_pump_desc){ .msg_size = sizeof(psyau_wav_msg), .capacity = 8,
+                                                      .on_msg = psyau_wav_on_msg, .on_idle = psyau_wav_step, .ctx = &g_wav }));
+    psyau__st32(&g_thr_stop, 0);
+    {
+#if defined(_WIN32)
+        HANDLE th = (HANDLE)_beginthreadex(NULL, 0, thr_main, s, 0, NULL);
+#else
+        pthread_t th;
+        pthread_create(&th, NULL, thr_main, s);
+#endif
+        for (i = 0; i < nplay; i++) {
+            psyau_wav_msg m;
+            psyau_id id;
+            int k, rc = PSYAU_PENDING;
+            psyau_stream_info in;
+            seeks[i] = (int64_t)(sd_rand(s) * 20000.0);
+            m.seek = seeks[i];
+            while (psyrt_pump_submit(&pump, &m) < 0) psyrt_sleep_until(psyrt_now_ns() + 1000000, 0);
+            for (k = 0; k < 3000; k++) {
+                psyau_stream_get_info(&g_wav.stream, &in);
+                if (in.state == PSYAU_STREAM_IDLE && in.first == seeks[i] && in.ready) break;
+                m.seek = -1;
+                if (psyau_wav_wants(&g_wav)) (void)psyrt_pump_submit(&pump, &m);
+                psyrt_sleep_until(psyrt_now_ns() + 1000000, 0);
+            }
+            id = psyau_play_stream(&g_au, &g_wav.stream, 0);
+            if (id <= 0) { fail_i(__LINE__, "wav play refused", id, 1); break; }
+            for (k = 0; k < 30; k++) {
+                m.seek = -1;
+                if (psyau_wav_wants(&g_wav)) (void)psyrt_pump_submit(&pump, &m);
+                psyrt_sleep_until(psyrt_now_ns() + 1000000, 0);
+            }
+            CHECK(psyau_stop_at(&g_au, id, 0, 0) == 0);
+            for (k = 0; k < 3000; k++) {
+                rc = psyau_result(&g_au, id, &recs[i]);
+                if (rc == PSYAU_OK && recs[i].end_frame > 0) break;
+                psyrt_sleep_until(psyrt_now_ns() + 1000000, 0);
+            }
+            CHECK_I(rc, PSYAU_OK);
+            if (rc == PSYAU_OK) done++;
+        }
+        psyau__st32(&g_thr_stop, 1);
+#if defined(_WIN32)
+        WaitForSingleObject(th, INFINITE); CloseHandle(th);
+#else
+        pthread_join(th, NULL);
+#endif
+    }
+    psyrt_pump_stop(&pump);
+    {
+        int64_t f, lim = s->W < TAPE_FRAMES ? s->W : TAPE_FRAMES;
+        int p = 0;
+        for (f = 0; f < lim; f++) {
+            float a = g_tape[f * 2], b = g_tape[f * 2 + 1];
+            while (p < done && f >= recs[p].end_frame) p++;
+            if (p < done && f >= recs[p].start_frame) {
+                int64_t smp = f - (recs[p].start_frame - recs[p].sample);
+                if ((a != 0.0f || b != 0.0f) && (a != wv_loop(smp, 0) || b != wv_loop(smp, 1))) bad++;
+                frames++;
+            } else if (a != 0.0f || b != 0.0f) {
+                bad++;
+            }
+        }
+        for (i = 0; i < done; i++) if (recs[i].sample != seeks[i]) fail_i(__LINE__, "play did not start at its seek", recs[i].sample, seeks[i]);
+    }
+    printf("wav pump: %d plays, %lld frames, %lld wrong\n", done, (long long)frames, (long long)bad);
+    CHECK_I(done, nplay);
+    CHECK_I(bad, 0);
+    CHECK_I(psyau_wav_close(&g_au, &g_wav), 0);
+    psyau_close(&g_au);
+    g_virtual = 1;
+}
+#endif
+
+#endif /* PSYAU_VERSION_MINOR >= 2 */
+
 static void test_misc(void) {
     int n = 0;
     const psyau_param* p = psyau_params(&n);
@@ -1009,10 +2243,15 @@ static void test_misc(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     g_tape = (float*)calloc((size_t)TAPE_FRAMES * 2, sizeof(float));
     if (!g_tape) return 2;
+    if (argc == 3 && strcmp(argv[1], "--tape") == 0) {
+        (void)tape_regression(argv[2]);
+        free(g_tape);
+        return g_failures ? 1 : 0;
+    }
     test_plan_and_placement();
     test_fit_drift();
     test_controls();
@@ -1025,6 +2264,21 @@ int main(void) {
     test_formats();
     test_synthesis();
     test_threads();
+    (void)tape_regression(NULL);
+#if PSYAU_VERSION_MINOR >= 2
+    test_stream_ring();
+    test_stream_placement();
+    test_stream_gaps();
+    test_stream_late_and_asap();
+    test_stream_mix();
+    test_stream_device();
+    test_stream_gap_storm();
+    test_stream_threads();
+    test_wav();
+#if !defined(PSYRT_NO_THREADS)
+    test_wav_pump();
+#endif
+#endif
     test_misc();
     free(g_tape);
     if (g_failures) { fprintf(stderr, "psy_audio_test: %d failure(s)\n", g_failures); return 1; }

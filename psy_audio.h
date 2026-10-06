@@ -1,4 +1,4 @@
-/* psy_audio.h - v0.1.0 - public domain single-header audio library
+/* psy_audio.h - v0.2.0 - public domain single-header audio library
  *
  *   Sound at a time on the psy_rt.h clock. A buffer is played with
  *   psyau_play_at(buf, t); the header plans its first sample on the device
@@ -6,10 +6,13 @@
  *   psy_rt clock, and reports where it landed: the stream frame, its time
  *   from that fit, the residual, and whether a device position report
  *   confirmed the frame played (a tier). The time is the fit's, never an
- *   observed time. Also tones, noise and clicks at the project rate, a strict
- *   open that refuses any format or rate conversion, and the device and
- *   source interfaces of the rig's Audio device and Audio source
- *   extensions.
+ *   observed time. A stream (a ring that another thread fills: a long WAV
+ *   file, a movie's soundtrack, synthesis) plays the same way, with the same
+ *   records, and its sample s plays on one fixed frame, origin + s. Also
+ *   WAV files (RIFF, RF64, BW64) streamed or loaded, tones, noise and clicks
+ *   at the project rate, a strict open that refuses any format or rate
+ *   conversion, and the device and source interfaces of the rig's Audio
+ *   device and Audio source extensions.
  *
  *   REQUIRES psy_rt.h beside it (the clock, the event ring, the thread
  *   elevation, the instrumentation macros), and miniaudio 0.11.25 or a
@@ -23,13 +26,37 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.0 - streams: psyau_stream, a ring-fed voice played by psyau_play()
+ *          with .stream (or psyau_play_stream), planned, recorded and
+ *          confirmed as a buffer is; sample s on stream frame origin + s,
+ *          late starts and ring underruns skip samples (GAPS); records
+ *          PSYAU_EV_STREAM and PSYAU_EV_GAP, flag PSYAU_ONSET_GAP,
+ *          psyau_onset.sample and .gap_frames, psyau_caps.gaps. WAV files:
+ *          psyau_wav (RIFF, RF64, BW64; 16-bit, 24-bit, 24 in 32, float)
+ *          streamed from a path, memory or a byte-range reader, with
+ *          psyrt_pump hooks, and psyau_wav_load into the arena. One gain,
+ *          fade and routing kernel for buffers and streams (a buffer's
+ *          output is byte for byte v0.1.0's). PSYAU_ERR_IO.
  *   v0.1.0 - first release: the scheduler and mixer, the device-clock fit,
  *          the onset confirmed by position reports past its frame, WASAPI
  *          shared and exclusive through miniaudio with IAudioClock
  *          positions, miniaudio's null device, the device and source
  *          interfaces, synthesis, the records, the parameter table.
  *
- *   STATUS: v0.1.0. Software timestamps only, on one Windows 11 25H2 laptop
+ *   STATUS: v0.2.0. Streams, measured on the same laptop and device (AC,
+ *   MSVC /O2, rows interleaved; docs/psy_audio.md "Streams"): render cost
+ *   per callback with 32 voices 10.35 us mean (v0.1.0 in the same session
+ *   11.38), with 1 stream 10.48, with 4 streams 12.07 (p99 34.7); 0 gaps
+ *   and 0 underruns in every row. A WAV stream on a psyrt_pump under load
+ *   (8 spinning threads, a 60 Hz frame loop) had 0 gaps for 3 minutes with
+ *   rings of 0.25, 0.5 and 1 s; the default stays 1 s for the margin it
+ *   leaves a producer that stalls (480 ms). 0 heap calls while 4 streams
+ *   play. A WAV feed of 4096 frames costs the producer 5 to 24 us mean.
+ *   Placement through a stream was checked on the scripted device only
+ *   (every sample on frame origin + s, 2880 ring wraps, gaps, late starts,
+ *   drift +-100 ppm); no loopback run with a stream yet (--line --stream
+ *   is built). The buffer path is byte for byte v0.1.0's. The rest of
+ *   this block is v0.1.0's, unchanged. Software timestamps only, on one Windows 11 25H2 laptop
  *   (i7-1360P), "Speakers (Realtek(R) Audio)" in WASAPI shared mode at 48000
  *   Hz, float, 2 channels, through miniaudio 0.11.25. No loopback cable was
  *   available: the delay to sound is UNMEASURED, desc.onset_offset_ns stays
@@ -115,6 +142,17 @@
  *   PsychPortAudio's waitForStart does. In C++17, zero a desc and set its
  *   fields one by one.
  *
+ *   A long WAV file, streamed, at t, with a fade 30 s later:
+ *
+ *       static psyau_wav story;                         // zeroed; owns its ring
+ *       if (psyau_wav_open(&au, &story, &(psyau_wav_desc){ .path = "story.wav" }) < 0)
+ *           die(psyau_wav_error(&story));
+ *       psyau_wav_feed(&story, 0);                      // fill the ring (1 s)
+ *       psyau_id id = psyau_play_stream(&au, &story.stream, t);
+ *       psyau_stop_at(&au, id, t + PSYAU_S(30), PSYAU_MS(50));
+ *       ...                                             // each frame: feed it,
+ *       psyau_wav_feed(&story, 0);                      // or let a pump do it (WAV FILES)
+ *
  *   From psy_timeline.h: an event on a channel that the program maps to a
  *   sound goes to psyau_play_at() at the event's own RT time, before that
  *   time. psyau_lead_ns() says how far before (MODEL, LEAD).
@@ -185,8 +223,9 @@
  *     planning each onset in device frames. A long buffer therefore plays
  *     at the device's rate, and its end is off from start + n / rate by n
  *     times the drift; the END record gives where it really ended. Locking
- *     a movie's soundtrack to its video is psy_video.h's job, by following
- *     the audio fit with the movie clock.
+ *     a movie's soundtrack to its video is psy_video.h's job: the
+ *     soundtrack is a stream, its sample s plays on frame origin + s, and
+ *     the movie clock follows psyau_stream_sample_at() (STREAMS).
  *
  *   LEAD
  *     A sound must reach the callback before the callback renders the
@@ -217,7 +256,11 @@
  *     CANCELED (never started), STOPPED (ended early by a call), XRUN,
  *     CLIPPED (the mix went past full scale while it played), UNCONFIRMED
  *     (no position report confirmed the frame played), BELOW_TIER, LOST
- *     (the device went away). onset is the fit's time in every record.
+ *     (the device went away), GAP (a stream played silence for missing
+ *     samples). onset is the fit's time in every record. sample is the
+ *     source's sample on start_frame (a buffer's offset; a stream's index,
+ *     -1 if it never started); gap_frames the silent frames of a stream,
+ *     final once end_frame is set.
  *
  *   TIERS (psyau_tier, record.tier, caps.worst_tier, desc.min_tier)
  *     1  the onset is the OS's observation of that frame at the output,
@@ -247,7 +290,20 @@
  *                      desc.device_index (3..5), fit generation mod 1024
  *                      (6..15): PSYAU_EV_TIER_OF(), _DEVICE_OF(), _GEN_OF()
  *     PSYAU_EV_END     t_ns end (the fit's); aux id; i64[0] end frame,
- *                      [1] frames played; u16[18] flags
+ *                      [1] frames played (a stream's samples, silence not
+ *                      counted); a stream also [2] silent frames, [3] the
+ *                      next sample (where it stopped); u16[18] flags
+ *     PSYAU_EV_STREAM  in the block that renders a stream's start: t_ns the
+ *                      start frame's time (the fit's, not confirmed); aux
+ *                      id; i64[0] origin, [1] start frame, [2] the sample
+ *                      on it, [3] samples a late start skipped; u32[8] the
+ *                      stream's id; u16[18] flags (LATE)
+ *     PSYAU_EV_GAP     when a run of missing samples ends: t_ns its first
+ *                      frame's time; aux id; i64[0] first silent frame,
+ *                      [1] silent frames, [2] first missing sample, [3]
+ *                      samples discarded so far in the play; u32[8] the
+ *                      stream's id; u16[18] XRUN when a device underrun
+ *                      came while it lasted
  *     PSYAU_EV_FIT     t_ns t0; aux generation; i64[0] W0; f64[1] frames
  *                      per second; f64[2] spread in ns; u32[6] points;
  *                      u32[7] 1 = reports, 0 = callback times
@@ -314,7 +370,7 @@
  *   PLAYING
  *   ---------------------------------------------------------------------
  *   psyau_play_at(au, buf, t) and psyau_play(au, &desc) queue a sound and
- *   return its id, a positive number. A negative return is an error code:
+ *   return its id, a positive number (with desc.stream, a stream: STREAMS). A negative return is an error code:
  *   a bad argument, a full queue, every voice in use, a closed or lost
  *   device, a buffer whose channel count is neither 1 nor the project's.
  *   A target already too late is not an error; the record says LATE.
@@ -334,6 +390,136 @@
  *
  *   psyau_update() moves completed records from the callback into the
  *   handle; psyau_result(), psyau_wait() and psyau_play() call it.
+ *
+ *   ---------------------------------------------------------------------
+ *   STREAMS
+ *   ---------------------------------------------------------------------
+ *   A stream is a voice whose samples come from a ring that a producer
+ *   thread fills while it plays: a file too long for memory, a movie's
+ *   soundtrack, synthesis. It is played, planned, stopped, faded, routed,
+ *   recorded and confirmed as a buffer is, by the same code; only where the
+ *   samples come from differs.
+ *
+ *       static psyau_stream st;                         // yours; 256 bytes
+ *       psyau_stream_init(&au, &st, &(psyau_stream_desc){ .channels = 1 });
+ *       ...                                             // the producer thread:
+ *       int64_t n;
+ *       float* p;
+ *       while ((p = psyau_stream_acquire(&st, &n)) != NULL) {  // up to the wrap
+ *           synth(p, n);
+ *           psyau_stream_commit(&st, n);
+ *       }
+ *       ...                                             // the frame thread:
+ *       psyau_id id = psyau_play_stream(&au, &st, t);   // or psyau_play(.stream)
+ *
+ *   THE RING holds project-rate float samples, interleaved, 1 or the
+ *   project's channels (desc.frames, default 1 s), in desc.memory or the
+ *   handle's arena. The producer widens integer samples to float itself:
+ *   that is exact for 16 and 24 bits and is not a conversion of the sound.
+ *   One producer thread at a time (which may be the frame thread), one
+ *   reader (the device thread), 64-bit sample counts, acquire and release
+ *   only: no lock, no allocation, no I/O on the device thread. A mono ring
+ *   goes to every channel in the play's mask, as a mono buffer does.
+ *   psyau_stream_end() says no sample follows the last one committed; the
+ *   play then ends there (END, not STOPPED). Without it the stream plays,
+ *   or plays silence, until it is stopped.
+ *
+ *   THE LOCK RULE. In the block that renders its first frame, the callback
+ *   fixes origin, the stream frame of sample 0: sample s plays on stream
+ *   frame origin + s for the whole play. psyau_stream_get_info() gives
+ *   origin to any thread once .started is set; psyau_stream_sample_at()
+ *   and psyau_stream_time_of() turn samples into psy_rt times and back
+ *   through the fit (frame thread). A movie clock that follows
+ *   sample_at(t) follows the sound frame for frame. Nothing moves origin:
+ *     A GAP. When the ring has no sample for a frame, the frame stays
+ *     silent and the stream's position moves on by exactly that frame; the
+ *     samples that arrive after their frame are discarded, never played
+ *     late. Each run of silent frames is one PSYAU_EV_GAP record, the play
+ *     is flagged GAP, and the counters in get_info (gaps, gap_frames,
+ *     discarded), psyau_onset.gap_frames and psyau_caps.gaps count every
+ *     one, also with no event ring. The edges of a gap are not ramped: a
+ *     gap is a failure, and a ramp would change samples that did arrive.
+ *     A LATE START. A target whose frame has gone to the device starts on
+ *     the first frame that has not, LATE, with origin from the target, so
+ *     the samples it missed are skipped (STREAM record i64[3]). A buffer
+ *     instead starts late from its first sample.
+ *
+ *   SCHEDULING. At t > 0, as a buffer: the first sample is planned on the
+ *   frame nearest t, in every block until it starts. Nothing about the
+ *   ring is checked at the call, because the producer may catch up before
+ *   a start seconds away; a start with an empty ring is a gap and the
+ *   ONSET is still on the planned frame, flagged GAP. get_info's ready
+ *   (the ring holds .preroll frames) and frames_to_start (the planned
+ *   start frame minus the frame of the device's next block) tell the
+ *   caller beforehand. At 0 a stream, unlike a buffer, waits until the
+ *   ring holds desc.preroll frames (default a quarter of the ring;
+ *   PSYAU_PREROLL_NONE: no wait) or every sample up to its end, and starts
+ *   on the next block; the ONSET record shows when that was.
+ *
+ *   CONFIRMATION. The ONSET of a stream is confirmed exactly as a
+ *   buffer's: tier 2 on WASAPI shared under the STATUS conditions,
+ *   UNCONFIRMED and tier 3 otherwise. GAP records are not confirmed: a
+ *   gap's frames are exact by construction (the mixer wrote the silence on
+ *   them) and its time is the fit's, as an END record's is; whether the
+ *   device timing held around it, the XRUN records say for the whole
+ *   stream, in stream frames.
+ *
+ *   STATES (get_info .state). IDLE: fill it, play it. psyau_play() takes
+ *   it (QUEUED), the callback holds it (WAITING, then PLAYING), the play
+ *   ends (ENDED). psyau_stream_reset(st, first) empties the ring and
+ *   numbers the next sample `first`; it is the producer's call and is
+ *   PSYAU_ERR_BUSY unless the stream is IDLE or ENDED, so a stream plays
+ *   once per reset and a reset can never race a play: a play takes the
+ *   stream by compare-and-swap, and so does a reset. To seek: stop the
+ *   play, reset at the new sample when it has ended, fill, play.
+ *
+ *   LOOPS are the producer's: write sample s from source position s mod A.
+ *   The ring is read once, a loop held in memory is a buffer (which loops),
+ *   and the sample count must go on across cycles for the lock rule.
+ *   psyau_wav does it (.loops). .loops, .offset, .frames and .buf with
+ *   .stream are PSYAU_ERR_ARG.
+ *
+ *   psyau_stream_release() ends an arena stream's hold on
+ *   psyau_arena_reset(), which is PSYAU_ERR_BUSY while one exists.
+ *
+ *   ---------------------------------------------------------------------
+ *   WAV FILES
+ *   ---------------------------------------------------------------------
+ *   psyau_wav reads a WAV file from a path, from memory or through a
+ *   psyau_reader (bytes by range, a pack entry; the same layout as
+ *   psy_video.h's psyvid_reader) and streams it through its own stream,
+ *   .stream. psyau_wav_load() reads a whole file into the arena as a
+ *   buffer instead. Accepted: RIFF, RF64 and BW64 (sizes from ds64),
+ *   16-bit and 24-bit PCM, 24 valid bits in 32 (WAVE_FORMAT_EXTENSIBLE; the
+ *   low byte is padding), 32-bit float, plain or EXTENSIBLE. Refused, with
+ *   a message that names what the file has: any other format (8-bit, 32-bit
+ *   integers and 64-bit floats are not exact in float), a rate that is not
+ *   the device's (psy_audio never resamples), a channel count that is
+ *   neither 1 nor the project's, an EXTENSIBLE speaker mask that differs
+ *   from desc.format.map, a damaged file. A float sample that is not a
+ *   number ends the stream before it, with the sample in the error.
+ *
+ *   Feeding is the producer's: psyau_wav_feed(w, 0) fills the ring.
+ *   psyau_wav_step is a psyrt_idle_fn (one block of up to 4096 frames;
+ *   true while there is room) and psyau_wav_on_msg a psyrt_msg_fn (a
+ *   psyau_wav_msg: a seek, or -1 to wake), so a pump does the reading:
+ *
+ *       psyrt_pump_start(&pump, &(psyrt_pump_desc){
+ *           .msg_size = sizeof(psyau_wav_msg), .capacity = 4,
+ *           .on_msg = psyau_wav_on_msg, .on_idle = psyau_wav_step, .ctx = &story });
+ *       ...                                                  // each frame
+ *       if (psyau_wav_wants(&story))                         // ring under half
+ *           psyrt_pump_submit(&pump, &(psyau_wav_msg){ .seek = -1 });
+ *
+ *   A seek waits for the play to end (psyau_wav_seek is PSYAU_ERR_BUSY
+ *   until then; a seek message is kept and applied by the next step).
+ *   .loops repeats the file (PSYAU_FOREVER), counting samples on. A path
+ *   is opened with stdio and no stdio buffer (setvbuf _IONBF), so the C
+ *   runtime allocates nothing on the producer thread; reads go to the OS
+ *   (ReadFile, read()) 16 KB at a time and the OS file cache still applies.
+ *   It is not FILE_FLAG_NO_BUFFERING or O_DIRECT, which need sector-aligned
+ *   offsets and buffers. Only open, close and load (frame thread) and the
+ *   producer calls touch the file.
  *
  *   ---------------------------------------------------------------------
  *   SYNTHESIS
@@ -409,6 +595,12 @@
  *   ---------------------------------------------------------------------
  *   MEMORY AND THREADS
  *   ---------------------------------------------------------------------
+ *   A stream is 256 bytes in your memory, one cache line per writer (the
+ *   producer's, the device thread's, the setup, the device thread's own),
+ *   plus its ring; a psyau_wav is about 17 KB (its stream and a 16 KB read
+ *   buffer), so nothing allocates while it plays. A stream voice keeps its
+ *   stream pointer in the buffer pointer's place, so the voice array, the
+ *   hot data of every block, does not grow (200 bytes a voice).
  *   The handle, about 142 KB, holds the voices, the command and
  *   completion queues, the results of the last 256 sounds, the fit window
  *   and the miniaudio context and device: make it static or allocate it,
@@ -419,7 +611,10 @@
  *   objects inside open(), none afterwards. The callback, psyau_play(),
  *   psyau_update() and psyau_result() allocate nothing and take no lock;
  *   the two queues are single-producer single-consumer rings.
- *   One thread calls the API for a handle (the frame thread). The device
+ *   One thread calls the API for a handle (the frame thread). A stream's
+ *   producer calls (acquire, commit, write, end, reset, and psyau_wav_feed,
+ *   seek, step, on_msg) come from one other thread at a time, or the frame
+ *   thread; psyau_stream_get_info and psyau_wav_wants from any. The device
  *   thread is miniaudio's; on WASAPI it joins MMCSS's "Pro Audio" task.
  *
  *   ---------------------------------------------------------------------
@@ -445,9 +640,9 @@
 #define PSY_AUDIO_H_INCLUDED
 
 #define PSYAU_VERSION_MAJOR 0
-#define PSYAU_VERSION_MINOR 1
+#define PSYAU_VERSION_MINOR 2
 #define PSYAU_VERSION_PATCH 0
-#define PSYAU_VERSION_STRING "0.1.0"
+#define PSYAU_VERSION_STRING "0.2.0"
 
 #include "psy_rt.h"
 
@@ -476,10 +671,12 @@ extern "C" {
 #define PSYAU_ERR_LOST      (-6)    /* the device went away or was rerouted   */
 #define PSYAU_ERR_BUSY      (-7)    /* arena reset while an arena sound plays */
 #define PSYAU_ERR_TIMEOUT   (-8)
+#define PSYAU_ERR_IO        (-9)    /* a file or reader could not be read     */
 
 #define PSYAU_MAX_CHANNELS 64
 #define PSYAU_MAX_VOICES   64
-#define PSYAU_FOREVER     (-1)      /* psyau_play_desc.loops                  */
+#define PSYAU_FOREVER     (-1)      /* psyau_play_desc.loops, psyau_wav_desc.loops */
+#define PSYAU_PREROLL_NONE (-1)     /* psyau_stream_desc.preroll: start at once */
 
 /* Seconds and milliseconds to ns, rounded to nearest; constant expressions. */
 #define PSYAU_S(x)  ((int64_t)((x) * 1e9 + ((x) < 0 ? -0.5 : 0.5)))
@@ -508,6 +705,8 @@ extern "C" {
 #define PSYAU_ONSET_UNCONFIRMED 0x040u /* no report confirmed the frame played */
 #define PSYAU_ONSET_BELOW_TIER 0x080u /* tier worse than desc.min_tier          */
 #define PSYAU_ONSET_LOST       0x100u /* the device went away                   */
+#define PSYAU_ONSET_GAP        0x200u /* a stream played silence for missing
+                                       * samples                               */
 
 /* Ring record kinds under PSYRT_SRC_AUDIO, and the tier word's fields. */
 #define PSYAU_EV_ONSET 1u
@@ -516,6 +715,8 @@ extern "C" {
 #define PSYAU_EV_XRUN  4u
 #define PSYAU_EV_OPEN  5u
 #define PSYAU_EV_CLAIM 6u   /* the OS LATENCY CLAIMS, at open           */
+#define PSYAU_EV_STREAM 7u  /* a stream's start: its origin              */
+#define PSYAU_EV_GAP   8u   /* a stream's run of missing samples         */
 #define PSYAU_EV_TIER_OF(w)   ((unsigned)(w) & 0x7u)
 #define PSYAU_EV_DEVICE_OF(w) (((unsigned)(w) >> 3) & 0x7u)
 #define PSYAU_EV_GEN_OF(w)    ((unsigned)(w) >> 6)
@@ -535,7 +736,21 @@ extern "C" {
 #define PSYAU_GAUSS   0
 #define PSYAU_UNIFORM 1
 
+/* psyau_stream_info.state */
+#define PSYAU_STREAM_IDLE    0   /* fill it, play it                         */
+#define PSYAU_STREAM_QUEUED  1   /* psyau_play() took it; the callback has not */
+#define PSYAU_STREAM_WAITING 2   /* the callback has it; not started yet      */
+#define PSYAU_STREAM_PLAYING 3
+#define PSYAU_STREAM_ENDED   4   /* reset it before the next play             */
+
+/* psyau_wav_info.format */
+#define PSYAU_WAV_S16    1
+#define PSYAU_WAV_S24    2       /* packed, 3 bytes                           */
+#define PSYAU_WAV_S24_32 3       /* 24 valid bits in 32 (EXTENSIBLE)          */
+#define PSYAU_WAV_F32    4
+
 typedef int64_t psyau_id;
+typedef struct psyau_stream psyau_stream;
 
 typedef enum psyau_sample {
     PSYAU_F32 = 0, PSYAU_S16 = 1, PSYAU_S24 = 2
@@ -588,6 +803,8 @@ typedef struct psyau_play_desc {
     int64_t   offset;           /* first frame of buf                        */
     int64_t   frames;           /* frames per pass; 0 = to the end           */
     int32_t   loops;            /* passes after the first; PSYAU_FOREVER     */
+    psyau_stream* stream;       /* play this instead of buf (STREAMS); buf,
+                                 * offset, frames and loops must then be 0  */
 } psyau_play_desc;
 
 /* The record of one sound. */
@@ -608,6 +825,10 @@ typedef struct psyau_onset {
     uint16_t flags;             /* PSYAU_ONSET_*                             */
     uint8_t  tier;              /* psyau_tier                                */
     uint8_t  reserved_;
+    int64_t  sample;            /* the source's sample on start_frame: the
+                                 * stream's index, or the buffer offset     */
+    int64_t  gap_frames;        /* a stream's silent frames (GAPS); final
+                                 * once end_frame is set                    */
 } psyau_onset;
 
 /* --- device and source interfaces (the extensions) ---------------------- */
@@ -719,6 +940,7 @@ typedef struct psyau_caps {
                                  * the output; -1 = none. Never in an onset */
     int64_t    os_stream_latency_ns;  /* the API's latency figure; -1 = none  */
     char       os_latency_src[32];    /* the API both come from             */
+    uint32_t   gaps;            /* stream GAPS since open, every stream      */
 } psyau_caps;
 
 typedef struct psyau_param {
@@ -753,6 +975,136 @@ typedef struct psyau_click_desc {
     float    peak;              /* required, [-1, 1], not 0                  */
 } psyau_click_desc;
 
+/* --- streams (STREAMS) ---------------------------------------------------- */
+
+typedef struct psyau_stream_desc {
+    float*   memory;            /* frames x channels floats; NULL = the arena */
+    int64_t  frames;            /* ring capacity; 0 = 1 s; at least 2 periods */
+    uint16_t channels;          /* 1 or the project's; 0 = the project's     */
+    uint32_t id;                /* in every record, as psyau_buf.id          */
+    int64_t  first;             /* index of the first sample written; 0      */
+    int64_t  preroll;           /* frames a play at 0 waits for; 0 = a quarter
+                                 * of the ring; PSYAU_PREROLL_NONE = none    */
+} psyau_stream_desc;
+
+/* Caller-allocated (static, or inside your own struct), set up by
+ * psyau_stream_init(); every field is private. One cache line per writer:
+ * the producer's, the device thread's, the read-mostly setup, and the
+ * device thread's private state, so no line is written by two threads. */
+struct psyau_stream {
+    /* --- producer --- */
+    int64_t  w_;                /* samples committed: the index of the next  */
+    int64_t  end_;              /* the index after the last sample; -1 = open */
+    unsigned char pad0_[48];
+    /* --- device thread (and the frame thread's CAS on state_) --- */
+    int64_t  r_;                /* the next sample the ring holds; <= w_     */
+    int64_t  next_;             /* the sample the next block plays           */
+    int64_t  origin_;           /* stream frame of sample 0, once started    */
+    int64_t  gap_frames_;
+    int64_t  discarded_;
+    int64_t  plan_;             /* the planned start frame; -1 = none yet    */
+    uint32_t state_;            /* PSYAU_STREAM_*                            */
+    uint32_t gaps_;
+    unsigned char pad1_[8];
+    /* --- set at init and reset --- */
+    float*   mem_;
+    int64_t  cap_;
+    int64_t  first_;
+    int64_t  preroll_;
+    struct psyau_audio* au_;
+    psyau_id id_;               /* the current play                          */
+    uint32_t buf_id_;
+    uint16_t ch_;
+    uint16_t in_arena_;
+    unsigned char pad2_[8];
+    /* --- device thread only --- */
+    int64_t  skip_;             /* samples a late start skipped              */
+    int64_t  gap_f0_, gap_n_, gap_s0_;
+    uint32_t gap_xr_;           /* the underrun count when the gap opened    */
+    int32_t  gap_open_;
+    unsigned char pad3_[24];
+};
+
+typedef struct psyau_stream_info {
+    int32_t  state;             /* PSYAU_STREAM_*                            */
+    bool     started;           /* origin is fixed                           */
+    bool     ready;             /* fill >= the preroll, or the end is in     */
+    psyau_id id;                /* the play; 0 = none                        */
+    int64_t  first;             /* the first sample since init or reset      */
+    int64_t  written;           /* the next sample the producer writes       */
+    int64_t  read;              /* the next sample the ring holds            */
+    int64_t  fill;              /* written - read, frames                    */
+    int64_t  preroll;           /* the frames `ready` asks for               */
+    int64_t  next;              /* the sample the device's next block plays  */
+    int64_t  start_frame;       /* planned or fixed start; -1 = not planned  */
+    int64_t  frames_to_start;   /* start_frame minus the next block's frame;
+                                 * <= 0 once started                         */
+    int64_t  origin;            /* stream frame of sample 0, once started    */
+    int64_t  end;               /* the index after the last sample; -1 = open */
+    uint32_t gaps;              /* runs of missing samples in this play      */
+    int64_t  gap_frames;        /* silent frames in this play                */
+    int64_t  discarded;         /* samples that came after their frame       */
+} psyau_stream_info;
+
+/* --- WAV files (WAV FILES) ------------------------------------------------- */
+
+/* The same layout as psy_video.h's psyvid_reader. */
+typedef struct psyau_reader {
+    int64_t (*read)(void* ctx, int64_t offset, void* dst, int64_t n);  /* bytes, or < 0 */
+    int64_t size;               /* bytes                                     */
+} psyau_reader;
+
+typedef struct psyau_wav_desc {
+    const char*         path;   /* a file; or                                */
+    const void*         data;   /* the file in memory, kept by you; or       */
+    size_t              size;
+    const psyau_reader* reader; /* bytes by range (a pack entry)             */
+    void*               reader_ctx;
+    int32_t             loops;  /* passes after the first; PSYAU_FOREVER      */
+    int64_t             start;  /* the first sample to stream; 0             */
+    int64_t             ring;   /* ring frames; 0 = 1 s                      */
+    float*              memory; /* ring memory; NULL = the arena             */
+    uint32_t            id;     /* in every record                           */
+} psyau_wav_desc;
+
+typedef struct psyau_wav_info {
+    uint32_t rate;
+    uint16_t channels;
+    uint16_t format;            /* PSYAU_WAV_*                               */
+    int64_t  frames;            /* one pass                                  */
+    int64_t  data_offset;       /* bytes                                     */
+    uint32_t channel_mask;      /* EXTENSIBLE's; 0 = none                    */
+    bool     rf64;              /* RF64 or BW64 sizes from ds64              */
+} psyau_wav_info;
+
+#define PSYAU__WAV_SCRATCH 16384  /* bytes of raw samples per read            */
+
+typedef struct psyau__wsrc {      /* private: where a WAV file's bytes come from */
+    void*               fh;     /* FILE*                                     */
+    const unsigned char* data;
+    psyau_reader        reader;
+    void*               ctx;
+    int64_t             size;
+} psyau__wsrc;
+
+/* Caller-allocated and zeroed, like the handle; about 17 KB. */
+typedef struct psyau_wav {
+    psyau_stream   stream;      /* play this                                 */
+    psyau_wav_info info;
+    /* private */
+    psyau__wsrc    src_;
+    int32_t        loops_;
+    int32_t        open_;
+    int64_t        pos_;        /* the next sample to write                  */
+    int64_t        total_;      /* samples in all passes; -1 = forever        */
+    int64_t        seek_;       /* a seek waiting for the play to end; -1    */
+    struct psyau_audio* au_;
+    char           error_[256];
+    unsigned char  scratch_[PSYAU__WAV_SCRATCH];
+} psyau_wav;
+
+typedef struct psyau_wav_msg { int64_t seek; } psyau_wav_msg;   /* -1 = wake only */
+
 /* --- private state, in the handle ---------------------------------------- */
 
 #define PSYAU__CMDS      256
@@ -761,6 +1113,7 @@ typedef struct psyau_click_desc {
 #define PSYAU__FIT_PTS   1024    /* 205 s of reports, 51 s of callbacks     */
 #define PSYAU__ACC       4096    /* floats in the mix accumulator           */
 #define PSYAU__BACKEND_WORDS 1536 /* 12 KB for miniaudio's context and device */
+#define PSYAU__STREAM_VOICE  2    /* psyau__voice.in_arena of a stream       */
 
 typedef struct psyau__fit {
     int64_t  w0, t0;            /* t = t0 + (w - w0) * k                     */
@@ -780,6 +1133,7 @@ typedef struct psyau__cmd {
     uint16_t in_arena;
     uint32_t buf_id;
     float*   frames;
+    psyau_stream* st;
     int64_t  first, len;
     uint64_t mask;
 } psyau__cmd;
@@ -798,10 +1152,12 @@ typedef struct psyau__voice {
     psyau_id id;
     int32_t  state;             /* 0 free, 1 waiting, 2 playing, 3 ended     */
     int32_t  onset_done;
-    float*   frames;
+    /* A stream has no buffer, so it takes the buffer's slot and the voice
+     * stays 200 bytes: the voice array is the hot data of every block. */
+    union { float* f; psyau_stream* st; } src;
     int64_t  first, len, in_loop;
     int32_t  loops_left;
-    uint16_t ch, in_arena;
+    uint16_t ch, in_arena;      /* in_arena: 0, 1, or PSYAU__STREAM_VOICE    */
     uint64_t mask;
     int64_t  target, start, end, played, rendered_at;
     float    gain;
@@ -837,7 +1193,8 @@ typedef struct psyau_audio {
     int64_t        w_pub;       /* the stream frame after the last block      */
     uint32_t       lost;        /* the device went away                       */
     uint32_t       msgs_dropped;
-    unsigned char  pad4_[48];
+    uint32_t       gaps_pub;    /* stream GAPS since open                     */
+    unsigned char  pad4_[44];
     psyau__cmd     cmd[PSYAU__CMDS];
     psyau__msg     msg[PSYAU__MSGS];
     /* --- frame thread --- */
@@ -860,6 +1217,7 @@ typedef struct psyau_audio {
     unsigned char* arena;
     size_t         arena_cap, arena_used;
     int            arena_owned;
+    int32_t        arena_streams;  /* streams whose ring is in the arena     */
     /* --- callback (device thread) --- */
     int64_t        w;           /* stream frame of the next block             */
     int64_t        p_off;       /* device position minus stream frame         */
@@ -882,6 +1240,7 @@ typedef struct psyau_audio {
     int64_t        early_since;
     int64_t        last_fit_t;
     int32_t        clip_any;
+    uint32_t       gaps;
     psyau__voice   voice[PSYAU_MAX_VOICES];
     float          acc[PSYAU__ACC];
     /* --- backend --- */
@@ -971,6 +1330,54 @@ PSYAU_API int psyau_ramp(float* f, int64_t n, uint16_t ch, int64_t on_frames, in
 /* dst[at_frame ...] += gain * src, both with ch channels, clipped to dst. */
 PSYAU_API int psyau_mix(float* dst, int64_t dst_n, uint16_t ch, const float* src,
                         int64_t src_n, int64_t at_frame, float gain);
+
+/* Streams (STREAMS). Frame thread: init takes the ring from desc.memory or
+ * the arena; release ends an arena stream's hold on psyau_arena_reset()
+ * (PSYAU_ERR_BUSY unless IDLE or ENDED). */
+PSYAU_API int psyau_stream_init(psyau_audio* au, psyau_stream* st, const psyau_stream_desc* d);
+PSYAU_API int psyau_stream_release(psyau_audio* au, psyau_stream* st);
+/* psyau_play() with .stream = st and .at = t. */
+PSYAU_API psyau_id psyau_play_stream(psyau_audio* au, psyau_stream* st, int64_t t);
+
+/* The producer: one thread at a time, which may be the frame thread.
+ * Wait-free. acquire returns the contiguous free region (up to the ring's
+ * wrap) and its size in *frames, or NULL when the ring is full; commit
+ * publishes the first `frames` of it. write copies and returns the frames
+ * it took. end: no sample follows the last one committed. reset empties the
+ * ring and numbers the next sample `first` (PSYAU_ERR_BUSY unless IDLE or
+ * ENDED). */
+PSYAU_API float*  psyau_stream_acquire(psyau_stream* st, int64_t* frames);
+PSYAU_API int     psyau_stream_commit(psyau_stream* st, int64_t frames);
+PSYAU_API int64_t psyau_stream_write(psyau_stream* st, const float* src, int64_t frames);
+PSYAU_API int     psyau_stream_end(psyau_stream* st);
+PSYAU_API int     psyau_stream_reset(psyau_stream* st, int64_t first);
+
+/* Any thread. Each field is current when read; the set is not one
+ * snapshot. */
+PSYAU_API int psyau_stream_get_info(const psyau_stream* st, psyau_stream_info* out);
+
+/* Frame thread: the sample of a started stream at psy_rt time t (the nearest
+ * frame minus origin), and the time of a sample, from the fit.
+ * PSYAU_PENDING until the start fixes origin. */
+PSYAU_API int psyau_stream_sample_at(const psyau_audio* au, const psyau_stream* st, int64_t t, int64_t* sample);
+PSYAU_API int psyau_stream_time_of(const psyau_audio* au, const psyau_stream* st, int64_t sample, int64_t* t);
+
+/* WAV files (WAV FILES). open and close: frame thread. feed, seek, step
+ * and on_msg: the producer. wants: any thread. feed writes up to
+ * max_frames (0 = until the ring is full or the file ends) and returns the
+ * frames written or a negative code. step is a psyrt_idle_fn (one block of
+ * up to 4096 frames; true while the ring has room and the file has
+ * samples); on_msg is a psyrt_msg_fn for psyau_wav_msg (a seek, or -1 to
+ * wake). load reads a whole file into the arena as a buffer. */
+PSYAU_API int       psyau_wav_open(psyau_audio* au, psyau_wav* w, const psyau_wav_desc* d);
+PSYAU_API int       psyau_wav_close(psyau_audio* au, psyau_wav* w);
+PSYAU_API int64_t   psyau_wav_feed(psyau_wav* w, int64_t max_frames);
+PSYAU_API int       psyau_wav_seek(psyau_wav* w, int64_t sample);
+PSYAU_API bool      psyau_wav_wants(const psyau_wav* w);
+PSYAU_API bool      psyau_wav_step(void* w);
+PSYAU_API void      psyau_wav_on_msg(void* w, const void* msg, uint32_t seq);
+PSYAU_API const char* psyau_wav_error(const psyau_wav* w);
+PSYAU_API psyau_buf psyau_wav_load(psyau_audio* au, const psyau_wav_desc* d);
 
 /* The table of desc fields a designer sets; *n gets the count. */
 PSYAU_API const psyau_param* psyau_params(int* n);
@@ -1078,9 +1485,11 @@ enum { PSYAU__OP_PLAY = 1, PSYAU__OP_CANCEL, PSYAU__OP_STOP, PSYAU__OP_GAIN };
 enum { PSYAU__M_ONSET = 1, PSYAU__M_END, PSYAU__M_FIT, PSYAU__M_XRUN, PSYAU__M_FREE };
 
 /* --- atomics ---------------------------------------------------------------
- * The two queues are single-producer single-consumer: an acquire load of the
- * other side's index and a release store of one's own is the whole
- * synchronization. The same pattern as psy_rt.h's ring: on MSVC x86/x64 a
+ * The two queues and every stream ring are single-producer single-consumer:
+ * an acquire load of the other side's index and a release store of one's
+ * own is the whole synchronization. A stream's state also takes a
+ * compare-and-swap, from the frame thread and the producer only, so a reset
+ * and a play cannot both claim it. The same pattern as psy_rt.h's ring: on MSVC x86/x64 a
  * volatile access has acquire or release semantics and the barrier only
  * stops the compiler; ARM64 gets the explicit instructions. */
 #if defined(_MSC_VER)
@@ -1101,7 +1510,13 @@ static void psyau__st32(uint32_t* p, uint32_t v) { _ReadWriteBarrier(); *(volati
 static int64_t psyau__ld64(const int64_t* p) { int64_t v = *(const volatile int64_t*)p; _ReadWriteBarrier(); return v; }
 static void psyau__st64(int64_t* p, int64_t v) { _ReadWriteBarrier(); *(volatile int64_t*)p = v; }
     #endif
+static int psyau__cas32(uint32_t* p, uint32_t expect, uint32_t v) {
+    return (uint32_t)_InterlockedCompareExchange((volatile long*)p, (long)v, (long)expect) == expect;
+}
 #elif defined(__GNUC__) || defined(__clang__)
+static int psyau__cas32(uint32_t* p, uint32_t expect, uint32_t v) {
+    return __atomic_compare_exchange_n(p, &expect, v, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
 static uint32_t psyau__ld32(const uint32_t* p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
 static void psyau__st32(uint32_t* p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 static int64_t psyau__ld64(const int64_t* p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
@@ -1135,8 +1550,9 @@ PSYAU_API const char* psyau_strerror(int code) {
     case PSYAU_ERR_FORMAT:    return "buffer format does not fit the project";
     case PSYAU_ERR_NOT_FOUND: return "no such sound among the last 256";
     case PSYAU_ERR_LOST:      return "device lost";
-    case PSYAU_ERR_BUSY:      return "an arena buffer is still playing";
+    case PSYAU_ERR_BUSY:      return "busy: still playing, waiting or in use";
     case PSYAU_ERR_TIMEOUT:   return "timeout";
+    case PSYAU_ERR_IO:        return "read error";
     case PSYAU_PENDING:       return "pending";
     default:                  return code < 0 ? "unknown error" : "ok";
     }
@@ -1309,8 +1725,48 @@ static int psyau__path_tier(const psyau_audio* au) {
 
 static void psyau__finish_voice_msg(psyau__voice* v, psyau__msg* m) {
     m->freed = v->onset_done && v->state == 3;
-    m->in_arena = v->in_arena;
+    m->in_arena = v->in_arena == 1;
     if (m->freed) v->state = 0;
+}
+
+#define PSYAU__NO_ORIGIN INT64_MIN
+#define PSYAU__STREAM_RESETTING 5u   /* a reset is rewriting the stream     */
+
+static int psyau__is_stream(const psyau__voice* v) { return v->in_arena == PSYAU__STREAM_VOICE; }
+
+/* The sample on the start frame: a buffer's offset; a stream's index, kept
+ * in `first` (unused by a stream) because its ONSET may complete after the
+ * play has ended and the stream has gone back to the producer. A stream's
+ * silent frames are kept in `len` for the same reason. */
+static int64_t psyau__voice_sample(const psyau__voice* v) {
+    if (psyau__is_stream(v) && v->start < 0) return -1;
+    return v->first;
+}
+
+/* A gap's record goes out when the run of missing samples closes, so it
+ * carries its full length. Only to the event ring: the counters in the
+ * stream carry gaps to the frame thread, and a burst of gaps must not
+ * fill the queue that carries the ONSET and END messages. */
+static void psyau__gap_close(psyau_audio* au, psyau__voice* v, psyau_stream* st) {
+    psyrt_payload u;
+    if (!st->gap_open_) return;
+    st->gap_open_ = 0;
+    memset(&u, 0, sizeof u);
+    u.i64[0] = st->gap_f0_;
+    u.i64[1] = st->gap_n_;
+    u.i64[2] = st->gap_s0_;
+    u.i64[3] = st->discarded_;
+    u.u32[8] = v->buf_id;
+    u.u16[18] = (uint16_t)(au->xruns != st->gap_xr_ ? PSYAU_ONSET_XRUN : 0u);
+    psyau__ring(au, (uint16_t)PSYAU_EV_GAP, psyau__fit_time(&au->fit, st->gap_f0_), (uint32_t)v->id, &u);
+}
+
+/* The play is over: the device stores r before ENDED, so a reset that sees
+ * ENDED never races a late store, and touches the stream no more. */
+static void psyau__stream_detach(psyau_audio* au, psyau__voice* v) {
+    psyau_stream* st = v->src.st;
+    psyau__gap_close(au, v, st);
+    psyau__st32(&st->state_, PSYAU_STREAM_ENDED);
 }
 
 static void psyau__onset_done(psyau_audio* au, psyau__voice* v, int64_t onset, int64_t devpos, int confirmed) {
@@ -1337,6 +1793,8 @@ static void psyau__onset_done(psyau_audio* au, psyau__voice* v, int64_t onset, i
     m.rec.buffer_id = v->buf_id;
     m.rec.flags = flags;
     m.rec.tier = (uint8_t)tier;
+    m.rec.sample = psyau__voice_sample(v);
+    m.rec.gap_frames = psyau__is_stream(v) ? v->len : 0;
     memset(&u, 0, sizeof u);
     u.i64[0] = v->target;
     u.i64[1] = v->start;
@@ -1366,7 +1824,15 @@ static void psyau__end_voice(psyau_audio* au, psyau__voice* v, int64_t end_frame
     u.i64[0] = end_frame;
     u.i64[1] = v->played;
     u.u16[18] = v->flags;
+    if (psyau__is_stream(v)) {
+        psyau__gap_close(au, v, v->src.st);
+        u.i64[2] = v->len;
+        u.i64[3] = v->start >= 0 ? v->first + (end_frame - v->start) : -1;
+        m.rec.gap_frames = v->len;
+        psyau__st64(&v->src.st->next_, u.i64[3]);
+    }
     psyau__ring(au, (uint16_t)PSYAU_EV_END, t, (uint32_t)v->id, &u);
+    if (psyau__is_stream(v)) psyau__stream_detach(au, v);
     psyau__finish_voice_msg(v, &m);
     (void)psyau__msg_push(au, &m);
 }
@@ -1377,6 +1843,7 @@ static void psyau__cancel_waiting(psyau_audio* au, psyau__voice* v) {
     v->flags |= PSYAU_ONSET_CANCELED;
     v->start = -1;
     v->state = 3;
+    if (psyau__is_stream(v)) psyau__stream_detach(au, v);
     psyau__onset_done(au, v, plan, -1, 0);
 }
 
@@ -1400,7 +1867,6 @@ static void psyau__apply(psyau_audio* au, const psyau__cmd* c) {
         memset(v, 0, sizeof *v);
         v->id = c->id;
         v->state = 1;
-        v->frames = c->frames;
         v->first = c->first;
         v->len = c->len;
         v->loops_left = c->loops;
@@ -1411,6 +1877,15 @@ static void psyau__apply(psyau_audio* au, const psyau__cmd* c) {
         v->start = -1;
         v->gain = psyau_db(c->db);
         v->buf_id = c->buf_id;
+        if (c->st) {
+            v->src.st = c->st;
+            v->in_arena = PSYAU__STREAM_VOICE;
+            v->first = 0;
+            v->len = 0;
+            psyau__st32(&c->st->state_, PSYAU_STREAM_WAITING);
+        } else {
+            v->src.f = c->frames;
+        }
         break;
     case PSYAU__OP_CANCEL:
         v = psyau__find(au, c->id);
@@ -1456,11 +1931,149 @@ static float psyau__gain_at(psyau__voice* v, int64_t f) {
     return g;
 }
 
+static int64_t psyau__stream_preroll(const psyau_stream* st) {
+    return st->preroll_ == PSYAU_PREROLL_NONE ? 0 : st->preroll_ > 0 ? st->preroll_ : st->cap_ / 4;
+}
+
+/* The ring holds the preroll, or every sample up to the end. Any thread. */
+static int psyau__stream_ready(const psyau_stream* st) {
+    int64_t e = psyau__ld64(&st->end_), w = psyau__ld64(&st->w_), r = psyau__ld64(&st->r_);
+    return w - r >= psyau__stream_preroll(st) || (e >= 0 && w >= e);
+}
+
+/* Add k frames of src (v->ch channels, interleaved) at v's gain into acc
+ * from stream frame f; c0 is the chunk's first frame. One kernel for
+ * buffers and streams, so a stream's gain, ramp, fade and channel routing
+ * are the same code as a buffer's: a mono source goes to every channel in
+ * the mask, a source with the project's channels plays only the channels
+ * in it. */
+static void psyau__mix_run(psyau_audio* au, psyau__voice* v, const float* src, int64_t f, int64_t k, int64_t c0) {
+    int C = au->dcaps.channels;
+    int64_t i;
+    int constant;
+    float g0;
+    float* dst = au->acc + (f - c0) * C;
+    int c, nc = 0, all;
+    int chans[PSYAU_MAX_CHANNELS];
+    constant = !(v->g_state == 2 && f < v->g_start + v->g_len && f + k > v->g_start)
+            && !(v->s_state == 2 && f + k > v->s_start);
+    if (v->g_state == 2 && f >= v->g_start + v->g_len) { v->gain = v->g_to; v->g_state = 0; constant = !(v->s_state == 2 && f + k > v->s_start); }
+    g0 = psyau__gain_at(v, f);
+    /* the channel list once per run, not a mask test per sample */
+    for (c = 0; c < C; c++) if (v->mask & ((uint64_t)1 << c)) chans[nc++] = c;
+    all = nc == C;
+    if (v->ch == 1 && constant && all && C == 2) {
+        for (i = 0; i < k; i++) { float x = src[i] * g0; dst[2 * i] += x; dst[2 * i + 1] += x; }
+    } else if (v->ch == 1) {
+        for (i = 0; i < k; i++) {
+            float x = src[i] * (constant ? g0 : psyau__gain_at(v, f + i));
+            for (c = 0; c < nc; c++) dst[i * C + chans[c]] += x;
+        }
+    } else if (constant && all) {
+        for (i = 0; i < k * C; i++) dst[i] += src[i] * g0;
+    } else {
+        for (i = 0; i < k; i++) {
+            float g = constant ? g0 : psyau__gain_at(v, f + i);
+            for (c = 0; c < nc; c++) dst[i * C + chans[c]] += src[i * C + chans[c]] * g;
+        }
+    }
+}
+
+/* Fix a stream's origin on its start frame: from the plan, so a late start
+ * skips the samples it missed instead of moving every later sample. */
+static void psyau__stream_start(psyau_audio* au, psyau__voice* v) {
+    psyau_stream* st = v->src.st;
+    psyrt_payload u;
+    int64_t plan = st->plan_;
+    int64_t origin = plan - st->first_;
+    st->skip_ = v->start - plan;
+    v->first = v->start - origin;
+    psyau__st64(&st->origin_, origin);
+    psyau__st64(&st->plan_, v->start);
+    psyau__st32(&st->state_, PSYAU_STREAM_PLAYING);
+    memset(&u, 0, sizeof u);
+    u.i64[0] = origin;
+    u.i64[1] = v->start;
+    u.i64[2] = v->first;
+    u.i64[3] = st->skip_;
+    u.u32[8] = v->buf_id;
+    u.u16[18] = v->flags;
+    psyau__ring(au, (uint16_t)PSYAU_EV_STREAM, psyau__fit_time(&au->fit, v->start), (uint32_t)v->id, &u);
+}
+
+/* Mix stream voice v for stream frames [c0, c0 + cn). Sample s plays on
+ * frame origin + s, always: a frame whose sample is not in the ring stays
+ * silent (a gap) and the position moves on by exactly that frame; a sample
+ * that arrives after its frame is dropped (discarded), never played late.
+ * The read index never passes the write index, so the producer never
+ * writes a slot this thread is reading. */
+static void psyau__mix_stream(psyau_audio* au, psyau__voice* v, int64_t c0, int32_t cn, int* contributed) {
+    psyau_stream* st = v->src.st;
+    int64_t f = c0, stop_at, cend = c0 + cn, e, w, r, origin, cap = st->cap_;
+    if (v->state == 1) {
+        if (v->start < 0 || v->start >= cend) return;
+        v->state = 2;
+        psyau__stream_start(au, v);
+        f = v->start;
+    } else if (v->state != 2) {
+        return;
+    }
+    /* end before w: a producer stores w, then end, so an end seen here has
+     * every sample up to it */
+    e = psyau__ld64(&st->end_);
+    w = psyau__ld64(&st->w_);
+    r = st->r_;
+    origin = st->origin_;
+    stop_at = v->s_state == 2 ? v->s_end : INT64_MAX;
+    while (f < cend) {
+        int64_t s = f - origin, k = cend - f;
+        if (f >= stop_at || (e >= 0 && s >= e)) {
+            psyau__st64(&st->r_, r);
+            if (f >= stop_at) v->flags |= PSYAU_ONSET_STOPPED;
+            psyau__end_voice(au, v, f);
+            return;
+        }
+        if (stop_at - f < k) k = stop_at - f;
+        if (e >= 0 && e - s < k) k = e - s;
+        if (r < s) {
+            int64_t nr = w < s ? w : s;
+            if (nr > r) { psyau__st64(&st->discarded_, st->discarded_ + (nr - r)); r = nr; }
+        }
+        if (r == s && s < w) {
+            int64_t at = s % cap;
+            if (w - s < k) k = w - s;
+            if (cap - at < k) k = cap - at;
+            psyau__gap_close(au, v, st);
+            psyau__mix_run(au, v, st->mem_ + at * v->ch, f, k, c0);
+            *contributed = 1;
+            r = s + k;
+            v->played += k;
+        } else {
+            if (!st->gap_open_) {
+                st->gap_open_ = 1;
+                st->gap_f0_ = f;
+                st->gap_s0_ = s;
+                st->gap_n_ = 0;
+                st->gap_xr_ = au->xruns;
+                psyau__st32(&st->gaps_, st->gaps_ + 1);
+                au->gaps++;
+                psyau__st32(&au->gaps_pub, au->gaps);
+                v->flags |= PSYAU_ONSET_GAP;
+            }
+            st->gap_n_ += k;
+            v->len += k;
+            psyau__st64(&st->gap_frames_, v->len);
+        }
+        f += k;
+    }
+    psyau__st64(&st->r_, r);
+    psyau__st64(&st->next_, cend - origin);
+}
+
 /* Mix voice v into acc for stream frames [c0, c0 + cn). */
 static void psyau__mix_voice(psyau_audio* au, psyau__voice* v, int64_t c0, int32_t cn, int* contributed) {
-    int C = au->dcaps.channels;
     int64_t f = c0, stop_at;
-    float* acc = au->acc;
+    if (psyau__is_stream(v)) { psyau__mix_stream(au, v, c0, cn, contributed); return; }
     if (v->state == 1) {
         if (v->start < 0 || v->start >= c0 + cn) return;
         v->state = 2;
@@ -1470,9 +2083,7 @@ static void psyau__mix_voice(psyau_audio* au, psyau__voice* v, int64_t c0, int32
     }
     stop_at = v->s_state == 2 ? v->s_end : INT64_MAX;
     while (f < c0 + cn) {
-        int64_t k, avail, i;
-        int constant;
-        float g0;
+        int64_t k, avail;
         if (f >= stop_at) {
             v->flags |= PSYAU_ONSET_STOPPED;
             psyau__end_voice(au, v, f);
@@ -1482,34 +2093,7 @@ static void psyau__mix_voice(psyau_audio* au, psyau__voice* v, int64_t c0, int32
         k = c0 + cn - f;
         if (k > avail) k = avail;
         if (stop_at - f < k) k = stop_at - f;
-        constant = !(v->g_state == 2 && f < v->g_start + v->g_len && f + k > v->g_start)
-                && !(v->s_state == 2 && f + k > v->s_start);
-        if (v->g_state == 2 && f >= v->g_start + v->g_len) { v->gain = v->g_to; v->g_state = 0; constant = !(v->s_state == 2 && f + k > v->s_start); }
-        g0 = psyau__gain_at(v, f);
-        {
-            const float* src = v->frames + (v->first + v->in_loop) * v->ch;
-            float* dst = acc + (f - c0) * C;
-            int c, nc = 0, all;
-            int chans[PSYAU_MAX_CHANNELS];
-            /* the channel list once per run, not a mask test per sample */
-            for (c = 0; c < C; c++) if (v->mask & ((uint64_t)1 << c)) chans[nc++] = c;
-            all = nc == C;
-            if (v->ch == 1 && constant && all && C == 2) {
-                for (i = 0; i < k; i++) { float x = src[i] * g0; dst[2 * i] += x; dst[2 * i + 1] += x; }
-            } else if (v->ch == 1) {
-                for (i = 0; i < k; i++) {
-                    float x = src[i] * (constant ? g0 : psyau__gain_at(v, f + i));
-                    for (c = 0; c < nc; c++) dst[i * C + chans[c]] += x;
-                }
-            } else if (constant && all) {
-                for (i = 0; i < k * C; i++) dst[i] += src[i] * g0;
-            } else {
-                for (i = 0; i < k; i++) {
-                    float g = constant ? g0 : psyau__gain_at(v, f + i);
-                    for (c = 0; c < nc; c++) dst[i * C + chans[c]] += src[i * C + chans[c]] * g;
-                }
-            }
-        }
+        psyau__mix_run(au, v, v->src.f + (v->first + v->in_loop) * v->ch, f, k, c0);
         *contributed = 1;
         f += k;
         v->in_loop += k;
@@ -1780,7 +2364,16 @@ PSYAU_API void psyau_render(void* host, void* out, int32_t frames, const psyau_t
     for (i = 0; i < PSYAU_MAX_VOICES; i++) {
         psyau__voice* v = &au->voice[i];
         if (v->state == 1) {
-            int64_t f = psyau__plan(au, v->target);
+            int64_t f;
+            if (psyau__is_stream(v) && v->target == 0 && !psyau__stream_ready(v->src.st)) {
+                /* "as soon as it can" for a stream: once the ring holds its
+                 * preroll, so it does not begin with a gap */
+                v->start = -1;
+                if (v->s_state && (v->s_t ? psyau__plan(au, v->s_t) : W) <= W) psyau__cancel_waiting(au, v);
+                continue;
+            }
+            f = psyau__plan(au, v->target);
+            if (psyau__is_stream(v)) psyau__st64(&v->src.st->plan_, f);
             if (f < W) { f = W; v->flags |= PSYAU_ONSET_LATE; }
             else v->flags = (uint16_t)(v->flags & ~PSYAU_ONSET_LATE);
             v->start = f;
@@ -2190,13 +2783,16 @@ static void psyau__res_put(psyau_audio* au, const psyau_onset* rec, int stage) {
     psyau__res* r = &au->res[(uint64_t)rec->id % PSYAU__RESULTS];
     if (r->rec.id != rec->id) return;
     if (stage == PSYAU__M_ONSET) {
-        int64_t endf = r->rec.end_frame;
+        int64_t endf = r->rec.end_frame, gapf = r->rec.gap_frames;
         r->rec = *rec;
         r->rec.end_frame = endf;
+        /* an END that came first has the final count */
+        if (r->ended) r->rec.gap_frames = gapf;
         r->rec.flags = (uint16_t)(r->rec.flags | r->end_flags);
         r->used = 2;
     } else {
         r->rec.end_frame = rec->end_frame;
+        r->rec.gap_frames = rec->gap_frames;
         r->end_flags = rec->flags;
         if (r->used == 2) r->rec.flags = (uint16_t)(r->rec.flags | rec->flags);
         r->ended = 1;
@@ -2237,6 +2833,45 @@ static int psyau__project_channels_ok(const psyau_audio* au, uint16_t ch) {
     return ch == 1 || ch == au->dcaps.channels;
 }
 
+static psyau_id psyau__play_stream(psyau_audio* au, const psyau_play_desc* d) {
+    psyau__cmd c;
+    psyau__res* r;
+    psyau_stream* st = d->stream;
+    if (d->buf.frames || d->buf.n || d->offset || d->frames || d->loops || d->at < 0
+        || st->au_ != au || !st->mem_) return PSYAU_ERR_ARG;
+    if (au->outstanding >= au->voices_max) return PSYAU_ERR_FULL;
+    /* the claim: a reset cannot run from here until the play has ended */
+    if (!psyau__cas32(&st->state_, PSYAU_STREAM_IDLE, PSYAU_STREAM_QUEUED)) return PSYAU_ERR_BUSY;
+    memset(&c, 0, sizeof c);
+    c.op = PSYAU__OP_PLAY;
+    c.id = au->next_id + 1;
+    c.t = d->at;
+    c.db = d->db;
+    c.ch = st->ch_;
+    c.buf_id = st->buf_id_;
+    c.st = st;
+    c.mask = d->channels ? d->channels : ~(uint64_t)0;
+    psyau__st64(&st->id_, c.id);
+    if (psyau__cmd_push(au, &c) < 0) {
+        psyau__st32(&st->state_, PSYAU_STREAM_IDLE);
+        return PSYAU_ERR_FULL;
+    }
+    au->next_id++;
+    au->outstanding++;
+    r = &au->res[(uint64_t)c.id % PSYAU__RESULTS];
+    memset(r, 0, sizeof *r);
+    r->used = 1;
+    r->rec.id = c.id;
+    r->rec.target = d->at;
+    r->rec.onset = d->at;
+    r->rec.start_frame = -1;
+    r->rec.device_pos = -1;
+    r->rec.buffer_id = st->buf_id_;
+    r->rec.flags = PSYAU_ONSET_PENDING;
+    r->rec.sample = -1;
+    return c.id;
+}
+
 PSYAU_API psyau_id psyau_play(psyau_audio* au, const psyau_play_desc* d) {
     psyau__cmd c;
     psyau__res* r;
@@ -2244,6 +2879,7 @@ PSYAU_API psyau_id psyau_play(psyau_audio* au, const psyau_play_desc* d) {
     if (!au || !d) return PSYAU_ERR_ARG;
     if (!au->open) return PSYAU_ERR_CLOSED;
     if (psyau_update(au) == PSYAU_ERR_LOST) return PSYAU_ERR_LOST;
+    if (d->stream) return psyau__play_stream(au, d);
     if (!d->buf.frames || d->buf.n <= 0 || d->offset < 0 || d->offset >= d->buf.n
         || d->frames < 0 || d->at < 0 || d->loops < PSYAU_FOREVER) return PSYAU_ERR_ARG;
     if (!psyau__project_channels_ok(au, d->buf.channels)) return PSYAU_ERR_FORMAT;
@@ -2278,6 +2914,7 @@ PSYAU_API psyau_id psyau_play(psyau_audio* au, const psyau_play_desc* d) {
     r->rec.device_pos = -1;
     r->rec.buffer_id = d->buf.id;
     r->rec.flags = PSYAU_ONSET_PENDING;
+    r->rec.sample = d->offset;
     return c.id;
 }
 
@@ -2287,6 +2924,194 @@ PSYAU_API psyau_id psyau_play_at(psyau_audio* au, psyau_buf buf, int64_t t) {
     d.buf = buf;
     d.at = t;
     return psyau_play(au, &d);
+}
+
+PSYAU_API psyau_id psyau_play_stream(psyau_audio* au, psyau_stream* st, int64_t t) {
+    psyau_play_desc d;
+    if (!st) return PSYAU_ERR_ARG;
+    memset(&d, 0, sizeof d);
+    d.stream = st;
+    d.at = t;
+    return psyau_play(au, &d);
+}
+
+/* --- streams: setup and the producer ------------------------------------------ */
+
+static float* psyau__arena_take(psyau_audio* au, int64_t floats);
+
+static void psyau__stream_clear(psyau_stream* st, int64_t first) {
+    psyau__st64(&st->w_, first);
+    psyau__st64(&st->end_, -1);
+    psyau__st64(&st->r_, first);
+    psyau__st64(&st->next_, first);
+    psyau__st64(&st->origin_, PSYAU__NO_ORIGIN);
+    psyau__st64(&st->gap_frames_, 0);
+    psyau__st64(&st->discarded_, 0);
+    psyau__st64(&st->plan_, -1);
+    psyau__st64(&st->first_, first);
+    psyau__st64(&st->id_, 0);
+    psyau__st32(&st->gaps_, 0);
+    st->skip_ = 0;
+    st->gap_open_ = 0;
+    st->gap_f0_ = st->gap_n_ = st->gap_s0_ = 0;
+    st->gap_xr_ = 0;
+}
+
+PSYAU_API int psyau_stream_init(psyau_audio* au, psyau_stream* st, const psyau_stream_desc* d) {
+    int64_t cap, pre;
+    uint16_t ch;
+    float* mem;
+    if (!au || !st || !d) return PSYAU_ERR_ARG;
+    if (!au->open) return PSYAU_ERR_CLOSED;
+    if (st->au_ && st->mem_ && st->state_ != PSYAU_STREAM_IDLE && st->state_ != PSYAU_STREAM_ENDED) return PSYAU_ERR_BUSY;
+    cap = d->frames ? d->frames : (int64_t)au->dcaps.rate;
+    ch = d->channels ? d->channels : au->dcaps.channels;
+    pre = d->preroll;
+    if (cap < 2 * (int64_t)au->dcaps.period || d->first < 0 || pre < PSYAU_PREROLL_NONE || pre > cap) {
+        psyau__err(au, "psy_audio: a stream needs at least 2 periods (%d frames) of ring, first >= 0 "
+                   "and preroll <= the ring", 2 * (int)au->dcaps.period);
+        return PSYAU_ERR_ARG;
+    }
+    if (!psyau__project_channels_ok(au, ch)) return PSYAU_ERR_FORMAT;
+    if (st->au_ == au && st->in_arena_) { au->arena_streams--; }
+    if (d->memory) {
+        mem = d->memory;
+    } else {
+        mem = psyau__arena_take(au, cap * ch);
+        if (!mem) return PSYAU_ERR_FULL;
+    }
+    memset(st, 0, sizeof *st);
+    st->mem_ = mem;
+    st->cap_ = cap;
+    st->ch_ = ch;
+    st->buf_id_ = d->id;
+    st->preroll_ = pre;
+    st->au_ = au;
+    st->in_arena_ = (uint16_t)(d->memory ? 0 : 1);
+    if (st->in_arena_) au->arena_streams++;
+    psyau__stream_clear(st, d->first);
+    psyau__st32(&st->state_, PSYAU_STREAM_IDLE);
+    return 0;
+}
+
+PSYAU_API int psyau_stream_release(psyau_audio* au, psyau_stream* st) {
+    uint32_t s;
+    if (!au || !st || st->au_ != au) return PSYAU_ERR_ARG;
+    s = psyau__ld32(&st->state_);
+    if (s != PSYAU_STREAM_IDLE && s != PSYAU_STREAM_ENDED) return PSYAU_ERR_BUSY;
+    if (st->in_arena_) au->arena_streams--;
+    st->in_arena_ = 0;
+    st->mem_ = NULL;
+    st->au_ = NULL;
+    return 0;
+}
+
+PSYAU_API float* psyau_stream_acquire(psyau_stream* st, int64_t* frames) {
+    int64_t w, r, space, at, n;
+    if (frames) *frames = 0;
+    if (!st || !st->mem_ || !frames) return NULL;
+    w = psyau__ld64(&st->w_);
+    r = psyau__ld64(&st->r_);
+    space = st->cap_ - (w - r);
+    if (space <= 0 || psyau__ld64(&st->end_) >= 0) return NULL;
+    at = w % st->cap_;
+    n = st->cap_ - at < space ? st->cap_ - at : space;
+    *frames = n;
+    return st->mem_ + at * st->ch_;
+}
+
+PSYAU_API int psyau_stream_commit(psyau_stream* st, int64_t frames) {
+    int64_t w, r, space, at, n;
+    if (!st || !st->mem_ || frames < 0) return PSYAU_ERR_ARG;
+    w = psyau__ld64(&st->w_);
+    r = psyau__ld64(&st->r_);
+    space = st->cap_ - (w - r);
+    at = w % st->cap_;
+    n = st->cap_ - at < space ? st->cap_ - at : space;
+    if (frames > n || psyau__ld64(&st->end_) >= 0) return PSYAU_ERR_ARG;
+    /* the samples first, then the index that hands them over */
+    psyau__st64(&st->w_, w + frames);
+    return 0;
+}
+
+PSYAU_API int64_t psyau_stream_write(psyau_stream* st, const float* src, int64_t frames) {
+    int64_t done = 0, n;
+    float* p;
+    if (!st || !src || frames < 0) return PSYAU_ERR_ARG;
+    while (done < frames && (p = psyau_stream_acquire(st, &n)) != NULL) {
+        if (n > frames - done) n = frames - done;
+        memcpy(p, src + done * st->ch_, (size_t)(n * st->ch_) * sizeof(float));
+        (void)psyau_stream_commit(st, n);
+        done += n;
+    }
+    return done;
+}
+
+PSYAU_API int psyau_stream_end(psyau_stream* st) {
+    if (!st || !st->mem_) return PSYAU_ERR_ARG;
+    psyau__st64(&st->end_, psyau__ld64(&st->w_));
+    return 0;
+}
+
+PSYAU_API int psyau_stream_reset(psyau_stream* st, int64_t first) {
+    uint32_t s;
+    if (!st || !st->mem_ || first < 0) return PSYAU_ERR_ARG;
+    s = psyau__ld32(&st->state_);
+    if (s != PSYAU_STREAM_IDLE && s != PSYAU_STREAM_ENDED) return PSYAU_ERR_BUSY;
+    /* claimed first, so a play cannot take the stream half rewritten */
+    if (!psyau__cas32(&st->state_, s, PSYAU__STREAM_RESETTING)) return PSYAU_ERR_BUSY;
+    psyau__stream_clear(st, first);
+    psyau__st32(&st->state_, PSYAU_STREAM_IDLE);
+    return 0;
+}
+
+PSYAU_API int psyau_stream_get_info(const psyau_stream* st, psyau_stream_info* out) {
+    uint32_t s;
+    int64_t origin, wpub;
+    if (!out) return PSYAU_ERR_ARG;
+    memset(out, 0, sizeof *out);
+    if (!st || !st->mem_) return PSYAU_ERR_ARG;
+    s = psyau__ld32(&st->state_);
+    out->state = s == PSYAU__STREAM_RESETTING ? PSYAU_STREAM_QUEUED : (int32_t)s;
+    out->id = psyau__ld64(&st->id_);
+    out->first = psyau__ld64(&st->first_);
+    out->end = psyau__ld64(&st->end_);
+    out->written = psyau__ld64(&st->w_);
+    out->read = psyau__ld64(&st->r_);
+    out->fill = out->written - out->read;
+    out->preroll = psyau__stream_preroll(st);
+    out->ready = out->fill >= out->preroll || (out->end >= 0 && out->written >= out->end);
+    out->next = psyau__ld64(&st->next_);
+    origin = psyau__ld64(&st->origin_);
+    out->started = origin != PSYAU__NO_ORIGIN;
+    out->origin = out->started ? origin : 0;
+    out->start_frame = psyau__ld64(&st->plan_);
+    wpub = st->au_ ? psyau__ld64(&st->au_->w_pub) : 0;
+    out->frames_to_start = out->start_frame >= 0 ? out->start_frame - wpub : 0;
+    out->gaps = psyau__ld32(&st->gaps_);
+    out->gap_frames = psyau__ld64(&st->gap_frames_);
+    out->discarded = psyau__ld64(&st->discarded_);
+    return 0;
+}
+
+PSYAU_API int psyau_stream_sample_at(const psyau_audio* au, const psyau_stream* st, int64_t t, int64_t* sample) {
+    int64_t origin;
+    if (!au || !st || !sample) return PSYAU_ERR_ARG;
+    if (!au->open) return PSYAU_ERR_CLOSED;
+    origin = psyau__ld64(&st->origin_);
+    if (origin == PSYAU__NO_ORIGIN || au->fit_ft.k <= 0) return PSYAU_PENDING;
+    *sample = psyau__fit_frame(&au->fit_ft, t) - origin;
+    return PSYAU_OK;
+}
+
+PSYAU_API int psyau_stream_time_of(const psyau_audio* au, const psyau_stream* st, int64_t sample, int64_t* t) {
+    int64_t origin;
+    if (!au || !st || !t) return PSYAU_ERR_ARG;
+    if (!au->open) return PSYAU_ERR_CLOSED;
+    origin = psyau__ld64(&st->origin_);
+    if (origin == PSYAU__NO_ORIGIN || au->fit_ft.k <= 0) return PSYAU_PENDING;
+    *t = psyau__fit_time(&au->fit_ft, origin + sample);
+    return PSYAU_OK;
 }
 
 static int psyau__send(psyau_audio* au, int op, psyau_id id, int64_t t, int64_t ramp, float db) {
@@ -2376,6 +3201,7 @@ PSYAU_API void psyau_get_caps(const psyau_audio* au, psyau_caps* out) {
     out->os_latency_ns = au->dcaps.os_latency_ns;
     out->os_stream_latency_ns = au->dcaps.os_stream_latency_ns;
     memcpy(out->os_latency_src, au->dcaps.os_latency_src, sizeof out->os_latency_src);
+    out->gaps = psyau__ld32(&au->gaps_pub);
 }
 
 static const char* psyau__out_name(int o) {
@@ -2403,13 +3229,13 @@ PSYAU_API int psyau_describe(const psyau_audio* au, char* buf, size_t cap) {
     else snprintf(be, sizeof be, "%s", au->dev && au->dev->name ? au->dev->name : "?");
     return snprintf(buf, cap,
         "psy_audio: backend=%s device='%s' rate=%u ch=%u out=%s period=%d buffer=%d "
-        "share=%s%s pos=%s drift=%+.2fppm spread=%.0fns lead=%.2fms xruns=%u worst_tier=%d "
+        "share=%s%s pos=%s drift=%+.2fppm spread=%.0fns lead=%.2fms xruns=%u gaps=%u worst_tier=%d "
         "os_claim=%s%s",
         be, c.name, (unsigned)c.rate, (unsigned)c.channels, psyau__out_name(c.out),
         (int)c.period, (int)c.buffer, c.exclusive ? "exclusive" : "shared",
         c.low_latency ? "(ac3)" : "", c.pos_source == PSYAU_POS_DEVICE ? "device" : "callback",
         c.drift_ppm, c.fit_spread_ns, (double)c.lead_ns / 1e6, (unsigned)c.xruns,
-        (int)c.worst_tier, claim, psyau__ld32(&au->lost) ? " LOST" : "");
+        (unsigned)c.gaps, (int)c.worst_tier, claim, psyau__ld32(&au->lost) ? " LOST" : "");
 }
 
 /* --- open and close -------------------------------------------------------------- */
@@ -2781,9 +3607,404 @@ PSYAU_API int psyau_arena_reset(psyau_audio* au) {
     if (!au) return PSYAU_ERR_ARG;
     if (!au->open) return PSYAU_ERR_CLOSED;
     (void)psyau_update(au);
-    if (au->arena_live > 0) return PSYAU_ERR_BUSY;
+    if (au->arena_live > 0 || au->arena_streams > 0) return PSYAU_ERR_BUSY;
     au->arena_used = 0;
     return 0;
+}
+
+/* --- WAV files ---------------------------------------------------------------- */
+
+static int psyau__wsrc_open(psyau__wsrc* s, const psyau_wav_desc* d, char* err, size_t cap) {
+    int kinds = (d->path != NULL) + (d->data != NULL) + (d->reader != NULL);
+    memset(s, 0, sizeof *s);
+    if (kinds != 1) {
+        snprintf(err, cap, "psy_audio: a WAV desc needs exactly one of .path, .data or .reader");
+        return PSYAU_ERR_ARG;
+    }
+    if (d->data) {
+        s->data = (const unsigned char*)d->data;
+        s->size = (int64_t)d->size;
+    } else if (d->reader) {
+        if (!d->reader->read || d->reader->size < 0) { snprintf(err, cap, "psy_audio: the reader needs read and a size"); return PSYAU_ERR_ARG; }
+        s->reader = *d->reader;
+        s->ctx = d->reader_ctx;
+        s->size = d->reader->size;
+    } else {
+        FILE* f = NULL;
+#if defined(_MSC_VER)
+        if (fopen_s(&f, d->path, "rb") != 0) f = NULL;
+#else
+        f = fopen(d->path, "rb");
+#endif
+        if (!f) { snprintf(err, cap, "psy_audio: cannot open '%s'", d->path); return PSYAU_ERR_IO; }
+        /* No stdio buffer: the C runtime would allocate one on the first
+         * read, on the producer thread. Reads go straight to the OS (which
+         * still caches the file); they are 16 KB at a time. */
+        setvbuf(f, NULL, _IONBF, 0);
+#if defined(_WIN32)
+        if (_fseeki64(f, 0, SEEK_END) == 0) s->size = _ftelli64(f);
+#else
+        if (fseeko(f, 0, SEEK_END) == 0) s->size = (int64_t)ftello(f);
+#endif
+        s->fh = f;
+        if (s->size < 0) { snprintf(err, cap, "psy_audio: cannot size '%s'", d->path); fclose(f); s->fh = NULL; return PSYAU_ERR_IO; }
+    }
+    return 0;
+}
+
+static void psyau__wsrc_close(psyau__wsrc* s) {
+    if (s->fh) fclose((FILE*)s->fh);
+    memset(s, 0, sizeof *s);
+}
+
+/* n bytes at off into dst; the bytes read, or a negative code. */
+static int64_t psyau__wsrc_read(psyau__wsrc* s, int64_t off, void* dst, int64_t n) {
+    if (off < 0 || n < 0) return PSYAU_ERR_ARG;
+    if (off >= s->size) return 0;
+    if (n > s->size - off) n = s->size - off;
+    if (s->data) { memcpy(dst, s->data + off, (size_t)n); return n; }
+    if (s->reader.read) return s->reader.read(s->ctx, off, dst, n);
+    if (s->fh) {
+        FILE* f = (FILE*)s->fh;
+#if defined(_WIN32)
+        if (_fseeki64(f, off, SEEK_SET) != 0) return PSYAU_ERR_IO;
+#else
+        if (fseeko(f, (off_t)off, SEEK_SET) != 0) return PSYAU_ERR_IO;
+#endif
+        return (int64_t)fread(dst, 1, (size_t)n, f);
+    }
+    return PSYAU_ERR_ARG;
+}
+
+static uint32_t psyau__le32(const unsigned char* b) { return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24); }
+static uint16_t psyau__le16(const unsigned char* b) { return (uint16_t)(b[0] | (b[1] << 8)); }
+static uint64_t psyau__le64(const unsigned char* b) { return (uint64_t)psyau__le32(b) | ((uint64_t)psyau__le32(b + 4) << 32); }
+
+static int psyau__wav_bytes(int format) {
+    return format == PSYAU_WAV_S16 ? 2 : format == PSYAU_WAV_S24 ? 3 : 4;
+}
+
+/* RIFF, RF64 or BW64 (ds64 sizes); PCM 16 and 24, 24 in 32, float 32,
+ * plain or WAVE_FORMAT_EXTENSIBLE. Everything else is refused by name: a
+ * resource in another form is converted offline (rig_spec 5.2). */
+static int psyau__wav_parse(psyau__wsrc* s, const psyau_audio* au, psyau_wav_info* out, char* err, size_t cap) {
+    static const unsigned char ext_guid_tail[14] = { 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 };
+    unsigned char h[64];
+    int64_t pos = 12, ds64_data = -1, data_size = -1;
+    int have_fmt = 0, rf64;
+    uint16_t tag = 0, ch = 0, block = 0, bits = 0, valid = 0;
+    uint32_t rate = 0, mask = 0;
+    memset(out, 0, sizeof *out);
+    if (psyau__wsrc_read(s, 0, h, 12) != 12 || memcmp(h + 8, "WAVE", 4) != 0
+        || (memcmp(h, "RIFF", 4) != 0 && memcmp(h, "RF64", 4) != 0 && memcmp(h, "BW64", 4) != 0)) {
+        snprintf(err, cap, "psy_audio: not a WAV file (no RIFF, RF64 or BW64 WAVE header)");
+        return PSYAU_ERR_FORMAT;
+    }
+    rf64 = memcmp(h, "RIFF", 4) != 0;
+    for (;;) {
+        uint32_t size;
+        if (psyau__wsrc_read(s, pos, h, 8) != 8) {
+            snprintf(err, cap, "psy_audio: WAV file damaged: no data chunk (stopped at byte %lld)", (long long)pos);
+            return PSYAU_ERR_FORMAT;
+        }
+        size = psyau__le32(h + 4);
+        if (!memcmp(h, "ds64", 4)) {
+            if (size < 24 || psyau__wsrc_read(s, pos + 8, h, 24) != 24) { snprintf(err, cap, "psy_audio: WAV file damaged: short ds64 chunk"); return PSYAU_ERR_FORMAT; }
+            ds64_data = (int64_t)psyau__le64(h + 8);
+        } else if (!memcmp(h, "fmt ", 4)) {
+            int64_t n = size < 40 ? size : 40;
+            if (size < 16 || psyau__wsrc_read(s, pos + 8, h, n) != n) { snprintf(err, cap, "psy_audio: WAV file damaged: short fmt chunk"); return PSYAU_ERR_FORMAT; }
+            tag = psyau__le16(h);
+            ch = psyau__le16(h + 2);
+            rate = psyau__le32(h + 4);
+            block = psyau__le16(h + 12);
+            bits = psyau__le16(h + 14);
+            valid = bits;
+            if (tag == 0xFFFE) {
+                if (size < 40) { snprintf(err, cap, "psy_audio: WAV file damaged: short EXTENSIBLE fmt chunk"); return PSYAU_ERR_FORMAT; }
+                valid = psyau__le16(h + 18);
+                mask = psyau__le32(h + 20);
+                if (memcmp(h + 26, ext_guid_tail, 14) != 0) { snprintf(err, cap, "psy_audio: WAV EXTENSIBLE subformat is not PCM or float; convert it with the pack tool"); return PSYAU_ERR_FORMAT; }
+                tag = psyau__le16(h + 24);
+            }
+            have_fmt = 1;
+        } else if (!memcmp(h, "data", 4)) {
+            if (!have_fmt) { snprintf(err, cap, "psy_audio: WAV file damaged: data before fmt"); return PSYAU_ERR_FORMAT; }
+            data_size = rf64 && size == 0xFFFFFFFFu ? ds64_data : (int64_t)size;
+            out->data_offset = pos + 8;
+            break;
+        }
+        pos += 8 + (int64_t)size + (size & 1u);
+    }
+    if (tag == 1 && bits == 16 && valid == 16) out->format = PSYAU_WAV_S16;
+    else if (tag == 1 && bits == 24 && valid == 24) out->format = PSYAU_WAV_S24;
+    else if (tag == 1 && bits == 32 && valid == 24) out->format = PSYAU_WAV_S24_32;
+    else if (tag == 3 && bits == 32) out->format = PSYAU_WAV_F32;
+    else {
+        snprintf(err, cap, "psy_audio: WAV format tag %u with %u bits (%u valid) is not 16-bit, 24-bit or "
+                 "float PCM; convert it with the pack tool (32-bit integers and 64-bit floats are not exact "
+                 "in float)", (unsigned)tag, (unsigned)bits, (unsigned)valid);
+        return PSYAU_ERR_FORMAT;
+    }
+    if (ch == 0 || block != ch * psyau__wav_bytes(out->format)) {
+        snprintf(err, cap, "psy_audio: WAV file damaged: block align %u for %u channels", (unsigned)block, (unsigned)ch);
+        return PSYAU_ERR_FORMAT;
+    }
+    if (data_size < 0 || out->data_offset + data_size > s->size) {
+        snprintf(err, cap, "psy_audio: WAV file damaged: %lld data bytes at byte %lld, past the end (%lld bytes)",
+                 (long long)data_size, (long long)out->data_offset, (long long)s->size);
+        return PSYAU_ERR_FORMAT;
+    }
+    if (rate != au->dcaps.rate) {
+        snprintf(err, cap, "psy_audio: WAV file is %u Hz; the device runs at %u Hz. psy_audio never "
+                 "resamples: resample it offline (the pack tool)", (unsigned)rate, (unsigned)au->dcaps.rate);
+        return PSYAU_ERR_FORMAT;
+    }
+    if (ch != 1 && ch != au->dcaps.channels) {
+        snprintf(err, cap, "psy_audio: WAV file has %u channels; the project has %u (1 is also accepted)",
+                 (unsigned)ch, (unsigned)au->dcaps.channels);
+        return PSYAU_ERR_FORMAT;
+    }
+    if (mask && ch > 1 && au->fmt.map) {
+        /* the EXTENSIBLE speaker bits, in order, are positions 2.. (FL, FR,
+         * FC, LFE, BL, BR, FLC, FRC, BC, SL, SR), as PSYAU_CH_* number them */
+        int b, c = 0;
+        for (b = 0; b < 32 && c < ch; b++) {
+            if (!(mask & (1u << b))) continue;
+            if (b > 10 || au->fmt.map[c] != (uint8_t)(b + 2)) {
+                snprintf(err, cap, "psy_audio: WAV channel %d is speaker bit %d; the project map says position %u",
+                         c, b, (unsigned)au->fmt.map[c]);
+                return PSYAU_ERR_FORMAT;
+            }
+            c++;
+        }
+    }
+    out->rate = rate;
+    out->channels = ch;
+    out->frames = data_size / block;
+    out->channel_mask = mask;
+    out->rf64 = rf64 && ds64_data >= 0;
+    return 0;
+}
+
+/* n samples (frames x channels) of raw bytes to float, exactly. In place
+ * when dst and src overlap with dst at or before src: each value is read
+ * before its float is written, and a float never reaches bytes not yet
+ * read. Returns the index of the first non-finite float sample, or -1. */
+static int64_t psyau__widen(float* dst, const unsigned char* src, int64_t n, int format) {
+    int64_t i;
+    switch (format) {
+    case PSYAU_WAV_S16:
+        for (i = 0; i < n; i++) { int16_t v = (int16_t)psyau__le16(src + 2 * i); dst[i] = (float)v / 32768.0f; }
+        break;
+    case PSYAU_WAV_S24:
+    case PSYAU_WAV_S24_32: {
+        int b = format == PSYAU_WAV_S24 ? 3 : 4, o = format == PSYAU_WAV_S24 ? 0 : 1;
+        for (i = 0; i < n; i++) {
+            const unsigned char* p = src + b * i + o;   /* the low byte of 24 in 32 is padding */
+            int32_t v = (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16));
+            if (v & 0x800000) v -= 0x1000000;
+            dst[i] = (float)v / 8388608.0f;
+        }
+    } break;
+    default:
+        for (i = 0; i < n; i++) {
+            uint32_t u = psyau__le32(src + 4 * i);
+            float x;
+            memcpy(&x, &u, 4);
+            if ((u & 0x7F800000u) == 0x7F800000u) return i;
+            dst[i] = x;
+        }
+        break;
+    }
+    return -1;
+}
+
+PSYAU_API const char* psyau_wav_error(const psyau_wav* w) { return w ? w->error_ : ""; }
+
+PSYAU_API int psyau_wav_open(psyau_audio* au, psyau_wav* w, const psyau_wav_desc* d) {
+    psyau_stream_desc sd;
+    int rc;
+    if (!au || !w || !d) return PSYAU_ERR_ARG;
+    if (!au->open) return PSYAU_ERR_CLOSED;
+    if (w->open_) {
+        rc = psyau_wav_close(au, w);
+        if (rc < 0) return rc;
+    }
+    memset(w, 0, sizeof *w);
+    if (d->loops < PSYAU_FOREVER || d->start < 0 || d->ring < 0) { snprintf(w->error_, sizeof w->error_, "psy_audio: WAV loops, start or ring out of range"); return PSYAU_ERR_ARG; }
+    rc = psyau__wsrc_open(&w->src_, d, w->error_, sizeof w->error_);
+    if (rc < 0) return rc;
+    rc = psyau__wav_parse(&w->src_, au, &w->info, w->error_, sizeof w->error_);
+    if (rc == 0 && w->info.frames == 0) { snprintf(w->error_, sizeof w->error_, "psy_audio: WAV file has no samples"); rc = PSYAU_ERR_FORMAT; }
+    w->total_ = d->loops == PSYAU_FOREVER ? -1 : w->info.frames * ((int64_t)d->loops + 1);
+    if (rc == 0 && w->total_ >= 0 && d->start >= w->total_) { snprintf(w->error_, sizeof w->error_, "psy_audio: WAV start %lld is past the end (%lld)", (long long)d->start, (long long)w->total_); rc = PSYAU_ERR_ARG; }
+    if (rc == 0) {
+        memset(&sd, 0, sizeof sd);
+        sd.memory = d->memory;
+        sd.frames = d->ring;
+        sd.channels = w->info.channels;
+        sd.id = d->id;
+        sd.first = d->start;
+        rc = psyau_stream_init(au, &w->stream, &sd);
+        if (rc < 0) snprintf(w->error_, sizeof w->error_, "%.200s", au->error[0] ? au->error : "psy_audio: the stream did not start");
+    }
+    if (rc < 0) { psyau__wsrc_close(&w->src_); return rc; }
+    w->loops_ = d->loops;
+    w->pos_ = d->start;
+    psyau__st64(&w->seek_, -1);
+    w->au_ = au;
+    w->open_ = 1;
+    return 0;
+}
+
+PSYAU_API int psyau_wav_close(psyau_audio* au, psyau_wav* w) {
+    int rc;
+    if (!au || !w) return PSYAU_ERR_ARG;
+    if (!w->open_) return 0;
+    rc = psyau_stream_release(au, &w->stream);
+    if (rc < 0) { snprintf(w->error_, sizeof w->error_, "psy_audio: the WAV stream is still playing; stop it first"); return rc; }
+    psyau__wsrc_close(&w->src_);
+    w->open_ = 0;
+    return 0;
+}
+
+static int psyau__wav_seek_now(psyau_wav* w, int64_t sample) {
+    int rc = psyau_stream_reset(&w->stream, sample);
+    if (rc < 0) return rc;
+    w->pos_ = sample;
+    psyau__st64(&w->seek_, -1);
+    return 0;
+}
+
+PSYAU_API int psyau_wav_seek(psyau_wav* w, int64_t sample) {
+    if (!w || !w->open_ || sample < 0 || (w->total_ >= 0 && sample >= w->total_)) return PSYAU_ERR_ARG;
+    return psyau__wav_seek_now(w, sample);
+}
+
+PSYAU_API int64_t psyau_wav_feed(psyau_wav* w, int64_t max_frames) {
+    int64_t done = 0, A, seek;
+    int ch, bytes, block;
+    if (!w || !w->open_ || max_frames < 0) return PSYAU_ERR_ARG;
+    seek = psyau__ld64(&w->seek_);
+    if (seek >= 0 && psyau__wav_seek_now(w, seek) < 0) return 0;   /* the play has not ended yet */
+    A = w->info.frames;
+    ch = w->info.channels;
+    bytes = psyau__wav_bytes(w->info.format);
+    block = ch * bytes;
+    while (max_frames == 0 || done < max_frames) {
+        int64_t n, k, q, off, got, bad;
+        float* p;
+        if (w->total_ >= 0 && w->pos_ >= w->total_) {
+            if (psyau__ld64(&w->stream.end_) < 0) (void)psyau_stream_end(&w->stream);
+            break;
+        }
+        p = psyau_stream_acquire(&w->stream, &n);
+        if (!p) break;
+        q = w->pos_ % A;                       /* a loop: sample s is file frame s mod A */
+        k = n;
+        if (max_frames && k > max_frames - done) k = max_frames - done;
+        if (k > A - q) k = A - q;
+        if (w->total_ >= 0 && k > w->total_ - w->pos_) k = w->total_ - w->pos_;
+        if (k > PSYAU__WAV_SCRATCH / block) k = PSYAU__WAV_SCRATCH / block;
+        off = w->info.data_offset + q * block;
+        if (w->src_.data) {
+            bad = psyau__widen(p, w->src_.data + off, k * ch, w->info.format);
+        } else {
+            got = psyau__wsrc_read(&w->src_, off, w->scratch_, k * block);
+            if (got != k * block) {
+                snprintf(w->error_, sizeof w->error_, "psy_audio: WAV read of %lld bytes at %lld failed",
+                         (long long)(k * block), (long long)off);
+                return PSYAU_ERR_IO;
+            }
+            bad = psyau__widen(p, w->scratch_, k * ch, w->info.format);
+        }
+        if (bad >= 0) {
+            /* the stream ends before the first sample that is not a number */
+            (void)psyau_stream_commit(&w->stream, bad / ch);
+            (void)psyau_stream_end(&w->stream);
+            snprintf(w->error_, sizeof w->error_, "psy_audio: WAV sample %lld (channel %d) is not a finite "
+                     "number; the stream ends there", (long long)(w->pos_ + bad / ch), (int)(bad % ch));
+            w->pos_ = w->total_ = w->pos_ + bad / ch;
+            return PSYAU_ERR_FORMAT;
+        }
+        (void)psyau_stream_commit(&w->stream, k);
+        w->pos_ += k;
+        done += k;
+    }
+    return done;
+}
+
+PSYAU_API bool psyau_wav_wants(const psyau_wav* w) {
+    int64_t fill;
+    if (!w || !w->open_) return false;
+    if (psyau__ld64(&w->seek_) >= 0) return true;
+    if (psyau__ld64(&w->stream.end_) >= 0) return false;
+    fill = psyau__ld64(&w->stream.w_) - psyau__ld64(&w->stream.r_);
+    return fill < w->stream.cap_ / 2;
+}
+
+PSYAU_API bool psyau_wav_step(void* wp) {
+    psyau_wav* w = (psyau_wav*)wp;
+    int64_t n = psyau_wav_feed(w, 4096);
+    int64_t space;
+    if (n <= 0) return false;
+    space = w->stream.cap_ - (psyau__ld64(&w->stream.w_) - psyau__ld64(&w->stream.r_));
+    return space > 0 && psyau__ld64(&w->stream.end_) < 0;
+}
+
+PSYAU_API void psyau_wav_on_msg(void* wp, const void* msg, uint32_t seq) {
+    psyau_wav* w = (psyau_wav*)wp;
+    psyau_wav_msg m;
+    (void)seq;
+    if (!w || !msg) return;
+    memcpy(&m, msg, sizeof m);
+    if (m.seek >= 0 && w->open_ && (w->total_ < 0 || m.seek < w->total_)) {
+        /* kept until the play has ended; feed applies it */
+        psyau__st64(&w->seek_, m.seek);
+        (void)psyau__wav_seek_now(w, m.seek);
+    }
+}
+
+PSYAU_API psyau_buf psyau_wav_load(psyau_audio* au, const psyau_wav_desc* d) {
+    psyau_buf b = psyau__nobuf();
+    psyau__wsrc src;
+    psyau_wav_info info;
+    int64_t n, raw, got = 0;
+    size_t mark;
+    float* f;
+    unsigned char* base;
+    if (!au || !au->open || !d) { if (au) psyau__err(au, "psy_audio: wav_load needs an open handle and a desc"); return b; }
+    if (psyau__wsrc_open(&src, d, au->error, sizeof au->error) < 0) return b;
+    if (psyau__wav_parse(&src, au, &info, au->error, sizeof au->error) < 0) { psyau__wsrc_close(&src); return b; }
+    if (info.frames == 0) { psyau__err(au, "psy_audio: WAV file has no samples"); psyau__wsrc_close(&src); return b; }
+    n = info.frames * info.channels;
+    raw = info.frames * info.channels * psyau__wav_bytes(info.format);
+    mark = au->arena_used;
+    f = psyau__arena_take(au, n);
+    if (!f) { psyau__wsrc_close(&src); return b; }
+    /* the raw bytes at the end of the buffer, widened forward in place */
+    base = (unsigned char*)f + (size_t)(n * 4 - raw);
+    while (got < raw) {
+        int64_t k = psyau__wsrc_read(&src, info.data_offset + got, base + got, raw - got);
+        if (k <= 0) break;
+        got += k;
+    }
+    psyau__wsrc_close(&src);
+    if (got != raw) { au->arena_used = mark; psyau__err(au, "psy_audio: WAV read failed at byte %lld", (long long)(info.data_offset + got)); return b; }
+    {
+        int64_t bad = psyau__widen(f, base, n, info.format);
+        if (bad >= 0) {
+            au->arena_used = mark;
+            psyau__err(au, "psy_audio: WAV sample %lld is not a finite number", (long long)(bad / info.channels));
+            return b;
+        }
+    }
+    b.frames = f;
+    b.n = info.frames;
+    b.channels = info.channels;
+    b.id = d->id;
+    return b;
 }
 
 PSYAU_API const psyau_param* psyau_params(int* n) {
@@ -2798,7 +4019,10 @@ PSYAU_API const psyau_param* psyau_params(int* n) {
         { "device_index",    "u32",  0, 7, 0, "",                  "device number in the records" },
         { "min_tier",        "i32",  0, 3, 0, "",                  "flag onsets whose tier is worse; 0 = off" },
         { "onset_offset_ns", "i64",  -1e9, 1e9, 0, "ns",           "added to every onset; from a line-in loopback test" },
-        { "arena_bytes",     "u32",  0, 4294967295.0, 8388608, "B", "synthesis arena when desc.arena is NULL" }
+        { "arena_bytes",     "u32",  0, 4294967295.0, 8388608, "B", "synthesis arena when desc.arena is NULL" },
+        { "stream.frames",   "i64",  0, 1e9, 48000, "frame",       "ring capacity of a stream (psyau_stream_desc); 0 = 1 s" },
+        { "stream.preroll",  "i64",  -1, 1e9, 0, "frame",          "frames a stream played at 0 waits for; 0 = a quarter ring, -1 = none" },
+        { "wav.loops",       "i32",  -1, 2147483647.0, 0, "",      "passes of a WAV stream after the first; -1 = forever" }
     };
     if (n) *n = (int)(sizeof table / sizeof table[0]);
     return table;

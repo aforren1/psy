@@ -54,7 +54,7 @@
  * the flips the records call late or dropped.
  *
  * Exit code 0 if every expected edge was found and no edge was extra, 1
- * otherwise, 2 for a usage or setup error. Esc ends the run.
+ * otherwise, 2 for a usage or setup error. Shift+Esc ends the run.
  */
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS   /* fopen(); fopen_s() is not portable */

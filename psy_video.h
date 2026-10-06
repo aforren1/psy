@@ -1,4 +1,4 @@
-/* psy_video.h - v0.1.0 - public domain single-header video playback library
+/* psy_video.h - v0.2.0 - public domain single-header video playback library
  *
  *   A movie as a stimulus. On each display frame the header takes the
  *   frame's PREDICTED ONSET, asks the movie clock for the movie time at
@@ -8,13 +8,16 @@
  *   decision (shown, repeated, dropped) with its reason. Frames are decoded
  *   ahead on a psy_rt.h pump and uploaded into a psy_gfx.h IMAGE texture.
  *   Also a frame sequence container (raw or QOI frames, read and write,
- *   value-exact), MPEG-1 through pl_mpeg, and the Video decoder extension
- *   interface of the rig's spec (section 12).
+ *   value-exact), MPEG-1 through pl_mpeg, H.264 and HEVC in MP4 through
+ *   Media Foundation on Windows, and the Video decoder extension interface
+ *   of the rig's spec (section 12).
  *
  *   REQUIRES psy_gfx.h (so psy_screen.h and psy_rt.h) and psy_timeline.h
  *   beside it. pl_mpeg.h (commit c871f2b, one MIT file) on the include path
- *   for MPEG-1; PSYVID_NO_PL_MPEG builds without it. psy_audio.h is
- *   optional: include it first and psyvid_follow_audio() appears.
+ *   for MPEG-1; PSYVID_NO_PL_MPEG builds without it. Media Foundation is an
+ *   OS API, loaded at run time (BUILDING); PSYVID_NO_MF builds without it.
+ *   psy_audio.h is optional: include it first and psyvid_follow_audio()
+ *   and psyvid_soundtrack() appear.
  *
  *   Written in the single-header style of the stb / sokol libraries. C99 is
  *   the floor: it builds as C99, C11 and C++17, and in the C dialect MSVC
@@ -23,6 +26,30 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.0 - Media Foundation (Windows): H.264 and HEVC (8-bit 4:2:0) in
+ *          MP4, decoded into NV12 by the software decoder or DXVA
+ *          (desc.hw_decode; AUTO is DXVA, by measurement). psyvid_index_make()
+ *          makes the index of an MP4 file too: B-frames, a rate that no
+ *          frame grid fits, a varying GOP, an edit list, interlace,
+ *          rotation, non-square pixels, 10-bit and 4:2:2 or 4:4:4 are
+ *          refused by name, the color is read from the H.264 SPS, and every
+ *          keyframe is decoded again after a seek to prove it is a clean
+ *          entry point. Planar upload: a YUV slot holds its planes and
+ *          psy_gfx.h's video program converts them, so light EOTF works;
+ *          the CPU conversion left the play path (psyvid_yuv_to_rgba()
+ *          stays). PSYVID_PATH_GPU: DXVA on the screen's device, one GPU
+ *          copy a frame, no readback and no upload. psyvid_soundtrack(): a
+ *          WAV played as a psy_audio.h stream, locked to the picture by
+ *          psyvid_follow_audio(). Base rates: the movie plays at its
+ *          psy_timeline.h base's rate. Fixed: after a PENDING decode the
+ *          decode thread pushed its slot onto the free queue, whose one
+ *          producer is the frame thread (a data race). Breaking:
+ *          psyvid_index_desc gains backend, hw and no_seek_check;
+ *          psyvid_desc gains hw_decode and psyvid_info gains hw;
+ *          PSYVID_PATH_ZERO_COPY is now PSYVID_PATH_GPU; a YUV movie's
+ *          texture is PSYGFX_NV12 or PSYGFX_I420, not RGBA8; light AUTO is
+ *          EOTF under a calibration; a file that is not a frame sequence,
+ *          MPEG-PS or MP4 is refused at open.
  *   v0.1.0 - first release: the scheduler (due frame by the timeline's
  *          lead rule, cadence, slips, drops and repeats with reasons), the
  *          movie clock read from a psy_timeline base, the decoder
@@ -31,23 +58,30 @@
  *          psy_gfx.h, I420 and NV12 converted to RGBA8 on the decode
  *          thread, manual mode, seek, loop, the records.
  *
- *   STATUS: v0.1.0, on one Windows 11 laptop (i7-1360P, Iris Xe, ANGLE),
- *   in a 640 x 360 composed window (tier 2). Measured: psyvid_update() on
- *   the frame thread with a 1920 x 1080 RGBA8 upload 0.95 to 0.98 ms mean,
- *   1.6 to 1.8 ms p99; 1280 x 720 0.52 ms mean, 0.9 to 1.0 ms p99; a
- *   repeat 0.01 ms. On the decode thread at 1080p: pl_mpeg 5.5 ms a frame,
- *   I420 to RGBA8 6.7 to 7.8 ms, XXH64 0.6 to 0.7 ms; QOI decode 0.7 to
- *   3.5 GB/s. No heap call per frame, pl_mpeg included. A core test with a
- *   scripted decoder and display on a virtual clock (cadences and slips
- *   against exact models, stalls, seeks, the timeline agreement under
- *   20 us of onset noise) passes on MSVC 19.44 (C, C++17), MinGW gcc 16.1
- *   (C99, C11, C++17), gcc 11.4 (C99 -O3, ASan and UBSan, ThreadSanitizer)
- *   and emcc 6.0.10 (node, with and without threads); 23 mutations of the
- *   header each make it fail. Not measured: slips on the real panel,
- *   fullscreen, a real audio clock, light. Media Foundation, AVFoundation,
- *   FFmpeg, the shared and zero-copy GPU paths, the planar YUV shader,
- *   the soundtrack source and capture are not in v0.1: open() refuses the
- *   ones a desc can ask for, by name. docs/psy_video.md has the tables.
+ *   STATUS: v0.2.0, on one Windows 11 laptop (i7-1360P, Iris Xe, ANGLE),
+ *   in a 640 x 360 composed window (tier 2); docs/psy_video.md has the
+ *   tables. Measured at 1920 x 1080 with Media Foundation: psyvid_update()
+ *   on the frame thread with the planar upload 0.39 to 0.61 ms mean, 0.7
+ *   to 1.3 ms p99 (v0.1's RGBA8 upload 0.9 to 1.07 / 1.5 to 2.0 ms), a
+ *   repeat 0.01 ms, PSYVID_PATH_GPU 0.01 to 0.02 ms. The decode thread at
+ *   1080p60: DXVA 5.3 ms mean, 8.5 ms p99 a frame; the software decoder
+ *   1.9 / 3.3 ms on it but 13 to 21 ms of CPU a frame on Media
+ *   Foundation's threads. Open 115 to 308 ms cold; a seek 32 to 42 ms mean
+ *   with DXVA, about 155 ms with the software decoder. pl_mpeg 5.5 ms a
+ *   1080p frame. The soundtrack on the real device (WASAPI shared, 48 kHz):
+ *   each start within 14 us of its target on psy_audio's fit, and the
+ *   flips' onsets within -0.42 to +0.08 ms (p1 to p99) of each frame's
+ *   time on the audio clock, outside a few frames the composed window
+ *   flipped a vblank early or late; no gap, no underrun. No heap call per
+ *   frame. The core test (a scripted decoder, display and audio device on
+ *   a virtual clock; with PSYVID_TEST_MEDIA the generated MP4 clips)
+ *   passes on MSVC 19.44 (C, C++17), MinGW gcc 16.1 (C99, C++17) and gcc
+ *   11.4 (C99 -O3, ASan and UBSan, ThreadSanitizer); emcc ran for v0.1.
+ *   Mutations: 23 of 23 (v0.1), 29 of 31 (v0.2; two Media Foundation
+ *   checks not caught, docs/psy_video.md says why). Not measured: light
+ *   and sound (no photodiode or microphone), fullscreen, slips on the
+ *   real panel, another GPU. Not built: PSYVID_PATH_SHARED, AVFoundation, FFmpeg,
+ *   capture; open() refuses the ones a desc can ask for, by name.
  *   Outside it and this block, a number in this header is a measurement
  *   only where the text says "measured".
  *
@@ -76,6 +110,9 @@
  *           psygfx_begin(&gfx, &f); psygfx_draw(&gfx, &film); psygfx_end(&gfx);
  *           psyscr_flip(&scr);
  *       }
+ *
+ *   The loop ends at the movie's end, or when psyscr_begin() stops (Shift+Esc
+ *   by default, psy_screen.h's abort).
  *
  *   Psychtoolbox and PsychoPy, for comparison (from their documentation):
  *
@@ -127,21 +164,19 @@
  *     base's time at T (psytl_base_time). psyvid_play_at, pause_at, seek
  *     and loop anchor, pause and rewind the base; the caller evaluates the
  *     timeline after psyvid_update() as usual, and annotations on the base
- *     fire on the display frame that shows them. Without a timeline the
- *     header keeps its own anchor with the same arithmetic. The movie
- *     plays at rate 1 or not at all: slow motion is manual mode
- *     (psyvid_show) or an offline re-encode. A seek moves the base with
+ *     fire on the display frame that shows them. The movie plays at the
+ *     base's rate (BASE RATES). Without a timeline the header keeps its
+ *     own anchor with the same arithmetic, at rate 1. A seek moves the base with
  *     psytl_skip(): the annotations it passes over are marked
  *     PSYTL_EV_SKIPPED and never fire, and the one at the target fires on
  *     the frame that shows it; the SEEK record counts the skipped ones.
- *     A base rate other than 1 (a later psy_timeline.h) needs the due frame
- *     from the base time at RT onset + L, not base time at onset plus L:
- *     the lead is RT ns. At rate 1 the two are the same.
  *     psyvid_follow_audio() (with psy_audio.h) or psyvid_follow() re-anchors
- *     the movie clock every frame from another clock: the movie time is the
- *     soundtrack's position at the output, read through the audio fit.
- *     Audio is never resampled; video follows by showing the frame due, so
- *     frames repeat or drop when the two clocks slip.
+ *     the movie clock every frame from another clock. With a soundtrack
+ *     (SOUNDTRACK) the movie time is the soundtrack's sample at the onset,
+ *     read through psy_audio's fit; without one, the device's stream
+ *     position since movie time 0. Audio is never resampled; video follows
+ *     by showing the frame due, so frames repeat or drop when the two
+ *     clocks slip.
  *
  *   CADENCE AND SLIPS
  *     At open the header compares the refresh R (desc.refresh_num/den, or
@@ -153,7 +188,8 @@
  *     frame the refresh cannot show (r > R) is DROPPED with reason
  *     CADENCE. No tier penalty: the cadence is a property of the stimulus,
  *     and psyvid_describe() states it with the frame durations.
- *     desc.strict_cadence refuses a refresh that is not a multiple.
+ *     desc.strict_cadence refuses a refresh that is not a multiple (at
+ *     open; at a change of base rate, BASE RATES).
  *     Each decision is also checked against a nominal schedule: the movie
  *     time the clock would give if it ran in step with the vblank count at
  *     the nominal period. A difference is a slip, reason DRIFT: the movie
@@ -200,8 +236,8 @@
  *     constant length, no B-frames, and a stated color: matrix (BT.601,
  *     BT.709, BT.2020 NCL), range, transfer, primaries and chroma siting.
  *     "Unspecified" is refused. 10-bit is refused. A frame sequence holds
- *     its own description; an MPEG-1 file needs its index beside it (path
- *     + ".psyvi"), made by psyvid_index_make() (the pack tool's step): its
+ *     its own description; an MPEG-1 or MP4 file needs its index beside it
+ *     (path + ".psyvi"), made by psyvid_index_make() (the pack tool's step): its
  *     description, the media file's size and the hashes of its first and
  *     last 64 KB, and the XXH64 of every decoded frame. Each value the
  *     backend reports must equal the index's. During play every frame's
@@ -210,27 +246,136 @@
  *     (else PSYVID_F_HASH_MISMATCH); the frame is still shown and the
  *     describe line says the file is not canonical.
  *
+ *   MEDIA FOUNDATION (Windows; desc.backend MF, or AUTO for an MP4 file)
+ *     An IMFSourceReader, synchronous, used on the decode thread. MP4 with
+ *     one H.264 (Baseline, Main, High) or HEVC Main video track; an audio
+ *     track is ignored. The reader may not add a converter or a video
+ *     processor: the decoder gives NV12 itself or the file is refused.
+ *     desc.hw_decode: OFF is Microsoft's software decoder; DXVA the
+ *     decoder on a D3D11 device of its own (VIDEO_SUPPORT, on the screen's
+ *     adapter) with each kept frame read back; AUTO is DXVA, and the
+ *     software decoder when no DXVA device opens. Measured at 1080p60
+ *     (docs/psy_video.md): DXVA costs 5.3 ms a frame on the decode thread
+ *     (most of it the readback) and about 1 ms of Media Foundation's CPU;
+ *     the software decoder 1.9 ms on the decode thread but 13 to 21 ms of
+ *     CPU on Media Foundation's threads, more than a core at 60 fps. DXVA
+ *     seeks 4 to 5 times faster and opens about 100 ms slower. A hardware
+ *     decoder MFT that writes system memory was measured too and removed:
+ *     it cost as much CPU as the software decoder. Every decoder gave the
+ *     index's bytes on every frame of the test clips: H.264 decoding is
+ *     exact by the standard, so one index serves them all, and a decoder
+ *     that differs is a HASH_MISMATCH, not a tolerance.
+ *     The rate is the index's: Media Foundation reports a 100 ns
+ *     approximation (24000/1001 comes out 10000000/417083). Media
+ *     Foundation does not report the color the stream states, so
+ *     psyvid_index_make() reads it from the H.264 SPS (its VUI): a desc
+ *     field that contradicts the stream is refused, and a field nobody
+ *     states is refused. HEVC's color comes from the desc. The index maker
+ *     refuses B-frames, frame times that fit no constant rate (to 100 ns),
+ *     a GOP that changes, an edit list in the video track (Media
+ *     Foundation plays a start offset from 0, other players do not),
+ *     interlace, rotation, non-square pixels, 10-bit, 4:2:2 and 4:4:4, and
+ *     a keyframe that does not decode to the same bytes after a seek. COM:
+ *     open() keeps a multithreaded apartment alive (CoIncrementMTAUsage),
+ *     so the decode thread needs no COM setup and the frame thread may be
+ *     in a single-threaded apartment, as SDL3 leaves it. A path, memory and
+ *     a psyvid_reader all reach Media Foundation through one IStream, whose
+ *     read() Media Foundation calls from its own threads, one at a time.
+ *
+ *   GPU PATH (desc.gpu_path PSYVID_PATH_GPU; Windows, Media Foundation)
+ *     DXVA decodes on the screen's own D3D11 device, and the decode thread
+ *     copies each kept frame on the GPU (CopySubresourceRegion) into one of
+ *     the movie's NV12 textures, which psy_gfx.h imported once at open
+ *     (psygfx_texture_import). Nothing is read back or uploaded; the frame
+ *     thread rebinds the stimulus to the due slot's texture
+ *     (psygfx_texture_rebind), and the slot on screen is not decoded into
+ *     until another replaces it. The decoder's own surfaces are not held:
+ *     it has about nine, and holding them for decode-ahead stalls it. The
+ *     copy and the draw go through one immediate context, which orders
+ *     them, so there is no fence. Needs psygfx_features() with
+ *     PSYGFX_FEAT_IMPORT_NV12, a screen with a D3D11 device (the DXGI_FLIP
+ *     or COMPOSITION backend) made with VIDEO_SUPPORT and multithread
+ *     protection (psy_screen.h's desc.d3d11_video), and hw_decode AUTO
+ *     or DXVA; open() refuses otherwise, by name. The timestamps are
+ *     checked; the frame hashes are not (the frame never reaches the CPU).
+ *     Against UPLOAD on the test clips: the same value at every pixel.
+ *     Measured at 1080p (docs/psy_video.md, M7): 20 to 50 % less process
+ *     CPU and no slot memory. On the frame thread the upload leaves, but
+ *     the draw and flip wait longer on the shared context (p99 1.5 to 8 ms
+ *     against 0.9 to 2 ms); dropped frames in a composed window did not
+ *     separate the paths. UPLOAD stays the default: it needs no video
+ *     device and has the shorter tail.
+ *     PSYVID_PATH_SHARED (a second device) is not built.
+ *
  *   DECODE-AHEAD AND UPLOAD
  *     Each movie has its own psy_rt.h pump at normal priority (desc.pin_cpu
  *     pins it). The pump decodes one frame per idle call into a free slot
  *     until desc.ahead frames are ready, then blocks until the frame
  *     thread frees a slot. Frames older than the due frame are decoded
  *     without being kept (a P-frame needs its reference), or skipped by a
- *     seek to the next keyframe when that is shorter. I420 and NV12 are
- *     converted to RGBA8 on the pump, with the matrix and range of the
- *     canonical form, by integer arithmetic within 1 code of a double
- *     reference; chroma by the stated siting (desc.chroma SITED) or by
- *     replication (NEAREST). The scene value is the code (light CODES):
- *     the shader path for linear light waits for psy_gfx.h's planar
- *     formats. psyvid_update() uploads the due frame with one
- *     psygfx_texture_update() (psy_gfx.h updates textures only between
- *     frames: call it after psyscr_begin() and before psygfx_begin()) and
- *     ends the frame's PSYSCR_PHASE_UPLOAD. Slots: ahead + 2 of w x h x
- *     the upload format's bytes, one allocation at open (or desc.mem).
- *     Nothing allocates per frame on either thread (psyvid_heap_calls()).
+ *     seek to the next keyframe when that is shorter. A slot holds the
+ *     frame as decoded: I420 or NV12 planes with tight rows, or the frame
+ *     sequence's own format. psyvid_update() uploads the due frame with
+ *     psygfx_texture_update_planes() into a PSYGFX_I420 or PSYGFX_NV12
+ *     texture (psygfx_texture_update() for the other formats) and ends the
+ *     frame's PSYSCR_PHASE_UPLOAD. psy_gfx.h updates textures only between
+ *     frames: call it after psyscr_begin() and before psygfx_begin().
+ *     psy_gfx.h's video program converts YUV with the canonical form's
+ *     matrix, range and siting (desc.chroma NEAREST replicates chroma).
+ *     desc.light: CODES shows the R'G'B' codes as device values; EOTF
+ *     decodes the stated transfer and primaries to linear light, so the
+ *     movie goes through the screen's calibration like any stimulus; AUTO
+ *     is EOTF for a YUV movie when psy_gfx.h has a calibration
+ *     (psygfx_calibrated), else CODES. EOTF is for YUV movies; an RGB frame
+ *     sequence holds device values. Slots: ahead + 2 of the frame's bytes
+ *     (1.5 a pixel for YUV), one allocation at open (or desc.mem); none on
+ *     the GPU path. Nothing allocates per frame on either thread
+ *     (psyvid_heap_calls()). psyvid_yuv_to_rgba() is the CPU conversion
+ *     v0.1 ran on the pump, kept as a tool (an export, a test): integer
+ *     arithmetic within 1 code of a double reference.
  *     desc.inline_decode runs the decode step inside psyvid_update()
  *     instead, so a run is a pure function of its inputs (tests).
  *
+ *   SOUNDTRACK (psyvid_soundtrack, with psy_audio.h)
+ *     A WAV (path, memory or a psyvid_reader) at the device's rate, played
+ *     as a psy_audio.h stream (psyau_wav): a voice like any other, placed,
+ *     recorded and confirmed by psy_audio, and mixed with psyau_play_at()
+ *     sounds. Call it after psyvid_open() and before the first play. The
+ *     movie's decode thread fills the stream's ring (1 s by default). Sample
+ *     s plays at movie time s / rate: a start at movie time mt begins with
+ *     the sample nearest mt (a tie to the earlier). With PSYVID_ASAP the
+ *     start is the first predicted display onset both can reach (at or
+ *     after now + psyau_lead_ns() + one display period, once the frames
+ *     and the ring are in), and the movie base is anchored there, so sound
+ *     and picture share one origin. A pause stops the sound at its target and a resume
+ *     starts it again. A seek during play stops it at once (the desc's
+ *     ramp_ns fades it), the decode thread moves the WAV to the target's
+ *     sample once psy_audio has ended the play, the ring refills, and the
+ *     movie resumes at the next shared ASAP target with a new play.
+ *     desc.loop loops the WAV with the movie, sample numbers continuing.
+ *     psyvid_follow_audio() then takes each display frame's movie time from
+ *     the soundtrack's sample at the onset. Refused, by name: a WAV whose
+ *     length is not the movie's duration in samples (N x den x rate / num,
+ *     rounded to the nearest, a tie up), a loop whose duration is not a
+ *     whole number of samples, and a base rate other than 1 (no
+ *     resampling; a later change of rate stops the sound and
+ *     psyvid_update() returns PSYVID_ERR_REFUSED once). psy_audio.h refuses
+ *     a rate or a channel count that is not the device's.
+ *
+ *   BASE RATES (psytl_rate on the movie base, with desc.timeline)
+ *     The movie plays at its base's rate: 1/2 is half speed, 2/1 double.
+ *     The due frame is the largest i with t(i) at or before the base time
+ *     at RT onset + L (psytl_window), so the lead stays in RT ns and an
+ *     annotation at t(i) still fires on the display frame that shows frame
+ *     i. psyvid_update() reads the rate on every display frame. At a
+ *     change, the cadence is computed again for R against r x num/den, the
+ *     nominal schedule restarts (a change is not a slip), and a
+ *     PSYVID_EV_RATE record says so. Under desc.strict_cadence a rate whose
+ *     cadence judders holds the frame on screen and psyvid_update() returns
+ *     PSYVID_ERR_REFUSED until the rate gives a multiple again or the movie
+ *     closes; a seek alone does not clear it (it lands, then holds). At
+ *     rate 1 the records are those of v0.1.0, byte for byte.
+
  *   RECORDS (desc.ring; source PSYRT_SRC_VIDEO, aux desc.movie_index)
  *     PSYVID_EV_FRAME, one per display frame while playing, pushed when its
  *     flip record arrives (psyscr_frame.done in a later psyvid_update(), or
@@ -269,6 +414,15 @@
  *                         movie time 0, i64[1] its rate
  *       PSYVID_EV_DECODE  t_ns start, i64[0] the decode's length in ns,
  *                         i64[1] frame: one decode longer than a frame
+ *       PSYVID_EV_SOUND   t_ns the target (now for a stop at once);
+ *                         i64[0] psy_audio's play id, i64[1] the first
+ *                         sample (a start) or -1 (a stop), i64[2] the
+ *                         target, u32[8] 1 start, 2 stop, u32[9] the
+ *                         control's id. psy_audio's ONSET, STREAM, GAP and
+ *                         END records under PSYRT_SRC_AUDIO carry the rest
+ *       PSYVID_EV_RATE    t_ns onset; i32[0] num, i32[1] den, i32[2] the
+ *                         multiple (0 = judder), f64[2] display frames per
+ *                         video frame, u32[8] 1 when strict_cadence refuses
  *     Controls (play_at, pause_at, seek) return an id > 0; psyvid_result()
  *     gives its PLAY, PAUSE or SEEK record once it happened.
  *
@@ -308,7 +462,13 @@
  *   ---------------------------------------------------------------------
  *   BUILDING
  *   ---------------------------------------------------------------------
- *   Links what psy_gfx.h links. pl_mpeg.h on the include path, or
+ *   Links what psy_gfx.h links. On Windows, Media Foundation (mfplat.dll,
+ *   mfreadwrite.dll) and, for DXVA, d3d11.dll and dxgi.dll are loaded at
+ *   run time and its GUIDs are copies in this file
+ *   (tests/compile/psy_video_com.cpp checks them against the SDK), so no
+ *   import library and no mfuuid.lib is needed; PSYVID_NO_MF leaves it
+ *   out. Windows Server needs its Media Foundation feature installed; open()
+ *   says so when the DLLs are missing. pl_mpeg.h on the include path, or
  *   PSYVID_NO_PL_MPEG. Its implementation is compiled here unless
  *   PSYVID_PL_MPEG_EXTERNAL (then psyvid_index_make() and the reader
  *   source are not available for MPEG-1). Its heap calls go through
@@ -323,9 +483,9 @@
 #define PSY_VIDEO_H_INCLUDED
 
 #define PSYVID_VERSION_MAJOR 0
-#define PSYVID_VERSION_MINOR 1
+#define PSYVID_VERSION_MINOR 2
 #define PSYVID_VERSION_PATCH 0
-#define PSYVID_VERSION_STRING "0.1.0"
+#define PSYVID_VERSION_STRING "0.2.0"
 
 #include "psy_gfx.h"
 #include "psy_timeline.h"
@@ -378,7 +538,7 @@ extern "C" {
 #define PSYVID_FMT_R16      8    /* uint16_t; psy_gfx.h's R16UI, k / 65535     */
 #define PSYVID_FMT_I420    32    /* Y, then Cb, then Cr; 8-bit 4:2:0           */
 #define PSYVID_FMT_NV12    33    /* Y, then CbCr interleaved; 8-bit 4:2:0      */
-#define PSYVID_FMT_P010    34    /* 10-bit 4:2:0: refused in v0.1             */
+#define PSYVID_FMT_P010    34    /* 10-bit 4:2:0: refused                     */
 
 /* Color, every field 0 = unspecified (refused for YUV). RGB formats are
  * device values, as psy_gfx.h images are: RGB, FULL, DEVICE, DEVICE, NONE. */
@@ -430,23 +590,32 @@ typedef enum psyvid_backend {
     PSYVID_BACKEND_AUTO = 0,   /* from the file's first bytes                 */
     PSYVID_BACKEND_SEQ,        /* frame sequence                              */
     PSYVID_BACKEND_PLMPEG,     /* MPEG-1 in MPEG-PS, pl_mpeg, CPU             */
-    PSYVID_BACKEND_MF,         /* Media Foundation: not in v0.1               */
-    PSYVID_BACKEND_AVF,        /* AVFoundation: not in v0.1                   */
-    PSYVID_BACKEND_FFMPEG,     /* not in v0.1                                 */
+    PSYVID_BACKEND_MF,         /* Media Foundation (Windows): H.264, HEVC in MP4 */
+    PSYVID_BACKEND_AVF,        /* AVFoundation: not built                     */
+    PSYVID_BACKEND_FFMPEG,     /* not built                                   */
     PSYVID_BACKEND_CUSTOM      /* desc.decoder                                */
 } psyvid_backend;
 
 typedef enum psyvid_path {
     PSYVID_PATH_AUTO = 0,
     PSYVID_PATH_UPLOAD,        /* glTexSubImage2D through psy_gfx.h           */
-    PSYVID_PATH_SHARED,        /* Windows shared textures: not in v0.1        */
-    PSYVID_PATH_ZERO_COPY      /* not in v0.1                                 */
+    PSYVID_PATH_SHARED,        /* Windows: a second device: not built         */
+    PSYVID_PATH_GPU            /* Windows, Media Foundation: DXVA on the screen's
+                                * device, one GPU copy per frame, no upload  */
 } psyvid_path;
 
+/* Media Foundation's decoder (desc.hw_decode). */
+typedef enum psyvid_hw {
+    PSYVID_HW_AUTO = 0,        /* DXVA, or the software decoder when no DXVA
+                                * device opens (measured, docs/psy_video.md) */
+    PSYVID_HW_OFF,             /* Microsoft's software decoder                */
+    PSYVID_HW_DXVA             /* DXVA on a D3D11 device                      */
+} psyvid_hw;
+
 typedef enum psyvid_light {
-    PSYVID_LIGHT_AUTO = 0,     /* CODES; refused with a calibration for YUV   */
+    PSYVID_LIGHT_AUTO = 0,     /* EOTF for YUV under a calibration, else CODES */
     PSYVID_LIGHT_CODES,        /* R'G'B' codes as device values               */
-    PSYVID_LIGHT_EOTF          /* linear light: needs the planar shader       */
+    PSYVID_LIGHT_EOTF          /* linear light, through the calibration (YUV) */
 } psyvid_light;
 
 typedef enum psyvid_chroma { PSYVID_CHROMA_SITED = 0, PSYVID_CHROMA_NEAREST = 1 } psyvid_chroma;
@@ -463,6 +632,7 @@ typedef enum psyvid_chroma { PSYVID_CHROMA_SITED = 0, PSYVID_CHROMA_NEAREST = 1 
 #define PSYVID_OUT_BORROWED 0x2u        /* out.planes are the backend's, valid
                                          * until its next call               */
 #define PSYVID_OUT_HAS_HASH 0x4u        /* out.hash is the container's XXH64  */
+#define PSYVID__OUT_GPU     0x80000000u /* private: copied on the GPU (PSYVID_PATH_GPU) */
 
 /* A byte source read by range (a streamed pack entry). */
 typedef struct psyvid_reader {
@@ -556,6 +726,7 @@ typedef struct psyvid_desc {
     const psyvid_decoder* decoder;      /* PSYVID_BACKEND_CUSTOM               */
     void*                decoder_ctx;
     int32_t              pin_cpu;       /* decode thread; 0 = no pin           */
+    psyvid_hw            hw_decode;     /* Media Foundation's decoder; 0 = AUTO */
 } psyvid_desc;
 
 typedef struct psyvid_info {
@@ -585,6 +756,7 @@ typedef struct psyvid_info {
     uint64_t drops_by[PSYVID_WHY_COUNT];
     uint64_t ts_mismatch, hash_mismatch;
     uint64_t skipped;                /* annotations seeks passed over (psytl_skip) */
+    psyvid_hw hw;                    /* Media Foundation: the decoder in use   */
 } psyvid_info;
 
 /* The record of one display frame while playing. */
@@ -625,6 +797,8 @@ typedef struct psyvid_record {
 #define PSYVID_EV_END     8u
 #define PSYVID_EV_CLOCK   9u
 #define PSYVID_EV_DECODE 10u
+#define PSYVID_EV_SOUND  11u   /* the soundtrack started or stopped (SOUNDTRACK) */
+#define PSYVID_EV_RATE   12u   /* the movie base's rate changed (BASE RATES)       */
 
 #define PSYVID_EV_DECISION_OF(w) ((unsigned)(w) & 0x3u)
 #define PSYVID_EV_WHY_OF(w)      (((unsigned)(w) >> 2) & 0xFu)
@@ -638,6 +812,24 @@ typedef struct psyvid_stim_desc {
     bool  linear;                    /* filter when scaled; default nearest   */
     const psygfx_group* group;
 } psyvid_stim_desc;
+
+/* --- soundtrack (psyvid_soundtrack(), with psy_audio.h) ------------------------ */
+
+/* The soundtrack is a WAV (RIFF, RF64, BW64; 16-bit, 24-bit or float)
+ * that psy_audio.h's psyau_wav reads; the movie's decode thread feeds its
+ * stream. */
+typedef struct psyvid_soundtrack_desc {
+    const char*          path;       /* a WAV file; or                          */
+    const void*          data;       /* the file in memory, kept by you; or     */
+    size_t               size;
+    const psyvid_reader* reader;     /* bytes by range (a pack entry)           */
+    void*                reader_ctx;
+    float    db;                     /* gain; 0 = unity                        */
+    uint64_t channels;               /* output mask, as psyau_play_desc; 0 = all */
+    int64_t  ramp_ns;                /* raised-cosine fade that ends a stop, a
+                                      * pause or a seek; 0 = cut at the frame  */
+    int64_t  ring;                   /* ring frames; 0 = 1 s                   */
+} psyvid_soundtrack_desc;
 
 /* --- frame sequence writer ---------------------------------------------------- */
 
@@ -685,6 +877,10 @@ typedef struct psyvid__slot {
     uint32_t epoch;
     uint32_t flags;          /* PSYVID_F_TS_MISMATCH, _HASH_MISMATCH          */
     uint8_t* data;
+    /* PSYVID_PATH_GPU: the slot's own NV12 texture on the screen's device,
+     * and its import into psy_gfx.h */
+    void*    gtex;
+    psygfx_tex gimp;
 } psyvid__slot;
 
 typedef struct psyvid__ctl {
@@ -710,9 +906,6 @@ typedef struct psyvid_movie {
     void*               be_mem;          /* a built-in backend's state        */
     uint64_t*           hashes;          /* the index's, or NULL              */
     unsigned char*      mem_raw;         /* slots, as allocated               */
-    unsigned char*      yuv;             /* the decode thread's YUV planes    */
-    int16_t*            yuv_rows;        /* the conversion's row scratch      */
-    int32_t             yuv_cm[8];       /* fixed-point conversion            */
     int64_t             timescale;
     uint32_t            dec_caps;
     int32_t             n_slots;
@@ -764,6 +957,24 @@ typedef struct psyvid_movie {
     uint64_t            upload_ns_last, upload_ns_max;
     int                 inline_mode;
     char                inline_why[128];     /* why the decode thread did not start */
+    int                 dt_spare;            /* decode thread: a free slot it took and did not fill */
+    int                 gpu;                 /* PSYVID_PATH_GPU                  */
+    int                 gpu_shown;           /* the slot on screen; -1 = none     */
+    int32_t             gpu_w, gpu_h;        /* the decoder's surface size        */
+    int32_t             gpu_ax, gpu_ay;      /* the visible frame's corner in it  */
+    /* the soundtrack (psy_audio.h's part); snd NULL = none */
+    void*               snd;
+    const struct psyvid__snd_ops* snd_ops;
+    uint32_t            snd_rate;            /* Hz                              */
+    uint32_t            snd_wake;            /* a wake for the feeder is queued */
+    int64_t             snd_frames;          /* samples in one pass             */
+    int64_t             snd_want;            /* the refill's first sample       */
+    int64_t             snd_id;              /* psy_audio's play id; 0 = none   */
+    int64_t             snd_t;               /* the start's target              */
+    int                 snd_phase;           /* 0 stopped, 1 refilling, 2 started */
+    int                 snd_ctl;             /* the pending control has its sound */
+    int32_t             rate_num, rate_den;  /* the movie base's rate, as last seen */
+    int                 nom_resync;          /* the nominal schedule starts again here */
     char                error[512];
 #if !defined(PSYRT_NO_THREADS)
     psyrt_pump          pump;
@@ -824,14 +1035,21 @@ PSYVID_API int  psyvid_seq_write(psyvid_seq* w, const void* const planes[3],
 PSYVID_API int  psyvid_seq_close(psyvid_seq* w);
 PSYVID_API const char* psyvid_seq_error(const psyvid_seq* w);
 
-/* The index of an MPEG-1 file (pl_mpeg): decodes every frame, checks the
- * canonical form, writes index_path (NULL = media_path + ".psyvi").
- * color: matrix, range, transfer, primaries, siting; 0 = BT.601, LIMITED,
- * BT1886, BT709, CENTER. Returns frames, or a negative code with err. */
+/* The index of an MPEG-1 (pl_mpeg) or MP4 (Media Foundation) file: decodes
+ * every frame, checks the canonical form, writes index_path (NULL =
+ * media_path + ".psyvi"). color: matrix, range, transfer, primaries,
+ * siting. MPEG-1: 0 = BT.601, LIMITED, BT1886, BT709, CENTER. MP4: what
+ * the stream states, which Media Foundation does not report, so each
+ * field must be given (BT.709, LIMITED, BT1886, BT709, LEFT for a usual
+ * x264 file); a given field that differs from a reported one is refused.
+ * Returns frames, or a negative code with err. */
 typedef struct psyvid_index_desc {
     uint8_t matrix, range, transfer, primaries, siting;
     uint8_t reserved_[3];
     const char* note;                /* the command that made the file        */
+    psyvid_backend backend;          /* 0 = from the file: MPEG-PS pl_mpeg, MP4 MF */
+    psyvid_hw   hw;                  /* MF: the decoder that makes the hashes; 0 = OFF */
+    bool        no_seek_check;       /* MF: skip the decode from each keyframe */
 } psyvid_index_desc;
 PSYVID_API int64_t psyvid_index_make(const char* media_path, const char* index_path,
                                      const psyvid_index_desc* d, char* err, size_t cap);
@@ -866,9 +1084,17 @@ PSYVID_API const psyscr_param* psyvid_params(int* n);
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* psyvid_follow() on the audio fit: movie time = the soundtrack's stream
- * frame at the output minus its frame at movie time 0. */
+/* psyvid_follow() on the audio fit. With a soundtrack, the movie time is
+ * the soundtrack's sample at f->onset (SOUNDTRACK); without one, the
+ * device's stream frame at the output minus its frame at movie time 0. */
 PSYVID_API int psyvid_follow_audio(psyvid_movie* mv, psyau_audio* au, const psyscr_frame* f);
+
+/* After psyvid_open(), before the first play: the movie's sound
+ * (SOUNDTRACK). PSYVID_ERR_REFUSED with psyvid_error() for a rate or
+ * channel count that is not the device's, a length that is not the movie's
+ * duration in samples, a loop that is not a whole number of samples, or a
+ * base rate other than 1. */
+PSYVID_API int psyvid_soundtrack(psyvid_movie* mv, psyau_audio* au, const psyvid_soundtrack_desc* d);
 #ifdef __cplusplus
 }
 #endif
@@ -898,6 +1124,29 @@ PSYVID_API int psyvid_follow_audio(psyvid_movie* mv, psyau_audio* au, const psys
 #include <stdarg.h>
 #include <math.h>
 
+/* Media Foundation: Windows, unless PSYVID_NO_MF. The SDK's headers give
+ * the interfaces; the DLLs are loaded at run time. */
+#if defined(_WIN32) && !defined(PSYVID_NO_MF)
+    #define PSYVID__MF 1
+    #if defined(_MSC_VER)
+        #pragma warning(push)
+        #pragma warning(disable: 4201)   /* the SDK's nameless unions in C */
+    #endif
+    #include <windows.h>
+    #include <objidl.h>
+    #include <d3d11.h>
+    #include <d3d10.h>
+    #include <dxgi.h>
+    #include <mfapi.h>
+    #include <mfidl.h>
+    #include <mfreadwrite.h>
+    #if defined(_MSC_VER)
+        #pragma warning(pop)
+    #endif
+#else
+    #define PSYVID__MF 0
+#endif
+
 #ifndef PSYVID_MALLOC
 #define PSYVID_MALLOC(n)     malloc(n)
 #define PSYVID_REALLOC(p, n) realloc((p), (n))
@@ -906,6 +1155,7 @@ PSYVID_API int psyvid_follow_audio(psyvid_movie* mv, psyau_audio* au, const psys
 #ifndef PSYVID__NOW
 #define PSYVID__NOW() ((int64_t)psyrt_now_ns())
 #endif
+
 
 /* --- atomics ---------------------------------------------------------------
  * The queues are single-producer single-consumer: an acquire load of the
@@ -974,7 +1224,20 @@ extern "C" {
 enum { PSYVID__STOPPED = 0, PSYVID__PLAYING, PSYVID__PAUSED, PSYVID__SEEKING, PSYVID__MANUAL,
        PSYVID__ENDED, PSYVID__FAILED };
 enum { PSYVID__OP_PLAY = 1, PSYVID__OP_PAUSE = 2 };
-enum { PSYVID__MSG_WAKE = 1, PSYVID__MSG_SEEK = 2 };
+enum { PSYVID__MSG_WAKE = 1, PSYVID__MSG_SEEK = 2, PSYVID__MSG_SND = 3 };
+
+/* The soundtrack's functions, from the part compiled with psy_audio.h. */
+struct psyvid__snd_ops {
+    bool    (*step)(void* s);                      /* decode thread: feed one block */
+    void    (*refill)(void* s, int64_t sample);    /* decode thread: refill from sample */
+    void    (*refilling)(void* s);                 /* frame thread: a refill is posted */
+    int     (*ready)(void* s, int64_t sample);     /* the refill from sample is in   */
+    bool    (*wants)(void* s);                     /* the feeder has work            */
+    int64_t (*lead)(void* s);                      /* psy_audio's lead now           */
+    int64_t (*start)(void* s, int64_t t);          /* play at t; the play id or < 0  */
+    void    (*stop)(void* s, int64_t t);           /* stop at t; 0 = at once         */
+    void    (*close)(void* s);
+};
 
 typedef struct psyvid__msg { uint32_t op, epoch; int64_t g; } psyvid__msg;
 
@@ -1003,7 +1266,7 @@ PSYVID_API const char* psyvid_strerror(int code) {
     case PSYVID_ERR_LOST: return "GL context lost";
     case PSYVID_ERR_IO: return "I/O error";
     case PSYVID_ERR_NOT_FOUND: return "not found";
-    case PSYVID_ERR_NOT_IMPLEMENTED: return "not implemented in v0.1";
+    case PSYVID_ERR_NOT_IMPLEMENTED: return "not implemented";
     default: return code >= 0 ? "ok" : "unknown error";
     }
 }
@@ -1618,7 +1881,7 @@ static void psyvid__rgb_color(psyvid__canon* c) {
 /* The fields a canonical description must have; "" when it has them. */
 static int psyvid__canon_check(const psyvid__canon* c, char* err, size_t cap) {
     if (c->w <= 0 || c->h <= 0 || c->w > 16384 || c->h > 16384) { psyvid__fmt(err, cap, "size %dx%d", (int)c->w, (int)c->h); return PSYVID_ERR_FORMAT; }
-    if (c->format == PSYVID_FMT_P010) { psyvid__fmt(err, cap, "10-bit (P010) is refused in v0.1: the panel link is 8 bits; re-encode as 8-bit 4:2:0"); return PSYVID_ERR_REFUSED; }
+    if (c->format == PSYVID_FMT_P010) { psyvid__fmt(err, cap, "10-bit (P010) is refused: the panel link is 8 bits; re-encode as 8-bit 4:2:0"); return PSYVID_ERR_REFUSED; }
     if (!psyvid__is_rgb(c->format) && !psyvid__is_yuv(c->format)) { psyvid__fmt(err, cap, "pixel format %d is not one psy_video.h knows", (int)c->format); return PSYVID_ERR_FORMAT; }
     if (!psyvid__rate_ok(c->fps_num, c->fps_den)) { psyvid__fmt(err, cap, "rate %d/%d is not a canonical rate", (int)c->fps_num, (int)c->fps_den); return PSYVID_ERR_FORMAT; }
     if (c->frames <= 0) { psyvid__fmt(err, cap, "no frames"); return PSYVID_ERR_FORMAT; }
@@ -2169,28 +2432,1135 @@ static const psyvid_decoder psyvid__plm_decoder = {
 
 #endif /* PSYVID_NO_PL_MPEG */
 
-PSYVID_API int64_t psyvid_index_make(const char* media_path, const char* index_path,
-                                     const psyvid_index_desc* d, char* err, size_t cap) {
-#if defined(PSYVID_NO_PL_MPEG) || defined(PSYVID_PL_MPEG_EXTERNAL)
-    (void)media_path; (void)index_path; (void)d;
-    (void)&psyvid__index_header;   /* the writer is unused in this build */
-    psyvid__fmt(err, cap, "psyvid_index_make needs pl_mpeg compiled into this file");
-    return PSYVID_ERR_NOT_IMPLEMENTED;
+/* --- Media Foundation backend (Windows) --------------------------------------
+ * An IMFSourceReader in synchronous mode, used from the decode thread only
+ * after open. MF's DLLs are loaded at run time and its GUIDs are local
+ * copies (tests/compile/psy_video_com.cpp checks them against the SDK), so
+ * nothing is linked. The reader may not insert a converter or a video
+ * processor: a stream that the decoder cannot give as NV12 is refused, not
+ * converted. */
+#if PSYVID__MF
+
+/* desc.hw_decode AUTO: chosen by measurement (docs/psy_video.md, M1, M2). */
+#ifndef PSYVID__HW_DEFAULT
+#define PSYVID__HW_DEFAULT PSYVID_HW_DXVA
+#endif
+
+#define PSYVID__G(n, a, b, c, d0, d1, d2, d3, d4, d5, d6, d7) \
+    static const GUID n = { a, b, c, { d0, d1, d2, d3, d4, d5, d6, d7 } }
+PSYVID__G(psyvid__GUID_NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+PSYVID__G(psyvid__IID_IUnknown, 0x00000000, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+PSYVID__G(psyvid__IID_ISequentialStream, 0x0c733a30, 0x2a1c, 0x11ce, 0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d);
+PSYVID__G(psyvid__IID_IStream, 0x0000000c, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+PSYVID__G(psyvid__IID_IMFAttributes, 0x2cd2d921, 0xc447, 0x44a7, 0xa1, 0x3c, 0x4a, 0xda, 0xbf, 0xc2, 0x47, 0xe3);
+PSYVID__G(psyvid__IID_IMF2DBuffer, 0x7dc9d5f9, 0x9ed9, 0x44ec, 0x9b, 0xbf, 0x06, 0x00, 0xbb, 0x58, 0x9f, 0xbb);
+PSYVID__G(psyvid__IID_IMF2DBuffer2, 0x33ae5ea6, 0x4316, 0x436f, 0x8d, 0xdd, 0xd7, 0x3d, 0x22, 0xf8, 0x29, 0xec);
+PSYVID__G(psyvid__IID_IMFDXGIBuffer, 0xe7174cfa, 0x1c9e, 0x48b1, 0x88, 0x66, 0x62, 0x62, 0x26, 0xbf, 0xc2, 0x58);
+PSYVID__G(psyvid__IID_IMFSourceReaderEx, 0x7b981cf0, 0x560e, 0x4116, 0x98, 0x75, 0xb0, 0x99, 0x89, 0x5f, 0x23, 0xd7);
+PSYVID__G(psyvid__IID_IMFTransform, 0xbf94c121, 0x5b05, 0x4e6f, 0x80, 0x00, 0xba, 0x59, 0x89, 0x61, 0x41, 0x4d);
+PSYVID__G(psyvid__IID_ID3D10Multithread, 0x9b7e4e00, 0x342c, 0x4106, 0xa1, 0x9f, 0x4f, 0x27, 0x04, 0xf6, 0x89, 0xf0);
+PSYVID__G(psyvid__IID_IDXGIFactory1, 0x770aae78, 0xf26f, 0x4dba, 0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87);
+PSYVID__G(psyvid__MF_MT_MAJOR_TYPE, 0x48eba18e, 0xf8c9, 0x4687, 0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f);
+PSYVID__G(psyvid__MF_MT_SUBTYPE, 0xf7e34c9a, 0x42e8, 0x4714, 0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5);
+PSYVID__G(psyvid__MFMediaType_Video, 0x73646976, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+PSYVID__G(psyvid__MFVideoFormat_NV12, 0x3231564e, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+PSYVID__G(psyvid__MFVideoFormat_H264, 0x34363248, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+PSYVID__G(psyvid__MFVideoFormat_HEVC, 0x43564548, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
+PSYVID__G(psyvid__MF_MT_FRAME_SIZE, 0x1652c33d, 0xd6b2, 0x4012, 0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d);
+PSYVID__G(psyvid__MF_MT_FRAME_RATE, 0xc459a2e8, 0x3d2c, 0x4e44, 0xb1, 0x32, 0xfe, 0xe5, 0x15, 0x6c, 0x7b, 0xb0);
+PSYVID__G(psyvid__MF_MT_PIXEL_ASPECT_RATIO, 0xc6376a1e, 0x8d0a, 0x4027, 0xbe, 0x45, 0x6d, 0x9a, 0x0a, 0xd3, 0x9b, 0xb6);
+PSYVID__G(psyvid__MF_MT_INTERLACE_MODE, 0xe2724bb8, 0xe676, 0x4806, 0xb4, 0xb2, 0xa8, 0xd6, 0xef, 0xb4, 0x4c, 0xcd);
+PSYVID__G(psyvid__MF_MT_MINIMUM_DISPLAY_APERTURE, 0xd7388766, 0x18fe, 0x48c6, 0xa1, 0x77, 0xee, 0x89, 0x48, 0x67, 0xc8, 0xc4);
+PSYVID__G(psyvid__MF_MT_DEFAULT_STRIDE, 0x644b4e48, 0x1e02, 0x4516, 0xb0, 0xeb, 0xc0, 0x1c, 0xa9, 0xd4, 0x9a, 0xc6);
+PSYVID__G(psyvid__MF_MT_YUV_MATRIX, 0x3e23d450, 0x2c75, 0x4d25, 0xa0, 0x0e, 0xb9, 0x16, 0x70, 0xd1, 0x23, 0x27);
+PSYVID__G(psyvid__MF_MT_VIDEO_NOMINAL_RANGE, 0xc21b8ee5, 0xb956, 0x4071, 0x8d, 0xaf, 0x32, 0x5e, 0xdf, 0x5c, 0xab, 0x11);
+PSYVID__G(psyvid__MF_MT_TRANSFER_FUNCTION, 0x5fb0fce9, 0xbe5c, 0x4935, 0xa8, 0x11, 0xec, 0x83, 0x8f, 0x8e, 0xed, 0x93);
+PSYVID__G(psyvid__MF_MT_VIDEO_PRIMARIES, 0xdbfbe4d7, 0x0740, 0x4ee0, 0x81, 0x92, 0x85, 0x0a, 0xb0, 0xe2, 0x19, 0x35);
+PSYVID__G(psyvid__MF_MT_VIDEO_CHROMA_SITING, 0x65df2370, 0xc773, 0x4c33, 0xaa, 0x64, 0x84, 0x3e, 0x06, 0x8e, 0xfb, 0x0c);
+PSYVID__G(psyvid__MF_MT_VIDEO_ROTATION, 0xc380465d, 0x2271, 0x428c, 0x9b, 0x83, 0xec, 0xea, 0x3b, 0x4a, 0x85, 0xc1);
+PSYVID__G(psyvid__MF_MT_MPEG2_PROFILE, 0xad76a80b, 0x2d5c, 0x4e0b, 0xb3, 0x75, 0x64, 0xe5, 0x20, 0x13, 0x70, 0x36);
+PSYVID__G(psyvid__MF_MT_MPEG_SEQUENCE_HEADER, 0x3c036de7, 0x3ad0, 0x4c9e, 0x92, 0x16, 0xee, 0x6d, 0x6a, 0xc2, 0x1c, 0xb3);
+PSYVID__G(psyvid__MF_SOURCE_READER_D3D11_BIND_FLAGS, 0x33f3197b, 0xf73a, 0x4e14, 0x8d, 0x85, 0x0e, 0x4c, 0x43, 0x68, 0x78, 0x8d);
+PSYVID__G(psyvid__IID_ID3D11Texture2D, 0x6f15aaf2, 0xd208, 0x4e89, 0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c);
+PSYVID__G(psyvid__MF_PD_DURATION, 0x6c990d33, 0xbb8e, 0x477a, 0x85, 0x98, 0x0d, 0x5d, 0x96, 0xfc, 0xd8, 0x8a);
+PSYVID__G(psyvid__MF_READWRITE_DISABLE_CONVERTERS, 0x98d5b065, 0x1374, 0x4847, 0x8d, 0x5d, 0x31, 0x52, 0x0f, 0xee, 0x71, 0x56);
+PSYVID__G(psyvid__MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 0xa634a91c, 0x822b, 0x41b9, 0xa4, 0x94, 0x4d, 0xe4, 0x64, 0x36, 0x12, 0xb0);
+PSYVID__G(psyvid__MF_SOURCE_READER_D3D_MANAGER, 0xec822da2, 0xe1e9, 0x4b29, 0xa0, 0xd8, 0x56, 0x3c, 0x71, 0x9f, 0x52, 0x69);
+PSYVID__G(psyvid__MF_BYTESTREAM_CONTENT_TYPE, 0xfc358289, 0x3cb6, 0x460c, 0xa4, 0x24, 0xb6, 0x68, 0x12, 0x60, 0x37, 0x5a);
+PSYVID__G(psyvid__MFSampleExtension_CleanPoint, 0x9cdf01d8, 0xa0f0, 0x43ba, 0xb0, 0x77, 0xea, 0xa0, 0x6c, 0xbd, 0x72, 0x8a);
+PSYVID__G(psyvid__MFSampleExtension_Interlaced, 0xb1d5830a, 0xdeb8, 0x40e3, 0x90, 0xfa, 0x38, 0x99, 0x43, 0x71, 0x64, 0x61);
+PSYVID__G(psyvid__MFSampleExtension_DecodeTimestamp, 0x73a954d4, 0x09e2, 0x4861, 0xbe, 0xfc, 0x94, 0xbd, 0x97, 0xc0, 0x8e, 0x6e);
+PSYVID__G(psyvid__MFT_FRIENDLY_NAME_Attribute, 0x314ffbae, 0x5b41, 0x4c95, 0x9c, 0x19, 0x4e, 0x7d, 0x58, 0x6f, 0xac, 0xe3);
+PSYVID__G(psyvid__MFT_ENUM_HARDWARE_URL_Attribute, 0x2fb866ac, 0xb078, 0x4942, 0xab, 0x6c, 0x00, 0x3d, 0x05, 0xcd, 0xa6, 0x74);
+PSYVID__G(psyvid__MFT_TRANSFORM_CLSID_Attribute, 0x6821c42b, 0x65a4, 0x4e82, 0x99, 0xbc, 0x9a, 0x88, 0x20, 0x5e, 0xcd, 0x0c);
+PSYVID__G(psyvid__CLSID_MSH264DecoderMFT, 0x62ce7e72, 0x4c71, 0x4d20, 0xb1, 0x5d, 0x45, 0x28, 0x31, 0xa8, 0x7d, 0x9d);
+#undef PSYVID__G
+
+/* IsEqualGUID takes pointers in C and references in C++. */
+static int psyvid__guid_eq(const GUID* a, const GUID* b) { return memcmp(a, b, sizeof *a) == 0; }
+
+#define PSYVID__MF_FIRST_VIDEO   0xFFFFFFFCu   /* MF_SOURCE_READER_FIRST_VIDEO_STREAM */
+#define PSYVID__MF_ALL_STREAMS   0xFFFFFFFEu   /* MF_SOURCE_READER_ALL_STREAMS        */
+#define PSYVID__MF_MEDIASOURCE   0xFFFFFFFFu   /* MF_SOURCE_READER_MEDIASOURCE        */
+
+typedef HRESULT (WINAPI *psyvid__MFStartup_fn)(ULONG, DWORD);
+typedef HRESULT (WINAPI *psyvid__MFShutdown_fn)(void);
+typedef HRESULT (WINAPI *psyvid__MFCreateAttributes_fn)(IMFAttributes**, UINT32);
+typedef HRESULT (WINAPI *psyvid__MFCreateMediaType_fn)(IMFMediaType**);
+typedef HRESULT (WINAPI *psyvid__MFCreateMFByteStreamOnStream_fn)(IStream*, IMFByteStream**);
+typedef HRESULT (WINAPI *psyvid__MFCreateDXGIDeviceManager_fn)(UINT*, IMFDXGIDeviceManager**);
+typedef HRESULT (WINAPI *psyvid__MFCreateSourceReaderFromByteStream_fn)(IMFByteStream*, IMFAttributes*, IMFSourceReader**);
+typedef HRESULT (WINAPI *psyvid__CoIncrementMTAUsage_fn)(void**);
+typedef HRESULT (WINAPI *psyvid__CoDecrementMTAUsage_fn)(void*);
+typedef HRESULT (WINAPI *psyvid__PropVariantClear_fn)(PROPVARIANT*);
+typedef HRESULT (WINAPI *psyvid__D3D11CreateDevice_fn)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL*,
+                                                      UINT, UINT, ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**);
+typedef HRESULT (WINAPI *psyvid__CreateDXGIFactory1_fn)(REFIID, void**);
+
+/* Loaded once per process; movies open and close on one thread, as the rest
+ * of the API requires, so a plain count is enough. */
+static struct {
+    int refs, loaded;
+    HMODULE plat, rw, ole, d3d, dxgi;
+    psyvid__MFStartup_fn Startup;
+    psyvid__MFShutdown_fn Shutdown;
+    psyvid__MFCreateAttributes_fn CreateAttributes;
+    psyvid__MFCreateMediaType_fn CreateMediaType;
+    psyvid__MFCreateMFByteStreamOnStream_fn ByteStreamOnStream;
+    psyvid__MFCreateDXGIDeviceManager_fn CreateDXGIDeviceManager;
+    psyvid__MFCreateSourceReaderFromByteStream_fn ReaderFromByteStream;
+    psyvid__CoIncrementMTAUsage_fn IncMTA;
+    psyvid__CoDecrementMTAUsage_fn DecMTA;
+    psyvid__PropVariantClear_fn PropVariantClear;
+    psyvid__D3D11CreateDevice_fn D3D11CreateDevice;
+    psyvid__CreateDXGIFactory1_fn CreateDXGIFactory1;
+} psyvid__mfl;
+
+#define PSYVID__SYM(m, name) GetProcAddress((m), name)
+
+static int psyvid__mf_load(char* err, size_t cap) {
+    HRESULT hr;
+    if (psyvid__mfl.refs > 0) { psyvid__mfl.refs++; return PSYVID_OK; }
+    if (!psyvid__mfl.loaded) {
+        psyvid__mfl.plat = LoadLibraryW(L"mfplat.dll");
+        psyvid__mfl.rw = LoadLibraryW(L"mfreadwrite.dll");
+        psyvid__mfl.ole = LoadLibraryW(L"ole32.dll");
+        if (!psyvid__mfl.plat || !psyvid__mfl.rw || !psyvid__mfl.ole) {
+            psyvid__fmt(err, cap, "Media Foundation is not installed (mfplat.dll or mfreadwrite.dll missing; on Windows Server add the Media Foundation feature)");
+            return PSYVID_ERR_NOT_IMPLEMENTED;
+        }
+        psyvid__mfl.Startup = (psyvid__MFStartup_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.plat, "MFStartup");
+        psyvid__mfl.Shutdown = (psyvid__MFShutdown_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.plat, "MFShutdown");
+        psyvid__mfl.CreateAttributes = (psyvid__MFCreateAttributes_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.plat, "MFCreateAttributes");
+        psyvid__mfl.CreateMediaType = (psyvid__MFCreateMediaType_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.plat, "MFCreateMediaType");
+        psyvid__mfl.ByteStreamOnStream = (psyvid__MFCreateMFByteStreamOnStream_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.plat, "MFCreateMFByteStreamOnStream");
+        psyvid__mfl.CreateDXGIDeviceManager = (psyvid__MFCreateDXGIDeviceManager_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.plat, "MFCreateDXGIDeviceManager");
+        psyvid__mfl.ReaderFromByteStream = (psyvid__MFCreateSourceReaderFromByteStream_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.rw, "MFCreateSourceReaderFromByteStream");
+        psyvid__mfl.IncMTA = (psyvid__CoIncrementMTAUsage_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.ole, "CoIncrementMTAUsage");
+        psyvid__mfl.DecMTA = (psyvid__CoDecrementMTAUsage_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.ole, "CoDecrementMTAUsage");
+        psyvid__mfl.PropVariantClear = (psyvid__PropVariantClear_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.ole, "PropVariantClear");
+        if (!psyvid__mfl.Startup || !psyvid__mfl.Shutdown || !psyvid__mfl.CreateAttributes || !psyvid__mfl.CreateMediaType ||
+            !psyvid__mfl.ByteStreamOnStream || !psyvid__mfl.ReaderFromByteStream || !psyvid__mfl.IncMTA ||
+            !psyvid__mfl.DecMTA || !psyvid__mfl.PropVariantClear) {
+            psyvid__fmt(err, cap, "Media Foundation is too old here (Windows 8 or later is needed)");
+            return PSYVID_ERR_NOT_IMPLEMENTED;
+        }
+        psyvid__mfl.loaded = 1;
+    }
+    hr = psyvid__mfl.Startup(0x00020070 /* MF_VERSION */, 1 /* MFSTARTUP_LITE: no sockets */);
+    if (FAILED(hr)) { psyvid__fmt(err, cap, "MFStartup failed (0x%08lx)", (unsigned long)hr); return PSYVID_ERR_DECODER; }
+    psyvid__mfl.refs = 1;
+    return PSYVID_OK;
+}
+
+static void psyvid__mf_unload(void) {
+    if (psyvid__mfl.refs <= 0) return;
+    if (--psyvid__mfl.refs == 0) psyvid__mfl.Shutdown();
+}
+
+/* --- an IStream over the header's byte source ---------------------------------
+ * One path for a file (64-bit offsets), memory and a psyvid_reader (a pack
+ * entry read by range). Media Foundation calls it from its own work-queue
+ * threads; the lock keeps one call at a time. It is the header's own table in
+ * the COM layout, so the same code builds as C and C++. */
+typedef struct psyvid__stm psyvid__stm;
+typedef struct psyvid__stm_vtbl {
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(psyvid__stm*, const IID*, void**);
+    ULONG   (STDMETHODCALLTYPE *AddRef)(psyvid__stm*);
+    ULONG   (STDMETHODCALLTYPE *Release)(psyvid__stm*);
+    HRESULT (STDMETHODCALLTYPE *Read)(psyvid__stm*, void*, ULONG, ULONG*);
+    HRESULT (STDMETHODCALLTYPE *Write)(psyvid__stm*, const void*, ULONG, ULONG*);
+    HRESULT (STDMETHODCALLTYPE *Seek)(psyvid__stm*, LARGE_INTEGER, DWORD, ULARGE_INTEGER*);
+    HRESULT (STDMETHODCALLTYPE *SetSize)(psyvid__stm*, ULARGE_INTEGER);
+    HRESULT (STDMETHODCALLTYPE *CopyTo)(psyvid__stm*, void*, ULARGE_INTEGER, ULARGE_INTEGER*, ULARGE_INTEGER*);
+    HRESULT (STDMETHODCALLTYPE *Commit)(psyvid__stm*, DWORD);
+    HRESULT (STDMETHODCALLTYPE *Revert)(psyvid__stm*);
+    HRESULT (STDMETHODCALLTYPE *LockRegion)(psyvid__stm*, ULARGE_INTEGER, ULARGE_INTEGER, DWORD);
+    HRESULT (STDMETHODCALLTYPE *UnlockRegion)(psyvid__stm*, ULARGE_INTEGER, ULARGE_INTEGER, DWORD);
+    HRESULT (STDMETHODCALLTYPE *Stat)(psyvid__stm*, STATSTG*, DWORD);
+    HRESULT (STDMETHODCALLTYPE *Clone)(psyvid__stm*, void**);
+} psyvid__stm_vtbl;
+
+struct psyvid__stm {
+    const psyvid__stm_vtbl* vt;
+    volatile LONG refs;
+    SRWLOCK lock;
+    psyvid__src src;
+    int64_t pos;
+};
+
+static HRESULT STDMETHODCALLTYPE psyvid__stm_qi(psyvid__stm* s, const IID* iid, void** out) {
+    if (!out) return E_POINTER;
+    if (psyvid__guid_eq(iid, &psyvid__IID_IUnknown) || psyvid__guid_eq(iid, &psyvid__IID_IStream) ||
+        psyvid__guid_eq(iid, &psyvid__IID_ISequentialStream)) {
+        *out = s;
+        InterlockedIncrement(&s->refs);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE psyvid__stm_addref(psyvid__stm* s) { return (ULONG)InterlockedIncrement(&s->refs); }
+static ULONG STDMETHODCALLTYPE psyvid__stm_release(psyvid__stm* s) {
+    LONG n = InterlockedDecrement(&s->refs);
+    if (n == 0) { psyvid__src_close(&s->src); psyvid__free(s); }
+    return (ULONG)n;
+}
+static HRESULT STDMETHODCALLTYPE psyvid__stm_read(psyvid__stm* s, void* buf, ULONG n, ULONG* got) {
+    int64_t k;
+    HRESULT hr = S_OK;
+    AcquireSRWLockExclusive(&s->lock);
+    k = s->src.size - s->pos;
+    if (k < 0) k = 0;
+    if (k > (int64_t)n) k = (int64_t)n;
+    if (k > 0 && psyvid__src_read(&s->src, s->pos, buf, k) != PSYVID_OK) { k = 0; hr = STG_E_READFAULT; }
+    s->pos += k;
+    ReleaseSRWLockExclusive(&s->lock);
+    if (got) *got = (ULONG)k;
+    if (hr == S_OK && k < (int64_t)n) hr = S_FALSE;
+    return hr;
+}
+static HRESULT STDMETHODCALLTYPE psyvid__stm_write(psyvid__stm* s, const void* b, ULONG n, ULONG* w) {
+    (void)s; (void)b; (void)n; if (w) *w = 0; return STG_E_ACCESSDENIED;
+}
+static HRESULT STDMETHODCALLTYPE psyvid__stm_seek(psyvid__stm* s, LARGE_INTEGER move, DWORD origin, ULARGE_INTEGER* np) {
+    int64_t p;
+    AcquireSRWLockExclusive(&s->lock);
+    p = origin == 0 ? move.QuadPart : origin == 1 ? s->pos + move.QuadPart : s->src.size + move.QuadPart;
+    if (p < 0) { ReleaseSRWLockExclusive(&s->lock); return STG_E_INVALIDFUNCTION; }
+    s->pos = p;
+    ReleaseSRWLockExclusive(&s->lock);
+    if (np) np->QuadPart = (ULONGLONG)p;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE psyvid__stm_setsize(psyvid__stm* s, ULARGE_INTEGER n) { (void)s; (void)n; return STG_E_ACCESSDENIED; }
+static HRESULT STDMETHODCALLTYPE psyvid__stm_copyto(psyvid__stm* s, void* d, ULARGE_INTEGER n, ULARGE_INTEGER* r, ULARGE_INTEGER* w) {
+    (void)s; (void)d; (void)n; (void)r; (void)w; return E_NOTIMPL;
+}
+static HRESULT STDMETHODCALLTYPE psyvid__stm_commit(psyvid__stm* s, DWORD f) { (void)s; (void)f; return S_OK; }
+static HRESULT STDMETHODCALLTYPE psyvid__stm_revert(psyvid__stm* s) { (void)s; return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE psyvid__stm_lockr(psyvid__stm* s, ULARGE_INTEGER o, ULARGE_INTEGER n, DWORD t) {
+    (void)s; (void)o; (void)n; (void)t; return STG_E_INVALIDFUNCTION;
+}
+static HRESULT STDMETHODCALLTYPE psyvid__stm_stat(psyvid__stm* s, STATSTG* st, DWORD flag) {
+    (void)flag;
+    if (!st) return E_POINTER;
+    memset(st, 0, sizeof *st);
+    st->type = STGTY_STREAM;
+    st->cbSize.QuadPart = (ULONGLONG)s->src.size;
+    st->grfMode = STGM_READ;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE psyvid__stm_clone(psyvid__stm* s, void** out) { (void)s; if (out) *out = NULL; return E_NOTIMPL; }
+
+static const psyvid__stm_vtbl psyvid__stm_table = {
+    psyvid__stm_qi, psyvid__stm_addref, psyvid__stm_release, psyvid__stm_read, psyvid__stm_write,
+    psyvid__stm_seek, psyvid__stm_setsize, psyvid__stm_copyto, psyvid__stm_commit, psyvid__stm_revert,
+    psyvid__stm_lockr, psyvid__stm_lockr, psyvid__stm_stat, psyvid__stm_clone
+};
+
+/* --- the backend -------------------------------------------------------------- */
+
+#if defined(__cplusplus) && !defined(CINTERFACE)
+    #define PSYVID__CALL(o, m, ...) ((o)->m(__VA_ARGS__))
+    #define PSYVID__CALL0(o, m)     ((o)->m())
+    #define PSYVID__IID(x)          (x)
+    #define PSYVID__REF(x)          (x)
 #else
+    #define PSYVID__CALL(o, m, ...) ((o)->lpVtbl->m((o), __VA_ARGS__))
+    #define PSYVID__CALL0(o, m)     ((o)->lpVtbl->m(o))
+    #define PSYVID__IID(x)          (&(x))
+    #define PSYVID__REF(x)          (&(x))
+#endif
+#define PSYVID__REL(o) do { if (o) { PSYVID__CALL0((o), Release); (o) = NULL; } } while (0)
+
+/* --- the H.264 SPS's VUI ---------------------------------------------------------
+ * Media Foundation reports none of the color the stream states, so the
+ * index maker reads it from the sequence parameter set: colour_primaries,
+ * transfer_characteristics, matrix_coefficients, video_full_range_flag and
+ * the chroma sample location (H.264 Annex E). HEVC's SPS puts its VUI
+ * behind the profile_tier_level and short-term reference picture sets, so it
+ * is not parsed here: an HEVC index takes the color from its desc. */
+typedef struct psyvid__bits { const uint8_t* p; size_t n, pos; int err; } psyvid__bits;
+
+static uint32_t psyvid__bu(psyvid__bits* b, int k) {
+    uint32_t v = 0;
+    while (k-- > 0) {
+        if (b->pos >= b->n * 8) { b->err = 1; return 0; }
+        v = (v << 1) | ((b->p[b->pos >> 3] >> (7 - (b->pos & 7))) & 1u);
+        b->pos++;
+    }
+    return v;
+}
+static uint32_t psyvid__bue(psyvid__bits* b) {   /* ue(v) */
+    int z = 0;
+    while (!b->err && psyvid__bu(b, 1) == 0) if (++z > 31) { b->err = 1; return 0; }
+    return z ? ((1u << z) - 1u) + psyvid__bu(b, z) : 0u;
+}
+static int32_t psyvid__bse(psyvid__bits* b) {    /* se(v) */
+    uint32_t k = psyvid__bue(b);
+    return (k & 1u) ? (int32_t)((k + 1) / 2) : -(int32_t)(k / 2);
+}
+
+/* out: matrix, range, transfer, primaries, siting as PSYVID_* values; -1
+ * not stated, -2 stated but not one the canonical form has. Returns 1 when
+ * an SPS was parsed. */
+static int psyvid__h264_vui(const uint8_t* nal, size_t n, int16_t out[5]) {
+    uint8_t rb[512];
+    size_t i, m = 0;
+    int zeros = 0;
+    psyvid__bits b;
+    uint32_t profile, k;
+    for (k = 0; k < 5; k++) out[k] = -1;
+    /* the RBSP: drop the emulation prevention bytes (00 00 03) */
+    for (i = 1; i < n && m < sizeof rb; i++) {
+        if (zeros >= 2 && nal[i] == 3) { zeros = 0; continue; }
+        zeros = nal[i] == 0 ? zeros + 1 : 0;
+        rb[m++] = nal[i];
+    }
+    b.p = rb; b.n = m; b.pos = 0; b.err = 0;
+    profile = psyvid__bu(&b, 8);
+    psyvid__bu(&b, 16);                 /* constraint flags, level            */
+    psyvid__bue(&b);                    /* seq_parameter_set_id               */
+    if (profile == 100 || profile == 110 || profile == 122 || profile == 244 || profile == 44 || profile == 83 ||
+        profile == 86 || profile == 118 || profile == 128 || profile == 138 || profile == 139 || profile == 134 || profile == 135) {
+        uint32_t cf = psyvid__bue(&b);
+        if (cf == 3) psyvid__bu(&b, 1);
+        psyvid__bue(&b); psyvid__bue(&b);   /* bit depths                     */
+        psyvid__bu(&b, 1);
+        if (psyvid__bu(&b, 1)) {            /* scaling matrices               */
+            for (k = 0; k < (cf != 3 ? 8u : 12u) && !b.err; k++) {
+                if (psyvid__bu(&b, 1)) {
+                    int size = k < 6 ? 16 : 64, j, last = 8, next = 8;
+                    for (j = 0; j < size && !b.err; j++) {
+                        if (next != 0) next = (last + psyvid__bse(&b) + 256) % 256;
+                        last = next == 0 ? last : next;
+                    }
+                }
+            }
+        }
+    }
+    psyvid__bue(&b);                    /* log2_max_frame_num_minus4          */
+    k = psyvid__bue(&b);                /* pic_order_cnt_type                 */
+    if (k == 0) psyvid__bue(&b);
+    else if (k == 1) {
+        uint32_t c, j;
+        psyvid__bu(&b, 1); psyvid__bse(&b); psyvid__bse(&b);
+        c = psyvid__bue(&b);
+        for (j = 0; j < c && j < 256 && !b.err; j++) psyvid__bse(&b);
+    }
+    psyvid__bue(&b); psyvid__bu(&b, 1);   /* max_num_ref_frames, gaps         */
+    psyvid__bue(&b); psyvid__bue(&b);     /* size in macroblocks              */
+    if (!psyvid__bu(&b, 1)) psyvid__bu(&b, 1);   /* frame_mbs_only, mb_adaptive */
+    psyvid__bu(&b, 1);                    /* direct_8x8_inference             */
+    if (psyvid__bu(&b, 1)) { psyvid__bue(&b); psyvid__bue(&b); psyvid__bue(&b); psyvid__bue(&b); }   /* cropping */
+    if (b.err) return 0;
+    if (!psyvid__bu(&b, 1)) { out[4] = PSYVID_SITING_LEFT; return 1; }   /* no VUI: type 0 inferred */
+    if (psyvid__bu(&b, 1) && psyvid__bu(&b, 8) == 255) psyvid__bu(&b, 32);   /* aspect ratio */
+    if (psyvid__bu(&b, 1)) psyvid__bu(&b, 1);   /* overscan                     */
+    if (psyvid__bu(&b, 1)) {              /* video_signal_type                */
+        uint32_t prim, trc, mat;
+        psyvid__bu(&b, 3);
+        out[1] = psyvid__bu(&b, 1) ? PSYVID_RANGE_FULL : PSYVID_RANGE_LIMITED;
+        if (psyvid__bu(&b, 1)) {
+            prim = psyvid__bu(&b, 8); trc = psyvid__bu(&b, 8); mat = psyvid__bu(&b, 8);
+            out[3] = prim == 1 ? PSYVID_PRIM_BT709 : prim == 5 ? PSYVID_PRIM_BT601_625 : (prim == 6 || prim == 7) ? PSYVID_PRIM_BT601_525 :
+                     prim == 9 ? PSYVID_PRIM_BT2020 : prim == 2 ? -1 : -2;
+            out[2] = (trc == 1 || trc == 6 || trc == 14 || trc == 15) ? PSYVID_TRC_BT1886 : trc == 13 ? PSYVID_TRC_SRGB :
+                     trc == 8 ? PSYVID_TRC_LINEAR : trc == 4 ? PSYVID_TRC_GAMMA22 : trc == 2 ? -1 : -2;
+            out[0] = mat == 1 ? PSYVID_MATRIX_BT709 : (mat == 5 || mat == 6) ? PSYVID_MATRIX_BT601 : mat == 9 ? PSYVID_MATRIX_BT2020 :
+                     mat == 2 ? -1 : -2;
+        }
+    }
+    if (psyvid__bu(&b, 1)) {              /* chroma_loc_info                  */
+        uint32_t top = psyvid__bue(&b);
+        psyvid__bue(&b);
+        out[4] = top == 0 ? PSYVID_SITING_LEFT : top == 1 ? PSYVID_SITING_CENTER : -2;
+    } else {
+        /* absent, the standard infers type 0 (E.2.1): x264 omits it then */
+        out[4] = PSYVID_SITING_LEFT;
+    }
+    if (b.err) { for (k = 0; k < 5; k++) out[k] = -1; return 0; }
+    return 1;
+}
+
+/* The SPS in an avcC record or in Annex B NAL units (MF_MT_MPEG_SEQUENCE_HEADER
+ * is one or the other). */
+static int psyvid__h264_seqhdr(const uint8_t* p, size_t n, int16_t out[5]) {
+    size_t i;
+    if (n > 8 && p[0] == 1) {   /* avcC: version 1, then the first SPS's length */
+        size_t len = (size_t)p[6] << 8 | p[7];
+        if ((p[5] & 0x1f) > 0 && 8 + len <= n && (p[8] & 0x1f) == 7) return psyvid__h264_vui(p + 8, len, out);
+        return 0;
+    }
+    for (i = 0; i + 3 < n; i++) {
+        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1 && (p[i + 3] & 0x1f) == 7) {
+            size_t j = i + 3;
+            while (j + 2 < n && !(p[j] == 0 && p[j + 1] == 0 && (p[j + 2] == 1 || p[j + 2] == 0))) j++;
+            if (j + 2 >= n) j = n;
+            return psyvid__h264_vui(p + i + 3, j - (i + 3), out);
+        }
+    }
+    return 0;
+}
+
+/* MFVideoArea, as the SDK lays it out (checked in psy_video_com.cpp). */
+typedef struct psyvid__mfarea { WORD fx; short x; WORD fy; short y; LONG cx, cy; } psyvid__mfarea;
+
+typedef struct psyvid__mf {
+    IMFSourceReader*      rd;
+    IMFSample*            cur;           /* the frame lent to the core          */
+    IMFMediaBuffer*       buf;
+    IMF2DBuffer*          b2d;
+    IMFSample*            pending;       /* the keyframe a seek read            */
+    int64_t               pending_ts;
+    ID3D11Device*         dev;
+    IMFDXGIDeviceManager* dm;
+    void*                 mta;           /* CO_MTA_USAGE_COOKIE                 */
+    int                   loaded;
+    int                   hw;            /* PSYVID_HW_*, resolved               */
+    int                   dxgi_out;      /* the decoder outputs D3D11 textures  */
+    int32_t               w, h, fw, fh, ax, ay, stride;
+    int32_t               num, den;
+    int32_t               codec;
+    int64_t               duration;      /* 100 ns, from the source             */
+    HRESULT               last_hr;
+    int                   native;        /* compressed samples: the index's first pass */
+    int                   interlaced;    /* the last sample is interlaced        */
+    int                   vui_found;     /* an H.264 SPS was parsed              */
+    int                   gpu;           /* PSYVID_PATH_GPU: frames copied on the GPU */
+    void*                 gpu_dst;       /* the core's texture for the next frame */
+    ID3D11DeviceContext*  ctx;           /* the screen's immediate context (GPU) */
+    int32_t               tw, th;        /* the decoder's surface size           */
+    int                   req_gpu;
+    int                   req_auto;
+    int16_t               vui[5];        /* its matrix, range, transfer, primaries, siting */
+    char                  name[96];
+    /* set by psyvid_open() before open(): the movie's choice and the screen */
+    int                   req_hw;
+    int32_t               req_num, req_den;   /* the index's rate        */
+    psyscr_native_info    req_nat;
+} psyvid__mf;
+
+static void psyvid__mf_unlock(psyvid__mf* m) {
+    if (m->b2d) { PSYVID__CALL0(m->b2d, Unlock2D); PSYVID__REL(m->b2d); }
+    else if (m->buf) PSYVID__CALL0(m->buf, Unlock);
+    PSYVID__REL(m->buf);
+    PSYVID__REL(m->cur);
+}
+
+static int64_t psyvid__mf_index_of(const psyvid__mf* m, int64_t ts) {
+    /* round(ts * num / (den * 1e7)), split so a long stream cannot overflow */
+    int64_t d = (int64_t)m->den * 10000000, a = psyvid__floordiv(ts, d), b = ts - a * d;
+    return a * m->num + (b * m->num + d / 2) / d;
+}
+
+static int16_t psyvid__mf_matrix(UINT32 v) {
+    switch (v) { case 1: return PSYVID_MATRIX_BT709; case 2: return PSYVID_MATRIX_BT601; case 4: return PSYVID_MATRIX_BT2020; default: return -1; }
+}
+static int16_t psyvid__mf_range(UINT32 v) {
+    switch (v) { case 1: return PSYVID_RANGE_FULL; case 2: return PSYVID_RANGE_LIMITED; default: return -1; }
+}
+static int16_t psyvid__mf_trc(UINT32 v) {
+    switch (v) {
+    case 1: return PSYVID_TRC_LINEAR;
+    case 4: return PSYVID_TRC_GAMMA22;
+    case 5: case 13: return PSYVID_TRC_BT1886;   /* BT.709 / BT.2020 OETF: shown by BT.1886 */
+    case 7: return PSYVID_TRC_SRGB;
+    case 15: case 16: return -2;                  /* PQ, HLG: HDR, refused   */
+    default: return -1;
+    }
+}
+static int16_t psyvid__mf_prim(UINT32 v) {
+    switch (v) { case 2: return PSYVID_PRIM_BT709; case 4: return PSYVID_PRIM_BT601_625; case 5: case 6: return PSYVID_PRIM_BT601_525;
+                 case 9: return PSYVID_PRIM_BT2020; default: return -1; }
+}
+static int16_t psyvid__mf_siting(UINT32 v) {
+    switch (v) { case 0: return -1; case 5: return PSYVID_SITING_LEFT; case 1: return PSYVID_SITING_CENTER; default: return -2; }
+}
+
+static UINT32 psyvid__mf_u32(IMFMediaType* t, const GUID* key, UINT32 def) {
+    UINT32 v = def;
+    if (FAILED(PSYVID__CALL(t, GetUINT32, PSYVID__IID(*key), &v))) v = def;
+    return v;
+}
+
+/* A D3D11 device for DXVA on the adapter the screen uses (its LUID), or the
+ * default adapter. Its own device: the screen's has no VIDEO_SUPPORT. */
+static int psyvid__mf_device(psyvid__mf* m, const psyscr_native_info* nat, char* err, size_t cap) {
+    IDXGIFactory1* fac = NULL;
+    IDXGIAdapter1* pick = NULL;
+    ID3D10Multithread* mt = NULL;
+    UINT i, token = 0;
+    HRESULT hr;
+    static const D3D_FEATURE_LEVEL lv[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    if (!psyvid__mfl.d3d) psyvid__mfl.d3d = LoadLibraryW(L"d3d11.dll");
+    if (!psyvid__mfl.dxgi) psyvid__mfl.dxgi = LoadLibraryW(L"dxgi.dll");
+    if (psyvid__mfl.d3d && !psyvid__mfl.D3D11CreateDevice)
+        psyvid__mfl.D3D11CreateDevice = (psyvid__D3D11CreateDevice_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.d3d, "D3D11CreateDevice");
+    if (psyvid__mfl.dxgi && !psyvid__mfl.CreateDXGIFactory1)
+        psyvid__mfl.CreateDXGIFactory1 = (psyvid__CreateDXGIFactory1_fn)(void (*)(void))PSYVID__SYM(psyvid__mfl.dxgi, "CreateDXGIFactory1");
+    if (!psyvid__mfl.D3D11CreateDevice || !psyvid__mfl.CreateDXGIFactory1 || !psyvid__mfl.CreateDXGIDeviceManager) {
+        psyvid__fmt(err, cap, "DXVA needs d3d11.dll, dxgi.dll and MFCreateDXGIDeviceManager");
+        return PSYVID_ERR_NOT_IMPLEMENTED;
+    }
+    if (nat && (nat->luid_low || nat->luid_high) &&
+        SUCCEEDED(psyvid__mfl.CreateDXGIFactory1(PSYVID__IID(psyvid__IID_IDXGIFactory1), (void**)&fac))) {
+        for (i = 0; !pick; i++) {
+            IDXGIAdapter1* ad = NULL;
+            DXGI_ADAPTER_DESC1 dd;
+            if (PSYVID__CALL(fac, EnumAdapters1, i, &ad) != S_OK) break;
+            PSYVID__CALL(ad, GetDesc1, &dd);
+            if (dd.AdapterLuid.LowPart == nat->luid_low && dd.AdapterLuid.HighPart == nat->luid_high) pick = ad;
+            else PSYVID__REL(ad);
+        }
+        PSYVID__REL(fac);
+    }
+    hr = psyvid__mfl.D3D11CreateDevice((IDXGIAdapter*)pick, pick ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, NULL,
+                                       D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                       lv, 2, D3D11_SDK_VERSION, &m->dev, NULL, NULL);
+    PSYVID__REL(pick);
+    if (FAILED(hr)) { psyvid__fmt(err, cap, "D3D11CreateDevice with VIDEO_SUPPORT failed (0x%08lx)", (unsigned long)hr); return PSYVID_ERR_DECODER; }
+    /* MF's decoder and the source reader use the device from more than one thread */
+    if (SUCCEEDED(PSYVID__CALL(m->dev, QueryInterface, PSYVID__IID(psyvid__IID_ID3D10Multithread), (void**)&mt))) {
+        PSYVID__CALL(mt, SetMultithreadProtected, TRUE);
+        PSYVID__REL(mt);
+    }
+    hr = psyvid__mfl.CreateDXGIDeviceManager(&token, &m->dm);
+    if (SUCCEEDED(hr)) hr = PSYVID__CALL(m->dm, ResetDevice, (IUnknown*)m->dev, token);
+    if (FAILED(hr)) { psyvid__fmt(err, cap, "the DXGI device manager failed (0x%08lx)", (unsigned long)hr); return PSYVID_ERR_DECODER; }
+    return PSYVID_OK;
+}
+
+static void psyvid__mf_close(void* ctx) {
+    psyvid__mf* m = (psyvid__mf*)ctx;
+    psyvid__mf_unlock(m);
+    PSYVID__REL(m->pending);
+    PSYVID__REL(m->rd);
+    PSYVID__REL(m->dm);
+    PSYVID__REL(m->ctx);
+    PSYVID__REL(m->dev);
+    if (m->mta) { psyvid__mfl.DecMTA(m->mta); m->mta = NULL; }
+    if (m->loaded) { psyvid__mf_unload(); m->loaded = 0; }
+}
+
+/* Opens the reader. native: the compressed samples, no decoder (the index
+ * maker's first pass). */
+static int psyvid__mf_open_ex(psyvid__mf* m, const psyvid_decoder_open* in, psyvid_stream* out, int hw,
+                              const psyscr_native_info* nat, int native, int32_t num, int32_t den, char* err, size_t cap) {
+    IMFAttributes* at = NULL;
+    IMFByteStream* bs = NULL;
+    IMFAttributes* bsa = NULL;
+    IMFMediaType* nt = NULL;
+    IMFMediaType* ot = NULL;
+    psyvid__stm* s;
+    GUID sub;
+    UINT64 v64 = 0;
+    UINT32 v, prof, nvideo = 0, k;
+    HRESULT hr;
+    int rc;
+    PROPVARIANT pv;
+    memset(m, 0, sizeof *m);
+    m->gpu = (hw >> 8) & 1;
+    hw &= 0xff;
+    m->hw = hw;
+    m->native = native;
+    m->req_num = num; m->req_den = den;
+    rc = psyvid__mf_load(err, cap);
+    if (rc < 0) return rc;
+    m->loaded = 1;
+    if (FAILED(psyvid__mfl.IncMTA(&m->mta))) m->mta = NULL;
+    /* the byte source */
+    s = (psyvid__stm*)psyvid__malloc(sizeof *s);
+    if (!s) { psyvid__fmt(err, cap, "out of memory"); return PSYVID_ERR_FULL; }
+    memset(s, 0, sizeof *s);
+    s->vt = &psyvid__stm_table;
+    s->refs = 1;
+    InitializeSRWLock(&s->lock);
+    rc = psyvid__src_open(&s->src, in->path, in->data, in->size, in->reader, in->reader_ctx);
+    if (rc < 0) { psyvid__free(s); psyvid__fmt(err, cap, "cannot open %s", in->path ? in->path : "the source"); return rc; }
+    hr = psyvid__mfl.ByteStreamOnStream((IStream*)(void*)s, &bs);
+    psyvid__stm_release(s);   /* the byte stream holds its own reference */
+    if (FAILED(hr)) { psyvid__fmt(err, cap, "MFCreateMFByteStreamOnStream failed (0x%08lx)", (unsigned long)hr); return PSYVID_ERR_DECODER; }
+    /* the source resolver picks the MP4 source from the content type: the
+     * stream has no file name to go by */
+    if (SUCCEEDED(PSYVID__CALL(bs, QueryInterface, PSYVID__IID(psyvid__IID_IMFAttributes), (void**)&bsa))) {
+        PSYVID__CALL(bsa, SetString, PSYVID__IID(psyvid__MF_BYTESTREAM_CONTENT_TYPE), L"video/mp4");
+        PSYVID__REL(bsa);
+    }
+    hr = psyvid__mfl.CreateAttributes(&at, 4);
+    if (FAILED(hr)) { PSYVID__REL(bs); psyvid__fmt(err, cap, "MFCreateAttributes failed"); return PSYVID_ERR_DECODER; }
+    /* MF refuses DISABLE_CONVERTERS together with hardware transforms
+     * (E_INVALIDARG, measured), so with hardware the chain is checked after
+     * the type is set: the decoder and nothing else. MF_LOW_LATENCY is not
+     * set: with it the Microsoft H.264 decoder stamped frame 1 with frame
+     * 0's time and then accumulated 100 ns roundings (measured). */
+    if (hw == PSYVID_HW_OFF || native) PSYVID__CALL(at, SetUINT32, PSYVID__IID(psyvid__MF_READWRITE_DISABLE_CONVERTERS), TRUE);
+    else PSYVID__CALL(at, SetUINT32, PSYVID__IID(psyvid__MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS), TRUE);
+    if (hw == PSYVID_HW_DXVA && !native && m->gpu) {
+        /* the screen's own device (made with VIDEO_SUPPORT and protection),
+         * and surfaces the GPU can copy from */
+        UINT token = 0;
+        HRESULT hr2;
+        m->dev = nat ? (ID3D11Device*)nat->d3d11_device : NULL;
+        if (!m->dev || !psyvid__mfl.CreateDXGIDeviceManager) { psyvid__fmt(err, cap, "the GPU path needs the screen's D3D11 device"); PSYVID__REL(at); PSYVID__REL(bs); return PSYVID_ERR_REFUSED; }
+        PSYVID__CALL0(m->dev, AddRef);
+        PSYVID__CALL(m->dev, GetImmediateContext, &m->ctx);
+        hr2 = psyvid__mfl.CreateDXGIDeviceManager(&token, &m->dm);
+        if (SUCCEEDED(hr2)) hr2 = PSYVID__CALL(m->dm, ResetDevice, (IUnknown*)m->dev, token);
+        if (FAILED(hr2)) { psyvid__fmt(err, cap, "the DXGI device manager refused the screen's device (0x%08lx)", (unsigned long)hr2); PSYVID__REL(at); PSYVID__REL(bs); return PSYVID_ERR_DECODER; }
+        PSYVID__CALL(at, SetUnknown, PSYVID__IID(psyvid__MF_SOURCE_READER_D3D_MANAGER), (IUnknown*)m->dm);
+    } else if (hw == PSYVID_HW_DXVA && !native) {
+        rc = psyvid__mf_device(m, nat, err, cap);
+        if (rc < 0) { PSYVID__REL(at); PSYVID__REL(bs); return rc; }
+        PSYVID__CALL(at, SetUnknown, PSYVID__IID(psyvid__MF_SOURCE_READER_D3D_MANAGER), (IUnknown*)m->dm);
+    }
+    hr = psyvid__mfl.ReaderFromByteStream(bs, at, &m->rd);
+    PSYVID__REL(at);
+    PSYVID__REL(bs);
+    if (FAILED(hr)) { psyvid__fmt(err, cap, "Media Foundation cannot read it (0x%08lx): MP4 only; remux with -f mp4", (unsigned long)hr); return PSYVID_ERR_FORMAT; }
+    /* exactly one video stream, and only it selected */
+    for (k = 0; k < 64; k++) {
+        IMFMediaType* t = NULL;
+        GUID major;
+        if (FAILED(PSYVID__CALL(m->rd, GetNativeMediaType, k, 0, &t))) break;
+        if (SUCCEEDED(PSYVID__CALL(t, GetGUID, PSYVID__IID(psyvid__MF_MT_MAJOR_TYPE), &major)) &&
+            psyvid__guid_eq(&(major), &(psyvid__MFMediaType_Video))) nvideo++;
+        PSYVID__REL(t);
+    }
+    if (nvideo != 1) { psyvid__fmt(err, cap, "%u video streams; the canonical form has one", (unsigned)nvideo); return PSYVID_ERR_FORMAT; }
+    PSYVID__CALL(m->rd, SetStreamSelection, PSYVID__MF_ALL_STREAMS, FALSE);
+    PSYVID__CALL(m->rd, SetStreamSelection, PSYVID__MF_FIRST_VIDEO, TRUE);
+    hr = PSYVID__CALL(m->rd, GetNativeMediaType, PSYVID__MF_FIRST_VIDEO, 0, &nt);
+    if (FAILED(hr)) { psyvid__fmt(err, cap, "no video stream"); return PSYVID_ERR_FORMAT; }
+    PSYVID__CALL(nt, GetGUID, PSYVID__IID(psyvid__MF_MT_SUBTYPE), &sub);
+    prof = psyvid__mf_u32(nt, &psyvid__MF_MT_MPEG2_PROFILE, 0);
+    if (psyvid__guid_eq(&(sub), &(psyvid__MFVideoFormat_H264))) {
+        m->codec = PSYVID_CODEC_H264;
+        if (prof == 110 || prof == 122 || prof == 244) {
+            PSYVID__REL(nt);
+            psyvid__fmt(err, cap, "H.264 profile %s: the canonical form is 8-bit 4:2:0 (High, Main or Baseline); re-encode with -pix_fmt yuv420p",
+                        prof == 110 ? "High 10" : prof == 122 ? "High 4:2:2" : "High 4:4:4");
+            return PSYVID_ERR_FORMAT;
+        }
+    } else if (psyvid__guid_eq(&(sub), &(psyvid__MFVideoFormat_HEVC))) {
+        m->codec = PSYVID_CODEC_HEVC;
+        if (prof != 0 && prof != 1) {
+            PSYVID__REL(nt);
+            psyvid__fmt(err, cap, "HEVC profile %u: the canonical form is Main (8-bit 4:2:0)", (unsigned)prof);
+            return PSYVID_ERR_FORMAT;
+        }
+    } else {
+        char cc[5];
+        memcpy(cc, &sub.Data1, 4); cc[4] = 0;
+        for (k = 0; k < 4; k++) if (cc[k] < 32 || cc[k] > 126) cc[k] = '?';
+        PSYVID__REL(nt);
+        psyvid__fmt(err, cap, "the video codec is '%s', not H.264 or HEVC; re-encode with libx264", cc);
+        return PSYVID_ERR_FORMAT;
+    }
+    if (m->codec == PSYVID_CODEC_H264) {
+        UINT8 hdr[1024];
+        UINT32 got = 0;
+        if (SUCCEEDED(PSYVID__CALL(nt, GetBlob, PSYVID__IID(psyvid__MF_MT_MPEG_SEQUENCE_HEADER), hdr, (UINT32)sizeof hdr, &got)))
+            m->vui_found = psyvid__h264_seqhdr(hdr, got, m->vui);
+    }
+    if (psyvid__mf_u32(nt, &psyvid__MF_MT_VIDEO_ROTATION, 0) != 0) {
+        v = psyvid__mf_u32(nt, &psyvid__MF_MT_VIDEO_ROTATION, 0);
+        PSYVID__REL(nt);
+        psyvid__fmt(err, cap, "the stream is rotated by %u degrees; no rotation is applied at play: re-encode the pixels upright (-autorotate) or remux with -display_rotation 0", (unsigned)v);
+        return PSYVID_ERR_FORMAT;
+    }
+    if (native) {
+        hr = PSYVID__CALL(m->rd, SetCurrentMediaType, PSYVID__MF_FIRST_VIDEO, NULL, nt);
+        ot = nt; nt = NULL;
+        if (FAILED(hr)) { PSYVID__REL(ot); psyvid__fmt(err, cap, "cannot select the compressed stream"); return PSYVID_ERR_DECODER; }
+    } else {
+        PSYVID__REL(nt);
+        hr = psyvid__mfl.CreateMediaType(&ot);
+        if (SUCCEEDED(hr)) {
+            PSYVID__CALL(ot, SetGUID, PSYVID__IID(psyvid__MF_MT_MAJOR_TYPE), PSYVID__IID(psyvid__MFMediaType_Video));
+            PSYVID__CALL(ot, SetGUID, PSYVID__IID(psyvid__MF_MT_SUBTYPE), PSYVID__IID(psyvid__MFVideoFormat_NV12));
+            hr = PSYVID__CALL(m->rd, SetCurrentMediaType, PSYVID__MF_FIRST_VIDEO, NULL, ot);
+        }
+        PSYVID__REL(ot);
+        if (FAILED(hr)) {
+            psyvid__fmt(err, cap, "%s: no decoder gives NV12 for this stream (0x%08lx)%s", m->codec == PSYVID_CODEC_HEVC ? "HEVC" : "H.264",
+                        (unsigned long)hr, m->codec == PSYVID_CODEC_HEVC ? "; no HEVC decoder may be installed (HEVC Video Extensions): re-encode as H.264"
+                                                                           : "; the canonical form is 8-bit 4:2:0");
+            return PSYVID_ERR_FORMAT;
+        }
+        hr = PSYVID__CALL(m->rd, GetCurrentMediaType, PSYVID__MF_FIRST_VIDEO, &ot);
+        if (FAILED(hr)) { psyvid__fmt(err, cap, "no output type"); return PSYVID_ERR_DECODER; }
+    }
+    /* the description */
+    if (FAILED(PSYVID__CALL(ot, GetUINT64, PSYVID__IID(psyvid__MF_MT_FRAME_SIZE), &v64))) v64 = 0;
+    m->fw = (int32_t)(v64 >> 32); m->fh = (int32_t)(v64 & 0xffffffffu);
+    m->w = m->fw; m->h = m->fh;
+    if (!native) {
+        psyvid__mfarea a;
+        UINT32 got = 0;
+        if (SUCCEEDED(PSYVID__CALL(ot, GetBlob, PSYVID__IID(psyvid__MF_MT_MINIMUM_DISPLAY_APERTURE), (UINT8*)&a, (UINT32)sizeof a, &got)) &&
+            got == sizeof a) {
+            m->ax = a.x; m->ay = a.y; m->w = (int32_t)a.cx; m->h = (int32_t)a.cy;
+        }
+        if ((m->ax & 1) || (m->ay & 1) || m->ax < 0 || m->ay < 0 || m->ax + m->w > m->fw || m->ay + m->h > m->fh) {
+            PSYVID__REL(ot);
+            psyvid__fmt(err, cap, "display aperture %d,%d %dx%d in a %dx%d frame", (int)m->ax, (int)m->ay, (int)m->w, (int)m->h, (int)m->fw, (int)m->fh);
+            return PSYVID_ERR_FORMAT;
+        }
+        m->stride = (int32_t)psyvid__mf_u32(ot, &psyvid__MF_MT_DEFAULT_STRIDE, (UINT32)m->fw);
+    }
+    if (SUCCEEDED(PSYVID__CALL(ot, GetUINT64, PSYVID__IID(psyvid__MF_MT_FRAME_RATE), &v64)) && (v64 >> 32) && (v64 & 0xffffffffu)) {
+        int64_t a = (int64_t)(v64 >> 32), b = (int64_t)(v64 & 0xffffffffu), g0 = a, g1 = b;
+        while (g1) { int64_t t = g0 % g1; g0 = g1; g1 = t; }
+        m->num = (int32_t)(a / g0); m->den = (int32_t)(b / g0);
+    }
+    if (SUCCEEDED(PSYVID__CALL(ot, GetUINT64, PSYVID__IID(psyvid__MF_MT_PIXEL_ASPECT_RATIO), &v64)) &&
+        (v64 >> 32) != (v64 & 0xffffffffu)) {
+        PSYVID__REL(ot);
+        psyvid__fmt(err, cap, "pixel aspect %u:%u; the canonical form has square pixels: -vf setsar=1 (after scaling to the shape you want)",
+                    (unsigned)(v64 >> 32), (unsigned)(v64 & 0xffffffffu));
+        return PSYVID_ERR_FORMAT;
+    }
+    /* Progressive, or "mixed": H.264 can switch per frame, so the decoder
+     * says mixed and each sample says what it is (the index maker checks
+     * every sample, MFSampleExtension_Interlaced). Field modes are refused. */
+    v = psyvid__mf_u32(ot, &psyvid__MF_MT_INTERLACE_MODE, 2);
+    if (v != 2 /* MFVideoInterlace_Progressive */ && v != 7 /* MixedInterlaceOrProgressive */) {
+        PSYVID__REL(ot);
+        psyvid__fmt(err, cap, "interlaced (MF interlace mode %u); the canonical form is progressive", (unsigned)v);
+        return PSYVID_ERR_FORMAT;
+    }
+    out->w = m->w; out->h = m->h;
+    out->format = native ? 0 : PSYVID_FMT_NV12;
+    /* MF derives the type's rate from 100 ns durations (23.976 comes out
+     * 10000000/417083, measured), so the stream's rate is the index's, made
+     * from the sample times; MF's must only agree to 100 ppm. */
+    if (m->req_num > 0 && m->req_den > 0) {
+        double a = (double)m->num / (m->den > 0 ? m->den : 1), b = (double)m->req_num / m->req_den;
+        if (m->num > 0 && fabs(a / b - 1.0) > 1e-4) {
+            psyvid__fmt(err, cap, "the stream runs %.4f fps, the index says %d/%d; the index is stale: make it again", a, (int)m->req_num, (int)m->req_den);
+            return PSYVID_ERR_FORMAT;
+        }
+        m->num = m->req_num; m->den = m->req_den;
+    }
+    out->fps_num = 0; out->fps_den = 0;
+    out->frames = -1; out->gop = 0; out->codec = m->codec;
+    out->matrix = psyvid__mf_matrix(psyvid__mf_u32(ot, &psyvid__MF_MT_YUV_MATRIX, 0));
+    out->range = psyvid__mf_range(psyvid__mf_u32(ot, &psyvid__MF_MT_VIDEO_NOMINAL_RANGE, 0));
+    out->transfer = psyvid__mf_trc(psyvid__mf_u32(ot, &psyvid__MF_MT_TRANSFER_FUNCTION, 0));
+    out->primaries = psyvid__mf_prim(psyvid__mf_u32(ot, &psyvid__MF_MT_VIDEO_PRIMARIES, 0));
+    out->siting = psyvid__mf_siting(psyvid__mf_u32(ot, &psyvid__MF_MT_VIDEO_CHROMA_SITING, 0));
+    PSYVID__REL(ot);
+    if (out->transfer == -2) { psyvid__fmt(err, cap, "an HDR transfer (PQ or HLG); the canonical form is SDR"); return PSYVID_ERR_FORMAT; }
+    if (out->siting == -2) { psyvid__fmt(err, cap, "chroma siting other than left or center; re-encode with -chroma_sample_location left"); return PSYVID_ERR_FORMAT; }
+    out->timescale = 10000000;   /* MF sample times are 100 ns */
+    out->caps = PSYVID_DEC_CPU;
+    memset(&pv, 0, sizeof pv);
+    if (SUCCEEDED(PSYVID__CALL(m->rd, GetPresentationAttribute, PSYVID__MF_MEDIASOURCE, PSYVID__IID(psyvid__MF_PD_DURATION), &pv))) {
+        /* a VT_UI8: the value sits after the 8-byte header in every layout */
+        memcpy(&m->duration, (const unsigned char*)&pv + 8, 8);
+        psyvid__mfl.PropVariantClear(&pv);
+    }
+    /* which decoder MF chose, for the describe line */
+    psyvid__fmt(m->name, sizeof m->name, "%s", native ? "compressed" : "decoder");
+    if (!native) {
+        IMFSourceReaderEx* rx = NULL;
+        if (SUCCEEDED(PSYVID__CALL(m->rd, QueryInterface, PSYVID__IID(psyvid__IID_IMFSourceReaderEx), (void**)&rx))) {
+            GUID cat;
+            IMFTransform* tr = NULL;
+            if (SUCCEEDED(PSYVID__CALL(rx, GetTransformForStream, PSYVID__MF_FIRST_VIDEO, 0, &cat, &tr)) && tr) {
+                IMFAttributes* ta = NULL;
+                GUID clsid;
+                WCHAR wn[80];
+                int named = 0, hwmft = 0;
+                if (SUCCEEDED(PSYVID__CALL(tr, GetAttributes, &ta)) && ta) {
+                    UINT32 len = 0;
+                    if (SUCCEEDED(PSYVID__CALL(ta, GetString, PSYVID__IID(psyvid__MFT_FRIENDLY_NAME_Attribute), wn, 80, &len))) {
+                        WideCharToMultiByte(CP_UTF8, 0, wn, -1, m->name, (int)sizeof m->name - 1, NULL, NULL);
+                        named = 1;
+                    }
+                    if (SUCCEEDED(PSYVID__CALL(ta, GetStringLength, PSYVID__IID(psyvid__MFT_ENUM_HARDWARE_URL_Attribute), &len))) hwmft = 1;
+                    if (!named && SUCCEEDED(PSYVID__CALL(ta, GetGUID, PSYVID__IID(psyvid__MFT_TRANSFORM_CLSID_Attribute), &clsid))) {
+                        if (psyvid__guid_eq(&(clsid), &(psyvid__CLSID_MSH264DecoderMFT))) { psyvid__fmt(m->name, sizeof m->name, "Microsoft H264 Video Decoder MFT"); named = 1; }
+                    }
+                    PSYVID__REL(ta);
+                }
+                if (!named) psyvid__fmt(m->name, sizeof m->name, "%s", m->codec == PSYVID_CODEC_HEVC ? "an HEVC decoder" : "an H.264 decoder");
+                (void)hwmft;
+                PSYVID__REL(tr);
+            }
+            {   /* principle 5: the decoder alone, no converter after it */
+                IMFTransform* t2 = NULL;
+                GUID cat2;
+                if (SUCCEEDED(PSYVID__CALL(rx, GetTransformForStream, PSYVID__MF_FIRST_VIDEO, 1, &cat2, &t2)) && t2) {
+                    PSYVID__REL(t2);
+                    PSYVID__REL(rx);
+                    psyvid__fmt(err, cap, "Media Foundation put a converter after the decoder; the canonical form needs none (the decoder must give NV12 itself)");
+                    return PSYVID_ERR_FORMAT;
+                }
+            }
+            PSYVID__REL(rx);
+        }
+    }
+    return PSYVID_OK;
+}
+
+static int psyvid__mf_open(void* ctx, const psyvid_decoder_open* in, psyvid_stream* out, char* err, size_t cap) {
+    psyvid__mf* m = (psyvid__mf*)ctx;
+    int hw = m->req_hw | (m->req_gpu ? 0x100 : 0);
+    int auto_hw = m->req_auto && !m->req_gpu;
+    int32_t num = m->req_num, den = m->req_den;
+    psyscr_native_info nat = m->req_nat;
+    int rc = psyvid__mf_open_ex(m, in, out, hw, &nat, 0, num, den, err, cap);
+    if (rc < 0 && auto_hw && rc != PSYVID_ERR_FORMAT && rc != PSYVID_ERR_NOT_FOUND) {
+        /* AUTO: no DXVA device here (WARP, a remote session); the software
+         * decoder gives the same bytes, and info.hw says which ran */
+        psyvid__mf_close(m);
+        rc = psyvid__mf_open_ex(m, in, out, PSYVID_HW_OFF, &nat, 0, num, den, err, cap);
+    }
+    return rc;
+}
+
+/* The current type after the decoder changed it (it learns the coded size
+ * from the first frames): the visible size must not change. */
+static int psyvid__mf_retype(psyvid__mf* m) {
+    IMFMediaType* t = NULL;
+    UINT64 v64 = 0;
+    psyvid__mfarea a;
+    UINT32 got = 0;
+    int32_t w, h, ax = 0, ay = 0;
+    GUID sub;
+    if (FAILED(PSYVID__CALL(m->rd, GetCurrentMediaType, PSYVID__MF_FIRST_VIDEO, &t))) return PSYVID_ERR_DECODER;
+    if (FAILED(PSYVID__CALL(t, GetGUID, PSYVID__IID(psyvid__MF_MT_SUBTYPE), &sub)) || !psyvid__guid_eq(&(sub), &(psyvid__MFVideoFormat_NV12))) {
+        PSYVID__REL(t);
+        return PSYVID_ERR_FORMAT;
+    }
+    if (FAILED(PSYVID__CALL(t, GetUINT64, PSYVID__IID(psyvid__MF_MT_FRAME_SIZE), &v64))) v64 = 0;
+    m->fw = (int32_t)(v64 >> 32); m->fh = (int32_t)(v64 & 0xffffffffu);
+    w = m->fw; h = m->fh;
+    if (SUCCEEDED(PSYVID__CALL(t, GetBlob, PSYVID__IID(psyvid__MF_MT_MINIMUM_DISPLAY_APERTURE), (UINT8*)&a, (UINT32)sizeof a, &got)) &&
+        got == sizeof a) { ax = a.x; ay = a.y; w = (int32_t)a.cx; h = (int32_t)a.cy; }
+    m->stride = (int32_t)psyvid__mf_u32(t, &psyvid__MF_MT_DEFAULT_STRIDE, (UINT32)m->fw);
+    PSYVID__REL(t);
+    if (w != m->w || h != m->h || (ax & 1) || (ay & 1) || ax + w > m->fw || ay + h > m->fh) return PSYVID_ERR_FORMAT;
+    m->ax = ax; m->ay = ay;
+    return PSYVID_OK;
+}
+
+/* The next sample in presentation order, or ENDED, or an error. */
+static int psyvid__mf_read(psyvid__mf* m, IMFSample** smp, int64_t* ts) {
+    int guard;
+    *smp = NULL;
+    for (guard = 0; guard < 64; guard++) {
+        DWORD idx = 0, flags = 0;
+        LONGLONG t = 0;
+        HRESULT hr = PSYVID__CALL(m->rd, ReadSample, PSYVID__MF_FIRST_VIDEO, 0, &idx, &flags, &t, smp);
+        m->last_hr = hr;
+        if (FAILED(hr) || (flags & 0x1u /* ERROR */)) { PSYVID__REL(*smp); return PSYVID_ERR_DECODER; }
+        if (flags & 0x2u /* ENDOFSTREAM */) { PSYVID__REL(*smp); return PSYVID_ENDED; }
+        if (flags & 0x100u /* STREAMTICK: a gap */) { PSYVID__REL(*smp); m->last_hr = E_UNEXPECTED; return PSYVID_ERR_DECODER; }
+        if ((flags & 0x20u /* CURRENTMEDIATYPECHANGED */) && !m->native && psyvid__mf_retype(m) < 0) {
+            PSYVID__REL(*smp);
+            m->last_hr = E_UNEXPECTED;
+            return PSYVID_ERR_FORMAT;
+        }
+        if (*smp) { *ts = (int64_t)t; return PSYVID_OK; }
+    }
+    return PSYVID_ERR_DECODER;
+}
+
+static int psyvid__mf_next(void* ctx, psyvid_planes* dst, psyvid_out* out) {
+    psyvid__mf* m = (psyvid__mf*)ctx;
+    IMFSample* smp = NULL;
+    int64_t ts = 0, rows;
+    BYTE* scan0 = NULL;
+    LONG pitch = 0;
+    UINT32 clean = 0;
+    int rc;
+    psyvid__mf_unlock(m);
+    if (m->pending) { smp = m->pending; ts = m->pending_ts; m->pending = NULL; }
+    else if ((rc = psyvid__mf_read(m, &smp, &ts)) != PSYVID_OK) return rc;
+    out->pts = ts;
+    out->index = -1;
+    if (SUCCEEDED(PSYVID__CALL(smp, GetUINT32, PSYVID__IID(psyvid__MFSampleExtension_CleanPoint), &clean)) && clean)
+        out->flags |= PSYVID_OUT_KEYFRAME;
+    {
+        UINT32 il = 0;
+        m->interlaced = SUCCEEDED(PSYVID__CALL(smp, GetUINT32, PSYVID__IID(psyvid__MFSampleExtension_Interlaced), &il)) && il;
+    }
+    if (!dst) { PSYVID__REL(smp); return PSYVID_OK; }   /* decoded and discarded: never read back */
+    if (m->gpu) {
+        /* one GPU copy of the surface into the core's texture, then the
+         * surface is the decoder's again: holding surfaces starves its pool
+         * (a deadlock at 8 held, measured) */
+        IMFMediaBuffer* b = NULL;
+        IMFDXGIBuffer* xb = NULL;
+        ID3D11Texture2D* tex = NULL;
+        UINT sub = 0;
+        HRESULT hr = PSYVID__CALL(smp, GetBufferByIndex, 0, &b);
+        if (SUCCEEDED(hr)) hr = PSYVID__CALL(b, QueryInterface, PSYVID__IID(psyvid__IID_IMFDXGIBuffer), (void**)&xb);
+        if (SUCCEEDED(hr)) hr = PSYVID__CALL(xb, GetResource, PSYVID__IID(psyvid__IID_ID3D11Texture2D), (void**)&tex);
+        if (SUCCEEDED(hr)) hr = PSYVID__CALL(xb, GetSubresourceIndex, &sub);
+        PSYVID__REL(xb);
+        PSYVID__REL(b);
+        if (SUCCEEDED(hr) && tex) {
+            D3D11_TEXTURE2D_DESC td;
+            PSYVID__CALL(tex, GetDesc, &td);
+            m->tw = (int32_t)td.Width; m->th = (int32_t)td.Height;
+            if (td.Format != DXGI_FORMAT_NV12) hr = E_UNEXPECTED;
+            else if (m->gpu_dst) PSYVID__CALL(m->ctx, CopySubresourceRegion, (ID3D11Resource*)m->gpu_dst, 0, 0, 0, 0, (ID3D11Resource*)tex, sub, NULL);
+        }
+        PSYVID__REL(tex);
+        PSYVID__REL(smp);
+        if (FAILED(hr)) { m->last_hr = hr; return PSYVID_ERR_DECODER; }
+        out->flags |= PSYVID__OUT_GPU;
+        out->planes.w[0] = m->w; out->planes.h[0] = m->h;
+        return PSYVID_OK;
+    }
+    m->cur = smp;
+    if (FAILED(PSYVID__CALL(smp, GetBufferByIndex, 0, &m->buf))) { m->last_hr = E_UNEXPECTED; return PSYVID_ERR_DECODER; }
+    {
+        IUnknown* dx = NULL;
+        if (SUCCEEDED(PSYVID__CALL(m->buf, QueryInterface, PSYVID__IID(psyvid__IID_IMFDXGIBuffer), (void**)&dx))) { m->dxgi_out = 1; PSYVID__REL(dx); }
+    }
+    rows = m->fh;
+    {
+        IMF2DBuffer2* b2 = NULL;
+        if (SUCCEEDED(PSYVID__CALL(m->buf, QueryInterface, PSYVID__IID(psyvid__IID_IMF2DBuffer2), (void**)&b2))) {
+            BYTE* start = NULL;
+            DWORD len = 0;
+            HRESULT hr = PSYVID__CALL(b2, Lock2DSize, MF2DBuffer_LockFlags_Read, &scan0, &pitch, &start, &len);
+            if (FAILED(hr)) { PSYVID__REL(b2); m->last_hr = hr; return PSYVID_ERR_DECODER; }
+            /* a surface taller than the frame size (a decoder's alignment)
+             * shows in the buffer's length */
+            if (pitch > 0) {
+                int64_t r = (int64_t)len * 2 / (3 * (int64_t)pitch);
+                if (r > rows && r * 3 * (int64_t)pitch == (int64_t)len * 2) rows = r;
+            }
+            m->b2d = (IMF2DBuffer*)(void*)b2;   /* IMF2DBuffer2 derives from it: Unlock2D is the same slot */
+        } else if (SUCCEEDED(PSYVID__CALL(m->buf, QueryInterface, PSYVID__IID(psyvid__IID_IMF2DBuffer), (void**)&m->b2d))) {
+            HRESULT hr = PSYVID__CALL(m->b2d, Lock2D, &scan0, &pitch);
+            if (FAILED(hr)) { PSYVID__REL(m->b2d); m->last_hr = hr; return PSYVID_ERR_DECODER; }
+        } else {
+            DWORD cur = 0;
+            HRESULT hr = PSYVID__CALL(m->buf, Lock, &scan0, NULL, &cur);
+            if (FAILED(hr)) { m->last_hr = hr; return PSYVID_ERR_DECODER; }
+            pitch = m->stride > 0 ? m->stride : m->fw;
+        }
+    }
+    if (pitch <= 0) { m->last_hr = E_UNEXPECTED; return PSYVID_ERR_FORMAT; }
+    out->flags |= PSYVID_OUT_BORROWED;
+    out->planes.data[0] = scan0 + (size_t)m->ay * (size_t)pitch + (size_t)m->ax;
+    out->planes.stride[0] = (int32_t)pitch;
+    out->planes.w[0] = m->w; out->planes.h[0] = m->h;
+    /* the chroma plane starts after every row of the surface, visible or not */
+    out->planes.data[1] = scan0 + (size_t)rows * (size_t)pitch + (size_t)(m->ay / 2) * (size_t)pitch + (size_t)m->ax;
+    out->planes.stride[1] = (int32_t)pitch;
+    out->planes.w[1] = (m->w + 1) / 2; out->planes.h[1] = (m->h + 1) / 2;
+    return PSYVID_OK;
+}
+
+static int psyvid__mf_seek(void* ctx, int64_t key, int64_t key_pts) {
+    psyvid__mf* m = (psyvid__mf*)ctx;
+    PROPVARIANT pv;
+    int64_t t100, n;
+    HRESULT hr;
+    (void)key_pts;
+    psyvid__mf_unlock(m);
+    PSYVID__REL(m->pending);
+    if (m->num <= 0) return PSYVID_ERR_ARG;
+    /* half a frame past the keyframe's time: the source takes the sync
+     * sample at or before it, and 100 ns rounding cannot fall short */
+    t100 = (psyvid_frame_time(m->num, m->den, key) + psyvid_frame_time(m->num, m->den, key + 1)) / 200;
+    memset(&pv, 0, sizeof pv);
+    {   /* VT_I8 in the first two bytes, the value after the 8-byte header:
+         * the same in every PROPVARIANT layout, and no union names needed */
+        VARTYPE vt = VT_I8;
+        memcpy(&pv, &vt, sizeof vt);
+        memcpy((unsigned char*)&pv + 8, &t100, 8);
+    }
+    hr = PSYVID__CALL(m->rd, SetCurrentPosition, PSYVID__IID(psyvid__GUID_NULL), PSYVID__REF(pv));
+    m->last_hr = hr;
+    if (FAILED(hr)) return PSYVID_ERR_DECODER;
+    /* forward to `key` itself, so next() returns it as the interface says */
+    for (n = 0; n < 100000; n++) {
+        IMFSample* smp = NULL;
+        int64_t ts = 0, i;
+        int rc = psyvid__mf_read(m, &smp, &ts);
+        if (rc != PSYVID_OK) return rc < 0 ? rc : PSYVID_ERR_DECODER;
+        i = psyvid__mf_index_of(m, ts);
+        if (i == key) { m->pending = smp; m->pending_ts = ts; return PSYVID_OK; }
+        PSYVID__REL(smp);
+        if (i > key) { m->last_hr = E_UNEXPECTED; return PSYVID_ERR_DECODER; }
+    }
+    return PSYVID_ERR_DECODER;
+}
+
+static int psyvid__mf_describe(void* ctx, char* buf, size_t cap) {
+    const psyvid__mf* m = (const psyvid__mf*)ctx;
+    static const char* const hw[] = { "auto", "software", "DXVA" };
+    return snprintf(buf, cap, "Media Foundation (%s, %s%s)", m->name, hw[m->hw >= 0 && m->hw <= 2 ? m->hw : 0],
+                    m->dxgi_out ? ", D3D11 surfaces read back" : "");
+}
+
+/* Whether the screen's device can carry a decoder from another thread:
+ * made with VIDEO_SUPPORT, and multithread protection on. Read from the
+ * device itself, so no screen option name is assumed. */
+static int psyvid__mf_video_device(void* devp) {
+    ID3D11Device* dev = (ID3D11Device*)devp;
+    ID3D10Multithread* mt = NULL;
+    int ok = 0;
+    if (!dev || !(PSYVID__CALL0(dev, GetCreationFlags) & D3D11_CREATE_DEVICE_VIDEO_SUPPORT)) return 0;
+    if (SUCCEEDED(PSYVID__CALL(dev, QueryInterface, PSYVID__IID(psyvid__IID_ID3D10Multithread), (void**)&mt)) && mt) {
+        ok = PSYVID__CALL0(mt, GetMultithreadProtected) ? 1 : 0;
+        PSYVID__REL(mt);
+    }
+    return ok;
+}
+
+/* PSYVID_PATH_GPU at open: the first frame gives the surface size (the
+ * movie's textures must have it to take a copy), then back to frame 0. */
+static int psyvid__mf_peek(psyvid__mf* m) {
+    psyvid_out o;
+    psyvid_planes d;
+    int rc;
+    memset(&o, 0, sizeof o);
+    m->gpu_dst = NULL;
+    rc = psyvid__mf_next(m, &d, &o);
+    if (rc != PSYVID_OK) return rc;
+    return psyvid__mf_seek(m, 0, 0);
+}
+
+/* The movie's textures on the screen's device: NV12, the surface's size,
+ * sampled by the GPU. */
+static int psyvid__mf_textures(psyvid__mf* m, psyvid_movie* mv) {
+    D3D11_TEXTURE2D_DESC td;
+    int k;
+    memset(&td, 0, sizeof td);
+    td.Width = (UINT)m->tw; td.Height = (UINT)m->th;
+    td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_NV12;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    for (k = 0; k < mv->n_slots; k++) {
+        ID3D11Texture2D* t = NULL;
+        HRESULT hr = PSYVID__CALL(m->dev, CreateTexture2D, &td, NULL, &t);
+        if (FAILED(hr)) { m->last_hr = hr; return PSYVID_ERR_FULL; }
+        mv->slots[k].gtex = t;
+    }
+    return PSYVID_OK;
+}
+
+static const psyvid_decoder psyvid__mf_decoder = {
+    PSYVID_DECODER_VERSION, "Media Foundation", psyvid__mf_open, psyvid__mf_next, psyvid__mf_seek,
+    psyvid__mf_close, psyvid__mf_describe
+};
+
+#endif /* PSYVID__MF */
+
+/* --- making the index ------------------------------------------------------------ */
+
+/* Writes index_path (NULL = media_path + ".psyvi"): the header from c and the
+ * media file's size and ends, the frame hashes, the note. */
+static int psyvid__index_write(const char* media_path, const char* index_path, const psyvid__canon* c,
+                               const uint64_t* hashes, int64_t n, const char* note, char* err, size_t cap) {
+    psyvid__src s;
+    uint64_t head = 0, tail = 0;
+    uint8_t hdr[PSYVID__IDX_HDR];
+    char ip[1024];
+    int64_t size, i;
+    FILE* f;
+    int rc = psyvid__src_open(&s, media_path, NULL, 0, NULL, NULL);
+    if (rc == PSYVID_OK) rc = psyvid__src_ends(&s, &head, &tail);
+    size = s.size;
+    psyvid__src_close(&s);
+    if (rc < 0) { psyvid__fmt(err, cap, "%s: cannot read it again", media_path); return rc; }
+    psyvid__index_header(hdr, c, size, head, tail);
+    if (!index_path) { psyvid__fmt(ip, sizeof ip, "%s.psyvi", media_path); index_path = ip; }
+    f = psyvid__fopen(index_path, "wb");
+    if (!f) { psyvid__fmt(err, cap, "cannot create %s", index_path); return PSYVID_ERR_IO; }
+    rc = fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr ? PSYVID_OK : PSYVID_ERR_IO;
+    for (i = 0; i < n && rc == PSYVID_OK; i++) {
+        uint8_t b8[8];
+        psyvid__w64(b8, hashes[i]);
+        if (fwrite(b8, 1, 8, f) != 8) rc = PSYVID_ERR_IO;
+    }
+    if (rc == PSYVID_OK && note) {
+        size_t ln = strlen(note);
+        if (fwrite(note, 1, ln, f) != ln) rc = PSYVID_ERR_IO;
+    }
+    if (fclose(f) != 0) rc = PSYVID_ERR_IO;
+    if (rc < 0) psyvid__fmt(err, cap, "cannot write %s", index_path);
+    return rc;
+}
+
+/* Keyframe bookkeeping shared by both makers: the first frame is a
+ * keyframe and every GOP but the last has one length. */
+static int psyvid__gop_step(const char* path, int64_t n, int key, int64_t* last_key, int64_t* gop, char* err, size_t cap) {
+    if (key) {
+        if (*last_key >= 0) {
+            if (*gop == 0) *gop = n - *last_key;
+            else if (n - *last_key != *gop) {
+                psyvid__fmt(err, cap, "%s: GOP length changes at frame %lld (%lld, was %lld); re-encode with a fixed -g and -keyint_min, -sc_threshold 0",
+                            path, (long long)n, (long long)(n - *last_key), (long long)*gop);
+                return PSYVID_ERR_FORMAT;
+            }
+        } else if (n != 0) {
+            psyvid__fmt(err, cap, "%s: the first frame is not a keyframe", path);
+            return PSYVID_ERR_FORMAT;
+        }
+        *last_key = n;
+    } else if (n == 0) {
+        psyvid__fmt(err, cap, "%s: the first frame is not a keyframe", path);
+        return PSYVID_ERR_FORMAT;
+    }
+    return PSYVID_OK;
+}
+
+static int psyvid__hashes_grow(uint64_t** hashes, int64_t n, int64_t* cap_h) {
+    if (n < *cap_h) return PSYVID_OK;
+    {
+        uint64_t* nh = (uint64_t*)psyvid__realloc(*hashes, (size_t)*cap_h * 2 * 8);
+        if (!nh) return PSYVID_ERR_FULL;
+        *hashes = nh;
+        *cap_h *= 2;
+    }
+    return PSYVID_OK;
+}
+
+#if !defined(PSYVID_NO_PL_MPEG) && !defined(PSYVID_PL_MPEG_EXTERNAL)
+static int64_t psyvid__index_make_plm(const char* media_path, const char* index_path,
+                                      const psyvid_index_desc* d, char* err, size_t cap) {
     psyvid__plm p;
     psyvid_stream st;
     psyvid_decoder_open in;
     psyvid__canon c;
-    psyvid__src s;
     uint64_t* hashes = NULL;
     int64_t n = 0, cap_h = 4096, last_key = -1, gop = 0;
-    uint64_t head = 0, tail = 0;
     char e[256];
     int rc;
-    FILE* f;
-    uint8_t hdr[PSYVID__IDX_HDR];
-    char ip[1024];
-    if (!media_path) { psyvid__fmt(err, cap, "no media path"); return PSYVID_ERR_ARG; }
     memset(&in, 0, sizeof in);
     memset(&st, 0, sizeof st);
     in.path = media_path;
@@ -2209,20 +3579,11 @@ PSYVID_API int64_t psyvid_index_make(const char* media_path, const char* index_p
         if (rc < 0) { psyvid__fmt(err, cap, "%s: decode failed at frame %lld", media_path, (long long)n); goto fail; }
         type = p.plm->video_decoder->picture_type;
         if (type == 3) { psyvid__fmt(err, cap, "%s: B-frames (frame %lld); re-encode with -bf 0", media_path, (long long)n); rc = PSYVID_ERR_FORMAT; goto fail; }
-        if (type == 1) {
-            if (last_key >= 0) {
-                if (gop == 0) gop = n - last_key;
-                else if (n - last_key != gop) { psyvid__fmt(err, cap, "%s: GOP length changes at frame %lld (%lld, was %lld); re-encode with a fixed -g and -sc_threshold 0", media_path, (long long)n, (long long)(n - last_key), (long long)gop); rc = PSYVID_ERR_FORMAT; goto fail; }
-            } else if (n != 0) { psyvid__fmt(err, cap, "%s: the first frame is not a keyframe", media_path); rc = PSYVID_ERR_FORMAT; goto fail; }
-            last_key = n;
-        } else if (n == 0) { psyvid__fmt(err, cap, "%s: the first frame is not a keyframe", media_path); rc = PSYVID_ERR_FORMAT; goto fail; }
+        rc = psyvid__gop_step(media_path, n, type == 1, &last_key, &gop, err, cap);
+        if (rc < 0) goto fail;
         idx = (o.pts * st.fps_num + (int64_t)st.fps_den * 45000) / ((int64_t)st.fps_den * 90000);
         if (idx != n) { psyvid__fmt(err, cap, "%s: frame %lld has the time of frame %lld: not a constant rate", media_path, (long long)n, (long long)idx); rc = PSYVID_ERR_FORMAT; goto fail; }
-        if (n >= cap_h) {
-            uint64_t* nh = (uint64_t*)psyvid__realloc(hashes, (size_t)cap_h * 2 * 8);
-            if (!nh) { rc = PSYVID_ERR_FULL; goto fail; }
-            hashes = nh; cap_h *= 2;
-        }
+        if ((rc = psyvid__hashes_grow(&hashes, n, &cap_h)) < 0) goto fail;
         hashes[n] = psyvid__hash_planes(PSYVID_FMT_I420, &o.planes);
         n++;
     }
@@ -2239,39 +3600,331 @@ PSYVID_API int64_t psyvid_index_make(const char* media_path, const char* index_p
     rc = psyvid__canon_check(&c, e, sizeof e);
     if (rc < 0) { psyvid__fmt(err, cap, "%s: %s", media_path, e); goto fail; }
     psyvid__plm_close(&p);
-    rc = psyvid__src_open(&s, media_path, NULL, 0, NULL, NULL);
-    if (rc == PSYVID_OK) { rc = psyvid__src_ends(&s, &head, &tail); c.frames = n; }
-    {
-        int64_t size = s.size;
-        psyvid__src_close(&s);
-        if (rc < 0) { psyvid__fmt(err, cap, "%s: cannot read it again", media_path); psyvid__free(hashes); return rc; }
-        psyvid__index_header(hdr, &c, size, head, tail);
-    }
-    if (!index_path) { psyvid__fmt(ip, sizeof ip, "%s.psyvi", media_path); index_path = ip; }
-    f = psyvid__fopen(index_path, "wb");
-    if (!f) { psyvid__fmt(err, cap, "cannot create %s", index_path); psyvid__free(hashes); return PSYVID_ERR_IO; }
-    rc = fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr ? PSYVID_OK : PSYVID_ERR_IO;
-    {
-        int64_t i;
-        uint8_t b8[8];
-        for (i = 0; i < n && rc == PSYVID_OK; i++) {
-            psyvid__w64(b8, hashes[i]);
-            if (fwrite(b8, 1, 8, f) != 8) rc = PSYVID_ERR_IO;
-        }
-    }
-    if (rc == PSYVID_OK && d && d->note) {
-        size_t ln = strlen(d->note);
-        if (fwrite(d->note, 1, ln, f) != ln) rc = PSYVID_ERR_IO;
-    }
-    if (fclose(f) != 0) rc = PSYVID_ERR_IO;
+    rc = psyvid__index_write(media_path, index_path, &c, hashes, n, d ? d->note : NULL, err, cap);
     psyvid__free(hashes);
-    if (rc < 0) { psyvid__fmt(err, cap, "cannot write %s", index_path); return rc; }
-    return n;
+    return rc < 0 ? rc : n;
 fail:
     psyvid__plm_close(&p);
     psyvid__free(hashes);
     return rc < 0 ? rc : PSYVID_ERR_FORMAT;
+}
 #endif
+
+#if PSYVID__MF
+/* A color field: the stream's when it states one, else the desc's; both
+ * stated and different is refused, neither is refused. */
+static int psyvid__color_pick(int16_t stream, uint8_t given, const char* what, const char* fix, uint8_t* out, char* err, size_t cap) {
+    if (stream > 0 && given && stream != given) {
+        psyvid__fmt(err, cap, "the stream states %s %d, the index desc says %d; drop the desc's value or re-encode", what, (int)stream, (int)given);
+        return PSYVID_ERR_FORMAT;
+    }
+    if (stream > 0) { *out = (uint8_t)stream; return PSYVID_OK; }
+    if (given) { *out = given; return PSYVID_OK; }
+    psyvid__fmt(err, cap, "the stream does not state its %s (an H.264 SPS without it, or HEVC, whose VUI is not read); state it in psyvid_index_desc or encode it with %s", what, fix);
+    return PSYVID_ERR_FORMAT;
+}
+
+/* MP4 boxes: the video track's edit list. MF plays an empty edit (a start
+ * offset) from time 0 without saying so (measured), where another player
+ * delays the picture, so the index maker reads the list itself. Returns 0,
+ * or an error with the message. */
+static int psyvid__mp4_box(psyvid__src* s, int64_t at, int64_t end, uint32_t* type, int64_t* body, int64_t* next) {
+    uint8_t h[16];
+    uint64_t sz;
+    if (at + 8 > end || psyvid__src_read(s, at, h, 8) != PSYVID_OK) return 0;
+    sz = (uint64_t)h[0] << 24 | (uint64_t)h[1] << 16 | (uint64_t)h[2] << 8 | h[3];
+    *type = (uint32_t)h[4] << 24 | (uint32_t)h[5] << 16 | (uint32_t)h[6] << 8 | h[7];
+    *body = at + 8;
+    if (sz == 1) {
+        if (psyvid__src_read(s, at + 8, h + 8, 8) != PSYVID_OK) return 0;
+        sz = (uint64_t)h[8] << 56 | (uint64_t)h[9] << 48 | (uint64_t)h[10] << 40 | (uint64_t)h[11] << 32 |
+             (uint64_t)h[12] << 24 | (uint64_t)h[13] << 16 | (uint64_t)h[14] << 8 | h[15];
+        *body = at + 16;
+    } else if (sz == 0) {
+        sz = (uint64_t)(end - at);
+    }
+    if (sz < 8 || at + (int64_t)sz > end) return 0;
+    *next = at + (int64_t)sz;
+    return 1;
+}
+#define PSYVID__4CC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
+
+static int psyvid__mp4_edits(const char* path, char* err, size_t cap) {
+    psyvid__src s;
+    int64_t at = 0, body, next, moov = -1, moov_end = 0;
+    uint32_t type;
+    int rc = PSYVID_OK;
+    if (psyvid__src_open(&s, path, NULL, 0, NULL, NULL) != PSYVID_OK) return PSYVID_OK;   /* MF read it; nothing to add */
+    while (psyvid__mp4_box(&s, at, s.size, &type, &body, &next)) {
+        if (type == PSYVID__4CC('m', 'o', 'o', 'v')) { moov = body; moov_end = next; break; }
+        at = next;
+    }
+    for (at = moov; moov >= 0 && rc == PSYVID_OK && psyvid__mp4_box(&s, at, moov_end, &type, &body, &next); at = next) {
+        int64_t t_at, t_body, t_next, elst = -1, elst_end = 0;
+        uint32_t t_type;
+        int video = 0;
+        if (type != PSYVID__4CC('t', 'r', 'a', 'k')) continue;
+        for (t_at = body; psyvid__mp4_box(&s, t_at, next, &t_type, &t_body, &t_next); t_at = t_next) {
+            int64_t e_at, e_body, e_next;
+            uint32_t e_type;
+            if (t_type == PSYVID__4CC('e', 'd', 't', 's')) {
+                for (e_at = t_body; psyvid__mp4_box(&s, e_at, t_next, &e_type, &e_body, &e_next); e_at = e_next)
+                    if (e_type == PSYVID__4CC('e', 'l', 's', 't')) { elst = e_body; elst_end = e_next; }
+            } else if (t_type == PSYVID__4CC('m', 'd', 'i', 'a')) {
+                for (e_at = t_body; psyvid__mp4_box(&s, e_at, t_next, &e_type, &e_body, &e_next); e_at = e_next) {
+                    uint8_t hd[12];
+                    if (e_type == PSYVID__4CC('h', 'd', 'l', 'r') && psyvid__src_read(&s, e_body, hd, 12) == PSYVID_OK &&
+                        memcmp(hd + 8, "vide", 4) == 0) video = 1;
+                }
+            }
+        }
+        if (video && elst >= 0) {
+            uint8_t eh[8], en[20];
+            uint32_t count;
+            int64_t mt;
+            int v1;
+            if (elst_end - elst < 8 || psyvid__src_read(&s, elst, eh, 8) != PSYVID_OK) continue;
+            v1 = eh[0] == 1;
+            count = (uint32_t)eh[4] << 24 | (uint32_t)eh[5] << 16 | (uint32_t)eh[6] << 8 | eh[7];
+            if (count == 0) continue;
+            if (psyvid__src_read(&s, elst + 8, en, v1 ? 20 : 12) != PSYVID_OK) continue;
+            if (v1) mt = (int64_t)((uint64_t)en[8] << 56 | (uint64_t)en[9] << 48 | (uint64_t)en[10] << 40 | (uint64_t)en[11] << 32 |
+                                   (uint64_t)en[12] << 24 | (uint64_t)en[13] << 16 | (uint64_t)en[14] << 8 | en[15]);
+            else mt = (int64_t)(int32_t)((uint32_t)en[4] << 24 | (uint32_t)en[5] << 16 | (uint32_t)en[6] << 8 | en[7]);
+            if (count != 1 || mt != 0) {
+                psyvid__fmt(err, cap, "%s: the video track has an edit list (%u entries, the first at media time %lld): a start offset or a cut that players treat differently; remux without it (-avoid_negative_ts make_zero, no -output_ts_offset)",
+                            path, (unsigned)count, (long long)mt);
+                rc = PSYVID_ERR_FORMAT;
+            }
+        }
+    }
+    psyvid__src_close(&s);
+    return rc;
+}
+
+/* The rate: the simplest num/den (k/1 or k*1000/1001, k up to 1000) that
+ * puts every sample time within 100 ns (MF's unit) of its grid time. MF's
+ * own rate is a 100 ns approximation and cannot be the canonical one. */
+static int psyvid__mf_fit_rate(const int64_t* ts, int64_t n, int32_t* num, int32_t* den) {
+    double est;
+    int k, f;
+    if (n < 2 || ts[n - 1] <= ts[0]) return 0;
+    est = (double)(n - 1) * 1e7 / (double)(ts[n - 1] - ts[0]);
+    for (f = 0; f < 2; f++) {
+        for (k = 1; k <= 1000; k++) {
+            int32_t a = f ? k * 1000 : k, b = f ? 1001 : 1;
+            int64_t i;
+            if (fabs((double)a / b / est - 1.0) > 1e-3) continue;
+            for (i = 0; i < n; i++) {
+                int64_t g = psyvid_frame_time(a, b, i), t = (ts[i] - ts[0]) * 100;
+                if (t - g > 100 || g - t > 100) break;
+            }
+            if (i == n) { *num = a; *den = b; return 1; }
+        }
+    }
+    return 0;
+}
+
+static int64_t psyvid__index_make_mf(const char* media_path, const char* index_path,
+                                     const psyvid_index_desc* d, char* err, size_t cap) {
+    psyvid__mf* m;
+    psyvid_decoder_open in;
+    psyvid_stream st;
+    psyvid__canon c;
+    uint64_t* hashes = NULL;
+    int64_t* tsv = NULL;
+    int64_t n = 0, n1 = 0, cap_h = 4096, cap_t = 4096, last_key = -1, gop = 0, prev_ts = 0, k;
+    int32_t num = 0, den = 0;
+    int hw = d && d->hw ? (int)d->hw : PSYVID_HW_OFF;
+    int vui_found = 0;
+    int16_t vui[5] = { -1, -1, -1, -1, -1 };
+    char e[256];
+    int rc;
+    m = (psyvid__mf*)psyvid__malloc(sizeof *m);
+    if (!m) return PSYVID_ERR_FULL;
+    memset(&in, 0, sizeof in);
+    memset(&st, 0, sizeof st);
+    in.path = media_path;
+    /* 1. the compressed samples, in decode order: B-frames and keyframes */
+    tsv = (int64_t*)psyvid__malloc((size_t)cap_t * 8);
+    if (!tsv) { rc = PSYVID_ERR_FULL; goto fail; }
+    rc = psyvid__mf_open_ex(m, &in, &st, PSYVID_HW_OFF, NULL, 1, 0, 0, e, sizeof e);
+    if (rc < 0) { psyvid__fmt(err, cap, "%s: %s", media_path, e); goto fail; }
+    for (;;) {
+        IMFSample* smp = NULL;
+        int64_t ts = 0;
+        UINT32 clean = 0;
+        UINT64 dts = 0;
+        rc = psyvid__mf_read(m, &smp, &ts);
+        if (rc == PSYVID_ENDED) break;
+        if (rc < 0) { psyvid__fmt(err, cap, "%s: cannot read sample %lld (0x%08lx)", media_path, (long long)n1, (unsigned long)m->last_hr); goto fail; }
+        if (FAILED(PSYVID__CALL(smp, GetUINT32, PSYVID__IID(psyvid__MFSampleExtension_CleanPoint), &clean))) clean = 0;
+        if (SUCCEEDED(PSYVID__CALL(smp, GetUINT64, PSYVID__IID(psyvid__MFSampleExtension_DecodeTimestamp), &dts)) && (int64_t)dts != ts) {
+            PSYVID__REL(smp);
+            psyvid__fmt(err, cap, "%s: sample %lld decodes at %lld but shows at %lld (100 ns): B-frames; re-encode with -bf 0",
+                        media_path, (long long)n1, (long long)dts, (long long)ts);
+            rc = PSYVID_ERR_FORMAT; goto fail;
+        }
+        PSYVID__REL(smp);
+        if (n1 > 0 && ts <= prev_ts) {
+            psyvid__fmt(err, cap, "%s: sample %lld shows before the one decoded ahead of it: B-frames; re-encode with -bf 0", media_path, (long long)n1);
+            rc = PSYVID_ERR_FORMAT; goto fail;
+        }
+        rc = psyvid__gop_step(media_path, n1, clean != 0, &last_key, &gop, err, cap);
+        if (rc < 0) goto fail;
+        prev_ts = ts;
+        if (n1 >= cap_t) {
+            int64_t* nt = (int64_t*)psyvid__realloc(tsv, (size_t)cap_t * 2 * 8);
+            if (!nt) { rc = PSYVID_ERR_FULL; goto fail; }
+            tsv = nt; cap_t *= 2;
+        }
+        tsv[n1++] = ts;
+    }
+    vui_found = m->vui_found;
+    memcpy(vui, m->vui, sizeof vui);
+    psyvid__mf_close(m);
+    if (n1 == 0) { psyvid__fmt(err, cap, "%s: no frames", media_path); rc = PSYVID_ERR_FORMAT; goto fail; }
+    if (gop == 0) gop = n1;
+    if ((rc = psyvid__mp4_edits(media_path, err, cap)) < 0) goto fail;
+    if (tsv[0] != 0) {
+        psyvid__fmt(err, cap, "%s: the first frame is at %.3f ms, not 0 (an edit list or a start offset); remux with -avoid_negative_ts make_zero", media_path, (double)tsv[0] / 1e4);
+        rc = PSYVID_ERR_FORMAT; goto fail;
+    }
+    if (!psyvid__mf_fit_rate(tsv, n1, &num, &den)) {
+        double est = n1 > 1 ? (double)(n1 - 1) * 1e7 / (double)(tsv[n1 - 1] - tsv[0]) : 0.0;
+        psyvid__fmt(err, cap, "%s: the frame times of %lld frames fit no constant rate (about %.4f fps); a variable rate, a dropped frame, or a coarse timescale: re-encode at a constant rate with -video_track_timescale set to a multiple of the rate",
+                    media_path, (long long)n1, est);
+        rc = PSYVID_ERR_FORMAT; goto fail;
+    }
+    psyvid__free(tsv); tsv = NULL;
+    /* 2. every frame decoded: on the grid, and its hash */
+    rc = psyvid__mf_open_ex(m, &in, &st, hw, NULL, 0, num, den, e, sizeof e);
+    if (rc < 0) { psyvid__fmt(err, cap, "%s: %s", media_path, e); goto fail; }
+    st.fps_num = num; st.fps_den = den;
+    hashes = (uint64_t*)psyvid__malloc((size_t)cap_h * 8);
+    if (!hashes) { rc = PSYVID_ERR_FULL; goto fail; }
+    for (;;) {
+        psyvid_out o;
+        psyvid_planes dummy;
+        int64_t t, grid;
+        memset(&o, 0, sizeof o);
+        rc = psyvid__mf_next(m, &dummy, &o);
+        if (rc == PSYVID_ENDED) break;
+        if (rc < 0) { psyvid__fmt(err, cap, "%s: decode failed at frame %lld (0x%08lx)", media_path, (long long)n, (unsigned long)m->last_hr); goto fail; }
+        if (m->interlaced) {
+            psyvid__fmt(err, cap, "%s: frame %lld is interlaced; the canonical form is progressive", media_path, (long long)n);
+            rc = PSYVID_ERR_FORMAT; goto fail;
+        }
+        t = o.pts * 100;
+        grid = psyvid_frame_time(st.fps_num, st.fps_den, n);
+        if (n == 0 && t != 0) {
+            psyvid__fmt(err, cap, "%s: the first frame is at %.3f ms, not 0 (an edit list or a start offset); remux with -avoid_negative_ts make_zero", media_path, (double)t / 1e6);
+            rc = PSYVID_ERR_FORMAT; goto fail;
+        }
+        /* 100 ns: MF's unit, so any container time that is a whole number
+         * of ticks of a timescale that is a multiple of the rate passes */
+        if (t - grid > 100 || grid - t > 100) {
+            psyvid__fmt(err, cap, "%s: frame %lld is at %lld ns, the grid of %d/%d fps puts it at %lld ns: a variable rate, a dropped frame, or a coarse timescale; re-encode at a constant rate with -video_track_timescale %d",
+                        media_path, (long long)n, (long long)t, (int)st.fps_num, (int)st.fps_den, (long long)grid, (int)(st.fps_den == 1 ? st.fps_num * 1000 : st.fps_num));
+            rc = PSYVID_ERR_FORMAT; goto fail;
+        }
+        if ((rc = psyvid__hashes_grow(&hashes, n, &cap_h)) < 0) goto fail;
+        hashes[n] = psyvid__hash_planes(PSYVID_FMT_NV12, &o.planes);
+        n++;
+    }
+    if (n != n1) { psyvid__fmt(err, cap, "%s: the decoder gave %lld frames for %lld samples", media_path, (long long)n, (long long)n1); rc = PSYVID_ERR_FORMAT; goto fail; }
+    /* 3. a seek to each keyframe decodes it and the next frame exactly: the
+     * property the movie's seeks rely on, proved for this file */
+    if (!(d && d->no_seek_check)) {
+        for (k = 0; k < n; k += gop) {
+            int64_t j;
+            if (psyvid__mf_seek(m, k, 0) != PSYVID_OK) { psyvid__fmt(err, cap, "%s: the seek to keyframe %lld failed (0x%08lx)", media_path, (long long)k, (unsigned long)m->last_hr); rc = PSYVID_ERR_FORMAT; goto fail; }
+            for (j = k; j < k + 2 && j < n; j++) {
+                psyvid_out o;
+                psyvid_planes dummy;
+                memset(&o, 0, sizeof o);
+                rc = psyvid__mf_next(m, &dummy, &o);
+                if (rc < 0 || psyvid__mf_index_of(m, o.pts) != j || psyvid__hash_planes(PSYVID_FMT_NV12, &o.planes) != hashes[j]) {
+                    psyvid__fmt(err, cap, "%s: frame %lld differs after a seek to keyframe %lld: a keyframe that is not a clean entry point (open GOP?); re-encode with -x264-params open-gop=0",
+                                media_path, (long long)j, (long long)k);
+                    rc = PSYVID_ERR_FORMAT; goto fail;
+                }
+            }
+        }
+    }
+    /* the stream's own statement, from its SPS, where MF reports nothing;
+     * a value the canonical form does not have is refused */
+    if (vui_found) {
+        static const char* const what[5] = { "matrix", "range", "transfer", "primaries", "chroma siting" };
+        int16_t* f[5];
+        int j;
+        f[0] = &st.matrix; f[1] = &st.range; f[2] = &st.transfer; f[3] = &st.primaries; f[4] = &st.siting;
+        for (j = 0; j < 5; j++) {
+            if (vui[j] == -2) {
+                psyvid__fmt(err, cap, "%s: the stream states a %s the canonical form does not have (an HDR transfer, RGB, or another chroma location); re-encode with BT.709 or BT.601 color", media_path, what[j]);
+                rc = PSYVID_ERR_FORMAT; goto fail;
+            }
+            if (*f[j] <= 0 && vui[j] > 0) *f[j] = vui[j];
+        }
+    }
+    memset(&c, 0, sizeof c);
+    c.codec = m->codec; c.w = st.w; c.h = st.h; c.format = PSYVID_FMT_NV12;
+    c.fps_num = st.fps_num; c.fps_den = st.fps_den; c.frames = n; c.gop = (int32_t)gop;
+    rc = psyvid__color_pick(st.matrix, d ? d->matrix : 0, "matrix", "-colorspace bt709", &c.matrix, e, sizeof e);
+    if (rc == PSYVID_OK) rc = psyvid__color_pick(st.range, d ? d->range : 0, "range", "-color_range tv", &c.range, e, sizeof e);
+    if (rc == PSYVID_OK) rc = psyvid__color_pick(st.transfer, d ? d->transfer : 0, "transfer", "-color_trc bt709", &c.transfer, e, sizeof e);
+    if (rc == PSYVID_OK) rc = psyvid__color_pick(st.primaries, d ? d->primaries : 0, "primaries", "-color_primaries bt709", &c.primaries, e, sizeof e);
+    if (rc == PSYVID_OK) rc = psyvid__color_pick(st.siting, d ? d->siting : 0, "chroma siting", "-chroma_sample_location left", &c.siting, e, sizeof e);
+    if (rc == PSYVID_OK) rc = psyvid__canon_check(&c, e, sizeof e);
+    if (rc < 0) { psyvid__fmt(err, cap, "%s: %s", media_path, e); goto fail; }
+    psyvid__mf_close(m);
+    psyvid__free(m);
+    rc = psyvid__index_write(media_path, index_path, &c, hashes, n, d ? d->note : NULL, err, cap);
+    psyvid__free(hashes);
+    return rc < 0 ? rc : n;
+fail:
+    psyvid__mf_close(m);
+    psyvid__free(m);
+    psyvid__free(hashes);
+    psyvid__free(tsv);
+    return rc < 0 ? rc : PSYVID_ERR_FORMAT;
+}
+#endif
+
+static int psyvid__backend_for(const psyvid_desc* d);
+
+PSYVID_API int64_t psyvid_index_make(const char* media_path, const char* index_path,
+                                     const psyvid_index_desc* d, char* err, size_t cap) {
+    int b;
+    if (!media_path) { psyvid__fmt(err, cap, "no media path"); return PSYVID_ERR_ARG; }
+    if (d && d->backend) b = d->backend;
+    else {
+        psyvid_desc q;
+        memset(&q, 0, sizeof q);
+        q.path = media_path;
+        b = psyvid__backend_for(&q);
+        if (b == -1) { psyvid__fmt(err, cap, "cannot open %s", media_path); return PSYVID_ERR_NOT_FOUND; }
+    }
+    if (b == PSYVID_BACKEND_PLMPEG) {
+#if !defined(PSYVID_NO_PL_MPEG) && !defined(PSYVID_PL_MPEG_EXTERNAL)
+        return psyvid__index_make_plm(media_path, index_path, d, err, cap);
+#else
+        psyvid__fmt(err, cap, "psyvid_index_make needs pl_mpeg compiled into this file for MPEG-1");
+        return PSYVID_ERR_NOT_IMPLEMENTED;
+#endif
+    }
+    if (b == PSYVID_BACKEND_MF) {
+#if PSYVID__MF
+        return psyvid__index_make_mf(media_path, index_path, d, err, cap);
+#else
+        psyvid__fmt(err, cap, "%s: MP4 needs Media Foundation (Windows); AVFoundation and FFmpeg are not built", media_path);
+        return PSYVID_ERR_NOT_IMPLEMENTED;
+#endif
+    }
+    (void)&psyvid__index_write; (void)&psyvid__gop_step; (void)&psyvid__hashes_grow;
+    (void)index_path;
+    psyvid__fmt(err, cap, "%s: not an MPEG-PS or MP4 file; a frame sequence needs no index", media_path);
+    return PSYVID_ERR_FORMAT;
 }
 
 /* --- the movie: helpers ----------------------------------------------------------- */
@@ -2326,11 +3979,37 @@ static int64_t psyvid__movie_time(const psyvid_movie* mv, int64_t t) {
     return mv->running ? mv->anchor_mt + (t - mv->anchor_rt) : mv->anchor_mt;
 }
 
-/* The movie base's rate, num/den. psy_timeline.h has rate 1 only today;
- * the soundtrack check below is written against this. */
+/* The movie base's rate, num/den (psytl_get_rate); 1/1 without a
+ * timeline, where the header's own anchor runs at rate 1. */
 static void psyvid__base_rate(const psyvid_movie* mv, int64_t* num, int64_t* den) {
-    (void)mv;
-    *num = 1; *den = 1;
+    int32_t n = 1, d = 1;
+    if (mv->d.timeline) (void)psytl_get_rate(mv->d.timeline, mv->d.base, &n, &d);
+    *num = n; *den = d;
+}
+
+/* floor(x * num / den) without overflow for |x| up to 2^62 and num, den
+ * below 2^31: x is split by den. RT ns to base ns at the base's rate. */
+static int64_t psyvid__scale(int64_t x, int64_t num, int64_t den) {
+    int64_t q, r;
+    if (num == den) return x;
+    q = psyvid__floordiv(x, den);
+    r = x - q * den;
+    return q * num + psyvid__floordiv(r * num, den);
+}
+
+/* The movie time the display frame's window reaches: the base time at RT
+ * onset + L (psytl_window), so the lead stays RT ns at any base rate and a
+ * video frame lands where an annotation at its time lands. Without a
+ * timeline the clock runs at 1, where this is the movie time at the onset
+ * plus L. */
+static int64_t psyvid__window_mt(const psyvid_movie* mv, int64_t onset, int64_t period, int64_t lead_ns) {
+    if (mv->d.timeline) {
+        psytl_frame tf;
+        int64_t e;
+        tf.onset = onset; tf.period = period; tf.index = 0;
+        if (psytl_window(mv->d.timeline, mv->d.base, &tf, &e)) return e;
+    }
+    return psyvid__movie_time(mv, onset) + lead_ns;
 }
 
 static void psyvid__anchor(psyvid_movie* mv, int64_t rt, int64_t mt) {
@@ -2390,10 +4069,81 @@ static int psyvid__hold_at(psyvid_movie* mv, int64_t rt, int64_t mt, int jump) {
     return n;
 }
 
+/* --- the soundtrack, as the frame thread drives it ------------------------------
+ * The sound is a psy_audio.h stream that the decode thread fills from the
+ * soundtrack's source. Sample s plays at movie time s / rate: a start at
+ * movie time mt begins with the sample nearest mt (a tie to the earlier,
+ * psy_audio's rule) and a pause, a seek or the end stops it. */
+
+/* The sample nearest movie time mt (ns) of the current cycle, counted
+ * from the first cycle, as the stream numbers its samples. */
+static int64_t psyvid__snd_sample(const psyvid_movie* mv, int64_t mt, int64_t cycle) {
+    int64_t r = (int64_t)mv->snd_rate, q = psyvid__floordiv(mt, PSYVID__NS), rem = mt - q * PSYVID__NS;
+    return cycle * mv->snd_frames + q * r + (2 * rem * r + PSYVID__NS - 1) / (2 * PSYVID__NS);
+}
+
+static void psyvid__snd_record(psyvid_movie* mv, uint32_t what, int64_t t, int64_t sample, int64_t id) {
+    psyrt_payload u;
+    memset(&u, 0, sizeof u);
+    u.i64[0] = mv->snd_id; u.i64[1] = sample; u.i64[2] = t;
+    u.u32[8] = what; u.u32[9] = (uint32_t)id;
+    psyvid__push(mv, (uint16_t)PSYVID_EV_SOUND, t > 0 ? t : PSYVID__NOW(), &u);
+}
+
+static int psyvid__post(psyvid_movie* mv, uint32_t op, int64_t g);
+
+/* Stops the sound at t (0: at once) and refills from the sample of movie
+ * time mt in cycle `cycle`, for the next start. */
+static void psyvid__snd_rearm(psyvid_movie* mv, int64_t t, int64_t mt, int64_t cycle, int64_t id) {
+    int64_t want;
+    if (!mv->snd) return;
+    want = psyvid__snd_sample(mv, mt, cycle);
+    if (mv->snd_phase == 1 && mv->snd_want == want) return;   /* that refill is on its way */
+    if (mv->snd_phase == 2) { mv->snd_ops->stop(mv->snd, t); psyvid__snd_record(mv, 2, t, -1, id); }
+    mv->snd_want = want;
+    mv->snd_phase = 1;
+    mv->snd_ops->refilling(mv->snd);
+    psyvid__post(mv, PSYVID__MSG_SND, want);
+}
+
+static void psyvid__snd_halt(psyvid_movie* mv, int64_t t, int64_t id) {
+    if (!mv->snd || mv->snd_phase != 2) return;
+    mv->snd_ops->stop(mv->snd, t);
+    psyvid__snd_record(mv, 2, t, -1, id);
+    mv->snd_phase = 0;
+}
+
+/* Starts the sound at t when its refill is in; true when it started. */
+static int psyvid__snd_go(psyvid_movie* mv, int64_t t, int64_t id) {
+    int64_t pid;
+    if (!mv->snd || mv->snd_phase != 1 || !mv->snd_ops->ready(mv->snd, mv->snd_want)) return 0;
+    pid = mv->snd_ops->start(mv->snd, t);
+    if (pid <= 0) return 0;
+    mv->snd_id = pid;
+    mv->snd_t = t;
+    mv->snd_phase = 2;
+    mv->follow_last_m = INT64_MIN;   /* the follow starts again from this play */
+    psyvid__snd_record(mv, 1, t, mv->snd_want, id);
+    return 1;
+}
+
+/* The first time both the sound and the next display frame can make, for
+ * an ASAP control with a soundtrack. */
+static int64_t psyvid__snd_asap(psyvid_movie* mv, const psyscr_frame* f) {
+    int64_t now = PSYVID__NOW(), lead = mv->snd_ops->lead(mv->snd);
+    int64_t t = (now > f->onset ? now : f->onset) + (lead > 0 ? lead : 0) + f->period;
+    /* on a predicted display onset: else the first frame shows up to half a
+     * period away from the first sample, and every frame after keeps that
+     * phase (measured on the real device: -6.2 and +4.5 ms in two runs) */
+    if (f->period > 0) t = f->onset + (t - f->onset + f->period - 1) / f->period * f->period;
+    return t;
+}
+
 /* --- queues ------------------------------------------------------------------------ */
 
 static void psyvid__free_push(psyvid_movie* mv, uint32_t s) {
     uint32_t t = mv->free_tail;
+    if (mv->gpu && (int)s == mv->gpu_shown) return;   /* its texture is on screen */
     mv->free_q[t & (PSYVID__QCAP - 1)] = s;
     psyvid__st32(&mv->free_tail, t + 1);
 }
@@ -2426,6 +4176,8 @@ static void psyvid__on_msg(void* ctx, const void* msg, uint32_t seq) {
     psyvid__msg m;
     (void)seq;
     memcpy(&m, msg, sizeof m);   /* the pump's slot has no alignment promise */
+    if (m.op == PSYVID__MSG_SND && mv->snd) mv->snd_ops->refill(mv->snd, m.g);
+    if (m.op == PSYVID__MSG_WAKE) psyvid__st32(&mv->snd_wake, 0);
     if (m.op == PSYVID__MSG_SEEK) {
         mv->dt_epoch = m.epoch;
         mv->dt_next = m.g;
@@ -2470,7 +4222,10 @@ static bool psyvid__dstep(psyvid_movie* mv) {
             return true;
         }
     }
-    s = psyvid__free_pop(mv);
+    /* a slot taken before and not filled (PENDING, an error): the free
+     * queue has one producer, the frame thread, so it is kept here */
+    if (mv->dt_spare >= 0) { s = mv->dt_spare; mv->dt_spare = -1; }
+    else s = psyvid__free_pop(mv);
     if (s < 0) {
         if (mv->inline_mode) return false;
         psyvid__xchg32(&mv->idle, 1);
@@ -2484,20 +4239,23 @@ static bool psyvid__dstep(psyvid_movie* mv) {
     {
         psyvid_planes dst;
         int64_t t0 = PSYVID__NOW(), dt;
-        uint8_t* base = psyvid__is_yuv(mv->info.format) ? mv->yuv : sl->data;
+        uint8_t* base = sl->data;
         PSYRT_ZONE(zd, "psyvid.decode");
         psyvid__planes_layout(mv->info.format, mv->info.w, mv->info.h, base, &dst);
+#if PSYVID__MF
+        if (mv->gpu) ((psyvid__mf*)mv->dec_ctx)->gpu_dst = sl->gtex;   /* where the decoder copies */
+#endif
         rc = mv->dec->next(mv->dec_ctx, &dst, &out);
         dt = PSYVID__NOW() - t0;
         PSYRT_ZONE_END(zd);
-        if (rc == PSYVID_PENDING) { psyvid__free_push(mv, (uint32_t)s); return false; }
+        if (rc == PSYVID_PENDING) { mv->dt_spare = s; return false; }
         if (rc == PSYVID_ENDED) {
-            psyvid__free_push(mv, (uint32_t)s);
+            mv->dt_spare = s;
             psyvid__dt_fail(mv, PSYVID_ERR_DECODER, "psy_video: %s: the stream ended at frame %lld; the index says %lld frames", mv->dec->name, (long long)idx, (long long)N);
             return false;
         }
         if (rc < 0) {
-            psyvid__free_push(mv, (uint32_t)s);
+            mv->dt_spare = s;
             psyvid__dt_fail(mv, PSYVID_ERR_DECODER, "psy_video: %s: decode of frame %lld failed (%d)", mv->dec->name, (long long)idx, rc);
             return false;
         }
@@ -2525,10 +4283,19 @@ static bool psyvid__dstep(psyvid_movie* mv) {
             int have = 0;
             if (out.flags & PSYVID_OUT_HAS_HASH) { want_h = out.hash; have = 1; }
             else if (mv->hashes) { want_h = mv->hashes[idx]; have = 1; }
+            if (out.flags & PSYVID__OUT_GPU) have = 0;   /* no bytes on the CPU: no hash */
             if (have && psyvid__hash_planes(mv->info.format, src) != want_h) sl->flags |= PSYVID_F_HASH_MISMATCH;
-            if (psyvid__is_yuv(mv->info.format)) {
-                psyvid_yuv_to_rgba(src, mv->info.format, mv->info.w, mv->info.h, mv->info.matrix, mv->info.range,
-                                   mv->info.siting, mv->d.chroma, sl->data, mv->info.w * 4, mv->yuv_rows);
+            if (out.flags & PSYVID__OUT_GPU) {
+                /* the frame is in the slot's texture already */
+            } else if (psyvid__is_yuv(mv->info.format) && (out.flags & PSYVID_OUT_BORROWED)) {
+                /* the decoder's planes, with its pitch, into the slot's tight
+                 * ones: what the upload sends and the next decode cannot touch */
+                int k, y;
+                for (k = 0; k < psyvid__n_planes(mv->info.format); k++) {
+                    size_t rb = psyvid__row_bytes(mv->info.format, &dst, k);
+                    for (y = 0; y < dst.h[k]; y++)
+                        memcpy(dst.data[k] + (size_t)y * (size_t)dst.stride[k], out.planes.data[k] + (size_t)y * (size_t)out.planes.stride[k], rb);
+                }
             } else if (out.flags & PSYVID_OUT_BORROWED) {
                 int y;
                 size_t rb = (size_t)mv->info.w * (size_t)psyvid__bpt(mv->info.format);
@@ -2552,7 +4319,10 @@ static bool psyvid__dstep(psyvid_movie* mv) {
 #if !defined(PSYRT_NO_THREADS)
 static bool psyvid__on_idle(void* ctx) {
     psyvid_movie* mv = (psyvid_movie*)ctx;
-    return psyvid__dstep(mv);
+    /* the soundtrack first: a block of it is 85 ms of sound, one frame's
+     * decode at most a frame period */
+    bool more = mv->snd ? mv->snd_ops->step(mv->snd) : false;
+    return psyvid__dstep(mv) || more;
 }
 
 static bool psyvid__on_start(void* ctx, char* err, size_t cap) {
@@ -2605,7 +4375,8 @@ static int psyvid__backend_for(const psyvid_desc* d) {
     psyvid__src_close(&s);
     if (memcmp(b, "PSYVSEQ1", 8) == 0) return PSYVID_BACKEND_SEQ;
     if (b[0] == 0 && b[1] == 0 && b[2] == 1 && (b[3] == 0xBA || b[3] == 0xB3)) return PSYVID_BACKEND_PLMPEG;
-    return PSYVID_BACKEND_MF;
+    if (memcmp(b + 4, "ftyp", 4) == 0) return PSYVID_BACKEND_MF;
+    return -2;   /* none of the three */
 }
 
 PSYVID_API bool psyvid_probe(const psyvid_desc* d, psyvid_info* out, char* err, size_t cap) {
@@ -2623,12 +4394,12 @@ PSYVID_API bool psyvid_probe(const psyvid_desc* d, psyvid_info* out, char* err, 
             psyvid__src_read(&s, 0, hdr, sizeof hdr) != PSYVID_OK) { psyvid__src_close(&s); psyvid__fmt(err, cap, "cannot read the file"); return false; }
         psyvid__src_close(&s);
         if (psyvid__seq_parse(hdr, &c, &comp, &io, err, cap) < 0) return false;
-    } else if (b == PSYVID_BACKEND_PLMPEG) {
+    } else if (b == PSYVID_BACKEND_PLMPEG || b == PSYVID_BACKEND_MF) {
         psyvid__index ix;
         if (psyvid__index_load(d, &ix, 0, err, cap) < 0) return false;
         c = ix.c;
     } else {
-        psyvid__fmt(err, cap, "psyvid_probe reads frame sequences and indexed MPEG-1 files only");
+        psyvid__fmt(err, cap, "psyvid_probe reads frame sequences and indexed MPEG-1 and MP4 files only");
         return false;
     }
     out->w = c.w; out->h = c.h; out->fps_num = c.fps_num; out->fps_den = c.fps_den;
@@ -2652,14 +4423,26 @@ static void psyvid__close_partial(psyvid_movie* mv) {
 #if !defined(PSYRT_NO_THREADS)
     if (!mv->inline_mode) psyrt_pump_stop(&mv->pump);
 #endif
+    if (mv->snd) { mv->snd_ops->close(mv->snd); mv->snd = NULL; mv->snd_ops = NULL; }
+#if PSYVID__MF
+    if (mv->gpu) {
+        int k;
+        if (mv->gfx && mv->tex.id) psygfx_texture_rebind(mv->gfx, mv->tex, mv->tex);
+        for (k = 0; k < mv->n_slots; k++) {
+            if (mv->gfx && mv->slots[k].gimp.id) psygfx_texture_free(mv->gfx, mv->slots[k].gimp);
+            if (mv->slots[k].gtex) { ID3D11Texture2D* t = (ID3D11Texture2D*)mv->slots[k].gtex; PSYVID__REL(t); }
+            mv->slots[k].gtex = NULL;
+            mv->slots[k].gimp.id = 0;
+        }
+        mv->gpu = 0;
+    }
+#endif
     if (mv->dec && mv->dec_ctx && mv->dec->close) mv->dec->close(mv->dec_ctx);
     if (mv->gfx && mv->tex.id) psygfx_texture_free(mv->gfx, mv->tex);
     psyvid__free(mv->be_mem);
     psyvid__free(mv->hashes);
     psyvid__free(mv->mem_raw);
-    psyvid__free(mv->yuv);
-    psyvid__free(mv->yuv_rows);
-    mv->be_mem = NULL; mv->hashes = NULL; mv->mem_raw = NULL; mv->yuv = NULL; mv->yuv_rows = NULL;
+    mv->be_mem = NULL; mv->hashes = NULL; mv->mem_raw = NULL;
     mv->dec = NULL; mv->dec_ctx = NULL;
     mv->tex.id = 0;
 }
@@ -2678,7 +4461,7 @@ PSYVID_API bool psyvid_open(psyvid_movie* mv, psygfx_gfx* g, const psyvid_desc* 
     if (!desc) { psyvid__err(mv, "psy_video: no desc"); return false; }
     mv->d = *desc;
     mv->gfx = g;
-    mv->screen = g ? g->screen : NULL;
+    mv->screen = psygfx_screen(g);
     if (!(desc->lead == PSYVID_LEAD_NONE || (desc->lead >= 0.0 && desc->lead < 1.0))) { psyvid__err(mv, "psy_video: desc.lead must be in [0, 1) or PSYVID_LEAD_NONE"); return false; }
     mv->info.lead = desc->lead == 0.0 ? 0.5 : desc->lead == PSYVID_LEAD_NONE ? 0.0 : desc->lead;
     if (desc->timeline) {
@@ -2689,19 +4472,21 @@ PSYVID_API bool psyvid_open(psyvid_movie* mv, psygfx_gfx* g, const psyvid_desc* 
         if (desc->lead != 0.0 && mv->info.lead != tl_lead) { psyvid__err(mv, "psy_video: desc.lead (%g) differs from the timeline's (%g): video and annotations must share one rule", mv->info.lead, tl_lead); return false; }
         mv->info.lead = tl_lead;
     }
+    if (desc->hw_decode != PSYVID_HW_AUTO && desc->hw_decode != PSYVID_HW_OFF && desc->hw_decode != PSYVID_HW_DXVA) {
+        psyvid__err(mv, "psy_video: desc.hw_decode %d is not AUTO, OFF or DXVA", (int)desc->hw_decode);
+        return false;
+    }
     if (desc->ahead < 0 || desc->ahead > PSYVID_MAX_SLOTS - 2) { psyvid__err(mv, "psy_video: desc.ahead must be 0..%d", PSYVID_MAX_SLOTS - 2); return false; }
-    if (desc->gpu_path == PSYVID_PATH_SHARED || desc->gpu_path == PSYVID_PATH_ZERO_COPY) {
-        psyvid__err(mv, "psy_video: the shared and zero-copy GPU paths are not in v0.1: they need psyscr_native() from psy_screen.h and texture import from psy_gfx.h (docs/psy_video.md)");
+    if (desc->gpu_path == PSYVID_PATH_SHARED) {
+        psyvid__err(mv, "psy_video: the SHARED GPU path is not built; PSYVID_PATH_GPU is (docs/psy_video.md)");
         return false;
     }
-    if (desc->light == PSYVID_LIGHT_EOTF) {
-        psyvid__err(mv, "psy_video: light EOTF needs psy_gfx.h's planar YUV formats, not in v0.1; use CODES");
-        return false;
-    }
+
     backend = psyvid__backend_for(desc);
+    if (backend == -2) { psyvid__err(mv, "psy_video: %s is not a frame sequence, MPEG-PS or MP4 file", desc->path ? desc->path : "the source"); return false; }
     if (backend < 0) { psyvid__err(mv, "psy_video: cannot open %s", desc->path ? desc->path : "the source"); return false; }
-    if (backend == PSYVID_BACKEND_MF || backend == PSYVID_BACKEND_AVF || backend == PSYVID_BACKEND_FFMPEG) {
-        psyvid__err(mv, "psy_video: %s is not a frame sequence or MPEG-1; H.264 and HEVC need the Media Foundation, AVFoundation or FFmpeg backend, not in v0.1", desc->path ? desc->path : "the source");
+    if ((backend == PSYVID_BACKEND_MF && !PSYVID__MF) || backend == PSYVID_BACKEND_AVF || backend == PSYVID_BACKEND_FFMPEG) {
+        psyvid__err(mv, "psy_video: %s: H.264 and HEVC need Media Foundation (Windows, without PSYVID_NO_MF); AVFoundation and FFmpeg are not built", desc->path ? desc->path : "the source");
         return false;
     }
     if (backend == PSYVID_BACKEND_CUSTOM) {
@@ -2726,11 +4511,42 @@ PSYVID_API bool psyvid_open(psyvid_movie* mv, psygfx_gfx* g, const psyvid_desc* 
         mv->dec = &psyvid__plm_decoder;
         mv->dec_ctx = mv->be_mem;
 #endif
+#if PSYVID__MF
+    } else if (backend == PSYVID_BACKEND_MF) {
+        psyvid__mf* m = (psyvid__mf*)psyvid__malloc(sizeof(psyvid__mf));
+        psyvid__index hx;
+        if (!m) { psyvid__err(mv, "psy_video: out of memory"); return false; }
+        memset(m, 0, sizeof *m);
+        /* the rate is the index's (MF's is a 100 ns approximation) */
+        if (psyvid__index_load(desc, &hx, 0, e, sizeof e) < 0) { psyvid__free(m); psyvid__err(mv, "psy_video: %s", e); return false; }
+        m->req_num = hx.c.fps_num; m->req_den = hx.c.fps_den;
+        m->req_hw = desc->hw_decode == PSYVID_HW_AUTO ? PSYVID__HW_DEFAULT : (int)desc->hw_decode;
+        m->req_auto = desc->hw_decode == PSYVID_HW_AUTO;
+        if (mv->screen) (void)psyscr_native(mv->screen, &m->req_nat);
+        if (desc->gpu_path == PSYVID_PATH_GPU) {
+            const char* why = NULL;
+            if (!g || !(psygfx_features(g) & PSYGFX_FEAT_IMPORT_NV12)) why = "this renderer cannot import NV12 D3D11 textures (psygfx_features)";
+            else if (!m->req_nat.d3d11_device) why = "the screen has no D3D11 device (DXGI_FLIP or COMPOSITION)";
+            else if (!psyvid__mf_video_device(m->req_nat.d3d11_device)) why = "the screen's D3D11 device needs D3D11_CREATE_DEVICE_VIDEO_SUPPORT and multithread protection (psy_screen.h's desc.d3d11_video)";
+            else if (desc->hw_decode != PSYVID_HW_AUTO && desc->hw_decode != PSYVID_HW_DXVA) why = "hw_decode must be AUTO or DXVA";
+            if (why) { psyvid__free(m); psyvid__err(mv, "psy_video: PSYVID_PATH_GPU: %s", why); return false; }
+            m->req_hw = PSYVID_HW_DXVA;
+            m->req_gpu = 1;
+        }
+        mv->be_mem = m;
+        mv->dec = &psyvid__mf_decoder;
+        mv->dec_ctx = m;
+#endif
     } else {
         psyvid__err(mv, "psy_video: unknown backend %d", backend);
         return false;
     }
     mv->info.backend = (psyvid_backend)backend;
+    if (desc->gpu_path == PSYVID_PATH_GPU && backend != PSYVID_BACKEND_MF) {
+        psyvid__err(mv, "psy_video: PSYVID_PATH_GPU is for Media Foundation movies (MP4)");
+        psyvid__close_partial(mv);
+        return false;
+    }
     memset(&in, 0, sizeof in);
     in.path = desc->path; in.data = desc->data; in.size = desc->size;
     in.reader = desc->reader; in.reader_ctx = desc->reader_ctx;
@@ -2754,12 +4570,12 @@ PSYVID_API bool psyvid_open(psyvid_movie* mv, psygfx_gfx* g, const psyvid_desc* 
     c.transfer = (uint8_t)(st.transfer > 0 ? st.transfer : 0); c.primaries = (uint8_t)(st.primaries > 0 ? st.primaries : 0);
     c.siting = (uint8_t)(st.siting > 0 ? st.siting : 0);
     memset(&ix, 0, sizeof ix);
-    if (backend == PSYVID_BACKEND_PLMPEG || desc->index || (backend == PSYVID_BACKEND_CUSTOM && desc->path)) {
+    if (backend == PSYVID_BACKEND_PLMPEG || backend == PSYVID_BACKEND_MF || desc->index || (backend == PSYVID_BACKEND_CUSTOM && desc->path)) {
         int32_t v;
         rc = psyvid__index_load(desc, &ix, 1, e, sizeof e);
         if (rc < 0) { psyvid__err(mv, "psy_video: %s", e); psyvid__close_partial(mv); return false; }
         mv->hashes = ix.hashes;
-        if (backend == PSYVID_BACKEND_PLMPEG || desc->path) {
+        if (backend == PSYVID_BACKEND_PLMPEG || backend == PSYVID_BACKEND_MF || desc->path) {
             psyvid__src s;
             uint64_t head = 0, tail = 0;
             if (psyvid__src_open(&s, desc->path, desc->data, desc->size, desc->reader, desc->reader_ctx) == PSYVID_OK) {
@@ -2798,16 +4614,34 @@ PSYVID_API bool psyvid_open(psyvid_movie* mv, psygfx_gfx* g, const psyvid_desc* 
     mv->info.matrix = c.matrix; mv->info.range = c.range; mv->info.transfer = c.transfer;
     mv->info.primaries = c.primaries; mv->info.siting = c.siting;
     mv->info.duration = psyvid__ft(mv, c.frames);
-    mv->info.upload_format = psyvid__is_yuv(c.format) ? PSYVID_FMT_RGBA8 : c.format;
+    mv->info.upload_format = c.format;   /* YUV goes up as planes (psy_gfx.h's video program converts) */
     mv->info.path = PSYVID_PATH_UPLOAD;
+    mv->gpu_shown = -1;
+#if PSYVID__MF
+    if (backend == PSYVID_BACKEND_MF && ((psyvid__mf*)mv->be_mem)->gpu) {
+        psyvid__mf* m = (psyvid__mf*)mv->be_mem;
+        rc = psyvid__mf_peek(m);
+        if (rc < 0) { psyvid__err(mv, "psy_video: PSYVID_PATH_GPU: the first frame (0x%08lx)", (unsigned long)m->last_hr); psyvid__close_partial(mv); return false; }
+        mv->info.path = PSYVID_PATH_GPU;
+        mv->gpu_w = m->tw; mv->gpu_h = m->th;
+        mv->gpu_ax = m->ax; mv->gpu_ay = m->ay;
+    }
+#endif
+    /* light: AUTO is linear light under a calibration, the codes without
+     * one; an RGB frame sequence holds device values, so CODES */
     mv->info.light = PSYVID_LIGHT_CODES;
-    mv->timescale = st.timescale;
-    mv->dec_caps = st.caps;
-    if (psyvid__is_yuv(c.format) && g && g->cal_crc != 0 && desc->light == PSYVID_LIGHT_AUTO) {
-        psyvid__err(mv, "psy_video: the gfx has a calibration, so light AUTO means EOTF (linear light), which needs psy_gfx.h's planar formats, not in v0.1; set light CODES to show the codes as device values");
+    if (psyvid__is_yuv(c.format) && (desc->light == PSYVID_LIGHT_EOTF || (desc->light == PSYVID_LIGHT_AUTO && psygfx_calibrated(g))))
+        mv->info.light = PSYVID_LIGHT_EOTF;
+    if (!psyvid__is_yuv(c.format) && desc->light == PSYVID_LIGHT_EOTF) {
+        psyvid__err(mv, "psy_video: light EOTF is for YUV movies; an RGB frame sequence holds device values (light CODES)");
         psyvid__close_partial(mv);
         return false;
     }
+    mv->timescale = st.timescale;
+    mv->dec_caps = st.caps;
+#if PSYVID__MF
+    if (backend == PSYVID_BACKEND_MF) mv->info.hw = (psyvid_hw)((const psyvid__mf*)mv->be_mem)->hw;
+#endif
     /* the display against the rate */
     if (psyvid__display_rate(mv, &rn, &rd)) {
         double R = (double)rn / (double)rd, r = (double)c.fps_num / (double)c.fps_den;
@@ -2827,8 +4661,12 @@ PSYVID_API bool psyvid_open(psyvid_movie* mv, psygfx_gfx* g, const psyvid_desc* 
     /* slots and scratch */
     mv->info.ahead = desc->ahead > 0 ? desc->ahead : 6;
     mv->n_slots = mv->info.ahead + 2;
+    /* the GPU path's frames are in textures: no CPU slot memory */
     mv->info.slots = mv->n_slots;
-    mv->info.slot_bytes = (size_t)c.w * (size_t)c.h * (size_t)psyvid__bpt(mv->info.upload_format);
+    /* a slot holds what is uploaded: the planes, tight, or RGBA8 */
+    mv->info.slot_bytes = mv->info.path == PSYVID_PATH_GPU ? 0
+                        : psyvid__is_yuv(mv->info.upload_format) ? psyvid__planes_layout(c.format, c.w, c.h, NULL, NULL)
+                        : (size_t)c.w * (size_t)c.h * (size_t)psyvid__bpt(mv->info.upload_format);
     {
         size_t stride = (mv->info.slot_bytes + 4095) / 4096 * 4096;
         size_t need = stride * (size_t)mv->n_slots + 4096;
@@ -2847,23 +4685,51 @@ PSYVID_API bool psyvid_open(psyvid_movie* mv, psygfx_gfx* g, const psyvid_desc* 
             mv->slots[i].g = -1;
         }
     }
-    if (psyvid__is_yuv(c.format)) {
-        size_t yb = psyvid__planes_layout(c.format, c.w, c.h, NULL, NULL);
-        mv->yuv = (unsigned char*)psyvid__malloc(yb);
-        mv->yuv_rows = (int16_t*)psyvid__malloc(psyvid_yuv_rows_bytes(c.w));
-        if (!mv->yuv || !mv->yuv_rows) { psyvid__err(mv, "psy_video: out of memory"); psyvid__close_partial(mv); return false; }
-    }
     if (g) {
         psygfx_texture_desc td;
         memset(&td, 0, sizeof td);
-        td.w = c.w; td.h = c.h; td.format = (psygfx_format)mv->info.upload_format;
+        td.w = mv->gpu_w > 0 ? mv->gpu_w : c.w;   /* GPU: the surface's size; the stim shows the frame */
+        td.h = mv->gpu_h > 0 ? mv->gpu_h : c.h;
+        td.format = (psygfx_format)mv->info.upload_format;
+        if (psyvid__is_yuv(mv->info.upload_format)) {
+            /* psy_gfx.h's video program: the canonical matrix, range and
+             * siting; the codes as device values (CODES) or the stated
+             * transfer and primaries to linear light (EOTF) */
+            int eotf = mv->info.light == PSYVID_LIGHT_EOTF;
+            td.format = c.format == PSYVID_FMT_NV12 ? PSYGFX_NV12 : PSYGFX_I420;
+            td.enc.matrix = c.matrix; td.enc.range = c.range; td.enc.siting = c.siting;
+            td.enc.transfer = (uint8_t)(eotf ? c.transfer : PSYGFX_TRC_DEVICE);
+            td.enc.primaries = (uint8_t)(eotf ? c.primaries : PSYGFX_PRIM_DEVICE);
+            td.enc.chroma_nearest = desc->chroma == PSYVID_CHROMA_NEAREST;
+        }
         mv->tex = psygfx_texture(g, &td);
         if (mv->tex.id == 0) { psyvid__err(mv, "psy_video: psy_gfx.h refused the texture: %s", psygfx_error(g)); psyvid__close_partial(mv); return false; }
+#if PSYVID__MF
+        if (mv->info.path == PSYVID_PATH_GPU) {
+            /* the slots' textures, made and imported once: nothing per frame */
+            psyvid__mf* m = (psyvid__mf*)mv->be_mem;
+            mv->gpu = 1;
+            if (psyvid__mf_textures(m, mv) < 0) { psyvid__err(mv, "psy_video: PSYVID_PATH_GPU: CreateTexture2D NV12 %dx%d (0x%08lx)", (int)m->tw, (int)m->th, (unsigned long)m->last_hr); psyvid__close_partial(mv); return false; }
+            for (i = 0; i < mv->n_slots; i++) {
+                psygfx_import_desc d;
+                memset(&d, 0, sizeof d);
+                d.kind = PSYGFX_IMPORT_D3D11;
+                d.w = m->tw; d.h = m->th;
+                d.format = PSYGFX_NV12;
+                d.enc = td.enc;
+                d.d3d11_tex = mv->slots[i].gtex;
+                mv->slots[i].gimp = psygfx_texture_import(g, &d);
+                if (!mv->slots[i].gimp.id) { psyvid__err(mv, "psy_video: PSYVID_PATH_GPU: psy_gfx.h refused the texture: %s", psygfx_error(g)); psyvid__close_partial(mv); return false; }
+            }
+        }
+#endif
     }
     for (i = 0; i < mv->n_slots; i++) psyvid__free_push(mv, (uint32_t)i);
+    mv->dt_spare = -1;
     mv->dt_pos = -1;
     mv->dt_key = -1;
     mv->shown_g = -1;
+    mv->rate_num = 1; mv->rate_den = 1;
     mv->late_from = INT64_MAX;
     mv->next_id = 1;
     mv->state = PSYVID__STOPPED;
@@ -2930,6 +4796,13 @@ PSYVID_API psygfx_stim psyvid_stim(const psyvid_movie* mv, const psyvid_stim_des
         id.ori = d->ori; id.opacity = d->opacity; id.linear = d->linear; id.group = d->group;
     }
     id.tex = psyvid_texture(mv);
+    if (mv && mv->open && mv->gpu_w > 0) {
+        /* the GPU path's texture is the decoder's surface size (1088 rows for
+         * 1080): the stim shows the visible frame */
+        id.src[0] = (float)mv->gpu_ax; id.src[1] = (float)mv->gpu_ay;
+        id.src[2] = (float)mv->info.w; id.src[3] = (float)mv->info.h;
+        if (id.w == 0.0f && id.h == 0.0f) { id.w = (float)mv->info.w; id.h = (float)mv->info.h; }
+    }
     return psygfx_image(mv ? mv->gfx : NULL, &id);
 }
 
@@ -2948,6 +4821,7 @@ PSYVID_API int64_t psyvid_play_at(psyvid_movie* mv, int64_t t) {
     mv->ctl.t = t;
     mv->ctl.id = mv->next_id++;
     mv->ctl.active = 1;
+    mv->snd_ctl = 0;
     return mv->ctl.id;
 }
 
@@ -2958,6 +4832,7 @@ PSYVID_API int64_t psyvid_pause_at(psyvid_movie* mv, int64_t t) {
     mv->ctl.t = t;
     mv->ctl.id = mv->next_id++;
     mv->ctl.active = 1;
+    mv->snd_ctl = 0;
     return mv->ctl.id;
 }
 
@@ -2975,6 +4850,9 @@ PSYVID_API int64_t psyvid_seek_frame(psyvid_movie* mv, int64_t frame, int64_t re
     mv->ft_epoch++;
     mv->seek_posted = psyvid__post(mv, PSYVID__MSG_SEEK, frame) == PSYVID_OK;
     psyvid__st64(&mv->want_g, frame);
+    /* the sound stops now and refills from the target (a seek lands in
+     * cycle 0) */
+    psyvid__snd_rearm(mv, 0, psyvid__ft(mv, frame), 0, mv->seek_id);
     /* the clock stops at the next onset (update), which is the first time
      * this thread knows */
     return mv->seek_id;
@@ -2991,6 +4869,7 @@ PSYVID_API int psyvid_show(psyvid_movie* mv, int64_t frame) {
     if (mv->state == PSYVID__FAILED) return PSYVID_ERR_DECODER;
     if (frame < 0 || frame >= mv->info.frames) return PSYVID_ERR_ARG;
     mv->ctl.active = 0;
+    psyvid__snd_halt(mv, 0, 0);   /* manual mode has no sound */
     if (mv->state != PSYVID__MANUAL) {
         mv->state = PSYVID__MANUAL;
         if (mv->shown_g >= 0) mv->shown_g %= mv->info.frames;
@@ -3175,12 +5054,37 @@ static void psyvid__purge(psyvid_movie* mv) {
 
 static int psyvid__upload(psyvid_movie* mv, int s) {
     int rc = PSYVID_OK;
+    if (mv->gfx && mv->gpu) {
+        /* the slot's texture is shown; the one shown before goes back to the
+         * decoder. Its last draw is already on the device's one immediate
+         * context, so a copy into it later runs after that draw */
+        int64_t t0 = PSYVID__NOW();
+        int old = mv->gpu_shown, g;
+        PSYRT_ZONE(zg, "psyvid.rebind");
+        g = psygfx_texture_rebind(mv->gfx, mv->tex, mv->slots[s].gimp);
+        PSYRT_ZONE_END(zg);
+        mv->gpu_shown = s;
+        if (old >= 0 && old != s) psyvid__free_push(mv, (uint32_t)old);
+        mv->upload_ns_last = (uint64_t)(PSYVID__NOW() - t0);
+        if (mv->upload_ns_last > mv->upload_ns_max) mv->upload_ns_max = mv->upload_ns_last;
+        return g == PSYGFX_ERR_ORDER ? PSYVID_ERR_ORDER : g < 0 ? PSYVID_ERR_ARG : PSYVID_OK;
+    }
     if (mv->gfx) {
         int64_t t0 = PSYVID__NOW();
         int g;
         PSYRT_ZONE(zu, "psyvid.upload");
-        g = psygfx_texture_update(mv->gfx, mv->tex, 0, 0, mv->info.w, mv->info.h, mv->slots[s].data,
-                                  (size_t)mv->info.w * (size_t)psyvid__bpt(mv->info.upload_format));
+        if (psyvid__is_yuv(mv->info.upload_format)) {
+            psyvid_planes pl;
+            psygfx_planes gp;
+            int k;
+            psyvid__planes_layout(mv->info.format, mv->info.w, mv->info.h, mv->slots[s].data, &pl);
+            memset(&gp, 0, sizeof gp);
+            for (k = 0; k < 3; k++) { gp.data[k] = pl.data[k]; gp.stride[k] = (size_t)pl.stride[k]; }
+            g = psygfx_texture_update_planes(mv->gfx, mv->tex, &gp);
+        } else {
+            g = psygfx_texture_update(mv->gfx, mv->tex, 0, 0, mv->info.w, mv->info.h, mv->slots[s].data,
+                                      (size_t)mv->info.w * (size_t)psyvid__bpt(mv->info.upload_format));
+        }
         PSYRT_ZONE_END(zu);
         mv->upload_ns_last = (uint64_t)(PSYVID__NOW() - t0);
         if (mv->upload_ns_last > mv->upload_ns_max) mv->upload_ns_max = mv->upload_ns_last;
@@ -3216,7 +5120,14 @@ static int64_t psyvid__due_global(const psyvid_movie* mv, int64_t mg, int64_t le
  * is where the frames now land. */
 static int64_t psyvid__nominal(const psyvid_movie* mv, const psyscr_frame* f, int64_t lead_ns) {
     int64_t dv = f->vblank - mv->nom_vb, m;
-    if (mv->info.multiple > 0) {
+    if (mv->rate_num != mv->rate_den && mv->info.multiple <= 0) {
+        /* base ns per vblank: the mode's period at the base's rate */
+        int64_t rn = (int64_t)mv->info.refresh_den * mv->rate_num, rd = (int64_t)mv->info.refresh_num * mv->rate_den;
+        if (mv->info.refresh_num > 0 && rn < ((int64_t)1 << 31) && rd < ((int64_t)1 << 31))
+            m = mv->nom_m + psyvid__floordiv(dv * rn, rd) * PSYVID__NS + psyvid__floordiv((dv * rn - psyvid__floordiv(dv * rn, rd) * rd) * PSYVID__NS, rd);
+        else
+            m = mv->nom_m + psyvid__scale(dv * f->period, mv->rate_num, mv->rate_den);
+    } else if (mv->info.multiple > 0) {
         int64_t q = (int64_t)mv->info.fps_num * mv->info.multiple;
         m = mv->nom_m + psyvid__floordiv(dv * mv->info.fps_den * PSYVID__NS, q);
     } else if (mv->info.refresh_num > 0) {
@@ -3225,6 +5136,49 @@ static int64_t psyvid__nominal(const psyvid_movie* mv, const psyscr_frame* f, in
         m = mv->nom_m + dv * f->period;
     }
     return psyvid__due_global(mv, m, lead_ns);
+}
+
+/* The cadence at the base's rate: R against r x num / den (R7). Returns the
+ * multiple, 0 for a cadence that judders. */
+static int32_t psyvid__cadence(psyvid_movie* mv) {
+    double R, r, ratio;
+    int32_t k;
+    if (mv->info.refresh_num <= 0 || mv->info.refresh_den <= 0) return 0;
+    R = (double)mv->info.refresh_num / mv->info.refresh_den;
+    r = (double)mv->info.fps_num / mv->info.fps_den * ((double)mv->rate_num / mv->rate_den);
+    ratio = R / r;
+    k = (int32_t)floor(ratio + 0.5);
+    mv->info.per_frame = ratio;
+    if (k >= 1 && fabs(ratio / k - 1.0) <= 200e-6) { mv->info.err_ppm = (ratio / k - 1.0) * 1e6; return k; }
+    mv->info.err_ppm = 0.0;
+    return 0;
+}
+
+/* strict_cadence refuses a rate whose cadence judders: the movie holds its
+ * frame and psyvid_update() returns PSYVID_ERR_REFUSED until the rate gives
+ * a multiple again (a seek lands, then holds; close ends it). */
+static int psyvid__rate_refused(const psyvid_movie* mv) {
+    return mv->d.strict_cadence && mv->rate_num != mv->rate_den && mv->info.multiple == 0 && mv->info.refresh_num > 0;
+}
+
+/* A new base rate, seen at frame f: the cadence again, the nominal schedule
+ * from this frame, and a RATE record (t onset, i32[0] num, i32[1] den,
+ * i32[2] the multiple, f64[2] display frames per video frame, u32[8] 1 when
+ * strict_cadence refuses it). */
+static void psyvid__rate_change(psyvid_movie* mv, const psyscr_frame* f, int64_t num, int64_t den) {
+    psyrt_payload u;
+    mv->rate_num = (int32_t)num;
+    mv->rate_den = (int32_t)den;
+    mv->info.multiple = psyvid__cadence(mv);
+    mv->nom_resync = 1;
+    memset(&u, 0, sizeof u);
+    u.i32[0] = (int32_t)num; u.i32[1] = (int32_t)den; u.i32[2] = mv->info.multiple;
+    u.f64[2] = mv->info.per_frame;
+    u.u32[8] = (uint32_t)psyvid__rate_refused(mv);
+    psyvid__push(mv, (uint16_t)PSYVID_EV_RATE, f->onset, &u);
+    if (psyvid__rate_refused(mv))
+        psyvid__err(mv, "psy_video: the movie base runs at %lld/%lld: %.4f display frames per frame, not a multiple, and desc.strict_cadence refuses judder; the frame holds until the rate gives a multiple",
+                    (long long)num, (long long)den, mv->info.per_frame);
 }
 
 /* The schedule starts again at an anchor: offset 0 there. */
@@ -3324,6 +5278,12 @@ static int psyvid__decide(psyvid_movie* mv, const psyscr_frame* f, int64_t i, in
     r.shows = mv->shows;
     r.ahead = (uint16_t)psyvid__ready_count(mv);
     r.due = f->onset - (mg - psyvid__gt(mv, mv->shown_g));
+    if (mv->rate_num != mv->rate_den && mv->d.timeline) {
+        /* the RT time the base reached the frame's time (R5): a movie-time
+         * difference is not RT ns at another rate */
+        int64_t rt;
+        if (psytl_rt_time(mv->d.timeline, mv->d.base, psyvid__gt(mv, mv->shown_g) - mv->cycle * mv->info.duration, &rt)) r.due = rt;
+    }
     psyvid__pend_add(mv, &r);
     return rc;
 }
@@ -3331,6 +5291,7 @@ static int psyvid__decide(psyvid_movie* mv, const psyscr_frame* f, int64_t i, in
 static void psyvid__inline_decode(psyvid_movie* mv) {
     int n = 0;
     if (!mv->inline_mode) return;
+    if (mv->snd) while (mv->snd_ops->step(mv->snd)) {}
     while (psyvid__dstep(mv)) {
         if (mv->d.inline_budget > 0 && ++n >= mv->d.inline_budget) break;
     }
@@ -3352,7 +5313,7 @@ static int psyvid__fail_check(psyvid_movie* mv) {
 
 PSYVID_API int psyvid_update(psyvid_movie* mv, const psyscr_frame* f) {
     int64_t lead_ns, m, i;
-    int rc = PSYVID_OK;
+    int rc = PSYVID_OK, refused = 0;
     PSYRT_ZONE(z, "psyvid.update");
     if (!mv || !mv->open) { PSYRT_ZONE_END(z); return PSYVID_ERR_CLOSED; }
     if (!f) { PSYRT_ZONE_END(z); return PSYVID_ERR_ARG; }
@@ -3369,9 +5330,30 @@ PSYVID_API int psyvid_update(psyvid_movie* mv, const psyscr_frame* f) {
     mv->lead_ns_last = lead_ns;
     mv->period_last = f->period;
     psyvid__purge(mv);
+    if (mv->snd) {
+        int64_t rn, rd;
+        /* one queued wake at a time: the feeder clears it when it runs */
+        if (psyvid__ld32(&mv->snd_wake) == 0 && mv->snd_ops->wants(mv->snd)) {
+            psyvid__st32(&mv->snd_wake, 1);
+            if (psyvid__post(mv, PSYVID__MSG_WAKE, 0) != PSYVID_OK) psyvid__st32(&mv->snd_wake, 0);
+        }
+        /* no resampling: a soundtrack plays at base rate 1 or not at all */
+        psyvid__base_rate(mv, &rn, &rd);
+        if (rn != rd && mv->snd_phase == 2) {
+            psyvid__snd_halt(mv, 0, 0);
+            psyvid__err(mv, "psy_video: the movie base runs at %lld/%lld; the soundtrack stopped (it plays at rate 1 only: no resampling)",
+                        (long long)rn, (long long)rd);
+            refused = 1;
+        }
+    }
+    if (mv->d.timeline) {
+        int64_t rn, rd;
+        psyvid__base_rate(mv, &rn, &rd);
+        if (rn != mv->rate_num || rd != mv->rate_den) psyvid__rate_change(mv, f, rn, rd);
+    }
     /* the decoder learns this frame's due before it decodes (inline: now) */
     if (mv->state == PSYVID__PLAYING)
-        psyvid__st64(&mv->want_g, mv->cycle * mv->info.frames + psyvid__dueg(mv, psyvid__movie_time(mv, f->onset), lead_ns));
+        psyvid__st64(&mv->want_g, mv->cycle * mv->info.frames + psyvid__dueg(mv, psyvid__window_mt(mv, f->onset, f->period, lead_ns), 0));
     else if (mv->state == PSYVID__MANUAL)
         psyvid__st64(&mv->want_g, mv->manual_g);
     psyvid__inline_decode(mv);
@@ -3391,6 +5373,17 @@ PSYVID_API int psyvid_update(psyvid_movie* mv, const psyscr_frame* f) {
             if (mv->seek_resume_kind == 2) go = ready_target;
             else if (mv->seek_resume_kind == 0) go = avail >= need;
             else go = ready_target && mv->seek_resume_t <= f->onset + lead_ns;
+            if (mv->snd && mv->seek_resume_kind == 0) {
+                /* ASAP with sound: the first frame both can reach, once
+                 * the frames and the refill are in */
+                if (go && mv->snd_ops->ready(mv->snd, mv->snd_want)) {
+                    int64_t t = psyvid__snd_asap(mv, f);
+                    if (psyvid__snd_go(mv, t, mv->seek_id)) { mv->seek_resume_kind = 1; mv->seek_resume_t = t; }
+                }
+                go = mv->seek_resume_kind == 1 && ready_target && mv->seek_resume_t <= f->onset + lead_ns;
+            } else if (mv->snd && mv->seek_resume_kind == 1) {
+                (void)psyvid__snd_go(mv, mv->seek_resume_t, mv->seek_id);   /* LATE if the refill came too late */
+            }
             if (go) {
                 const psyvid__slot* sl = NULL;
                 uint32_t h, t = psyvid__ld32(&mv->ready_tail);
@@ -3423,7 +5416,9 @@ PSYVID_API int psyvid_update(psyvid_movie* mv, const psyscr_frame* f) {
                     }
                     mv->just = 0;
                 } else {
-                    u.u32[9] = (uint32_t)psyvid__seek_anchor(mv, f->onset, psyvid__ft(mv, mv->seek_g));
+                    /* with sound, the shared target is the origin of both */
+                    u.u32[9] = (uint32_t)psyvid__seek_anchor(mv, mv->snd && mv->snd_phase == 2 ? mv->snd_t : f->onset,
+                                                             psyvid__ft(mv, mv->seek_g));
                     psyvid__nom_sync(mv, f, psyvid__ft(mv, mv->seek_g));
                     mv->state = PSYVID__PLAYING;
                 }
@@ -3500,19 +5495,43 @@ PSYVID_API int psyvid_update(psyvid_movie* mv, const psyscr_frame* f) {
     }
 
     /* a pending play or pause lands on the frame whose window reaches its time */
+    if (mv->ctl.active && mv->snd && !mv->snd_ctl) {
+        /* the sound's part of a control, once */
+        if (mv->ctl.op == PSYVID__OP_PAUSE) {
+            if (mv->ctl.t == PSYVID_ASAP) mv->ctl.t = psyvid__snd_asap(mv, f);
+            psyvid__snd_halt(mv, mv->ctl.t, mv->ctl.id);
+        } else {
+            psyvid__snd_rearm(mv, 0, mv->state == PSYVID__STOPPED ? 0 : mv->anchor_mt + psyvid__scale(f->period, mv->rate_num, mv->rate_den),
+                              mv->cycle, mv->ctl.id);
+        }
+        mv->snd_ctl = 1;
+    }
     if (mv->ctl.active) {
         int land = mv->ctl.t == PSYVID_ASAP ? 1 : mv->ctl.t <= f->onset + lead_ns;
         /* A resume starts one display period after the frozen time: the
          * frozen frame was on screen for the pause. */
-        int64_t mt0 = mv->state == PSYVID__STOPPED ? 0 : mv->anchor_mt + f->period;
+        int64_t mt0 = mv->state == PSYVID__STOPPED ? 0 : mv->anchor_mt + psyvid__scale(f->period, mv->rate_num, mv->rate_den);
+        int64_t lead_b = psyvid__scale(lead_ns, mv->rate_num, mv->rate_den);   /* the window's width in base ns */
         if (mv->ctl.op == PSYVID__OP_PLAY && mv->ctl.t == PSYVID_ASAP) {
             int64_t need = mv->d.preroll > 0 ? mv->d.preroll : mv->info.ahead;
-            int64_t from = psyvid__dueg(mv, mt0, lead_ns);
+            int64_t from = psyvid__dueg(mv, mt0, lead_b);
             if (mv->state != PSYVID__STOPPED && from <= mv->shown_g) from = mv->shown_g + 1;
             if (need > mv->info.frames - from && !mv->d.loop) need = mv->info.frames - from;
             if (from < mv->info.frames) {
                 psyvid__st64(&mv->want_g, from);
                 land = psyvid__ready_from(mv, from) >= need;
+            }
+        }
+        if (mv->snd && mv->ctl.op == PSYVID__OP_PLAY && mv->snd_phase == 1) {
+            if (mv->ctl.t == PSYVID_ASAP) {
+                /* the first frame both can reach, once both are ready */
+                if (land && mv->snd_ops->ready(mv->snd, mv->snd_want)) {
+                    int64_t t = psyvid__snd_asap(mv, f);
+                    if (psyvid__snd_go(mv, t, mv->ctl.id)) mv->ctl.t = t;
+                }
+                land = mv->ctl.t != PSYVID_ASAP && mv->ctl.t <= f->onset + lead_ns;
+            } else {
+                (void)psyvid__snd_go(mv, mv->ctl.t, mv->ctl.id);   /* LATE if the refill came too late */
             }
         }
         if (land) {
@@ -3521,29 +5540,38 @@ PSYVID_API int psyvid_update(psyvid_movie* mv, const psyscr_frame* f) {
             memset(&u, 0, sizeof u);
             if (mv->ctl.op == PSYVID__OP_PLAY) {
                 mt = mt0;
-                psyvid__anchor(mv, f->onset, mt);
+                /* with sound, the shared target is the origin of both */
+                psyvid__anchor(mv, mv->snd && mv->snd_phase == 2 ? mv->snd_t : f->onset, mt);
                 psyvid__nom_sync(mv, f, mt + mv->cycle * mv->info.duration);
                 mv->state = PSYVID__PLAYING;
-                u.i64[0] = mt; u.i64[1] = mv->ctl.id; u.i64[2] = psyvid__dueg(mv, mt, lead_ns); u.i64[3] = mv->ctl.t;
+                u.i64[0] = mt; u.i64[1] = mv->ctl.id; u.i64[2] = psyvid__dueg(mv, mt, lead_b); u.i64[3] = mv->ctl.t;
                 psyvid__result_put(mv, mv->ctl.id, (uint16_t)PSYVID_EV_PLAY, f->onset, &u);
             }
             mv->ctl.active = mv->ctl.op == PSYVID__OP_PAUSE ? 2 : 0;
         }
     }
 
-    if (mv->state == PSYVID__PLAYING) {
+    if (mv->state == PSYVID__PLAYING && psyvid__rate_refused(mv)) {
+        /* strict_cadence at a rate that judders: the frame on screen holds */
+        refused = 1;
+    } else if (mv->state == PSYVID__PLAYING) {
         m = psyvid__movie_time(mv, f->onset);
-        i = psyvid__dueg(mv, m, lead_ns);
+        i = psyvid__dueg(mv, psyvid__window_mt(mv, f->onset, f->period, lead_ns), 0);
         while (i >= 0 && mv->d.loop && i >= mv->info.frames) {
-            /* the loop: the base goes back to 0 at t(N); annotations fire again */
+            /* the loop: the base goes back to 0 at t(N); annotations fire
+             * again. The wrap's RT time is when the base reached t(N), the
+             * inverse of the base's mapping at its rate (R3). */
             int64_t rt_wrap = f->onset - (m - mv->info.duration);
             uint32_t keep = mv->anchor_epoch;
+            if (mv->rate_num != mv->rate_den && mv->d.timeline)
+                (void)psytl_rt_time(mv->d.timeline, mv->d.base, mv->info.duration, &rt_wrap);
             mv->cycle++;
             psyvid__anchor(mv, rt_wrap, 0);
             if (mv->following) mv->anchor_epoch = keep;   /* the other clock runs on */
             m = psyvid__movie_time(mv, f->onset);
-            i = psyvid__dueg(mv, m, lead_ns);
+            i = psyvid__dueg(mv, psyvid__window_mt(mv, f->onset, f->period, lead_ns), 0);
         }
+        if (mv->nom_resync) { psyvid__nom_sync(mv, f, m + mv->cycle * mv->info.duration); mv->nom_resync = 0; }
         if (i >= 0) {
             int64_t gi = i + mv->cycle * mv->info.frames;
             if (!mv->d.loop && i >= mv->info.frames) {
@@ -3555,7 +5583,7 @@ PSYVID_API int psyvid_update(psyvid_movie* mv, const psyscr_frame* f) {
                 if (mv->shown_g >= 0)
                     psyvid__drop_run(mv, mv->shown_g + 1, mv->info.frames, f->vblank - mv->last_vblank, 0, m, f->onset, f->index);
             } else {
-                rc = psyvid__decide(mv, f, gi, m, lead_ns);
+                rc = psyvid__decide(mv, f, gi, m, psyvid__scale(lead_ns, mv->rate_num, mv->rate_den));
             }
         }
         if (mv->ctl.active == 2) {
@@ -3579,10 +5607,26 @@ PSYVID_API int psyvid_update(psyvid_movie* mv, const psyscr_frame* f) {
     PSYRT_PLOT("psyvid.ready", psyvid__ready_count(mv));
     PSYRT_ZONE_END(z);
     if (rc < 0) return rc;
+    if (refused) return PSYVID_ERR_REFUSED;
     return mv->state == PSYVID__ENDED ? PSYVID_ENDED : PSYVID_OK;
 }
 
 /* --- following another clock ------------------------------------------------------- */
+
+/* Re-anchors the movie clock at f->onset to global movie time mg, read
+ * from another clock. A clock that stalls or steps back would rewind the
+ * base and fire its annotations again; the base runs on instead until the
+ * clock moves. */
+static int psyvid__follow_to(psyvid_movie* mv, const psyscr_frame* f, int64_t mg) {
+    int64_t m;
+    if (mg <= mv->follow_last_m) return PSYVID_OK;
+    mv->follow_last_m = mg;
+    m = mg - mv->cycle * mv->info.duration;
+    mv->anchor_rt = f->onset;
+    mv->anchor_mt = m;
+    if (mv->d.timeline) psytl_anchor(mv->d.timeline, mv->d.base, f->onset, m);
+    return PSYVID_OK;
+}
 
 PSYVID_API int psyvid_follow(psyvid_movie* mv, const psyscr_frame* f, psyvid_unit_at_fn unit_at, void* ctx, uint32_t rate) {
     int64_t num, den, u, m;
@@ -3608,15 +5652,7 @@ PSYVID_API int psyvid_follow(psyvid_movie* mv, const psyscr_frame* f, psyvid_uni
     }
     u = unit_at(ctx, f->onset);
     m = (int64_t)floor((double)(u - mv->follow_f0) * 1e9 / (double)rate + 0.5);
-    /* A clock that stalls or steps back would rewind the base and fire its
-     * annotations again; the base runs on instead until the clock moves. */
-    if (m <= mv->follow_last_m) return PSYVID_OK;
-    mv->follow_last_m = m;
-    m -= mv->cycle * mv->info.duration;
-    mv->anchor_rt = f->onset;
-    mv->anchor_mt = m;
-    if (mv->d.timeline) psytl_anchor(mv->d.timeline, mv->d.base, f->onset, m);
-    return PSYVID_OK;
+    return psyvid__follow_to(mv, f, m);
 }
 
 /* --- describe and params ---------------------------------------------------------- */
@@ -3634,7 +5670,11 @@ PSYVID_API int psyvid_describe(const psyvid_movie* mv, char* buf, size_t cap) {
     be[0] = 0;
     if (mv->dec && mv->dec->describe) mv->dec->describe(mv->dec_ctx, be, sizeof be);
     else if (mv->dec) psyvid__fmt(be, sizeof be, "%s", mv->dec->name);
-    if (mv->info.refresh_num <= 0) {
+    if (mv->rate_num != mv->rate_den) {
+        psyvid__fmt(cad, sizeof cad, "base rate %d/%d: display %.4f Hz, %.4f display frames per frame%s",
+                    (int)mv->rate_num, (int)mv->rate_den, mv->info.refresh_num > 0 ? (double)mv->info.refresh_num / mv->info.refresh_den : 0.0,
+                    mv->info.per_frame, mv->info.multiple > 0 ? " (multiple)" : " (judders: CADENCE)");
+    } else if (mv->info.refresh_num <= 0) {
         psyvid__fmt(cad, sizeof cad, "display rate unknown: no cadence check");
     } else if (mv->info.multiple > 0) {
         psyvid__fmt(cad, sizeof cad, "display %.4f Hz: %d display frames per frame (multiple, %+.1f ppm)",
@@ -3674,13 +5714,15 @@ PSYVID_API int psyvid_describe(const psyvid_movie* mv, char* buf, size_t cap) {
             used += (size_t)snprintf(counts + used, sizeof counts - used, "; %s %llu/%llu", psyvid__why_name(w),
                                      (unsigned long long)mv->info.repeats_by[w], (unsigned long long)mv->info.drops_by[w]);
     }
-    n = snprintf(buf, cap, "psy_video %s: %s, %dx%d %s, %d/%d fps, %lld frames, GOP %d; %s; lead %.2f; ahead %d (%d slots, %.1f MB%s%s); path UPLOAD to %s; light CODES; %s%s%s; worst tier %d",
+    n = snprintf(buf, cap, "psy_video %s: %s, %dx%d %s, %d/%d fps, %lld frames, GOP %d; %s; lead %.2f; ahead %d (%d slots, %.1f MB%s%s); path %s %s; light %s; %s%s%s; worst tier %d",
                  PSYVID_VERSION_STRING, be, (int)mv->info.w, (int)mv->info.h, psyvid__fmt_name(mv->info.format),
                  (int)mv->info.fps_num, (int)mv->info.fps_den, (long long)mv->info.frames, (int)mv->info.gop, cad,
                  mv->info.lead, (int)mv->info.ahead, (int)mv->info.slots,
                  (double)mv->info.slot_bytes * mv->info.slots / 1048576.0,
                  mv->inline_mode ? ", decoded inline" : "", mv->inline_why[0] ? ": no decode thread" : "",
-                 psyvid__fmt_name(mv->info.upload_format), counts,
+                 mv->info.path == PSYVID_PATH_GPU ? "GPU" : "UPLOAD of",
+                 mv->info.path == PSYVID_PATH_GPU ? "(DXVA on the screen's device, one GPU copy a frame; frame hashes not checked)" : psyvid__fmt_name(mv->info.upload_format),
+                 mv->info.light == PSYVID_LIGHT_EOTF ? "EOTF (linear)" : "CODES", counts,
                  mv->info.ts_mismatch ? "; NOT CANONICAL: timestamp mismatches" : "",
                  mv->info.hash_mismatch ? "; NOT CANONICAL: hash mismatches" : "", (int)mv->info.worst_tier);
     return n;
@@ -3693,7 +5735,9 @@ PSYVID_API const psyscr_param* psyvid_params(int* n) {
         { "loop", "bool", 0, 1, 0, "", "frame 0 follows the last; annotations fire again" },
         { "strict_cadence", "bool", 0, 1, 0, "", "refuse a refresh that is not a multiple of the rate" },
         { "lead", "f64", -1, 0.999, 0.5, "frame", "the due rule's lead; -1 = never early" },
-        { "light", "enum", 0, 2, 0, "", "AUTO, CODES, EOTF (EOTF not in v0.1)" },
+        { "light", "enum", 0, 2, 0, "", "AUTO, CODES, EOTF" },
+        { "gpu_path", "enum", 0, 3, 0, "", "AUTO, UPLOAD, SHARED (not built), GPU" },
+        { "hw_decode", "enum", 0, 2, 0, "", "Media Foundation's decoder: AUTO, OFF, DXVA" },
         { "chroma", "enum", 0, 1, 0, "", "SITED, NEAREST" },
         { "base", "i32", 0, 7, 0, "", "the movie base on the timeline" },
         { "min_tier", "i32", 0, 4, 0, "", "flag frames worse than this tier" },
@@ -3718,10 +5762,208 @@ PSYVID_API const psyscr_param* psyvid_params(int* n) {
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* --- the soundtrack -------------------------------------------------------------
+ * A psy_audio.h stream (a voice, placed, recorded and confirmed like any
+ * sound) that the movie's decode thread fills from the source. The ring is
+ * the movie's own memory, so close() waits for the stream to end before it
+ * frees it. */
+typedef struct psyvid__snd {
+    psyau_wav           w;           /* first: its stream's lines             */
+    psyau_audio*        au;
+    float*              ring;
+    float               db;
+    uint64_t            mask;
+    int64_t             ramp;
+    psyau_id            id;          /* the current play                     */
+    uint32_t            refilling;   /* frame thread sets, decode thread clears */
+    int64_t             seek_to;     /* decode thread: a refill waiting for the
+                                      * play to end (psyau_wav_seek is BUSY
+                                      * until then); -1 none                 */
+} psyvid__snd;
+
+static bool psyvid__snd_step(void* v) {
+    psyvid__snd* s = (psyvid__snd*)v;
+    if (s->seek_to >= 0) {
+        /* BUSY until the device has taken the stop; the frame thread wakes
+         * this thread again on its next frame */
+        if (psyau_wav_seek(&s->w, s->seek_to) != PSYAU_OK) return false;
+        s->seek_to = -1;
+        psyvid__st32(&s->refilling, 0);
+    }
+    if (psyvid__ld32(&s->refilling)) return false;
+    return psyau_wav_step(&s->w);
+}
+
+static void psyvid__snd_refill_dt(void* v, int64_t sample) { ((psyvid__snd*)v)->seek_to = sample; }
+static void psyvid__snd_refilling(void* v) { psyvid__st32(&((psyvid__snd*)v)->refilling, 1); }
+
+static int psyvid__snd_ready(void* v, int64_t sample) {
+    psyvid__snd* s = (psyvid__snd*)v;
+    psyau_stream_info si;
+    if (psyvid__ld32(&s->refilling)) return 0;
+    if (psyau_stream_get_info(&s->w.stream, &si) != PSYAU_OK) return 0;
+    return si.state == PSYAU_STREAM_IDLE && si.first == sample && si.ready;
+}
+
+static bool psyvid__snd_wants(void* v) {
+    psyvid__snd* s = (psyvid__snd*)v;
+    psyau_stream_info si;
+    (void)si;
+    return psyvid__ld32(&s->refilling) || psyau_wav_wants(&s->w);
+}
+
+static int64_t psyvid__snd_lead(void* v) { return psyau_lead_ns(((psyvid__snd*)v)->au); }
+
+static int64_t psyvid__snd_start(void* v, int64_t t) {
+    psyvid__snd* s = (psyvid__snd*)v;
+    psyau_play_desc pd;
+    psyau_id id;
+    memset(&pd, 0, sizeof pd);
+    pd.stream = &s->w.stream;
+    pd.at = t;
+    pd.db = s->db;
+    pd.channels = s->mask;
+    id = psyau_play(s->au, &pd);
+    if (id > 0) s->id = id;
+    return id;
+}
+
+static void psyvid__snd_stop(void* v, int64_t t) {
+    psyvid__snd* s = (psyvid__snd*)v;
+    if (s->id > 0) psyau_stop_at(s->au, s->id, t, s->ramp);
+}
+
+static void psyvid__snd_close(void* v) {
+    psyvid__snd* s = (psyvid__snd*)v;
+    int k, done = 0;
+    if (!psyau_is_open(s->au)) done = 1;   /* no callback reads the ring */
+    else {
+        if (s->id > 0) psyau_cancel(s->au, s->id);
+        for (k = 0; k < 500 && !done; k++) {   /* a device buffer, at most half a second */
+            psyau_stream_info si;
+            psyau_update(s->au);
+            if (psyau_stream_get_info(&s->w.stream, &si) == PSYAU_OK &&
+                (si.state == PSYAU_STREAM_IDLE || si.state == PSYAU_STREAM_ENDED)) done = 1;
+            else PSYAU__SLEEP_UNTIL(PSYAU__NOW() + 1000000);
+        }
+        if (done) psyau_wav_close(s->au, &s->w);
+    }
+    /* a stream the device still holds keeps its ring: leaked, not freed
+     * under the callback */
+    if (done) { psyvid__free(s->ring); psyvid__free(s); }
+}
+
+static const struct psyvid__snd_ops psyvid__snd_table = {
+    psyvid__snd_step, psyvid__snd_refill_dt, psyvid__snd_refilling, psyvid__snd_ready, psyvid__snd_wants,
+    psyvid__snd_lead, psyvid__snd_start, psyvid__snd_stop, psyvid__snd_close
+};
+
+static int64_t psyvid__gcd64(int64_t a, int64_t b) { while (b) { int64_t t = a % b; a = b; b = t; } return a; }
+
+PSYVID_API int psyvid_soundtrack(psyvid_movie* mv, psyau_audio* au, const psyvid_soundtrack_desc* d) {
+    psyau_caps c;
+    psyau_wav_desc wd;
+    psyvid__snd* s;
+    int64_t N, num, den, rate, A2, want, rn, rd, cap;
+    int rc;
+    if (!mv || !mv->open) return PSYVID_ERR_CLOSED;
+    if (!au || !d || (!d->path && !d->data && !d->reader)) { psyvid__err(mv, "psy_video: psyvid_soundtrack needs an audio handle and a WAV (path, data or reader)"); return PSYVID_ERR_ARG; }
+    if (mv->snd) { psyvid__err(mv, "psy_video: the movie has a soundtrack already"); return PSYVID_ERR_ORDER; }
+    if (mv->state != PSYVID__STOPPED || mv->ctl.active) { psyvid__err(mv, "psy_video: give the soundtrack before the first play"); return PSYVID_ERR_ORDER; }
+    if (!psyau_is_open(au)) { psyvid__err(mv, "psy_video: the audio handle is not open"); return PSYVID_ERR_CLOSED; }
+    psyvid__base_rate(mv, &rn, &rd);
+    if (rn != rd) {
+        psyvid__err(mv, "psy_video: the movie base runs at %lld/%lld; a soundtrack plays at rate 1 only (no resampling)", (long long)rn, (long long)rd);
+        return PSYVID_ERR_REFUSED;
+    }
+    psyau_get_caps(au, &c);
+    s = (psyvid__snd*)psyvid__malloc(sizeof *s);
+    if (!s) { psyvid__err(mv, "psy_video: out of memory"); return PSYVID_ERR_FULL; }
+    memset(s, 0, sizeof *s);
+    /* the ring is the movie's: sized for the device's channel count, the
+     * most a WAV may have */
+    cap = d->ring > 0 ? d->ring : (int64_t)c.rate;
+    if (cap < 4 * (int64_t)c.period) cap = 4 * (int64_t)c.period;
+    s->ring = (float*)psyvid__malloc((size_t)cap * c.channels * sizeof(float));
+    if (!s->ring) { psyvid__free(s); psyvid__err(mv, "psy_video: out of memory for the soundtrack's ring"); return PSYVID_ERR_FULL; }
+    memset(&wd, 0, sizeof wd);
+    wd.path = d->path; wd.data = d->data; wd.size = d->size;
+    wd.reader = (const psyau_reader*)(const void*)d->reader;   /* the same layout */
+    wd.reader_ctx = d->reader_ctx;
+    wd.loops = mv->d.loop ? PSYAU_FOREVER : 0;   /* a loop counts samples on: sample s is frame s mod A */
+    wd.ring = cap;
+    wd.memory = s->ring;
+    wd.id = mv->d.movie_index;
+    rc = psyau_wav_open(au, &s->w, &wd);
+    if (rc < 0) {
+        /* rate, channels, sample type and damage: psy_audio's refusals */
+        psyvid__err(mv, "psy_video: the soundtrack: %s", psyau_wav_error(&s->w));
+        psyvid__free(s->ring); psyvid__free(s);
+        return rc == PSYAU_ERR_NOT_FOUND || rc == PSYAU_ERR_IO ? PSYVID_ERR_IO : PSYVID_ERR_REFUSED;
+    }
+    /* The length: the movie's duration in samples, N x den x rate / num,
+     * rounded to the nearest sample, a tie up. */
+    N = mv->info.frames; num = mv->info.fps_num; den = mv->info.fps_den; rate = s->w.info.rate;
+    rc = PSYVID_OK;
+    if ((double)N * (double)den * (double)rate * 2.0 >= 9.0e18) { psyvid__err(mv, "psy_video: the movie is too long for a soundtrack"); rc = PSYVID_ERR_REFUSED; }
+    if (rc == PSYVID_OK) {
+        A2 = 2 * N * den * rate;   /* twice the duration in samples, times num */
+        want = (A2 + num) / (2 * num);
+        if (s->w.info.frames != want) {
+            psyvid__err(mv, "psy_video: the soundtrack has %lld samples; the movie's %lld frames at %d/%d fps last %.3f samples at %u Hz, so %lld are needed (the duration rounded to the nearest sample)",
+                        (long long)s->w.info.frames, (long long)N, (int)num, (int)den, (double)A2 / 2.0 / (double)num, (unsigned)rate, (long long)want);
+            rc = PSYVID_ERR_REFUSED;
+        } else if (mv->d.loop && (N * den * rate) % num != 0) {
+            int64_t k = num / psyvid__gcd64(num, den * rate);
+            psyvid__err(mv, "psy_video: a loop needs the movie to last a whole number of samples, so that the sound does not slip a part of a sample each cycle; at %d/%d fps and %u Hz the frame count must be a multiple of %lld (it is %lld)",
+                        (int)num, (int)den, (unsigned)rate, (long long)k, (long long)N);
+            rc = PSYVID_ERR_REFUSED;
+        }
+    }
+    if (rc < 0) { psyau_wav_close(au, &s->w); psyvid__free(s->ring); psyvid__free(s); return rc; }
+    s->au = au;
+    s->db = d->db;
+    s->mask = d->channels;
+    s->ramp = d->ramp_ns;
+    s->seek_to = -1;
+    mv->snd = s;
+    mv->snd_ops = &psyvid__snd_table;
+    mv->snd_rate = (uint32_t)rate;
+    mv->snd_frames = s->w.info.frames;
+    mv->snd_phase = 0;
+    /* fill from the start now, so the first play does not wait for it */
+    psyvid__snd_rearm(mv, 0, 0, 0, 0);
+    return PSYVID_OK;
+}
+
+/* Sample s's time on the movie clock, counted from the first cycle. */
+static int64_t psyvid__snd_ns(int64_t s, uint32_t rate) {
+    int64_t q = psyvid__floordiv(s, (int64_t)rate), r = s - q * (int64_t)rate;
+    return q * PSYVID__NS + (r * PSYVID__NS + (int64_t)rate / 2) / (int64_t)rate;
+}
+
 static int64_t psyvid__au_unit_at(void* ctx, int64_t t) { return psyau_frame_at((const psyau_audio*)ctx, t); }
+
 PSYVID_API int psyvid_follow_audio(psyvid_movie* mv, psyau_audio* au, const psyscr_frame* f) {
     psyau_caps c;
     if (!au) return PSYVID_ERR_ARG;
+    if (mv && mv->open && mv->snd) {
+        /* The soundtrack's own clock: the sample at the onset, from psy_audio's
+         * fit and the stream's origin, is the movie time. */
+        psyvid__snd* s = (psyvid__snd*)mv->snd;
+        psyau_stream_info si;
+        int64_t smp, rn, rd;
+        if (!f) return PSYVID_ERR_ARG;
+        psyvid__base_rate(mv, &rn, &rd);
+        if (rn != rd) return PSYVID_ERR_REFUSED;
+        if (mv->state != PSYVID__PLAYING || !mv->running || mv->snd_phase != 2) return PSYVID_OK;
+        if (psyau_stream_get_info(&s->w.stream, &si) != PSYAU_OK || si.state != PSYAU_STREAM_PLAYING ||
+            si.id != mv->snd_id || !si.started) return PSYVID_OK;
+        if (psyau_stream_sample_at(au, &s->w.stream, f->onset, &smp) != PSYAU_OK) return PSYVID_OK;
+        mv->following = 1;
+        return psyvid__follow_to(mv, f, psyvid__snd_ns(smp, mv->snd_rate));
+    }
     psyau_get_caps(au, &c);
     return psyvid_follow(mv, f, psyvid__au_unit_at, au, c.rate);
 }

@@ -240,6 +240,80 @@ static bool is_pending_reset(const psytl_event* e) {
     return e && e->frame == -1 && e->onset == 0 && e->residual == 0 && e->flags == 0;
 }
 
+/* ------------------------------------------- exact reference for RATE */
+
+/* floor(d * a / b) for |d| < 2^63 and a, b in [1, 2^31): the 94-bit
+ * product in 32-bit limbs, then long division by b. Written apart from
+ * the header's split of d by b, so the two can disagree. *big is set when
+ * the exact value does not fit an int64. */
+static int64_t ref_floor_md(int64_t d, int64_t a, int64_t b, int* big) {
+    uint64_t m = d < 0 ? (uint64_t)0 - (uint64_t)d : (uint64_t)d;
+    uint64_t lo = (m & 0xFFFFFFFFu) * (uint64_t)a;
+    uint64_t hi = (m >> 32) * (uint64_t)a;
+    uint64_t top = hi + (lo >> 32);
+    uint64_t qt = top / (uint64_t)b, rt = top % (uint64_t)b;
+    uint64_t low = (rt << 32) | (lo & 0xFFFFFFFFu);
+    uint64_t ql = low / (uint64_t)b, rl = low % (uint64_t)b, q;
+    *big = 0;
+    if (qt >> 31) {
+        *big = 1;
+        return d < 0 ? INT64_MIN : INT64_MAX;
+    }
+    q = (qt << 32) + ql;
+    if (d >= 0) return (int64_t)q;
+    if (rl != 0) q++;
+    if (q > (uint64_t)INT64_MAX) {
+        *big = 1;
+        return INT64_MIN;
+    }
+    return -(int64_t)q;
+}
+
+static int64_t ref_ceil_md(int64_t d, int64_t a, int64_t b, int* big) {
+    int64_t f = ref_floor_md(-d, a, b, big);
+    return f == INT64_MIN ? INT64_MAX : -f;
+}
+
+#if defined(__SIZEOF_INT128__)
+/* A second reference where the compiler has 128-bit integers: checks the
+ * limb code itself. */
+__extension__ typedef __int128 ref_i128;
+static int64_t i128_floor_md(int64_t d, int64_t a, int64_t b, int* big) {
+    ref_i128 p = (ref_i128)d * a, q = p / b;
+    if (p % b < 0) q--;
+    *big = q > INT64_MAX || q < INT64_MIN;
+    return *big ? (q < 0 ? INT64_MIN : INT64_MAX) : (int64_t)q;
+}
+#endif
+
+static long long g_ref_checks, g_ref_bad;
+
+static int64_t gcd64(int64_t x, int64_t y) {
+    while (y) { int64_t t = x % y; x = y; y = t; }
+    return x;
+}
+
+/* The manual's mapping of a running base with anchor (art, abt) and rate
+ * num/den: base time at RT t, and the first RT time reaching base time T. */
+static int64_t ref_bt(int64_t art, int64_t abt, int64_t num, int64_t den, int64_t t) {
+    int big;
+    int64_t x = ref_floor_md(t - art, num, den, &big);
+#if defined(__SIZEOF_INT128__)
+    {
+        int big2;
+        int64_t y = i128_floor_md(t - art, num, den, &big2);
+        g_ref_checks++;
+        if (y != x || big != big2) g_ref_bad++;
+    }
+#endif
+    return abt + x;
+}
+
+static int64_t ref_rt(int64_t art, int64_t abt, int64_t num, int64_t den, int64_t T) {
+    int big;
+    return art + ref_ceil_md(T - abt, den, num, &big);
+}
+
 /* ------------------------------------------------- reference easing model */
 
 #define REF_PI 3.14159265358979323846
@@ -278,6 +352,16 @@ static unsigned g_mut;
 #define MUT_PEEK_FIRED   65536u  /* peek lists fired events too                    */
 #define MUT_PEEK_ONSET   131072u /* a peek copy's onset is its base time           */
 #define MUT_SKIP_LATEW   262144u /* a skip back leaves waiting late events pending */
+/* RATE (v0.4.0) */
+#define MUT_RATE_REWIND   (1u << 19) /* a rate change rewinds like an anchor         */
+#define MUT_RATE_TRUNC    (1u << 20) /* the scaled time truncates toward 0, not floor */
+#define MUT_RATE_LEAD     (1u << 21) /* window end bt(onset) + L, not bt(onset + L)  */
+#define MUT_RATE_INVFLOOR (1u << 22) /* the RT time of a base time rounds down      */
+#define MUT_RATE_PAUSE1   (1u << 23) /* a pause freezes at rate 1                   */
+#define MUT_RATE_ORDER    (1u << 24) /* the report ordered by onset - residual      */
+#define MUT_RATE_NOW      (1u << 25) /* a rate change leaves "now"                  */
+#define MUT_RATE_SAME     (1u << 26) /* the same rate re-anchors a running base     */
+#define MUT_RATE_ANCHOR1  (1u << 27) /* an anchor or skip resets the rate to 1/1    */
 
 #define NS_E9 INT64_C(1000000000)
 
@@ -3970,6 +4054,9 @@ static psytl_track g_rtr[3];
 
 /* Channels 6 and 7 keyed, 8 swapped between sampled, repeated and
  * BEZIER tracks and none, 9 tweened. */
+static int g_replay_rate;
+static int g_v030_model;   /* TL_V030_MODEL: only the v0.3.0 model runs */   /* RATE: rate and window calls among the ops too */
+
 static uint64_t replay_run(psytl_timeline* tl, psytl_event* store) {
     float init[10] = { 0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f };
     psytl_event fired[8], b[3];
@@ -3983,8 +4070,20 @@ static uint64_t replay_run(psytl_timeline* tl, psytl_event* store) {
     psytl_set_keys(tl, 7, 0, g_rk7, 3);
     psytl_set_track(tl, 8, 2, &g_rtr[0]);
     for (step = 0; step < 600; step++) {
-        r = rnd_int(110);
-        if (r < 35) {
+        r = rnd_int(g_replay_rate ? 118 : 110);
+        if (r >= 114) {
+            psytl_frame wf;
+            int64_t end = 0;
+            wf.onset = onset + rnd_range(0, P60);
+            wf.period = P60;
+            wf.index = step;
+            ret = psytl_window(tl, rnd_int(5), &wf, &end);
+            h = fnv(h, &end, sizeof end);
+        } else if (r >= 110) {
+            static const int32_t rn[6] = { 1, 1, 2, 1001, 3, 25 }, rd[6] = { 1, 2, 1, 1000, 7, 24 };
+            int k = rnd_int(6);
+            ret = psytl_rate(tl, 1 + rnd_int(3), onset + rnd_range(-P60, 2 * P60), rn[k], rd[k]);
+        } else if (r < 35) {
             int base = rnd_int(4), kind = rnd_int(5);
             int64_t t = base == 0 ? onset + rnd_range(-3 * P60, 10 * P60) : rnd_range(-3 * P60, 80 * P60);
             psytl_event e = ev(base, t, kind, rnd_int(6), (float)rnd_int(50));
@@ -4092,6 +4191,17 @@ static void test_replay(void) {
     v1 = psytl_values(&g_tl);
     v2 = psytl_values(&g_tl2);
     CHECK(v1 && v2 && memcmp(v1, v2, 10 * sizeof(float)) == 0);
+    /* RATE: the same with rate changes and window queries among the calls,
+     * and the whole handles compared. */
+    g_replay_rate = 1;
+    h1 = replay_run(&g_tl, g_store);
+    h2 = replay_run(&g_tl2, g_store2);
+    g_replay_rate = 0;
+    CHECK(h1 != 0);
+    CHECK(h1 == h2);
+    CHECK(memcmp(g_store, g_store2, 64 * sizeof g_store[0]) == 0);
+    CHECK(memcmp(&g_tl.bases, &g_tl2.bases, sizeof g_tl.bases) == 0);
+    CHECK(memcmp(psytl_values(&g_tl), psytl_values(&g_tl2), 10 * sizeof(float)) == 0);
 }
 
 /* ------------------------------------------- 11b. lead, skip and peek */
@@ -4588,6 +4698,1373 @@ static void test_peek_lookahead(void) {
     CHECK(worst >= L - P);
 }
 
+/* ------------------------------------------------- 11c. RATE and window */
+
+/* Base `b` running from (art, abt) at num/den, through the calls: an
+ * anchor, then the rate at the anchor's RT time, which keeps (art, abt). */
+static void rate_setup(psytl_timeline* tl, int b, int64_t art, int64_t abt, int32_t num, int32_t den) {
+    CHECK_I(psytl_anchor(tl, b, art, abt), 0);
+    CHECK_I(psytl_rate(tl, b, art, num, den), 0);
+}
+
+/* The exact base time, with *oor set when it is at or past +-2^62. */
+static int64_t ref_bt_range(int64_t art, int64_t abt, int64_t num, int64_t den, int64_t t, int* oor) {
+    int big;
+    int64_t q = ref_floor_md(t - art, num, den, &big);
+    *oor = 1;
+    if (big) return 0;
+    if (q > 0 && q >= LIM62 - abt) return 0;
+    if (q < 0 && q <= -LIM62 - abt) return 0;
+    *oor = abt + q >= LIM62 || abt + q <= -LIM62;
+    return abt + q;
+}
+
+static void test_rate_arith(void) {
+    static const int64_t nums[9] = { 1, 2, 3, 7, 1000, 1001, 24000, 2147483646, 2147483647 };
+    int i, bad = 0, bad_inv = 0, bad_oor = 0, n_oor = 0, n_inv = 0;
+    g_rng = 4242;
+    CHECK(open_h(&g_tl, g_store, 4, 1, NULL, 0.5));
+    for (i = 0; i < 200000; i++) {
+        int64_t num = rnd_int(3) ? nums[rnd_int(9)] : rnd_range(1, 2147483647);
+        int64_t den = rnd_int(3) ? nums[rnd_int(9)] : rnd_range(1, 2147483647);
+        int64_t g = gcd64(num, den), art, abt, t, x = 0, want, T;
+        int oor, cls = rnd_int(4);
+        bool ok;
+        art = rnd_int(2) ? rnd_range(-LIM62 + 1, LIM62 - 1) : rnd_range(-1000000, 1000000);
+        abt = rnd_int(2) ? rnd_range(-LIM62 + 1, LIM62 - 1) : rnd_range(-1000000, 1000000);
+        if (cls == 0) t = art + rnd_range(-3 * den, 3 * den);
+        else if (cls == 1) t = art + rnd_range(-(INT64_C(1) << 40), INT64_C(1) << 40);
+        else t = rnd_range(-LIM62 + 1, LIM62 - 1);
+        if (t >= LIM62 || t <= -LIM62) t = art;
+        rate_setup(&g_tl, 1, art, abt, (int32_t)num, (int32_t)den);
+        num /= g;
+        den /= g;
+        want = ref_bt_range(art, abt, num, den, t, &oor);
+        ok = psytl_base_time(&g_tl, 1, t, &x);
+        if (oor) {
+            n_oor++;
+            if (ok) bad_oor++;
+        } else if (!ok || x != want) {
+            if (!bad)
+                fprintf(stderr, "  base_time %lld/%lld anchor (%lld, %lld) t %lld: got %lld (%d), want %lld\n",
+                        (long long)num, (long long)den, (long long)art, (long long)abt, (long long)t,
+                        (long long)x, (int)ok, (long long)want);
+            bad++;
+        }
+        /* The inverse: the first RT ns at which the base reaches T. */
+        T = oor ? abt + rnd_range(-1000, 1000) : want + rnd_range(-2, 2);
+        if (T >= LIM62 || T <= -LIM62) continue;
+        {
+            int big;
+            int64_t c = ref_ceil_md(T - abt, den, num, &big), r = 0, b0 = 0, b1 = 0;
+            int in = !big && !(c > 0 && c >= LIM62 - art) && !(c < 0 && c <= -LIM62 - art);
+            if (in && (art + c >= LIM62 || art + c <= -LIM62)) in = 0;
+            ok = psytl_rt_time(&g_tl, 1, T, &r);
+            if (ok != (in != 0) || (ok && r != art + c)) {
+                bad_inv++;
+            } else if (ok && r - 1 > -LIM62) {
+                n_inv++;
+                /* bt(r) >= T > bt(r - 1), read back through the header */
+                if (psytl_base_time(&g_tl, 1, r, &b0) && psytl_base_time(&g_tl, 1, r - 1, &b1)
+                    && !(b0 >= T && b1 < T))
+                    bad_inv++;
+            }
+        }
+    }
+    CHECK_I(bad, 0);
+    CHECK_I(bad_oor, 0);
+    CHECK_I(bad_inv, 0);
+    CHECK(n_oor > 1000 && n_inv > 100000);
+    /* Floor, not truncation, before the anchor: at 1/2 from (0, 0). */
+    rate_setup(&g_tl, 2, 0, 0, 1, 2);
+    {
+        static const int64_t t[7] = { -3, -2, -1, 0, 1, 2, 3 }, w[7] = { -2, -1, -1, 0, 0, 1, 1 };
+        int k;
+        int64_t x;
+        for (k = 0; k < 7; k++) {
+            x = 99;
+            CHECK(psytl_base_time(&g_tl, 2, t[k], &x));
+            CHECK_I(x, w[k]);
+        }
+        /* and the inverse rounds up: base time 1 is reached at RT 2, -1 at
+         * RT -2, 0 at RT 0 */
+        CHECK(psytl_rt_time(&g_tl, 2, 1, &x));
+        CHECK_I(x, 2);
+        CHECK(psytl_rt_time(&g_tl, 2, -1, &x));
+        CHECK_I(x, -2);
+        CHECK(psytl_rt_time(&g_tl, 2, 0, &x));
+        CHECK_I(x, 0);
+    }
+}
+
+static void test_rate_calls(void) {
+    const int64_t M = MS_NS, P = 10 * MS_NS;
+    int32_t n = 0, d = 0;
+    int64_t x = 0;
+    int k;
+    psytl_frame f;
+    psytl_tween_desc td;
+    /* refusals */
+    CHECK_I(psytl_rate(&g_closed, 1, 0, 1, 2), PSYTL_ERR_CLOSED);
+    CHECK(!psytl_get_rate(&g_closed, 1, &n, &d));
+    CHECK(!psytl_rt_time(&g_closed, 0, 0, &x));
+    CHECK_I(psytl_clamped(&g_closed, 1), PSYTL_ERR_CLOSED);
+    CHECK(open_h(&g_tl, g_store, 64, 4, NULL, 0.5));
+    CHECK_I(psytl_rate(&g_tl, 0, 0, 1, 2), PSYTL_ERR_ARG);
+    CHECK_I(psytl_rate(&g_tl, PSYTL_MAX_BASES, 0, 1, 2), PSYTL_ERR_ARG);
+    CHECK_I(psytl_rate(&g_tl, -1, 0, 1, 2), PSYTL_ERR_ARG);
+    CHECK_I(psytl_rate(&g_tl, 1, 0, 0, 2), PSYTL_ERR_ARG);
+    CHECK_I(psytl_rate(&g_tl, 1, 0, 1, 0), PSYTL_ERR_ARG);
+    CHECK_I(psytl_rate(&g_tl, 1, 0, -1, 2), PSYTL_ERR_ARG);
+    CHECK_I(psytl_rate(&g_tl, 1, 0, 1, -2), PSYTL_ERR_ARG);
+    CHECK_I(psytl_rate(&g_tl, 1, LIM62, 1, 2), PSYTL_ERR_ARG);
+    CHECK_I(psytl_rate(&g_tl, 1, -LIM62, 1, 2), PSYTL_ERR_ARG);
+    CHECK(psytl_get_rate(&g_tl, 1, &n, &d) && n == 1 && d == 1);   /* nothing changed */
+    CHECK_I(psytl_rate(&g_tl, 1, LIM62 - 1, 1, 1), 0);
+    CHECK(!psytl_get_rate(&g_tl, 1, NULL, &d));
+    CHECK(!psytl_get_rate(&g_tl, 1, &n, NULL));
+    CHECK(!psytl_get_rate(&g_tl, -1, &n, &d));
+    CHECK(!psytl_get_rate(&g_tl, PSYTL_MAX_BASES, &n, &d));
+    CHECK(psytl_get_rate(&g_tl, 0, &n, &d) && n == 1 && d == 1);
+    CHECK_I(psytl_clamped(&g_tl, -1), PSYTL_ERR_ARG);
+    CHECK_I(psytl_clamped(&g_tl, 1), 0);
+    /* reduced by the gcd */
+    CHECK_I(psytl_rate(&g_tl, 1, 0, 2, 4), 0);
+    CHECK(psytl_get_rate(&g_tl, 1, &n, &d) && n == 1 && d == 2);
+    CHECK_I(psytl_rate(&g_tl, 1, 0, 1000, 1000), 0);
+    CHECK(psytl_get_rate(&g_tl, 1, &n, &d) && n == 1 && d == 1);
+    CHECK_I(psytl_rate(&g_tl, 1, 0, 2147483647, 2147483646), 0);
+    CHECK(psytl_get_rate(&g_tl, 1, &n, &d) && n == 2147483647 && d == 2147483646);
+    CHECK_I(psytl_rate(&g_tl, 1, 0, 48000, 2002), 0);
+    CHECK(psytl_get_rate(&g_tl, 1, &n, &d) && n == 24000 && d == 1001);
+    /* rt_time and window refusals */
+    CHECK(!psytl_rt_time(&g_tl, 1, 0, &x));                 /* stopped */
+    CHECK(psytl_rt_time(&g_tl, 0, 1234, &x) && x == 1234);  /* the RT base */
+    CHECK(!psytl_rt_time(&g_tl, 0, LIM62, &x));
+    CHECK(!psytl_rt_time(&g_tl, 0, 0, NULL));
+    CHECK(!psytl_rt_time(&g_tl, PSYTL_MAX_BASES, 0, &x));
+    f.onset = T0;
+    f.period = P;
+    f.index = 0;
+    CHECK(!psytl_window(&g_tl, 1, &f, &x));                 /* stopped */
+    CHECK(psytl_window(&g_tl, 0, &f, &x) && x == T0 + P / 2);
+    CHECK(!psytl_window(&g_tl, 0, NULL, &x));
+    CHECK(!psytl_window(&g_tl, 0, &f, NULL));
+    CHECK(!psytl_window(&g_tl, -1, &f, &x));
+    f.period = -1;
+    CHECK(!psytl_window(&g_tl, 0, &f, &x));
+    f.period = 0;
+    CHECK(psytl_window(&g_tl, 0, &f, &x) && x == T0);
+    /* LEAD_NONE: the window ends at the onset */
+    CHECK(open_h(&g_tl2, g_store2, 4, 1, NULL, 0.0));
+    f.period = P;
+    CHECK(psytl_window(&g_tl2, 0, &f, &x) && x == T0);
+
+    /* A stopped base keeps the rate for its anchor. */
+    CHECK_I(psytl_rate(&g_tl, 2, 0, 1, 2), 0);
+    CHECK_I(psytl_anchor(&g_tl, 2, T0, 0), 0);
+    CHECK(psytl_base_time(&g_tl, 2, T0 + 11, &x) && x == 5);
+    /* A pause at 1/3 freezes the floor; a rate while paused changes nothing
+     * now and runs from the resume. */
+    rate_setup(&g_tl, 3, T0, 0, 1, 3);
+    CHECK_I(psytl_pause(&g_tl, 3, T0 + 10), 0);
+    CHECK(psytl_base_time(&g_tl, 3, T0 + 999, &x) && x == 3);
+    f.onset = T0 + 999;
+    f.period = P;
+    CHECK(psytl_window(&g_tl, 3, &f, &x) && x == 3);          /* paused: the frozen time */
+    CHECK_I(psytl_rate(&g_tl, 3, T0 + 500, 1, 4), 0);
+    CHECK(psytl_base_time(&g_tl, 3, T0 + 999, &x) && x == 3);
+    CHECK(!psytl_rt_time(&g_tl, 3, 5, &x));                    /* paused */
+    CHECK_I(psytl_resume(&g_tl, 3, T0 + 1000), 0);
+    CHECK(psytl_base_time(&g_tl, 3, T0 + 1008, &x) && x == 5);
+    CHECK(psytl_get_rate(&g_tl, 3, &n, &d) && n == 1 && d == 4);
+    /* anchor, skip, stop, clear, prune keep it; open resets it */
+    CHECK_I(psytl_anchor(&g_tl, 3, T0, 0), 0);
+    CHECK(psytl_get_rate(&g_tl, 3, &n, &d) && n == 1 && d == 4);
+    CHECK(psytl_skip(&g_tl, 3, T0, 100) >= 0);
+    CHECK_I(psytl_stop(&g_tl, 3), 0);
+    CHECK(psytl_clear(&g_tl, 3) >= 0);
+    CHECK(psytl_prune(&g_tl, PSYTL_ALL_BASES) >= 0);
+    CHECK(psytl_get_rate(&g_tl, 3, &n, &d) && n == 1 && d == 4);
+    CHECK(open_h(&g_tl, g_store, 64, 4, NULL, 0.5));
+    CHECK(psytl_get_rate(&g_tl, 3, &n, &d) && n == 1 && d == 1);
+
+    /* No rewind at the change point: P = 10 ms, lead 0.5, MARKs every
+     * 5 ms on base 1. Frames 0 to 4; frame 4's window ends at 45 ms. A
+     * change at frame 4's onset (base time 40 ms) to 1/10 leaves every
+     * fired event fired, the one at 40 ms included, and the storage as it
+     * was. */
+    CHECK(open_h(&g_tl, g_store, 64, 4, NULL, 0.5));
+    CHECK_I(psytl_anchor(&g_tl, 1, T0, 0), 0);
+    for (k = 0; k <= 20; k++) CHECK(add1(&g_tl, 1, k * 5 * M, PSYTL_MARK, 0, 0.0f) >= 0);
+    for (k = 0; k <= 4; k++) (void)eval_at(&g_tl, T0 + k * P, P, k, NULL, 0);
+    CHECK_I(find_at(&g_tl, 1, 40 * M, PSYTL_MARK)->frame, 4);
+    CHECK_I(find_at(&g_tl, 1, 45 * M, PSYTL_MARK)->frame, 4);
+    memcpy(g_snap, g_store, 64 * sizeof g_store[0]);
+    CHECK_I(psytl_rate(&g_tl, 1, T0 + 4 * P, 1, 10), 0);
+    CHECK(memcmp(g_snap, g_store, 64 * sizeof g_store[0]) == 0);
+    /* Frame 5's window ends at 40 + 15/10 = 41.5 ms, behind the reach
+     * (45 ms). An event added at 44 ms is late and waits for frame 8,
+     * whose window ends at 44.5 ms. */
+    f.onset = T0 + 5 * P;
+    f.period = P;
+    f.index = 5;
+    CHECK(psytl_window(&g_tl, 1, &f, &x) && x == 41 * M + M / 2);
+    CHECK(add1(&g_tl, 1, 44 * M, PSYTL_MARK, 0, 0.0f) >= 0);
+    for (k = 5; k <= 7; k++) CHECK_I(eval_at(&g_tl, T0 + k * P, P, k, NULL, 0), 0);
+    CHECK_I(eval_at(&g_tl, T0 + 8 * P, P, 8, g_fired, 4), 1);
+    CHECK_I(g_fired[0].time, 44 * M);
+    CHECK_I(g_fired[0].flags, PSYTL_EV_FIRED | PSYTL_EV_LATE);
+    CHECK_I(g_fired[0].residual, 0);   /* base time at frame 8's onset is 44 ms */
+    CHECK_I(find_at(&g_tl, 1, 45 * M, PSYTL_MARK)->frame, 4);
+    for (k = 9; k <= 13; k++) CHECK_I(eval_at(&g_tl, T0 + k * P, P, k, NULL, 0), 0);
+    CHECK_I(eval_at(&g_tl, T0 + 14 * P, P, 14, NULL, 0), 1);   /* 50 ms: window end 50.5 */
+    /* An anchor at 40 ms still rewinds: the change moved no fired event. */
+    CHECK_I(psytl_anchor(&g_tl, 1, T0 + 15 * P, 40 * M), 0);
+    CHECK(is_pending_reset(find_at(&g_tl, 1, 40 * M, PSYTL_MARK)));
+    CHECK_I(find_at(&g_tl, 1, 35 * M, PSYTL_MARK)->frame, 3);
+
+    /* "now" after a change between onsets is the base time at the change:
+     * frames at 0 and 10 ms, a change to 1/2 at 15 ms (base time 15 ms),
+     * then a 10 ms tween from 0 to 1. At frame 2 (base time 15 + 2.5 ms)
+     * it shows 0.25. With "now" at the last onset (10 ms) it would show
+     * 0.75. */
+    CHECK(open_h(&g_tl, g_store, 64, 4, NULL, 0.5));
+    CHECK_I(psytl_anchor(&g_tl, 1, T0, 0), 0);
+    (void)eval_at(&g_tl, T0, P, 0, NULL, 0);
+    (void)eval_at(&g_tl, T0 + P, P, 1, NULL, 0);
+    CHECK_I(psytl_rate(&g_tl, 1, T0 + 15 * M, 1, 2), 0);
+    td = twd(1.0f, 10 * M);
+    CHECK_I(psytl_tween(&g_tl, 0, 1, &td), 0);
+    (void)eval_at(&g_tl, T0 + 2 * P, P, 2, NULL, 0);
+    CHECK_F(psytl_value(&g_tl, 0), 0.25, 1e-6);
+    /* The same rate again changes nothing, "now" included: a tween posted
+     * after it starts at frame 2's base time (17.5 ms). */
+    memcpy(&g_tl2, &g_tl, sizeof g_tl);
+    CHECK_I(psytl_rate(&g_tl, 1, T0 + 23 * M, 2, 4), 0);
+    CHECK(memcmp(&g_tl2, &g_tl, sizeof g_tl) == 0);
+    td = twd(1.0f, 10 * M);
+    CHECK_I(psytl_tween(&g_tl, 1, 1, &td), 0);
+    (void)eval_at(&g_tl, T0 + 3 * P, P, 3, NULL, 0);   /* base time 22.5 ms */
+    CHECK_F(psytl_value(&g_tl, 1), 0.5, 1e-6);
+}
+
+/* Quantization under a rate: an event at base time T lands on the first
+ * grid frame k with T0 + k P + w >= rt(T), the rate-1 rule applied to the
+ * RT time its base reaches it, with residual bt(onset) - T, and in the
+ * report by rt(T) then id. */
+static void rate_grid(int64_t P, int lead_num, int lead_den, int64_t num, int64_t den, uint64_t seed) {
+    enum { NE = 300, NF = 420 };
+    static int64_t ev_t[NE];
+    static int ev_id[NE];
+    const int64_t w = lead_num ? P * lead_num / lead_den : 0;
+    const int64_t art = T0 + 12345, abt = 500 * MS_NS;
+    int i, k, bad = 0, bad_order = 0, first_bad = -1, n_land = 0;
+    g_rng = seed;
+    CHECK(open_h(&g_tl, g_store, NE + 4, 1, NULL, lead_num ? (double)lead_num / (double)lead_den : 0.0));
+    rate_setup(&g_tl, 3, art, abt, (int32_t)num, (int32_t)den);
+    for (i = 0; i < NE; i++) {
+        int64_t kk = rnd_int(NF - 20), t;
+        int c = i % 10;
+        if (c == 0) t = ref_bt(art, abt, num, den, T0 + kk * P);
+        else if (c == 1) t = ref_bt(art, abt, num, den, T0 + kk * P + w);
+        else if (c == 2) t = ref_bt(art, abt, num, den, T0 + kk * P + w) + 1;
+        else if (c == 3) t = ref_bt(art, abt, num, den, T0 + kk * P + w) - 1;
+        else t = rnd_range(ref_bt(art, abt, num, den, T0 - P), ref_bt(art, abt, num, den, T0 + (NF - 20) * P));
+        ev_t[i] = t;
+        ev_id[i] = add1(&g_tl, 3, t, PSYTL_MARK, 0, 0.0f);
+        CHECK_I(ev_id[i], i);
+    }
+    for (k = 0; k < NF; k++) {
+        int n = eval_at(&g_tl, T0 + k * P, P, 1000 + k, g_fired, STORE_CAP), j;
+        for (j = 1; j < n && j < STORE_CAP; j++) {
+            int64_t a = ref_rt(art, abt, num, den, g_fired[j - 1].time);
+            int64_t b = ref_rt(art, abt, num, den, g_fired[j].time);
+            if (a > b || (a == b && g_fired[j - 1].id > g_fired[j].id)) bad_order++;
+        }
+    }
+    for (i = 0; i < NE; i++) {
+        const psytl_event* e = psytl_find(&g_tl, ev_id[i]);
+        int64_t kk = quant_k(ref_rt(art, abt, num, den, ev_t[i]), P, w), on = T0 + kk * P;
+        if (kk >= NF) continue;
+        n_land++;
+        if (!e || e->frame != 1000 + kk || e->onset != on
+            || e->residual != ref_bt(art, abt, num, den, on) - ev_t[i] || e->flags != PSYTL_EV_FIRED) {
+            if (first_bad < 0) first_bad = i;
+            bad++;
+        }
+    }
+    if (first_bad >= 0) {
+        const psytl_event* e = psytl_find(&g_tl, ev_id[first_bad]);
+        fprintf(stderr, "  rate grid P %lld lead %d/%d rate %lld/%lld: event %lld want frame %lld; got %lld residual %lld\n",
+                (long long)P, lead_num, lead_den, (long long)num, (long long)den, (long long)ev_t[first_bad],
+                (long long)(1000 + quant_k(ref_rt(art, abt, num, den, ev_t[first_bad]), P, w)),
+                e ? (long long)e->frame : -99, e ? (long long)e->residual : -99);
+    }
+    if (bad) fail_i(__LINE__, "rate grid landings that disagree with the reference", bad, 0);
+    if (bad_order) fail_i(__LINE__, "rate grid reports out of RT target order", bad_order, 0);
+    if (n_land < NE * 9 / 10) fail_i(__LINE__, "rate grid: too few events in the grid (vacuous)", n_land, NE);
+}
+
+static void test_rate_quant(void) {
+    static const int64_t periods[6] = { 16666667, 6944444, 4166667, 2777778, 2000000, 1000000 };
+    static const int64_t rn[6] = { 1, 2, 1001, 1000, 3, 25 }, rd[6] = { 2, 1, 1000, 1001, 7, 24 };
+    static const int ln[3] = { 1, 1, 0 }, ld[3] = { 2, 4, 1 };
+    int pi, ri, li;
+    for (pi = 0; pi < 6; pi++)
+        for (ri = 0; ri < 6; ri++)
+            for (li = 0; li < 3; li++)
+                rate_grid(periods[pi], ln[li], ld[li], rn[ri], rd[ri], (uint64_t)(700 + 100 * pi + 10 * ri + li));
+}
+
+/* The change point swept across a frame: a change from r0 to r1 at RT
+ * time c, made after frame K-1 is evaluated and before frame K, with c
+ * from frame K-1's onset to frame K+1's (and on the onsets, on the window
+ * ends, and a ns either side). Frames before K use the old mapping, frames
+ * from K the new one, anchored at (c, old bt(c)). Every event lands on the
+ * first frame whose window end reaches it; that covers the windows behind
+ * the reach after a drop, since nothing un-fires. */
+static void rate_sweep(int64_t P, int lead_num, int lead_den, int64_t n0, int64_t d0, int64_t n1, int64_t d1,
+                       long* n_checked) {
+    enum { NE = 260, NF = 44, K = 20 };
+    static int64_t ev_t[NE], ends[NF], ons[NF];
+    static int ev_id[NE];
+    const int64_t w = lead_num ? P * lead_num / lead_den : 0, art = T0 + 777;
+    int64_t cs[48];
+    int nc = 0, ci, i, k, bad = 0, bad_win = 0;
+    for (i = 0; i <= 32; i++) cs[nc++] = T0 + (K - 1) * P + i * 2 * P / 32;
+    cs[nc++] = T0 + K * P - 1;
+    cs[nc++] = T0 + K * P + 1;
+    cs[nc++] = T0 + K * P + w;
+    cs[nc++] = T0 + K * P + w - 1;
+    cs[nc++] = T0 + K * P + w + 1;
+    cs[nc++] = T0 + (K - 1) * P + w;
+    cs[nc++] = T0 + (K - 1) * P + w + 1;
+    for (ci = 0; ci < nc; ci++) {
+        const int64_t c = cs[ci], btc = ref_bt(art, 0, n0, d0, c);
+        g_rng = 9000 + (uint64_t)ci;
+        for (k = 0; k < NF; k++) {
+            ons[k] = T0 + k * P;
+            ends[k] = k < K ? ref_bt(art, 0, n0, d0, ons[k] + w) : ref_bt(c, btc, n1, d1, ons[k] + w);
+        }
+        CHECK(open_h(&g_tl, g_store, NE + 4, 1, NULL, lead_num ? (double)lead_num / (double)lead_den : 0.0));
+        rate_setup(&g_tl, 1, art, 0, (int32_t)n0, (int32_t)d0);
+        for (i = 0; i < NE; i++) {
+            int kk = K - 4 + rnd_int(12), c3 = i % 8;
+            int64_t t;
+            if (c3 < 3) t = ends[kk] + (c3 - 1);
+            else if (c3 < 6) t = ref_bt(art, 0, n0, d0, ons[kk] + w) + (c3 - 4);
+            else if (c3 == 6) t = ref_bt(c, btc, n1, d1, ons[kk] + w) + rnd_range(-1, 1);
+            else t = rnd_range(ends[K - 6], ends[NF - 4]);
+            ev_t[i] = t;
+            ev_id[i] = add1(&g_tl, 1, t, PSYTL_MARK, 0, 0.0f);
+        }
+        for (k = 0; k < NF; k++) {
+            psytl_frame f;
+            int64_t e = 0;
+            if (k == K) CHECK_I(psytl_rate(&g_tl, 1, c, (int32_t)n1, (int32_t)d1), 0);
+            f.onset = ons[k];
+            f.period = P;
+            f.index = k;
+            if (!psytl_window(&g_tl, 1, &f, &e) || e != ends[k]) bad_win++;
+            (void)psytl_evaluate(&g_tl, &f, NULL, 0);
+        }
+        for (i = 0; i < NE; i++) {
+            const psytl_event* e = psytl_find(&g_tl, ev_id[i]);
+            int64_t want = -1, res = 0;
+            for (k = 0; k < NF; k++) {
+                if (ends[k] >= ev_t[i]) {
+                    want = k;
+                    res = (k < K ? ref_bt(art, 0, n0, d0, ons[k]) : ref_bt(c, btc, n1, d1, ons[k])) - ev_t[i];
+                    break;
+                }
+            }
+            (*n_checked)++;
+            if (!e || e->frame != want || (want >= 0 && (e->residual != res || e->onset != ons[want]))) {
+                if (!bad)
+                    fprintf(stderr, "  sweep P %lld lead %d/%d %lld/%lld -> %lld/%lld at %lld: event %lld "
+                            "want frame %lld, got %lld\n", (long long)P, lead_num, lead_den, (long long)n0,
+                            (long long)d0, (long long)n1, (long long)d1, (long long)(c - T0 - K * P),
+                            (long long)ev_t[i], (long long)want, e ? (long long)e->frame : -99);
+                bad++;
+            }
+        }
+    }
+    if (bad) fail_i(__LINE__, "sweep landings that disagree with the reference", bad, 0);
+    if (bad_win) fail_i(__LINE__, "sweep windows that disagree with the reference", bad_win, 0);
+}
+
+static void test_rate_sweep(void) {
+    static const int64_t pr[5][4] = { { 1, 1, 1, 2 }, { 1, 2, 3, 1 }, { 1001, 1000, 999, 1000 },
+                                      { 1, 1, 1, 10 }, { 7, 3, 1, 1 } };
+    static const int64_t periods[2] = { 2000000, 1000000 };
+    long n = 0;
+    int pi, ri;
+    for (pi = 0; pi < 2; pi++)
+        for (ri = 0; ri < 5; ri++) {
+            rate_sweep(periods[pi], 1, 2, pr[ri][0], pr[ri][1], pr[ri][2], pr[ri][3], &n);
+            rate_sweep(periods[pi], 0, 1, pr[ri][0], pr[ri][1], pr[ri][2], pr[ri][3], &n);
+        }
+    CHECK(n > 200000);   /* 2 periods x 5 pairs x 2 leads x 40 change points x 260 events */
+}
+
+static void test_rate_tracks(void) {
+    const int64_t M = MS_NS;
+    int i, bad = 0, trial;
+    psytl_tween_desc td;
+    /* A 200 ms tween on a base at 1/2 takes 400 ms of RT. */
+    CHECK(open_h(&g_tl, g_store, 8, 4, NULL, 0.5));
+    rate_setup(&g_tl, 1, T0, 0, 1, 2);
+    td = twd_at(1.0f, 200 * M, 0);
+    CHECK_I(psytl_tween(&g_tl, 0, 1, &td), 0);
+    for (i = 0; i <= 10; i++) {
+        (void)eval_at(&g_tl, T0 + i * 40 * M, 0, i, NULL, 0);
+        CHECK_F(psytl_value(&g_tl, 0), i / 10.0, 1e-6);
+    }
+    /* keep_velocity across a rate change: the value is continuous and the
+     * RT velocity steps by exactly the ratio of the rates (1 to 1/2). The
+     * old track moves 10 per s; the tween takes over at 500 ms; the rate
+     * changes at RT 700 ms. Frames every 1 ms. */
+    {
+        static psytl_key lin[2];
+        int64_t c = T0 + 700 * M;
+        double v[5];
+        lin[0] = mkkey(0, 0.0f, PSYTL_EASE_LINEAR);
+        lin[1] = mkkey(S_NS, 10.0f, PSYTL_EASE_LINEAR);
+        CHECK(open_h(&g_tl, g_store, 8, 4, NULL, 0.5));
+        CHECK_I(psytl_anchor(&g_tl, 1, T0, 0), 0);
+        CHECK_I(psytl_set_keys(&g_tl, 0, 1, lin, 2), 0);
+        td = twd_at(20.0f, S_NS, 500 * M);
+        td.keep_velocity = true;
+        CHECK_I(psytl_tween(&g_tl, 0, 1, &td), 0);
+        for (i = 0; i < 698; i++) (void)eval_at(&g_tl, T0 + i * M, M, i, NULL, 0);
+        for (i = 0; i < 5; i++) {
+            if (i == 2) CHECK_I(psytl_rate(&g_tl, 1, c, 1, 2), 0);
+            (void)eval_at(&g_tl, c + (i - 2) * M, M, 698 + i, NULL, 0);
+            v[i] = psytl_value(&g_tl, 0);
+        }
+        /* v[2] is at the change; the steps before and after it */
+        CHECK_F((v[3] - v[2]) / (v[2] - v[1]), 0.5, 0.01);
+        CHECK_F((v[4] - v[3]) / (v[1] - v[0]), 0.5, 0.01);
+    }
+    /* A STEP track's change lands on the frame an event at the same time
+     * lands on, at 1001/1000 and 1/3, 300 random cases each. */
+    for (trial = 0; trial < 600; trial++) {
+        static psytl_key st[2];
+        int64_t P, art, T;
+        int32_t num = trial < 300 ? 1001 : 1, den = trial < 300 ? 1000 : 3;
+        int fs = -1, fe = -1, k;
+        double lead;
+        g_rng = 5000 + (uint64_t)trial;
+        P = rnd_int(2) ? P60 : 2000000;
+        art = T0 + rnd_range(0, P);
+        lead = rnd_int(2) ? 0.5 : 0.0;
+        CHECK(open_h(&g_tl, g_store, 4, 3, NULL, lead));
+        rate_setup(&g_tl, 1, art, 0, num, den);
+        T = rnd_range(5 * P, 30 * P) * num / den;
+        if (rnd_int(2))
+            T = ref_bt(art, 0, num, den, T0 + rnd_range(5, 30) * P + (lead > 0 ? P / 2 : 0)) + rnd_range(-1, 1);
+        st[0] = mkkey(T - S_NS, 0.0f, PSYTL_EASE_STEP);
+        st[1] = mkkey(T, 1.0f, PSYTL_EASE_LINEAR);
+        CHECK_I(psytl_set_keys(&g_tl, 1, 1, st, 2), 0);
+        CHECK(add1(&g_tl, 1, T, PSYTL_ONSET, 2, 0.0f) >= 0);
+        for (k = 0; k < 400 && (fs < 0 || fe < 0); k++) {
+            (void)eval_at(&g_tl, T0 + k * P, P, k, NULL, 0);
+            if (fs < 0 && psytl_value(&g_tl, 1) == 1.0f) fs = k;
+            if (fe < 0 && psytl_value(&g_tl, 2) == 1.0f) fe = k;
+        }
+        if (fs != fe || fs < 0) bad++;
+    }
+    CHECK_I(bad, 0);
+}
+
+static void test_rate_peek(void) {
+    const int64_t M = MS_NS;
+    static const int32_t rn[2] = { 1, 7 }, rd[2] = { 3, 3 };
+    int ri, i, bad = 0;
+    for (ri = 0; ri < 2; ri++) {
+        int64_t due = 0, mdue = INT64_MAX;
+        g_rng = 77 + (uint64_t)ri;
+        CHECK(open_h(&g_tl, g_store, 64, 1, NULL, 0.5));
+        rate_setup(&g_tl, 2, T0 + 5, 1000, rn[ri], rd[ri]);
+        for (i = 0; i < 50; i++) CHECK(add1(&g_tl, 2, 1000 + rnd_range(0, 3000), PSYTL_MARK, 0, 0.0f) >= 0);
+        for (i = 0; i < 50; i++) {
+            const psytl_event* e = psytl_find(&g_tl, i);
+            int64_t r = ref_rt(T0 + 5, 1000, rn[ri], rd[ri], e->time);
+            int j;
+            if (r < mdue) mdue = r;
+            for (j = -1; j <= 1; j++) {
+                int n = psytl_peek(&g_tl, 2, r + j, r + j + 1, g_fired, 64), m, in = 0;
+                for (m = 0; m < n && m < 64; m++)
+                    if (g_fired[m].id == i) {
+                        in = 1;
+                        if (g_fired[m].onset != r || g_fired[m].residual != 0) bad++;
+                    }
+                if (in != (j == 0)) bad++;
+            }
+        }
+        CHECK(psytl_next_due(&g_tl, &due));
+        CHECK_I(due, mdue);
+    }
+    CHECK_I(bad, 0);
+    /* The report's order across bases at 1/2 and 3/1: base 1's event at
+     * 4 ms is reached at RT 8 ms, base 2's at 27 ms at RT 9 ms, so base 1's
+     * comes first. By onset - residual it would be 9 against 7 ms. */
+    CHECK(open_h(&g_tl, g_store, 8, 1, NULL, 0.5));
+    rate_setup(&g_tl, 1, T0, 0, 1, 2);
+    rate_setup(&g_tl, 2, T0, 0, 3, 1);
+    CHECK(add1(&g_tl, 2, 27 * M, PSYTL_MARK, 0, 0.0f) >= 0);
+    CHECK(add1(&g_tl, 1, 4 * M, PSYTL_MARK, 0, 0.0f) >= 0);
+    CHECK_I(eval_at(&g_tl, T0 + 10 * M, 0, 0, g_fired, 4), 2);
+    CHECK_I(g_fired[0].base, 1);
+    CHECK_I(g_fired[0].residual, M);
+    CHECK_I(g_fired[1].base, 2);
+    CHECK_I(g_fired[1].residual, 3 * M);
+}
+
+/* No drift: 1001/1000 held for 10 hours is the exact floor at any time,
+ * and 1000 changes leave the base behind the exact rational time by less
+ * than n + 1 ns after n of them, never ahead. */
+static void test_rate_drift(void) {
+    const int64_t H10 = 36000 * S_NS;
+    int i, bad = 0, ahead = 0;
+    int64_t x = 0, exact1000 = 0, last = T0, worst = 0;
+    g_rng = 31337;
+    CHECK(open_h(&g_tl, g_store, 4, 1, NULL, 0.5));
+    rate_setup(&g_tl, 1, T0, 0, 1001, 1000);
+    for (i = 0; i < 10000; i++) {
+        int64_t t = T0 + rnd_range(0, H10);
+        if (!psytl_base_time(&g_tl, 1, t, &x) || x != ref_bt(T0, 0, 1001, 1000, t)) bad++;
+    }
+    CHECK(psytl_base_time(&g_tl, 1, T0 + H10, &x));
+    CHECK_I(x, H10 + H10 / 1000);
+    CHECK_I(bad, 0);
+    CHECK(open_h(&g_tl, g_store, 4, 1, NULL, 0.5));
+    rate_setup(&g_tl, 1, T0, 0, 1001, 1000);
+    for (i = 1; i <= 1000; i++) {
+        int64_t c = T0 + i * (36 * S_NS) + rnd_range(0, 999), lag;
+        exact1000 += (c - last) * (i % 2 ? 1001 : 999);
+        last = c;
+        CHECK_I(psytl_rate(&g_tl, 1, c, i % 2 ? 999 : 1001, 1000), 0);
+        CHECK(psytl_base_time(&g_tl, 1, c, &x));
+        lag = exact1000 - x * 1000;   /* thousandths of a ns */
+        if (lag < 0) ahead++;
+        if (lag > worst) worst = lag;
+        if (lag >= (int64_t)(i + 1) * 1000) bad++;
+    }
+    CHECK_I(ahead, 0);
+    CHECK_I(bad, 0);
+    CHECK(worst > 1000);   /* not vacuous: the floors did add up */
+}
+
+/* Out of range: a time at or past +-2^62 becomes +-2^62 only with a
+ * record (psytl_clamped), the queries refuse it, and comparisons with
+ * event times keep their exact answers. */
+static void test_rate_clamp(void) {
+    int64_t x = 0;
+    psytl_frame f;
+    CHECK(open_h(&g_tl, g_store, 8, 1, NULL, 0.5));
+    rate_setup(&g_tl, 1, 0, 0, 2147483647, 1);
+    CHECK(add1(&g_tl, 1, LIM62 - 1, PSYTL_MARK, 0, 0.0f) >= 0);
+    CHECK_I(psytl_clamped(&g_tl, 1), 0);
+    CHECK(!psytl_base_time(&g_tl, 1, INT64_C(1) << 40, &x));
+    f.onset = INT64_C(1) << 40;
+    f.period = P60;
+    f.index = 0;
+    CHECK(!psytl_window(&g_tl, 1, &f, &x));
+    CHECK_I(psytl_evaluate(&g_tl, &f, g_fired, 4), 1);
+    CHECK_I(g_fired[0].residual, 1);
+    CHECK_I(psytl_clamped(&g_tl, 1), 1);
+    CHECK_I(psytl_rate(&g_tl, 1, INT64_C(1) << 41, 1, 2), PSYTL_ERR_ARG);
+    CHECK_I(psytl_pause(&g_tl, 1, INT64_C(1) << 41), 0);
+    CHECK_I(psytl_clamped(&g_tl, 1), 2);
+    CHECK(!psytl_base_time(&g_tl, 1, 0, &x));
+    /* the far side: before the anchor the base is at -2^62, and an event
+     * just inside the range is not reached */
+    CHECK(open_h(&g_tl, g_store, 8, 1, NULL, 0.5));
+    rate_setup(&g_tl, 2, 0, 0, 2147483647, 1);
+    CHECK(add1(&g_tl, 2, -LIM62 + 1, PSYTL_MARK, 0, 0.0f) >= 0);
+    f.onset = -(INT64_C(1) << 40);
+    f.index = 1;
+    CHECK_I(psytl_evaluate(&g_tl, &f, NULL, 0), 0);
+    CHECK(is_pending_reset(find_at(&g_tl, 2, -LIM62 + 1, PSYTL_MARK)));
+    CHECK_I(psytl_clamped(&g_tl, 2), 1);
+    /* a base that reaches an event only past the range: next_due says
+     * +2^62, a time no clock reaches */
+    CHECK(open_h(&g_tl, g_store, 8, 1, NULL, 0.5));
+    rate_setup(&g_tl, 3, 0, 0, 1, 2147483647);
+    CHECK(add1(&g_tl, 3, INT64_C(1) << 40, PSYTL_MARK, 0, 0.0f) >= 0);
+    CHECK(psytl_next_due(&g_tl, &x));
+    CHECK_I(x, LIM62);
+    CHECK(!psytl_rt_time(&g_tl, 3, INT64_C(1) << 40, &x));
+    CHECK(psytl_rt_time(&g_tl, 3, 1, &x) && x == 2147483647);
+    CHECK_I(psytl_clamped(&g_tl, 3), 0);
+    /* Exactly 2^62 is out of range, at rate 1 as at a rate, and an
+     * evaluate that meets it says so. */
+    CHECK(open_h(&g_tl, g_store, 8, 1, NULL, 0.5));
+    CHECK_I(psytl_anchor(&g_tl, 1, 0, LIM62 - 10), 0);
+    rate_setup(&g_tl, 2, 0, LIM62 - 20, 2, 1);
+    CHECK(psytl_base_time(&g_tl, 1, 9, &x) && x == LIM62 - 1);
+    CHECK(!psytl_base_time(&g_tl, 1, 10, &x));
+    CHECK(psytl_base_time(&g_tl, 2, 9, &x) && x == LIM62 - 2);
+    CHECK(!psytl_base_time(&g_tl, 2, 10, &x));
+    f.onset = 9;
+    f.period = 0;
+    f.index = 0;
+    (void)psytl_evaluate(&g_tl, &f, NULL, 0);
+    CHECK_I(psytl_clamped(&g_tl, 1), 0);
+    CHECK_I(psytl_clamped(&g_tl, 2), 0);
+    f.onset = 10;
+    f.index = 1;
+    (void)psytl_evaluate(&g_tl, &f, NULL, 0);
+    CHECK_I(psytl_clamped(&g_tl, 1), 1);
+    CHECK_I(psytl_clamped(&g_tl, 2), 1);
+}
+
+/* ------------------------------------------------- 11d. SEQUENCES */
+
+#define SQ_ARENA 4096
+static psytl_key g_ka[SQ_ARENA], g_kb[SQ_ARENA], g_kc[SQ_ARENA];
+static psytl_timeline g_tl3;
+static psytl_event g_store3[STORE_CAP];
+
+static bool seq_open(psytl_timeline* tl, psytl_event* st, int cap, psytl_key* keys, int kcap, int nch,
+                     const float* init) {
+    psytl_desc d;
+    memset(&d, 0, sizeof d);
+    if (st && cap > 0) memset(st, 0, (size_t)cap * sizeof *st);
+    if (keys && kcap > 0) memset(keys, 0, (size_t)kcap * sizeof *keys);
+    d.events = st;
+    d.event_capacity = cap;
+    d.n_channels = nch;
+    d.initial = init;
+    d.keys = keys;
+    d.key_capacity = kcap;
+    return psytl_open(tl, &d);
+}
+
+enum { SQ_FIX, SQ_GRATING, SQ_CONTRAST, SQ_NCH };
+
+static psytl_tween_desc sq_tw(float to, int64_t dur, int ease) {
+    psytl_tween_desc d;
+    memset(&d, 0, sizeof d);
+    d.to = to;
+    d.duration = dur;
+    d.ease = ease;
+    return d;
+}
+
+/* The rig_spec 4.5.1 trial, with the builder. */
+static void seq_trial_builder(psytl_timeline* tl, psytl_seq* out) {
+    psytl_seq q = psytl_seq_on(tl, 1);
+    psytl_tween_desc up = sq_tw(0.5f, PSYTL_MS(100), PSYTL_EASE_COSINE);
+    psytl_tween_desc down = sq_tw(0.0f, PSYTL_MS(100), PSYTL_EASE_COSINE);
+    psytl_on(&q, SQ_FIX);
+    psytl_wait(&q, PSYTL_MS(500));
+    psytl_off(&q, SQ_FIX);
+    psytl_on(&q, SQ_GRATING);
+    psytl_trigger(&q, 12);
+    psytl_to(&q, SQ_CONTRAST, &up);
+    psytl_wait(&q, PSYTL_MS(600));
+    psytl_then(&q, SQ_CONTRAST, &down);
+    psytl_off(&q, SQ_GRATING);
+    *out = q;
+}
+
+/* The same trial as a table. */
+static void seq_trial_ops(psytl_op* ops, int* n) {
+    int k = 0;
+    memset(ops, 0, 9 * sizeof *ops);
+    ops[k].op = PSYTL_OP_ON; ops[k++].ch = SQ_FIX;
+    ops[k].op = PSYTL_OP_WAIT; ops[k++].t = PSYTL_MS(500);
+    ops[k].op = PSYTL_OP_OFF; ops[k++].ch = SQ_FIX;
+    ops[k].op = PSYTL_OP_ON; ops[k++].ch = SQ_GRATING;
+    ops[k].op = PSYTL_OP_TRIGGER; ops[k++].code = 12;
+    ops[k].op = PSYTL_OP_TO; ops[k].ch = SQ_CONTRAST; ops[k++].tween = sq_tw(0.5f, PSYTL_MS(100), PSYTL_EASE_COSINE);
+    ops[k].op = PSYTL_OP_WAIT; ops[k++].t = PSYTL_MS(600);
+    ops[k].op = PSYTL_OP_THEN; ops[k].ch = SQ_CONTRAST; ops[k++].tween = sq_tw(0.0f, PSYTL_MS(100), PSYTL_EASE_COSINE);
+    ops[k].op = PSYTL_OP_OFF; ops[k++].ch = SQ_GRATING;
+    *n = k;
+}
+
+/* The draft trial's CONTRAST: both ramps play in full, a re-anchor replays
+ * them bit for bit, and the table gives the same as the builder. */
+static void test_seq_trial(void) {
+    static float va[100], vb[100];
+    static psytl_key ref[4];
+    static psytl_op ops[9];
+    const int64_t M = MS_NS;
+    psytl_seq q;
+    int k, n_ops, n1[100], n2[100], bad_ref = 0;
+    ref[0] = mkkey(500 * M, 0.0f, PSYTL_EASE_COSINE);
+    ref[1] = mkkey(600 * M, 0.5f, PSYTL_EASE_STEP);
+    ref[2] = mkkey(1100 * M, 0.5f, PSYTL_EASE_COSINE);
+    ref[3] = mkkey(1200 * M, 0.0f, PSYTL_EASE_LINEAR);
+    CHECK(seq_open(&g_tl, g_store, 64, g_ka, 64, SQ_NCH, NULL));
+    seq_trial_builder(&g_tl, &q);
+    CHECK_I(q.err, 0);
+    CHECK_I(q.n_calls, 9);
+    CHECK_I(q.t, PSYTL_MS(1200));
+    CHECK_I(psytl_anchor(&g_tl, 1, T0, 0), 0);
+    for (k = 0; k < 90; k++) {
+        int64_t bt = k * P60;
+        float want = (float)ksample(ref, 4, bt);
+        n1[k] = eval_at(&g_tl, T0 + bt, P60, k, NULL, 0);
+        va[k] = psytl_value(&g_tl, SQ_CONTRAST);
+        if (va[k] != want) bad_ref++;
+    }
+    CHECK_I(bad_ref, 0);
+    /* The ramp up plays: frame 33 is at 550 ms, half way up. The draft's
+     * lowering left 0 there (the second tween replaced the first). */
+    CHECK_F(va[33], 0.25, 1e-3);
+    CHECK(va[35] > 0.4f);
+    CHECK_F(va[36], 0.5, 0.0);
+    CHECK_F(va[69], 0.25, 1e-3);   /* and the ramp down */
+    CHECK_F(va[72], 0.0, 0.0);
+    /* Re-run by re-anchor: the same values on every frame, bit for bit. */
+    CHECK_I(psytl_anchor(&g_tl, 1, T0 + 100 * P60, 0), 0);
+    for (k = 0; k < 90; k++) {
+        n2[k] = eval_at(&g_tl, T0 + (100 + k) * P60, P60, 100 + k, NULL, 0);
+        vb[k] = psytl_value(&g_tl, SQ_CONTRAST);
+    }
+    CHECK(memcmp(va, vb, 90 * sizeof va[0]) == 0);
+    CHECK(memcmp(n1, n2, 90 * sizeof n1[0]) == 0);
+    /* The table: the same storage and the same values. */
+    seq_trial_ops(ops, &n_ops);
+    CHECK(seq_open(&g_tl2, g_store2, 64, g_kb, 64, SQ_NCH, NULL));
+    CHECK(seq_open(&g_tl3, g_store3, 64, g_kc, 64, SQ_NCH, NULL));
+    {
+        psytl_seq r = psytl_seq_on(&g_tl2, 1), b;
+        int bad = 99;
+        CHECK_I(psytl_check_ops(&g_tl2, 1, ops, n_ops, &bad), 0);
+        CHECK_I(bad, -1);
+        CHECK_I(psytl_run(&r, ops, n_ops), 0);
+        CHECK_I(r.err, 0);
+        CHECK_I(r.t, PSYTL_MS(1200));
+        seq_trial_builder(&g_tl3, &b);
+        CHECK_I(b.err, 0);
+    }
+    CHECK_I(psytl_anchor(&g_tl2, 1, T0, 0), 0);
+    CHECK_I(psytl_anchor(&g_tl3, 1, T0, 0), 0);
+    bad_ref = 0;
+    for (k = 0; k < 90; k++) {
+        (void)eval_at(&g_tl2, T0 + k * P60, P60, k, NULL, 0);
+        (void)eval_at(&g_tl3, T0 + k * P60, P60, k, NULL, 0);
+        if (psytl_value(&g_tl2, SQ_CONTRAST) != va[k] || psytl_value(&g_tl3, SQ_CONTRAST) != va[k]) bad_ref++;
+    }
+    CHECK_I(bad_ref, 0);
+    CHECK(memcmp(g_store2, g_store3, 64 * sizeof g_store2[0]) == 0);
+}
+
+/* A failed psytl_run changes nothing (memcmp of the handle, the storage
+ * and the arena), reports the op's index, and agrees with psytl_check_ops. */
+static void seq_run_fail(int line, psytl_op* ops, int n, int want_rc, int want_bad, int ecap, int kcap) {
+    static psytl_timeline snap;
+    static psytl_event sst[64];
+    static psytl_key sk[64];
+    psytl_seq q;
+    int rc, bad = 99;
+    CHECK(seq_open(&g_tl, g_store, ecap, g_ka, kcap, SQ_NCH, NULL));
+    q = psytl_seq_on(&g_tl, 1);
+    memcpy(&snap, &g_tl, sizeof snap);
+    memcpy(sst, g_store, sizeof sst);
+    memcpy(sk, g_ka, sizeof sk);
+    rc = psytl_check_ops(&g_tl, 1, ops, n, &bad);
+    if (rc != want_rc || bad != want_bad) fail_i(line, "check_ops code x 1000 + index", rc * 1000 + bad, want_rc * 1000 + want_bad);
+    rc = psytl_run(&q, ops, n);
+    if (rc != want_rc || q.err != want_rc || q.err_call != want_bad)
+        fail_i(line, "run code x 1000 + err_call", rc * 1000 + q.err_call, want_rc * 1000 + want_bad);
+    if (memcmp(&snap, &g_tl, sizeof snap) != 0 || memcmp(sst, g_store, sizeof sst) != 0 || memcmp(sk, g_ka, sizeof sk) != 0)
+        fail(line, "a failed psytl_run changed the handle, the storage or the arena");
+    /* sticky: nothing after it */
+    psytl_on(&q, SQ_FIX);
+    if (n_events(&g_tl, 1) != 0) fail(line, "a call after the error added an event");
+}
+
+static void test_seq_run(void) {
+    static psytl_op ops[12];
+    int n;
+    seq_trial_ops(ops, &n);
+    /* a zeroed op */
+    seq_trial_ops(ops, &n);
+    memset(&ops[3], 0, sizeof ops[3]);
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_ARG, 3, 64, 64);
+    /* start_set: the cursor wins */
+    seq_trial_ops(ops, &n);
+    ops[5].tween.start_set = true;
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_ARG, 5, 64, 64);
+    /* FOREVER */
+    seq_trial_ops(ops, &n);
+    ops[7].tween.cycles = PSYTL_FOREVER;
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_ARG, 7, 64, 64);
+    /* an event on the tweened channel */
+    seq_trial_ops(ops, &n);
+    ops[8].ch = SQ_CONTRAST;
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_BOUND, 8, 64, 64);
+    /* a tween on an event channel */
+    seq_trial_ops(ops, &n);
+    ops[7].ch = SQ_FIX;
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_BOUND, 7, 64, 64);
+    /* overlap: the second tween starts inside the first */
+    seq_trial_ops(ops, &n);
+    ops[6].t = PSYTL_MS(50);
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_ARG, 7, 64, 64);
+    /* a channel out of range */
+    seq_trial_ops(ops, &n);
+    ops[3].ch = SQ_NCH;
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_ARG, 3, 64, 64);
+    /* the storage: 5 events need 5 */
+    seq_trial_ops(ops, &n);
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_FULL, 8, 4, 64);
+    /* the arena: the CONTRAST block is 5 slots with its header, and the
+     * check wants room for one more copy of it: 10. 9 is refused at the
+     * op that makes it 5. */
+    seq_trial_ops(ops, &n);
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_FULL, 7, 64, 9);
+    {
+        psytl_seq q;
+        CHECK(seq_open(&g_tl, g_store, 64, g_ka, 10, SQ_NCH, NULL));
+        q = psytl_seq_on(&g_tl, 1);
+        CHECK_I(psytl_run(&q, ops, n), 0);
+        /* the builder needs only what it uses: 5 slots */
+        CHECK(seq_open(&g_tl, g_store, 64, g_ka, 5, SQ_NCH, NULL));
+        seq_trial_builder(&g_tl, &q);
+        CHECK_I(q.err, 0);
+        /* and with 4 the second tween is refused, the first kept */
+        CHECK(seq_open(&g_tl, g_store, 64, g_ka, 4, SQ_NCH, NULL));
+        seq_trial_builder(&g_tl, &q);
+        CHECK_I(q.err, PSYTL_ERR_FULL);
+        CHECK_I(q.err_call, 7);
+        CHECK_I(n_events(&g_tl, 1), 4);   /* the call after the error added nothing */
+        CHECK_I(psytl_anchor(&g_tl, 1, T0, 0), 0);
+        (void)eval_at(&g_tl, T0 + PSYTL_MS(700), 0, 0, NULL, 0);
+        CHECK_F(psytl_value(&g_tl, SQ_CONTRAST), 0.5, 0.0);
+    }
+    /* no arena at all */
+    seq_trial_ops(ops, &n);
+    seq_run_fail(__LINE__, ops, n, PSYTL_ERR_FULL, 5, 64, 0);
+    /* builder refusals and the sticky error */
+    {
+        psytl_seq q;
+        psytl_tween_desc d = sq_tw(1.0f, PSYTL_MS(10), 0);
+        int64_t r;
+        CHECK(seq_open(&g_tl, g_store, 64, g_ka, 64, SQ_NCH, NULL));
+        q = psytl_seq_on(&g_closed, 1);
+        CHECK_I(q.err, PSYTL_ERR_CLOSED);
+        CHECK_I(q.err_call, -1);
+        q = psytl_seq_on(&g_tl, PSYTL_MAX_BASES);
+        CHECK_I(q.err, PSYTL_ERR_ARG);
+        q = psytl_seq_on(&g_tl, 1);
+        psytl_wait(&q, LIM62);
+        CHECK_I(q.err, PSYTL_ERR_ARG);
+        CHECK_I(q.err_call, 0);
+        r = psytl_to(&q, SQ_CONTRAST, &d);
+        CHECK_I(r, 0);
+        CHECK_I(q.n_calls, 2);
+        CHECK_I(q.err_call, 0);
+        q = psytl_seq_on(&g_tl, 1);
+        CHECK_I(psytl_to(&q, SQ_CONTRAST, NULL), 0);
+        CHECK_I(q.err, PSYTL_ERR_ARG);
+        q = psytl_seq_on(&g_tl, 1);
+        d.cycles = 3;
+        d.yoyo = true;
+        CHECK_I(psytl_to(&q, SQ_CONTRAST, &d), 3 * 2 * PSYTL_MS(10));
+        CHECK_I(q.t, 0);
+        d.keep_velocity = true;
+        d.cycles = 0;
+        d.yoyo = false;
+        psytl_at(&q, PSYTL_MS(100));
+        CHECK_I(psytl_to(&q, SQ_CONTRAST, &d), PSYTL_MS(100));   /* keep_velocity after the first: refused */
+        CHECK_I(q.err, PSYTL_ERR_ARG);
+        CHECK_I(q.err_call, 2);
+    }
+}
+
+/* psytl_seq_cancel: the sequence's events and blocks go; what was on the
+ * base before stays. */
+static void test_seq_cancel(void) {
+    static psytl_key lin[2];
+    psytl_seq q;
+    psytl_tween_desc d = sq_tw(2.0f, PSYTL_MS(100), 0);
+    float v3;
+    int c;
+    lin[0] = mkkey(0, 0.0f, 0);
+    lin[1] = mkkey(S_NS, 1.0f, 0);
+    CHECK(seq_open(&g_tl, g_store, 64, g_ka, 64, 6, NULL));
+    CHECK(add1(&g_tl, 1, 0, PSYTL_ONSET, 0, 0.0f) >= 0);
+    CHECK(add1(&g_tl, 1, 0, PSYTL_SET, 1, 3.0f) >= 0);   /* ch 1 keeps this one */
+    CHECK_I(psytl_set_keys(&g_tl, 3, 1, lin, 2), 0);
+    CHECK_I(psytl_anchor(&g_tl, 1, T0, 0), 0);
+    (void)eval_at(&g_tl, T0, P60, 0, NULL, 0);
+    q = psytl_seq_now(&g_tl, 1);
+    psytl_on(&q, 1);
+    psytl_to(&q, 2, &d);   /* starts at now: the next evaluate promotes it */
+    psytl_wait(&q, PSYTL_MS(50));
+    psytl_to(&q, 3, &d);   /* takes over ch 3 at 50 ms: still waiting at the cancel */
+    psytl_set_value(&q, 4, 7.0f);
+    CHECK_I(q.err, 0);
+    CHECK_I(n_events(&g_tl, 1), 4);
+    (void)eval_at(&g_tl, T0 + P60, P60, 1, NULL, 0);   /* the ONSET on ch 1 fires */
+    CHECK_F(psytl_value(&g_tl, 1), 1.0, 0.0);
+    c = psytl_seq_cancel(&q);
+    CHECK_F(psytl_value(&g_tl, 1), 3.0, 0.0);           /* recomputed from the SET */
+    CHECK_F(psytl_value(&g_tl, 2), 2.0 * (double)P60 / (double)PSYTL_MS(100), 1e-6);   /* promoted: held */
+    CHECK_I(c, 2);
+    CHECK_I(n_events(&g_tl, 1), 2);
+    CHECK(psytl_find(&g_tl, 0) != NULL);
+    /* ch 2 is free again, ch 3 still runs its keys */
+    CHECK(add1(&g_tl, 1, 0, PSYTL_ONSET, 2, 0.0f) >= 0);
+    (void)eval_at(&g_tl, T0 + PSYTL_MS(500), P60, 2, NULL, 0);
+    v3 = psytl_value(&g_tl, 3);
+    CHECK_F(v3, 0.5, 1e-6);
+    /* the sequence does nothing more */
+    psytl_on(&q, 5);
+    CHECK_I(q.err, PSYTL_ERR_CLOSED);
+    CHECK_I(n_events(&g_tl, 1), 3);
+    CHECK_I(psytl_seq_cancel(&q), PSYTL_ERR_CLOSED);
+}
+
+/* A sequence's one tween equals psytl_tween() with the same desc: the
+ * same takeover from a moving track, the same keys, the same bits. */
+static void test_seq_vs_tween(void) {
+    static psytl_key mv[3];
+    int trial, k, bad = 0, bad_n = 0;
+    g_rng = 4711;
+    mv[0] = mkkey(0, -1.0f, PSYTL_EASE_LINEAR);
+    mv[1] = mkkey(PSYTL_MS(700), 3.0f, PSYTL_EASE_QUAD_IN);
+    mv[2] = mkkey(S_NS, 2.0f, PSYTL_EASE_LINEAR);
+    for (trial = 0; trial < 400; trial++) {
+        psytl_tween_desc d;
+        psytl_seq q;
+        int64_t c = rnd_range(0, PSYTL_MS(600)), end;
+        bool moving = rnd_int(3) != 0;
+        memset(&d, 0, sizeof d);
+        d.to = (float)rnd_int(64) / 8.0f - 2.0f;
+        d.duration = rnd_range(1, PSYTL_MS(300));
+        d.ease = rnd_int(7);
+        if (d.ease == PSYTL_EASE_LOG) d.ease = PSYTL_EASE_QUAD_OUT;
+        if (d.ease == PSYTL_EASE_BEZIER) d.curve = mkcurve(0.42f, -0.2f, 0.58f, 1.3f);
+        d.from_set = rnd_int(3) == 0;
+        d.from = (float)rnd_int(64) / 8.0f;
+        d.cycles = rnd_int(4);
+        d.yoyo = rnd_int(3) == 0;
+        d.delay = rnd_int(2) ? rnd_range(-PSYTL_MS(50), PSYTL_MS(50)) : 0;
+        if (rnd_int(3) == 0) {
+            d.keep_velocity = true;
+            d.ease = 0;
+            d.from_set = false;
+            d.yoyo = false;
+            d.cycles = rnd_int(2);
+        }
+        CHECK(seq_open(&g_tl, g_store, 8, g_ka, 256, 2, NULL));
+        CHECK(seq_open(&g_tl2, g_store2, 8, g_kb, 256, 2, NULL));
+        if (moving) {
+            CHECK_I(psytl_set_keys(&g_tl, 1, 1, mv, 3), 0);
+            CHECK_I(psytl_set_keys(&g_tl2, 1, 1, mv, 3), 0);
+        }
+        q = psytl_seq_on(&g_tl, 1);
+        psytl_at(&q, c);
+        end = psytl_to(&q, 1, &d);
+        if (q.err != 0) { bad_n++; continue; }
+        d.start = c;
+        d.start_set = true;
+        CHECK_I(psytl_tween(&g_tl2, 1, 1, &d), 0);
+        d.start_set = false;
+        CHECK_I(end, c + d.delay + (d.cycles > 1 ? d.cycles : 1) * d.duration * (d.yoyo ? 2 : 1));
+        CHECK_I(psytl_anchor(&g_tl, 1, T0, 0), 0);
+        CHECK_I(psytl_anchor(&g_tl2, 1, T0, 0), 0);
+        for (k = 0; k < 90; k++) {
+            int64_t on = T0 + k * (P60 / 2);
+            (void)eval_at(&g_tl, on, P60 / 2, k, NULL, 0);
+            (void)eval_at(&g_tl2, on, P60 / 2, k, NULL, 0);
+            if (psytl_value(&g_tl, 1) != psytl_value(&g_tl2, 1)) {
+                if (!bad)
+                    fprintf(stderr, "  seq vs tween trial %d frame %d: %.9g against %.9g (ease %d cycles %d yoyo %d kv %d)\n",
+                            trial, k, (double)psytl_value(&g_tl, 1), (double)psytl_value(&g_tl2, 1), d.ease,
+                            d.cycles, (int)d.yoyo, (int)d.keep_velocity);
+                bad++;
+                break;
+            }
+        }
+    }
+    CHECK_I(bad, 0);
+    CHECK_I(bad_n, 0);
+}
+
+/* The arena under clears: a clear takes its blocks' room back, and the
+ * blocks of other bases still sample right after they move. */
+static void test_seq_arena(void) {
+    psytl_tween_desc d = sq_tw(4.0f, PSYTL_MS(200), PSYTL_EASE_COSINE);
+    psytl_seq q;
+    float want;
+    int i;
+    CHECK(seq_open(&g_tl, g_store, 16, g_ka, 12, 6, NULL));
+    q = psytl_seq_on(&g_tl, 1);
+    psytl_then(&q, 0, &d);
+    psytl_then(&q, 0, &d);          /* 1 + 4 slots, grown in place */
+    CHECK_I(q.err, 0);
+    q = psytl_seq_on(&g_tl, 2);
+    psytl_then(&q, 1, &d);          /* 1 + 2 */
+    psytl_then(&q, 2, &d);          /* 1 + 2: 11 of 12 */
+    CHECK_I(q.err, 0);
+    psytl_then(&q, 1, &d);          /* needs a copy of 5: does not fit */
+    CHECK_I(q.err, PSYTL_ERR_FULL);
+    CHECK_I(psytl_clear(&g_tl, 1), 0);
+    q = psytl_seq_on(&g_tl, 2);
+    psytl_at(&q, PSYTL_MS(400));
+    psytl_then(&q, 1, &d);          /* a new block of this sequence: 3 */
+    psytl_then(&q, 1, &d);          /* grows at the top: 2 more */
+    CHECK_I(q.err, 0);
+    CHECK_I(psytl_anchor(&g_tl, 2, T0, 0), 0);
+    for (i = 0; i < 60; i++) {
+        int64_t bt = i * P60;
+        (void)eval_at(&g_tl, T0 + bt, P60, i, NULL, 0);
+        /* ch 2's tween runs from 200 to 400 ms (after psytl_then on ch 1) */
+        want = (float)(bt < PSYTL_MS(200) ? 0.0
+                       : bt < PSYTL_MS(400) ? 4.0 * (0.5 - 0.5 * cos(3.14159265358979323846 * (double)(bt - PSYTL_MS(200))
+                                                                      / (double)PSYTL_MS(200)))
+                                            : 4.0);
+        CHECK_F(psytl_value(&g_tl, 2), want, 1e-5);
+    }
+}
+
+/* psytl_on_n: staggered onsets, all or none. */
+static void test_seq_on_n(void) {
+    static const int dots[4] = { 0, 1, 2, 3 };
+    static const int with_bound[4] = { 0, 1, 5, 2 };
+    static psytl_key k1[1];
+    psytl_seq q;
+    const psytl_event* e;
+    int n, i;
+    k1[0] = mkkey(0, 1.0f, 0);
+    CHECK(seq_open(&g_tl, g_store, 8, g_ka, 16, 6, NULL));
+    CHECK_I(psytl_set_keys(&g_tl, 5, 1, k1, 1), 0);
+    q = psytl_seq_on(&g_tl, 1);
+    psytl_at(&q, PSYTL_MS(100));
+    psytl_on_n(&q, with_bound, 4, PSYTL_MS(20));
+    CHECK_I(q.err, PSYTL_ERR_BOUND);
+    CHECK_I(n_events(&g_tl, 1), 0);                 /* none of the four */
+    q = psytl_seq_on(&g_tl, 1);
+    psytl_at(&q, PSYTL_MS(100));
+    psytl_on_n(&q, dots, 4, PSYTL_MS(20));
+    CHECK_I(q.err, 0);
+    CHECK_I(q.t, PSYTL_MS(100));                    /* the cursor stays */
+    e = psytl_events(&g_tl, 1, &n);
+    CHECK_I(n, 4);
+    for (i = 0; i < n && i < 4; i++) {
+        CHECK_I(e[i].time, PSYTL_MS(100) + i * PSYTL_MS(20));
+        CHECK_I(e[i].target, dots[i]);
+        CHECK_I(e[i].kind, PSYTL_ONSET);
+    }
+    psytl_on_n(&q, dots, 4, PSYTL_MS(20));          /* 4 more do not fit in 8 - 4 = 4? they do */
+    CHECK_I(q.err, 0);
+    psytl_on_n(&q, dots, 1, 0);                     /* the ninth does not */
+    CHECK_I(q.err, PSYTL_ERR_FULL);
+    CHECK_I(n_events(&g_tl, 1), 8);
+}
+
+/* A sequence's tween on a channel tracked on another base stops that track
+ * at its value, as psytl_tween() does, and takes over from that value. */
+static void test_seq_cross_base(void) {
+    static psytl_key mv[2];
+    psytl_tween_desc d = sq_tw(5.0f, PSYTL_MS(100), 0);
+    psytl_seq q;
+    int k, bad = 0;
+    mv[0] = mkkey(0, 0.0f, 0);
+    mv[1] = mkkey(S_NS, 10.0f, 0);
+    CHECK(seq_open(&g_tl, g_store, 8, g_ka, 64, 2, NULL));
+    CHECK(seq_open(&g_tl2, g_store2, 8, g_kb, 64, 2, NULL));
+    for (k = 0; k < 2; k++) {
+        psytl_timeline* t = k ? &g_tl2 : &g_tl;
+        CHECK_I(psytl_set_keys(t, 0, 2, mv, 2), 0);
+        CHECK_I(psytl_anchor(t, 2, T0, 0), 0);
+        CHECK_I(psytl_anchor(t, 1, T0, -PSYTL_MS(300)), 0);
+        (void)eval_at(t, T0 + PSYTL_MS(200), P60, 0, NULL, 0);   /* base 2 at 200 ms: 2.0 */
+    }
+    CHECK_F(psytl_value(&g_tl, 0), 2.0, 1e-6);
+    q = psytl_seq_on(&g_tl, 1);
+    psytl_to(&q, 0, &d);                            /* base 1 time 0, 100 ms of RT later */
+    d.start = 0;
+    d.start_set = true;
+    CHECK_I(psytl_tween(&g_tl2, 0, 1, &d), 0);
+    for (k = 1; k < 40; k++) {
+        int64_t on = T0 + PSYTL_MS(200) + k * P60;
+        (void)eval_at(&g_tl, on, P60, k, NULL, 0);
+        (void)eval_at(&g_tl2, on, P60, k, NULL, 0);
+        if (psytl_value(&g_tl, 0) != psytl_value(&g_tl2, 0)) bad++;
+    }
+    CHECK_I(bad, 0);
+    CHECK_F(psytl_value(&g_tl, 0), 5.0, 0.0);
+}
+
+/* The random model: tables of random ops, with errors among them, built
+ * three ways: by the builder calls, by psytl_run, and by hand with
+ * psytl_add and psytl_set_track of keys that this test lowers on its own
+ * from the manual's rules. The channels are idle before the table, so the
+ * takeover's value is the channel's initial value, which a hand-built
+ * keyed track holds before its first key with a STEP key. */
+enum { SM_NCH = 6, SM_OPS = 16, SM_KEYS = 256 };
+static psytl_op sm_ops[SM_OPS];
+static psytl_key sm_keys[SM_NCH][SM_KEYS];
+static psytl_curve sm_curves[SM_NCH][SM_OPS];
+static psytl_key g_kh[SQ_ARENA];
+static long sm_stat_err[8], sm_stat_ok, sm_stat_tw, sm_stat_ev;
+
+static void sm_gen(int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        psytl_op* o = &sm_ops[i];
+        int r = rnd_int(100), tw;
+        memset(o, 0, sizeof *o);
+        if (r < 12) o->op = PSYTL_OP_ON;
+        else if (r < 18) o->op = PSYTL_OP_OFF;
+        else if (r < 24) o->op = PSYTL_OP_SET_VALUE;
+        else if (r < 28) o->op = PSYTL_OP_TRIGGER;
+        else if (r < 31) o->op = PSYTL_OP_MARK;
+        else if (r < 45) o->op = PSYTL_OP_WAIT;
+        else if (r < 49) o->op = PSYTL_OP_AT;
+        else if (r < 75) o->op = PSYTL_OP_TO;
+        else o->op = PSYTL_OP_THEN;
+        tw = o->op == PSYTL_OP_TO || o->op == PSYTL_OP_THEN;
+        /* Events mostly on 0..2 and tweens on 3..5, so BOUND does not
+         * dominate; sometimes any channel. */
+        o->ch = rnd_int(10) == 0 ? rnd_int(SM_NCH) : (tw ? 3 : 0) + rnd_int(3);
+        o->value = (float)rnd_int(32) / 4.0f;
+        o->code = (int32_t)rnd_range(-1000, 1000);
+        o->user = sm64();
+        if (o->op == PSYTL_OP_WAIT) o->t = rnd_range(0, PSYTL_MS(200));
+        if (o->op == PSYTL_OP_AT) o->t = rnd_range(0, PSYTL_MS(1500));
+        if (tw) {
+            static const int eases[6] = { 0, 1, 2, 3, 4, 6 };
+            psytl_tween_desc* d = &o->tween;
+            d->to = (float)rnd_int(64) / 8.0f - 3.0f;
+            d->duration = rnd_int(6) == 0 ? 0 : rnd_range(1, PSYTL_MS(300));
+            d->ease = eases[rnd_int(6)];
+            if (d->ease == PSYTL_EASE_BEZIER)
+                d->curve = rnd_int(2) ? mkcurve(0.42f, 0.0f, 0.58f, 1.0f) : mkcurve(0.7f, -0.5f, 0.3f, 1.5f);
+            d->from_set = rnd_int(3) == 0;
+            d->from = (float)rnd_int(64) / 8.0f;
+            d->cycles = rnd_int(4);
+            d->yoyo = rnd_int(4) == 0;
+            if (d->duration == 0 && rnd_int(4) != 0) {
+                d->cycles = 0;
+                d->yoyo = false;
+            }
+            d->delay = rnd_int(3) == 0 ? rnd_range(-PSYTL_MS(50), PSYTL_MS(100)) : 0;
+        }
+        /* errors */
+        r = rnd_int(100);
+        if (r < 2) o->op = 0;
+        else if (r < 4) o->ch = SM_NCH;
+        else if (r < 6 && tw) o->tween.start_set = true;
+        else if (r < 8 && tw) o->tween.cycles = PSYTL_FOREVER;
+    }
+}
+
+static int sm_model_op(psytl_timeline* h, const float* init, const psytl_op* o, int* kind, int* nk, int* nc,
+                       int64_t* end, int64_t* tp);
+
+/* The model: applies the ops to h by hand up to the first error, whose
+ * code it returns with its index in *bad. */
+static int sm_model(psytl_timeline* h, const float* init, int n, int* bad) {
+    int kind[SM_NCH], nk[SM_NCH], nc[SM_NCH], i, ch, rc = 0;
+    int64_t end[SM_NCH], t = 0;
+    memset(kind, 0, sizeof kind);
+    memset(nk, 0, sizeof nk);
+    memset(nc, 0, sizeof nc);
+    memset(end, 0, sizeof end);
+    *bad = -1;
+    for (i = 0; i < n && rc == 0; i++) {
+        const psytl_op* o = &sm_ops[i];
+        rc = sm_model_op(h, init, o, kind, nk, nc, end, &t);
+        if (rc < 0) *bad = i;
+    }
+    /* What came before the error stays, as the builder leaves it. */
+    for (ch = 0; ch < SM_NCH; ch++) {
+        psytl_track tr;
+        if (kind[ch] != 2) continue;
+        tr = trk_keys(sm_keys[ch], nk[ch]);
+        tr.curves = sm_curves[ch];
+        tr.n_curves = nc[ch];
+        if (psytl_set_track(h, ch, 1, &tr) != 0) return -101;
+    }
+    return rc;
+}
+
+static int sm_model_op(psytl_timeline* h, const float* init, const psytl_op* o, int* kind, int* nk, int* nc,
+                       int64_t* end, int64_t* tp) {
+    int64_t t = *tp;
+    int ch;
+    switch (o->op) {
+    case PSYTL_OP_WAIT: t += o->t; break;
+    case PSYTL_OP_AT: t = o->t; break;
+    case PSYTL_OP_ON: case PSYTL_OP_OFF: case PSYTL_OP_SET_VALUE:
+    case PSYTL_OP_TRIGGER: case PSYTL_OP_MARK: {
+        psytl_event e;
+        bool drives = o->op == PSYTL_OP_ON || o->op == PSYTL_OP_OFF || o->op == PSYTL_OP_SET_VALUE;
+        if (drives && (o->ch < 0 || o->ch >= SM_NCH)) return PSYTL_ERR_ARG;
+        if (drives && kind[o->ch] == 2) return PSYTL_ERR_BOUND;
+        memset(&e, 0, sizeof e);
+        e.time = t;
+        e.base = 1;
+        e.kind = (uint8_t)(o->op == PSYTL_OP_ON ? PSYTL_ONSET : o->op == PSYTL_OP_OFF ? PSYTL_OFFSET
+                           : o->op == PSYTL_OP_SET_VALUE ? PSYTL_SET
+                           : o->op == PSYTL_OP_TRIGGER ? PSYTL_TRIGGER : PSYTL_MARK);
+        if (drives) e.target = o->ch;
+        if (o->op == PSYTL_OP_SET_VALUE) e.value = o->value;
+        if (o->op == PSYTL_OP_TRIGGER || o->op == PSYTL_OP_MARK) e.code = o->code;
+        if (o->op == PSYTL_OP_MARK) e.user = o->user;
+        if (psytl_add(h, &e) < 0) return -100;
+        if (drives) kind[o->ch] = 1;
+        sm_stat_ev++;
+        break;
+    }
+    case PSYTL_OP_TO: case PSYTL_OP_THEN: {
+        const psytl_tween_desc* d = &o->tween;
+        int64_t s, cyc, cn, j;
+        psytl_key* k;
+        float from;
+        int ci = 0, per;
+        if (o->ch < 0 || o->ch >= SM_NCH) return PSYTL_ERR_ARG;
+        ch = o->ch;
+        if (kind[ch] == 1) return PSYTL_ERR_BOUND;
+        if (d->start_set || d->cycles == PSYTL_FOREVER) return PSYTL_ERR_ARG;
+        if ((d->cycles > 1 || d->yoyo) && d->duration == 0) return PSYTL_ERR_ARG;
+        s = t + d->delay;
+        if (kind[ch] == 2 && s < end[ch]) return PSYTL_ERR_ARG;
+        k = sm_keys[ch];
+        if (kind[ch] != 2) {
+            k[0] = mkkey(s, init[ch], PSYTL_EASE_STEP);
+            nk[ch] = 1;
+            from = init[ch];
+        } else {
+            k[nk[ch] - 1].ease = PSYTL_EASE_STEP;
+            from = k[nk[ch] - 1].value;
+        }
+        if (d->from_set) from = d->from;
+        if (d->ease == PSYTL_EASE_BEZIER) {
+            sm_curves[ch][nc[ch]] = d->curve;
+            ci = nc[ch]++;
+        }
+        cn = d->cycles > 1 ? d->cycles : 1;
+        cyc = d->duration * (d->yoyo ? 2 : 1);
+        per = d->yoyo ? 3 : 2;
+        for (j = 0; j < cn; j++) {
+            psytl_key* a = &k[nk[ch]];
+            a[0] = mkkey(s + j * cyc, from, d->ease);
+            a[1] = mkkey(s + j * cyc + d->duration, d->to, d->ease);
+            a[0].curve = a[1].curve = (uint16_t)ci;
+            if (d->yoyo) {
+                a[2] = mkkey(s + j * cyc + 2 * d->duration, from, d->ease);
+                a[2].curve = (uint16_t)ci;
+            }
+            nk[ch] += per;
+        }
+        end[ch] = s + cn * cyc;
+        kind[ch] = 2;
+        sm_stat_tw++;
+        if (o->op == PSYTL_OP_THEN) t = end[ch];
+        break;
+    }
+    default:
+        return PSYTL_ERR_ARG;
+    }
+    *tp = t;
+    return 0;
+}
+
+static void sm_builder(psytl_seq* q, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        const psytl_op* o = &sm_ops[i];
+        switch (o->op) {
+        case PSYTL_OP_ON: psytl_on(q, o->ch); break;
+        case PSYTL_OP_OFF: psytl_off(q, o->ch); break;
+        case PSYTL_OP_SET_VALUE: psytl_set_value(q, o->ch, o->value); break;
+        case PSYTL_OP_TRIGGER: psytl_trigger(q, o->code); break;
+        case PSYTL_OP_MARK: psytl_mark(q, o->code, o->user); break;
+        case PSYTL_OP_WAIT: psytl_wait(q, o->t); break;
+        case PSYTL_OP_AT: psytl_at(q, o->t); break;
+        case PSYTL_OP_TO: (void)psytl_to(q, o->ch, &o->tween); break;
+        case PSYTL_OP_THEN: psytl_then(q, o->ch, &o->tween); break;
+        default:
+            /* A bad op has no builder call; the table form reports it. */
+            if (q->err == 0) (void)psytl_run(q, o, 1);
+            return;
+        }
+    }
+}
+
+static void test_seq_model(void) {
+    static psytl_timeline snap;
+    int trial, bad_vals = 0, bad_store = 0, bad_err = 0, bad_run = 0;
+    float init[SM_NCH];
+    for (trial = 0; trial < 600; trial++) {
+        int n, want, wbad, rc, bad, ch, k;
+        psytl_seq qb, qr;
+        g_rng = 9100 + (uint64_t)trial;
+        n = 3 + rnd_int(SM_OPS - 2);
+        for (ch = 0; ch < SM_NCH; ch++) init[ch] = (float)rnd_int(16) / 4.0f - 1.0f;
+        sm_gen(n);
+        CHECK(seq_open(&g_tl, g_store, 64, g_ka, SQ_ARENA, SM_NCH, init));    /* builder */
+        CHECK(seq_open(&g_tl2, g_store2, 64, g_kb, SQ_ARENA, SM_NCH, init));  /* run */
+        CHECK(seq_open(&g_tl3, g_store3, 64, g_kh, SQ_ARENA, SM_NCH, init));  /* by hand */
+        want = sm_model(&g_tl3, init, n, &wbad);
+        if (want < -99) {
+            bad_err++;
+            continue;
+        }
+        sm_stat_err[-want]++;
+        if (want == 0) sm_stat_ok++;
+        rc = psytl_check_ops(&g_tl2, 1, sm_ops, n, &bad);
+        if (rc != want || bad != wbad) {
+            if (!bad_err) fprintf(stderr, "  seq model trial %d: check_ops %d at %d, model %d at %d\n", trial, rc, bad, want, wbad);
+            bad_err++;
+        }
+        qr = psytl_seq_on(&g_tl2, 1);
+        memcpy(&snap, &g_tl2, sizeof snap);
+        rc = psytl_run(&qr, sm_ops, n);
+        if (rc != want || (want != 0 && (qr.err_call != wbad || memcmp(&snap, &g_tl2, sizeof snap) != 0))) bad_run++;
+        qb = psytl_seq_on(&g_tl, 1);
+        sm_builder(&qb, n);
+        if (qb.err != want || (want != 0 && sm_ops[wbad].op != 0 && qb.err_call != wbad)) {
+            if (!bad_err)
+                fprintf(stderr, "  seq model trial %d: builder %d at %d, model %d at %d\n", trial, qb.err, qb.err_call, want, wbad);
+            bad_err++;
+        }
+        CHECK_I(psytl_anchor(&g_tl, 1, T0, 0), 0);
+        CHECK_I(psytl_anchor(&g_tl2, 1, T0, 0), 0);
+        CHECK_I(psytl_anchor(&g_tl3, 1, T0, 0), 0);
+        for (k = 0; k < 160; k++) {
+            int64_t on = T0 + k * P60;
+            (void)eval_at(&g_tl, on, P60, k, NULL, 0);
+            (void)eval_at(&g_tl2, on, P60, k, NULL, 0);
+            (void)eval_at(&g_tl3, on, P60, k, NULL, 0);
+            for (ch = 0; ch < SM_NCH; ch++) {
+                float h = psytl_value(&g_tl3, ch);
+                if (psytl_value(&g_tl, ch) != h || (want == 0 && psytl_value(&g_tl2, ch) != h)) {
+                    if (!bad_vals)
+                        fprintf(stderr, "  seq model trial %d frame %d ch %d: builder %.9g run %.9g hand %.9g\n", trial, k,
+                                ch, (double)psytl_value(&g_tl, ch), (double)psytl_value(&g_tl2, ch), (double)h);
+                    bad_vals++;
+                    k = 1000;
+                    break;
+                }
+            }
+        }
+        if (memcmp(g_store, g_store3, 64 * sizeof g_store[0]) != 0) bad_store++;
+        if (want == 0 && memcmp(g_store2, g_store3, 64 * sizeof g_store[0]) != 0) bad_store++;
+    }
+    CHECK_I(bad_vals, 0);
+    CHECK_I(bad_store, 0);
+    CHECK_I(bad_err, 0);
+    CHECK_I(bad_run, 0);
+    if (sm_stat_ok < 150 || sm_stat_err[-PSYTL_ERR_ARG] < 100 || sm_stat_err[-PSYTL_ERR_BOUND] < 30 || sm_stat_tw < 1000)
+        fail_i(__LINE__, "seq model: too few clean tables, ARG, BOUND or tweens (vacuous)", sm_stat_ok, 150);
+    printf("psy_timeline_test: seq model: %ld clean tables, %ld ARG, %ld BOUND, %ld tweens, %ld events\n",
+           sm_stat_ok, sm_stat_err[-PSYTL_ERR_ARG], sm_stat_err[-PSYTL_ERR_BOUND], sm_stat_tw, sm_stat_ev);
+}
+
 /* -------------------------------------------- 12. the randomized model */
 
 enum { M_CAP = 48, M_NCH = 8, M_EVCH = 6 };
@@ -4599,6 +6076,8 @@ typedef struct mev {
     psytl_event e;
     int late;    /* added at or before its base's reach             */
     int ambig;   /* LATE bit not checked: see the note in m_rewind() */
+    int64_t key; /* the report's order when it fired: the RT time its base
+                  * reached it (EVALUATE), onset - residual when paused */
 } mev;
 
 typedef struct mbase {
@@ -4614,7 +6093,10 @@ typedef struct mbase {
     int64_t ev_bt, anc_bt;
     int ev_any, moved;
     int64_t nowv;       /* "now" as TWEENS defines it: set by every evaluate,
-                         * anchor, pause and resume of the base */
+                         * anchor, pause and resume of the base, and by a
+                         * rate change of a running base */
+    int64_t num, den;   /* RATE, reduced */
+    int chg;            /* a rate change since the last evaluate (a statistic) */
 } mbase;
 
 static mev m_ev[M_CAP + 8];
@@ -4647,6 +6129,7 @@ static int m_step;
 static long m_stat_eval, m_stat_fired, m_stat_late, m_stat_arew, m_stat_wrew, m_stat_unfired, m_stat_err, m_stat_wait, m_stat_trk;
 static long m_stat_tw, m_stat_twrej, m_stat_promo, m_stat_kv, m_stat_xbase, m_stat_twnow;
 static long m_stat_skip, m_stat_skipped, m_stat_skipback, m_stat_skiplate, m_stat_peek, m_stat_peeked, m_stat_peektrunc;
+static long m_stat_rate, m_stat_rate_run, m_stat_rate_behind, m_stat_rate_fired, m_stat_win, m_stat_rtt;
 static const char* m_op;
 
 static int m_fail(const char* what, long long got, long long want) {
@@ -4663,10 +6146,34 @@ static void print_ev(const char* tag, const psytl_event* e) {
             (long long)e->onset, (long long)e->residual);
 }
 
+static int m_scaled(int b) { return b != 0 && m_b[b].num != m_b[b].den; }
+
+/* RATE: base time anchor_bt + floor((rt - anchor_rt) num / den), from the
+ * exact reference; at 1/1 it is v0.3.0's sum. */
 static int64_t m_bt(int b, int64_t rt) {
+    const mbase* mb = &m_b[b];
     if (b == 0) return rt;
-    if (m_b[b].state == 2) return m_b[b].frozen;
-    return m_b[b].abt + (rt - m_b[b].art);
+    if (mb->state == 2) return mb->frozen;
+    if (!m_scaled(b)) return mb->abt + (rt - mb->art);
+    if (g_mut & MUT_RATE_TRUNC) {
+        int big;
+        int64_t d = rt - mb->art;
+        return mb->abt + (d < 0 ? -ref_floor_md(-d, mb->num, mb->den, &big) : ref_floor_md(d, mb->num, mb->den, &big));
+    }
+    return ref_bt(mb->art, mb->abt, mb->num, mb->den, rt);
+}
+
+/* The RT time a running base reaches base time T: ceil, so that it is the
+ * first RT ns with m_bt >= T. */
+static int64_t m_rt(int b, int64_t T) {
+    const mbase* mb = &m_b[b];
+    if (b == 0) return T;
+    if (!m_scaled(b)) return mb->art + (T - mb->abt);
+    if (g_mut & MUT_RATE_INVFLOOR) {
+        int big;
+        return mb->art + ref_floor_md(T - mb->abt, mb->den, mb->num, &big);
+    }
+    return ref_rt(mb->art, mb->abt, mb->num, mb->den, T);
 }
 
 /* A tween's "now" on base b (TWEENS): the base time of the last evaluated
@@ -4731,7 +6238,11 @@ static void m_rewind(int b, int64_t bt) {
 }
 
 static int fired_cmp(const void* a, const void* b) {
-    return report_cmp(&((const mev*)a)->e, &((const mev*)b)->e);
+    const mev* x = (const mev*)a;
+    const mev* y = (const mev*)b;
+    if (x->key != y->key) return x->key < y->key ? -1 : 1;
+    if (x->e.id != y->e.id) return x->e.id < y->e.id ? -1 : 1;
+    return 0;
 }
 
 static int store_cmp(const void* a, const void* b) {
@@ -4745,10 +6256,16 @@ static void m_evaluate(int64_t onset, int64_t index) {
         int64_t hi, bt_on;
         if (b != 0 && m_b[b].state == 0) continue;
         bt_on = m_bt(b, onset);
-        hi = m_b[b].state == 2 && b != 0 ? m_b[b].frozen : m_bt(b, onset + m_w);
+        if (m_b[b].state == 2 && b != 0) hi = m_b[b].frozen;
+        else if ((g_mut & MUT_RATE_LEAD) && m_scaled(b)) hi = bt_on + m_w;
+        else hi = m_bt(b, onset + m_w);
         /* An evaluate never un-fires: a window behind the reach fires
          * only what it reaches; later events wait. */
-        if (m_b[b].evaluated && hi < m_b[b].last_hi) m_stat_wrew++;
+        if (m_b[b].evaluated && hi < m_b[b].last_hi) {
+            m_stat_wrew++;
+            if (m_b[b].chg) m_stat_rate_behind++;
+        }
+        m_b[b].chg = 0;
         for (i = 0; i < m_n; i++) {
             mev* m = &m_ev[i];
             if (m->e.base != b || (m->e.flags & M_DONE) || m->e.time > hi) continue;
@@ -4756,8 +6273,11 @@ static void m_evaluate(int64_t onset, int64_t index) {
             m->e.frame = index;
             m->e.onset = onset;
             m->e.residual = bt_on - m->e.time;
+            m->key = m_scaled(b) && m_b[b].state == 1 && !(g_mut & MUT_RATE_ORDER)
+                     ? m_rt(b, m->e.time) : onset - m->e.residual;
             m_fired[m_nf++] = *m;
             m_stat_fired++;
+            if (m_scaled(b)) m_stat_rate_fired++;
             if (m->late) m_stat_late++;
         }
         for (i = 0; i < m_n; i++)
@@ -4775,7 +6295,7 @@ static void m_evaluate(int64_t onset, int64_t index) {
          * window's end, any other at the onset. */
         for (ch = 6; ch < M_NCH; ch++) {
             if (m_tb[ch] != b) continue;
-            if (m_pend[ch] && (m_pstep[ch] ? m_bt(b, onset + m_w) : bt_on) >= m_ps[ch]) {
+            if (m_pend[ch] && (m_pstep[ch] ? hi : bt_on) >= m_ps[ch]) {
                 rdrv nd;
                 rdrv_tween(&nd, &m_pd[ch], m_ps[ch], m_has_drv[ch] ? &m_drv[ch] : NULL, (double)m_trackv[ch],
                            (double)m_pcall[ch]);
@@ -4790,7 +6310,7 @@ static void m_evaluate(int64_t onset, int64_t index) {
                 m_stat_promo++;
             }
             if (m_has_drv[ch])
-                m_trackv[ch] = (float)rdrv_value(&m_drv[ch], rdrv_step(&m_drv[ch]) ? m_bt(b, onset + m_w) : bt_on);
+                m_trackv[ch] = (float)rdrv_value(&m_drv[ch], rdrv_step(&m_drv[ch]) ? hi : bt_on);
         }
     }
     qsort(m_fired, (size_t)m_nf, sizeof m_fired[0], fired_cmp);
@@ -4857,6 +6377,11 @@ static int64_t m_rand_time(int b) {
     if (b != 0 && m_b[b].state == 0) t = rnd_range(-5 * m_pe, 30 * m_pe);
     else t = m_bt(b, now) + rnd_range(-4 * m_pe, 8 * m_pe);
     if (rnd_int(3) == 0) t -= t % m_pe;   /* ties on a coarse grid */
+    /* RATE: a scaled base moves num/den base ns per RT ns, so a window
+     * edge is near the base time of a coming window's end, not a multiple
+     * of the period. Only on scaled bases: the v0.3.0 seeds draw the same. */
+    if (m_scaled(b) && m_b[b].state != 0 && rnd_int(2) == 0)
+        t = m_bt(b, now + (int64_t)rnd_int(6) * m_pe + m_w) + rnd_range(-1, 1);
     /* On or next to a window edge: the last one, or one a few frames on. */
     if (rnd_int(5) == 0 && m_b[b].evaluated)
         t = m_b[b].last_hi + (int64_t)rnd_int(4) * m_pe + rnd_range(-1, 1);
@@ -5005,6 +6530,7 @@ static int m_op_skip(int64_t now) {
     m_b[b].anc_bt = bt;
     m_b[b].nowv = bt;
     m_b[b].moved++;
+    if (g_mut & MUT_RATE_ANCHOR1) m_b[b].num = m_b[b].den = 1;
     if (!(g_mut & MUT_SKIP_FIRES)) {
         for (i = 0; i < m_n; i++) {
             mev* m = &m_ev[i];
@@ -5050,7 +6576,7 @@ static int m_op_peek(int64_t now) {
         const mev* m = &m_ev[rnd_int(m_n)];
         int eb = m->e.base;
         if (eb == 0 || m_b[eb].state == 1) {
-            int64_t rte = eb == 0 ? m->e.time : m_b[eb].art + (m->e.time - m_b[eb].abt);
+            int64_t rte = m_rt(eb, m->e.time);
             if (rnd_int(2)) from = rte + rnd_range(-1, 1);
             else to = rte + rnd_range(-1, 1);
             if (to < from && rnd_int(4) != 0) { int64_t x = to; to = from; from = x; }
@@ -5076,11 +6602,12 @@ static int m_op_peek(int64_t now) {
         if (b != PSYTL_ALL_BASES && eb != b) continue;
         if (eb != 0 && m_b[eb].state != 1) continue;
         if (m->e.flags & ((g_mut & MUT_PEEK_FIRED) ? PSYTL_EV_SKIPPED : M_DONE)) continue;
-        rte = eb == 0 ? m->e.time : m_b[eb].art + (m->e.time - m_b[eb].abt);
+        rte = m_rt(eb, m->e.time);
         if (rte < from || rte > to || (rte == to && !(g_mut & MUT_PEEK_END))) continue;
         want[nw] = *m;
         want[nw].e.onset = (g_mut & MUT_PEEK_ONSET) ? m->e.time : rte;
         want[nw].e.residual = 0;
+        want[nw].key = want[nw].e.onset;
         want[nw].ambig = 0;
         nw++;
     }
@@ -5102,7 +6629,98 @@ static int m_op_peek(int64_t now) {
     return 0;
 }
 
-/* ops: also skip and peek (v0.3.0). Off, the run is v0.2.0's, op for op. */
+/* RATE, from the manual: base 1 .. 7 only, num and den >= 1, stored
+ * reduced; a running base re-anchors at (rt, its time at rt) with no rewind
+ * and "now" there; a paused or stopped base only stores the rate; the rate
+ * it has changes nothing. */
+static int m_op_rate(int64_t now) {
+    static const int32_t rn[16] = { 1, 1, 2, 1001, 999, 3, 7, 1, 25, 2, 1000, 2147483647, 0, 1, -1, 5 };
+    static const int32_t rd[16] = { 1, 2, 1, 1000, 1000, 7, 3, 1000, 24, 4, 1000, 2147483646, 1, 0, 2, 5 };
+    int b = rnd_int(12) == 0 ? (rnd_int(2) ? 0 : PSYTL_MAX_BASES) : 1 + rnd_int(3);
+    int k = rnd_int(16), ret, want;
+    int64_t num = rn[k], den = rd[k], rt = rnd_int(4) == 0 ? now : now + rnd_range(-3 * m_pe, 3 * m_pe);
+    int32_t gn = -9, gd = -9;
+    m_op = "rate";
+    ret = psytl_rate(&g_tl, b, rt, rn[k], rd[k]);
+    want = b < 1 || b >= PSYTL_MAX_BASES || num < 1 || den < 1 ? PSYTL_ERR_ARG : 0;
+    m_trace("rate", b, num, den, ret);
+    if (ret != want) return m_fail("rate return", ret, want);
+    if (want != 0) return 0;
+    {
+        mbase* mb = &m_b[b];
+        int64_t g = gcd64(num, den);
+        num /= g;
+        den /= g;
+        if (num != mb->num || den != mb->den || ((g_mut & MUT_RATE_SAME) && mb->state == 1)) {
+            if (mb->state == 1) {
+                int64_t bt = m_bt(b, rt);
+                if ((g_mut & MUT_RATE_REWIND) && mb->evaluated && bt <= mb->last_on) {
+                    m_rewind(b, bt);
+                    mb->last_hi = bt - 1;
+                    mb->last_on = bt - 1;
+                }
+                mb->art = rt;
+                mb->abt = bt;
+                if (!(g_mut & MUT_RATE_NOW)) mb->nowv = bt;
+                mb->moved++;
+                mb->chg = 1;
+                m_stat_rate_run++;
+            }
+            mb->num = num;
+            mb->den = den;
+        }
+        m_stat_rate++;
+        if (!psytl_get_rate(&g_tl, b, &gn, &gd)) return m_fail("get_rate", 0, 1);
+        if (gn != mb->num || gd != mb->den) return m_fail("get_rate num", gn, mb->num);
+    }
+    return 0;
+}
+
+/* psytl_window(): the evaluate's window end, changing nothing. */
+static int m_op_window(int64_t now) {
+    static psytl_timeline snap_tl;
+    int b = rnd_int(10) == 0 ? (rnd_int(2) ? -1 : PSYTL_MAX_BASES) : rnd_int(4);
+    psytl_frame f;
+    int64_t end = -77, want = 0;
+    bool ok, wok;
+    m_op = "window";
+    f.onset = now + rnd_range(0, 2 * m_pe);
+    f.period = m_period;
+    f.index = m_index;
+    memcpy(&snap_tl, &g_tl, sizeof g_tl);
+    ok = psytl_window(&g_tl, b, &f, &end);
+    if (memcmp(&snap_tl, &g_tl, sizeof g_tl) != 0) return m_fail("window changed the handle", 1, 0);
+    wok = b >= 0 && b < PSYTL_MAX_BASES && (b == 0 || m_b[b].state != 0);
+    if (wok) want = b != 0 && m_b[b].state == 2 ? m_b[b].frozen : m_bt(b, f.onset + m_w);
+    if (ok != wok) return m_fail("window ok", ok, wok);
+    if (ok && end != want) return m_fail("window end", end, want);
+    m_stat_win++;
+    return 0;
+}
+
+/* psytl_rt_time(): the first RT ns at which a running base reaches bt. */
+static int m_op_rt_time(int64_t now) {
+    int b = rnd_int(10) == 0 ? PSYTL_MAX_BASES : rnd_int(4);
+    int64_t bt, x = -77;
+    bool ok, wok;
+    m_op = "rt_time";
+    if (b < PSYTL_MAX_BASES && m_n > 0 && rnd_int(2)) bt = m_ev[rnd_int(m_n)].e.time + rnd_range(-1, 1);
+    else bt = (b < PSYTL_MAX_BASES && (b == 0 || m_b[b].state != 0) ? m_bt(b, now) : 0) + rnd_range(-5 * m_pe, 10 * m_pe);
+    ok = psytl_rt_time(&g_tl, b, bt, &x);
+    wok = b < PSYTL_MAX_BASES && (b == 0 || m_b[b].state == 1);
+    if (ok != wok) return m_fail("rt_time ok", ok, wok);
+    if (ok) {
+        int64_t w = m_rt(b, bt);
+        if (x != w) return m_fail("rt_time", x, w);
+        /* The defining property, from the base time side. */
+        if (m_bt(b, x) < bt || m_bt(b, x - 1) >= bt) return m_fail("rt_time is not the first RT ns", x, w);
+    }
+    m_stat_rtt++;
+    return 0;
+}
+
+/* ops: also skip and peek (v0.3.0); 2: also rate, window and rt_time
+ * (v0.4.0). Off, the run is v0.2.0's, op for op. */
 static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, int steps, int ops) {
     int ch, i;
     m_seed = seed;
@@ -5110,6 +6728,7 @@ static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, 
     m_step = -1;
     g_rng = seed;
     memset(m_b, 0, sizeof m_b);
+    for (i = 0; i < PSYTL_MAX_BASES; i++) m_b[i].num = m_b[i].den = 1;
     m_b[0].state = 1;
     m_n = 0;
     m_next_id = 0;
@@ -5153,7 +6772,7 @@ static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, 
     if (m_check()) return 1;
 
     for (m_step = 0; m_step < steps; m_step++) {
-        int r = rnd_int(ops ? 126 : 110), ret;
+        int r = rnd_int(ops >= 2 ? 140 : ops ? 126 : 110), ret;
         int64_t now = m_has_onset ? m_onset : T0;
         /* Near full, mostly remove, so FULL does not dominate the adds. */
         if (m_n >= M_CAP - 6 && r < 40 && rnd_int(5) != 0) r = 45;
@@ -5211,6 +6830,7 @@ static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, 
                 m_b[b].anc_bt = bt;
                 m_b[b].nowv = bt;
                 m_b[b].moved++;
+                if (g_mut & MUT_RATE_ANCHOR1) m_b[b].num = m_b[b].den = 1;
             }
             m_trace("anchor", b, rt, bt, ret);
         } else if (r < 68) {
@@ -5220,9 +6840,16 @@ static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, 
             want = b == 0 ? PSYTL_ERR_ARG : (m_b[b].state != 1 ? PSYTL_ERR_ORDER : 0);
             ret = psytl_pause(&g_tl, b, rt);
             if (ret != want) return m_fail("pause return", ret, want);
-            if (want == 0) { m_b[b].frozen = m_bt(b, rt); m_b[b].state = 2; m_b[b].moved++;
+            if (want == 0) { m_b[b].frozen = (g_mut & MUT_RATE_PAUSE1) && m_scaled(b) ? m_b[b].abt + (rt - m_b[b].art) : m_bt(b, rt);
+                             m_b[b].state = 2; m_b[b].moved++;
                              m_b[b].nowv = m_b[b].frozen; }
             m_trace("pause", b, rt, m_b[b].frozen, ret);
+        } else if (r >= 136) {
+            if (m_op_rt_time(now)) return 1;
+        } else if (r >= 132) {
+            if (m_op_window(now)) return 1;
+        } else if (r >= 126) {
+            if (m_op_rate(now)) return 1;
         } else if (r >= 118) {
             if (m_op_peek(now)) return 1;
         } else if (r >= 110) {
@@ -5378,7 +7005,7 @@ static int model_run(uint64_t seed, int lead_num, int lead_den, int64_t period, 
                 int64_t t;
                 if (e->flags & M_DONE) continue;
                 if (e->base != 0 && m_b[e->base].state != 1) continue;
-                t = e->base == 0 ? e->time : m_b[e->base].art + (e->time - m_b[e->base].abt);
+                t = m_rt(e->base, e->time);
                 if (!mhas || t < mdue) { mdue = t; mhas = 1; }
             }
             if (has != (mhas != 0)) return m_fail("next_due found", has, mhas);
@@ -5404,6 +7031,14 @@ static void test_model(void) {
      * seeds, so the v0.2.0 runs above stay as they were. */
     for (i = 0; i < sizeof cfg / sizeof cfg[0]; i++)
         (void)model_run(cfg[i].seed + 100, cfg[i].num, cfg[i].den, cfg[i].period, 1000, 1);
+    /* RATE: rate, window and rt_time among the ops; other seeds again, so
+     * the 20 runs above stay v0.3.0's. Two more at 500 Hz. TL_V030_MODEL
+     * stops here, so the statistics line can be compared with v0.3.0's. */
+    if (g_v030_model) return;
+    for (i = 0; i < sizeof cfg / sizeof cfg[0]; i++)
+        (void)model_run(cfg[i].seed + 200, cfg[i].num, cfg[i].den, cfg[i].period, 1000, 2);
+    (void)model_run(221, 1, 2, 2000000, 1500, 2);
+    (void)model_run(222, 0, 1, 2000000, 1500, 2);
 }
 
 /* QUANTIZATION: a desc lead of 0 is the default, 0.5; PSYTL_LEAD_NONE is
@@ -5471,6 +7106,8 @@ static void test_lead_default(void) {
 
 int main(void) {
     const char* mu = getenv("TL_MUT");
+    const char* v3 = getenv("TL_V030_MODEL");
+    g_v030_model = v3 != NULL;
     g_mut = mu ? (unsigned)strtoul(mu, NULL, 10) : 0u;
     test_open();
     test_lead_default();
@@ -5531,23 +7168,47 @@ int main(void) {
     test_skip_tracks();
     test_peek();
     test_peek_lookahead();
+    test_rate_arith();
+    test_rate_calls();
+    test_rate_quant();
+    test_rate_sweep();
+    test_rate_tracks();
+    test_rate_peek();
+    test_rate_drift();
+    test_rate_clamp();
+    test_seq_trial();
+    test_seq_run();
+    test_seq_cancel();
+    test_seq_vs_tween();
+    test_seq_arena();
+    test_seq_on_n();
+    test_seq_cross_base();
+    test_seq_model();
     test_model();
     if (m_stat_promo < 100 || m_stat_kv < 20 || m_stat_xbase < 20 || m_stat_twnow < 50 || m_stat_twrej < 20)
         fail(__LINE__, "model: too few tween takeovers, keep_velocity, cross-base, now or rejected tweens (vacuous)");
     if (m_stat_skip < 300 || m_stat_skipped < 300 || m_stat_skipback < 50 || m_stat_skiplate < 20
         || m_stat_peek < 300 || m_stat_peeked < 300 || m_stat_peektrunc < 50)
         fail(__LINE__, "model: too few skips, skipped events, skips back, late skips or peeks (vacuous)");
+    if (g_ref_bad) fail(__LINE__, "the limb reference disagrees with __int128");
+    if (!g_v030_model && (m_stat_rate < 300 || m_stat_rate_run < 100 || m_stat_rate_behind < 20 || m_stat_rate_fired < 300
+        || m_stat_win < 200 || m_stat_rtt < 200))
+        fail(__LINE__, "model: too few rate changes, changes while running, windows behind the reach "
+             "after one, events fired on scaled bases, windows or rt_times (vacuous)");
     fprintf(g_failures ? stderr : stdout,
             "psy_timeline_test: %s (model: %ld evaluates, %ld fired, %ld late, "
             "%ld anchor rewinds, %ld windows behind reach, %ld un-fired, %ld rejected adds, %ld late waits, "
             "%ld track ops; tweens %ld accepted, %ld rejected, %ld took over, %ld keep_velocity, "
             "%ld cross-base, %ld from now; %ld skips (%ld back) skipped %ld events (%ld late); "
-            "%ld peeks listed %ld events, %ld over the cap)\n",
+            "%ld peeks listed %ld events, %ld over the cap; %ld rate changes (%ld running, %ld windows "
+            "behind the reach after one, %ld fired on scaled bases), %ld windows, %ld rt_times; "
+            "%lld reference checks against __int128, %lld bad)\n",
             g_failures ? "FAILED" : "all checks passed",
             m_stat_eval, m_stat_fired, m_stat_late, m_stat_arew, m_stat_wrew, m_stat_unfired, m_stat_err, m_stat_wait,
             m_stat_trk, m_stat_tw, m_stat_twrej, m_stat_promo, m_stat_kv, m_stat_xbase, m_stat_twnow,
             m_stat_skip, m_stat_skipback, m_stat_skipped, m_stat_skiplate, m_stat_peek, m_stat_peeked,
-            m_stat_peektrunc);
+            m_stat_peektrunc, m_stat_rate, m_stat_rate_run, m_stat_rate_behind, m_stat_rate_fired,
+            m_stat_win, m_stat_rtt, g_ref_checks, g_ref_bad);
     if (g_failures) {
         fprintf(stderr, "psy_timeline_test: %d failure(s)\n", g_failures);
         return 1;

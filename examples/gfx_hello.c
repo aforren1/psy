@@ -9,7 +9,7 @@
  * Usage: gfx_hello [--sim] [--frames N]
  *   --sim       no window and no GL: the simulated display and the null
  *               backend, for CI
- *   --frames N  stop after N frames (default: until Esc or the window closes)
+ *   --frames N  stop after N frames (default: until Shift+Esc or the window closes)
  * Exit code: 0, 1 when the screen or the gfx did not open, 2 for a bad
  * argument.
  */
@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
     psygfx_describe(&gfx, line, sizeof line);
     printf("%s\n", line);
 
-    while (psyscr_begin(&scr, &f) == PSYSCR_OK) {   /* Esc ends it */
+    while (psyscr_begin(&scr, &f) == PSYSCR_OK) {   /* Shift+Esc ends it */
         if (f.index == 0) t0 = f.onset;
         g.phase = (float)fmod(1.0 * (double)(f.onset - t0) * 1e-9, 1.0);   /* 1 Hz drift */
         psygfx_begin(&gfx, &f);

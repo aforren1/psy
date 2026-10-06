@@ -102,13 +102,13 @@ endif()
 # compiler's own header dependencies rebuild every target after a psy_rt.h
 # edit. rt comes first so its compile checks run before its dependents'.
 # The list has four groups: the transports (rt, parallel, serial), the
-# adaptive methods (stair, quest, gp), the trial sequencer (trials) and the
-# timeline (timeline).
+# adaptive methods (stair, quest, gp), the trial sequencer (trials), the
+# timeline (timeline) and color (color), then the rig headers.
 # A header with a tests/adapt/psy_<name>_test.c gets that self-checking
 # program registered with ctest too, and one with PSY_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
 # PSY<X>_ASYNC defined, which is the opt-in layer that pulls in psy_rt.h.
-set(PSY_LIBS rt parallel serial stair quest gp trials timeline screen audio gfx video)
+set(PSY_LIBS rt parallel serial stair quest gp trials timeline color screen audio gfx video)
 
 set(PSY_PREFIX_rt          PSYRT)
 set(PSY_PLATFORMS_rt       Windows Linux Darwin)
@@ -148,6 +148,11 @@ set(PSY_THREADS_trials     OFF)
 set(PSY_PREFIX_timeline    PSYTL)
 set(PSY_PLATFORMS_timeline Windows Linux Darwin)
 set(PSY_THREADS_timeline   OFF)
+
+# The color header is pure computation too: calibration, conversions, gamut.
+set(PSY_PREFIX_color       PSYCOL)
+set(PSY_PLATFORMS_color    Windows Linux Darwin)
+set(PSY_THREADS_color      OFF)
 
 # The display header is the one with an external dependency. PSY_DEPS_<name>
 # lists CMake targets it links; when one is missing, only its tests/adapt test
@@ -247,6 +252,22 @@ foreach(lib IN LISTS PSY_LIBS)
             psy_add_program(compile_${name} ${src})
             add_test(NAME compile_${name} COMMAND compile_${name})
         endforeach()
+        # psy_timeline.h's op table macros are designated initializers,
+        # which C++ has from C++20 on; g++ warns about every field they
+        # leave out, though zero is the default.
+        if(TARGET compile_psy_timeline_ops)
+            set_target_properties(compile_psy_timeline_ops PROPERTIES CXX_STANDARD 20)
+            if(NOT MSVC)
+                target_compile_options(compile_psy_timeline_ops PRIVATE -Wno-missing-field-initializers)
+            endif()
+        endif()
+        # psy_color.h's value macros (PSYCOL_DKL(...)) are the same kind.
+        if(TARGET compile_psy_color_macros)
+            set_target_properties(compile_psy_color_macros PROPERTIES CXX_STANDARD 20)
+            if(NOT MSVC)
+                target_compile_options(compile_psy_color_macros PRIVATE -Wno-missing-field-initializers)
+            endif()
+        endif()
     endif()
 
     # --- verification tests: tests/adapt/psy_<lib>_test.c is self-checking

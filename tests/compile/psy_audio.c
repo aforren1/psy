@@ -51,9 +51,24 @@ int main(void) {
     id = psyau_play_at(au, b, 0);
     if (id <= 0) { psyau_close(au); free(au); return 5; }
     rc = psyau_wait(au, id, 2000000000LL, &r);
+    if (rc != PSYAU_OK || r.tier != PSYAU_TIER_SIM) { psyau_close(au); free(au); return 6; }
+    {
+        /* the same tone through a stream */
+        static psyau_stream st;
+        psyau_stream_desc sd;
+        psyau_stream_info in;
+        memset(&sd, 0, sizeof sd);
+        sd.channels = 1;
+        if (psyau_stream_init(au, &st, &sd) != 0) { psyau_close(au); free(au); return 8; }
+        if (psyau_stream_write(&st, b.frames, b.n) != b.n || psyau_stream_end(&st) != 0) { psyau_close(au); free(au); return 9; }
+        id = psyau_play_stream(au, &st, 0);
+        rc = id > 0 ? psyau_wait(au, id, 2000000000LL, &r) : (int)id;
+        if (rc != PSYAU_OK || r.sample != 0 || psyau_stream_get_info(&st, &in) != 0 || !in.started) {
+            psyau_close(au); free(au); return 10;
+        }
+    }
     psyau_close(au);
     free(au);
-    if (rc != PSYAU_OK || r.tier != PSYAU_TIER_SIM) return 6;
     return psyau_params(&n) && n > 0 ? 0 : 7;
 #endif
 }

@@ -51,6 +51,23 @@ gamut check is v0.2's.
 | 7. Manual, README, rig_spec 4.3, license block | Done. The year of each Inigo Quilez notice was copied from the Shadertoy pages by hand (2015, 2018, 2019, 2019, 2019), because the pages refused automated reads. |
 | 8. Build matrix | See "v0.3 builds". |
 
+## v0.4 status
+
+The running record of v0.4 (program cache, video, instances, the
+gallery's fixes). The design is in the session notes of 2026-10-06; the
+coordinator's conditions are listed with the item each belongs to.
+
+| Item | State |
+|---|---|
+| 1. Program cache | Done, tested (11 GL cases on 3 renderers, a CPU half with a fake backend). Warm open 11.4 to 35.0 ms on the Iris Xe against 2.3 to 5.3 s without a cache (bar 100 ms: met); a cold open adds 32 to 120 ms of stores (bar 5 %: met). |
+| 1b. Kind-specialized vector programs | Not built: the coordinator asked for the harness numbers first; see "Next". |
+| 2. Gallery fixes (calibration CRC, straight-alpha sprites, DIST range rule, first, shape_p); the dots' zero-default bug and the no-pixel audit | Done, tested. |
+| 3. Planar YUV, encodings, import, rebind | Done, tested on 3 renderers; D3D11 NV12 import (array slice, shared handles) on the Iris Xe and WARP. Bars: update CPU met (30 to 38 % of RGBA8); GPU 1.0 ms met except DEVICE (1.12 ms); GPU 1.5x RGBA8 missed (1.63 to 1.91). |
+| 4. Instances | Done, tested on 3 renderers. Every bar met: 10000 gabors 177 to 191 us of CPU, 1.26 to 1.33 ms of GPU (5.5 ms one stimulus each). |
+| 5. Overlap-aware reordering in end() | Done, tested bit for bit against call order on 3 renderers. 1000 interleaved stimuli of 4 kinds: 7.2 to 1.1 ms of GPU, 3.3 to 0.47 ms of CPU. |
+| 6. Bench on AC | Done ("v0.4 cost"); a build ran during parts of it, named there. |
+| Mutations | 35 of 35 caught ("v0.4 mutations"). |
+
 ## What the GPU and ANGLE report
 
 Queries made before the design, offscreen:
@@ -168,9 +185,9 @@ design proposed against the 16.7 ms frame.
 | gabors x 10 | 78 to 189 | 0.57 to 0.62 | | |
 | gabors x 100 | 75 to 213 | 1.33 to 1.72 | CPU 100 us | in 1 of 5 runs |
 | gabors x 1000 | 196 to 502 | 9.3 to 11.2 | CPU 1 ms, GPU 10 ms | CPU yes; GPU in 4 of 5 runs |
-| dots x 1000, 4 px, upload each frame | 66 to 288 | 0.37 to 0.61 | CPU 0.1 ms | in 2 of 5 runs |
-| dots x 10000 | 87 to 243 | 0.45 to 0.59 | CPU 0.3 ms, GPU 0.5 ms over the empty frame | yes |
-| dots x 100000 | 654 to 1271 | 1.45 to 1.99 | CPU 2 ms, GPU 3 ms | yes |
+| dots x 1000, 4 px, upload each frame | 66 to 288 | 0.37 to 0.61 | CPU 0.1 ms | void: drew nothing (v0.4, "the gallery's findings") |
+| dots x 10000 | 87 to 243 | 0.45 to 0.59 | CPU 0.3 ms, GPU 0.5 ms over the empty frame | void: drew nothing |
+| dots x 100000 | 654 to 1271 | 1.45 to 1.99 | CPU 2 ms, GPU 3 ms | void: drew nothing; re-measured in "v0.4 cost" |
 | noise, full screen, GPU hash | 63 to 285 | 0.83 to 1.01 | GPU 1 ms over the empty frame | yes |
 | `psygfx_noise_fill()` 1920 x 1200 on the CPU | 8 500 to 26 600, once | | off the frame thread | on the pump |
 | noise, CPU R32F upload + draw | 1 708 to 3 259 | 2.99 to 4.79 | CPU 3 ms | in 2 of 3 runs |
@@ -200,7 +217,7 @@ psy_screen.h's flip records.
 | 1 gabor | 2565 (1) | 21 | 2 | 286 / 654 | 0.7 |
 | 1 gabor, again | 3600 | 1 | 0 | 255 / 590 | 0.6 |
 | 100 gabors | 3595 | 5 | 1 | 332 / 788 | 0.8 |
-| 10000 dots, uploaded each frame | 3567 | 3 | 1 | 268 / 643 | 215 |
+| 10000 dots, uploaded each frame (void: they drew nothing; not re-measured) | 3567 | 3 | 1 | 268 / 643 | 215 |
 
 (1) The run ended before its minute; the window was most likely covered or
 closed. The rerun below it is complete.
@@ -296,8 +313,8 @@ the two cannot disagree. ANGLE compiles it when the pack loads. The
 compiler's log names the body's own lines: the wrapper puts `#line 1`
 before the body, and the test checks that an error on the body's line 3
 is reported as `0:3` (ANGLE `0:3:`, Mesa `0:3(`). A program binary cache
-would cut the open from 0.8 to 1.4 s to a few ms, but it changes start-up,
-not timing, so it is left for later.
+would cut the open from 0.8 to 1.4 s to a few ms; v0.4 has one ("v0.4: the
+program cache").
 
 ## v0.2: what was added and why
 
@@ -821,28 +838,575 @@ functions, a bounded fold (56 primitives), bounded paths (224 points). No
 SVG, no fill rules, no general path rasterizer. Artwork still goes
 through the pack tool, now also as MSDF.
 
+## v0.4: the program cache
+
+### What ANGLE does with a binary
+
+A probe on the Docker ANGLE (2.1.23876), 2026-10-06, under the lock:
+
+| Fact | Iris Xe (D3D11) | WARP | SwiftShader |
+|---|---|---|---|
+| Binary formats | 1, 0x93A6 | 1, 0x93A6 | 1, 0x93A6 |
+| The eleven programs' binaries | 456 KB (17 to 39 KB each, the vector program 112 KB) | 456 KB | 425 KB |
+| `glProgramBinary` and the link status, all eleven | 2.8 ms | 9.3 ms | 0.4 ms |
+| One byte flipped in the middle of a binary | linked: 10 of 11 programs | linked: 10 of 11 | linked: 11 of 11 |
+| Half a binary under a valid header | the process ended (fast fail) | | |
+
+GL_RENDERER carries the adapter and the driver version ("Direct3D11
+vs_5_0 ps_5_0, D3D11-32.0.101.7088"), GL_VERSION the ANGLE build and git
+hash. ANGLE does not check what it is given, so an entry carries its own
+check, and the driver sees no byte that has not matched it.
+
+EGL_ANDROID_blob_cache exists too. It was not used: psy_screen.h owns the
+EGL display, the blob cache is set once per display, and its corruption
+handling is ANGLE's. `glGetProgramBinary` is core GL ES 3.0 and keeps the
+key, the check and the fallback in this header.
+
+### The entry and the key
+
+The key is FNV-1a 64 of the vendor, renderer, version and GLSL strings,
+the binary format, and the vertex and fragment text. The 48-byte header
+holds the key, a second hash of the same material (a multiply-xorshift
+hash), the material's length, the binary's format and size, and FNV-1a 64
+of the binary. A load is used only when every field matches. A forced
+collision (a test seam sets every key to 0) shows the second hash at work:
+each program finds another program's entry, rejects it, compiles, and the
+frame is bit-identical.
+
+### Tests
+
+`v0.4 cache` (GL, each renderer): a reference frame with no cache (a
+gabor, a soft circle, an RRECT, a linear image, noise, a grating in a
+circle, ordered dither), then eight opens with an in-memory cache, each
+followed by the same frame, compared bit for bit, and the counters:
+
+| Case | Loaded | Compiled | Rejected | Frame |
+|---|---|---|---|---|
+| cold | 0 | 11 | 0 | equal |
+| warm | 11 | 0 | 0 | equal |
+| a byte flipped in each payload | 0 | 11 | 11 | equal |
+| warm again (the entries were rewritten) | 11 (and a user pipeline) | 0 | 0 | equal |
+| every key 0, cold | 0 | 11 | | equal |
+| every key 0, warm | 1 | 10 | 10 | equal |
+| another driver identity | 0 | 11 | 0 | equal |
+| a binary of another ANGLE build under a valid header | 0 | 11 | 11 | equal |
+| the file cache: cold, warm, a folder that cannot be made | as expected | | | equal |
+
+The CPU half runs everywhere with a backend whose binary is a hash of the
+program's text: a changed vendor, renderer or version is a miss; a
+flipped byte, a flipped magic and a truncation are rejects; a binary the
+driver refuses is compiled; with every key 0 nothing is loaded; a user
+pipeline is cached. The whole GL suite runs with an in-memory cache, so
+every other pixel check also runs on loaded binaries.
+
+### Open time
+
+The probe's 2.8 ms for eleven loads became 11 to 31 ms for the whole open
+(scene, CLUT, buffers, eleven loads). The table: fresh processes, five
+rounds interleaved (none, cold, warm), the lock held. Run 1 on AC; the
+WARP and SwiftShader runs on AC.
+
+| Renderer | No cache | Cold (empty cache, stores) | Warm |
+|---|---|---|---|
+| Iris Xe | 2410 to 4569 ms | 2289 to 4678 ms | 11.4 to 22.3 ms |
+| WARP | 1808 to 2666 ms | 1829 to 2541 ms | 17.8 to 30.7 ms |
+| SwiftShader | 42 to 80 ms | 155 to 176 ms | 4.0 to 4.4 ms |
+
+What a cold open adds, timed inside open (the reads of the binaries and
+the stores), three runs each: an in-memory cache 1.3 to 2.6 ms on the Iris
+Xe; the file cache 39 to 121 ms (eleven files). Bar: a cold open at most
+5 % slower than none: met (at most 121 ms of 2.3 s or more). SwiftShader
+pays more (133 to 347 ms): reading a binary back makes ANGLE's Vulkan
+backend build what it would otherwise build at the first draw.
+
+v0.4 against v0.3.0 with no cache, to check that the version-3 backend
+and the cache's code cost nothing when no cache is given: fresh
+processes, eight rounds interleaved, the lock held, 2026-10-06 09:56 to
+09:58. **A loaded machine:** on battery, and another worker's build ran
+during rounds 2 to 4, 7 and 8.
+
+| Header | Open, ms (8 rounds) | Median |
+|---|---|---|
+| v0.3.0 (git HEAD) | 7489, 4603, 3384, 4122, 4010, 4743, 3524, 3231 | 4066 |
+| v0.4 | 4751, 3305, 4008, 3743, 4355, 3646, 3370, 3475 | 3694 |
+
+No regression. Both headers moved together from v0.3's 1.96 to 2.14 s
+(measured on 2026-10-05); the machine moved. PROGRAM_BINARY_RETRIEVABLE_HINT
+is set only when a cache is given.
+
+## v0.4: video
+
+### What ANGLE imports
+
+A probe on the Iris Xe (2026-10-06): an NV12 texture on ANGLE's D3D11
+device, imported plane by plane with `eglCreateImageKHR(EGL_D3D11_TEXTURE_ANGLE,
+{EGL_D3D11_TEXTURE_PLANE_ANGLE, p})` and `glEGLImageTargetTexture2DOES`:
+plane 0 an R8 texture, plane 1 RG8, read back exactly; slice 1 of a
+2-slice array made with D3D11_BIND_DECODER through
+EGL_D3D11_TEXTURE_ARRAY_SLICE_ANGLE, exactly. RGBA8 and BGRA8 textures
+import with no attributes. The imported textures cannot be rendered to
+(the framebuffer is incomplete); psy_gfx only samples them.
+
+### The conversion
+
+Y' at the image point; chroma at the stated siting in its own plane
+(texel-edge coordinates c = L / 2, plus 0.25 across for LEFT, both ways
+for TOP_LEFT), bilinear by four texelFetch clamped to the plane, or
+replicated; the matrix and range from constants the CPU puts in the
+block; R'G'B' clamped; the transfer; the primaries' 3x3. At 1:1 the
+weights are psy_video.h's sixteenths: CENTER takes 9/16, 3/16, 3/16, 1/16;
+LEFT takes the co-sited sample whole and the mean of two between them.
+
+TRC_DEVICE: at open (and at each `psygfx_set_lut()`) a 256 x 3 table holds,
+per gun, the linear value the CLUT maps to each code k / 255, inverted on
+the CPU. The output stage then writes code k back: all 256 codes through
+a nominal calibration's CLUT came out as they went in.
+
+The video program is compiled the first time an encoded texture is made
+or imported, so an open without video compiles nothing more and the
+plain IMAGE program is the same text as v0.3's (plus the straight-alpha
+fix).
+
+### Pixel tests
+
+`v0.4 video`, an RGBA32F scene against a double reference built from the
+definitions (H.273's matrices and ranges, the transfers' formulas, the
+luma equation for green, chroma weights from the siting), none of the
+header's arithmetic. Frames of 36 or 37 x 23 or 24 texels (odd and even),
+random codes with some 0 and 255 (out of range for LIMITED, so the clamp
+is exercised).
+
+| Check | Iris Xe | WARP | SwiftShader | Tolerance |
+|---|---|---|---|---|
+| NV12 and I420 x 3 matrices x 2 ranges x 3 sitings x 2 chroma filters, 1:1 (72) | 2.7e-7 | 3.1e-7 | 3.0e-7 | 1e-6 |
+| each transfer (DEVICE, BT1886, SRGB, LINEAR, GAMMA22) | 4.4e-7 | 6.6e-7 | 7.5e-7 | 2e-6 |
+| linear sampling at 2.5x | 6.2e-6 | 5.8e-6 | 5.5e-6 | 2e-5 |
+| one plane's rectangle, then all planes, updated | 5.1e-7 | 6.6e-7 | 6.3e-7 | 2e-6 |
+| BT.709 and BT.2020 primaries through a calibration (EDID chromaticities, nominal) | 1.1e-6 | 1.3e-6 | 9.8e-7 | 4e-6 |
+| TRC_DEVICE: the 256 gray codes through a non-identity CLUT | 0 wrong | 0 wrong | 0 wrong | 0 |
+| rebind: the other's texels, its own, its own after the other is freed | 5.1e-7 | 5.0e-7 | 6.3e-7 | 2e-6 |
+| GL import of a texture's planes (the source survives the import's free) | 5.1e-7 | 5.0e-7 | 6.3e-7 | 2e-6 |
+| D3D11 NV12 import, slice 1 of an array on ANGLE's device | 5.1e-7 | 5.0e-7 | (no D3D11) | 2e-6 |
+| NV12 from a second D3D11 device by an NT handle and a keyed mutex | 5.1e-7 | 5.2e-7 | | 2e-6 |
+| the same by a legacy shared handle, after the producer's flush and an event query | 5.1e-7 | 5.2e-7 | | 2e-6 |
+| refusals (no encoding; primaries without a calibration; siting NONE on 4:2:0; texture_update on a planar texture; a video as a modulation; rebind across formats) | 6 of 6 | 6 of 6 | 6 of 6 | all |
+
+The shared-handle cases are psy_video.h's SHARED path: the producer
+writes on its own device's immediate context; ANGLE's device opens the
+texture by its handle; the consumer acquires key 1 before `psygfx_end()`
+and releases key 0 after the frame. The test cannot show what happens
+without the keyed mutex: the producer's write finishes long before ANGLE
+samples. The order above is the documented contract, not a measured need.
+
+### Cost, from a loaded machine
+
+`gfx_bench --only "v0.4 video"`, 1920 x 1080 frames in a 1920 x 1200
+scene, the lock held, 2026-10-06 09:58. **On battery, with another
+worker's build running at the end.** GPU over an empty frame, the median
+of 25 interleaved rounds.
+
+| Workload | GPU, ms | CPU over empty, us |
+|---|---|---|
+| RGBA8, draw | 0.890 | 32 |
+| NV12, BT.709, BT1886, draw | 1.227 | 48 |
+| I420, the same, draw | 1.329 | 51 |
+| RGBA8, upload + draw | 3.403 | 2117 |
+| NV12, upload planes + draw | 2.290 | 755 |
+| (second table) RGBA8, draw | 0.719 | 23 |
+| NV12, transfer LINEAR | 1.125 | 32 |
+| NV12, transfer BT1886 | 1.111 | 25 |
+| NV12, transfer DEVICE | 1.275 | 21 |
+
+The update call alone, 400 calls each, A/B/A/B: RGBA8 (8.3 MB) 1107 to
+1253 us mean, 1848 to 2192 us p99; NV12 (3.1 MB) 360 to 362 us mean, 535
+to 556 us p99; I420 367 to 402 us mean. `psygfx_texture_rebind()`: 0.001
+us a call.
+
+The knob for the GPU time. Chroma costs 8 texelFetch a pixel for NV12
+and 16 for I420 (the hand bilinear, kept for exactness), and DEVICE 3
+more. The sampler's own bilinear (one `texture()` a plane) would remove
+most of them. Its weights: at 1:1 with the supported sitings the chroma
+sample point falls on fractions 0, 1/4, 1/2 or 3/4 of a texel (CENTER: 1/4
+and 3/4 both ways; LEFT: 0 and 1/2 across, 1/4 and 3/4 down; TOP_LEFT: 0
+and 1/2), which a sampler's 8-bit subtexel weights hold exactly, so the
+fast path would give the same weights at 1:1. Scaled, its weights are
+quantized to 1/256: an error of up to 1/512 of the step between two
+chroma samples, under 1/255 of a code. The filter's own arithmetic on R8
+texels was not checked. Not built (the coordinator's decision, 2026-10-06).
+
+## v0.4: instances
+
+### Design
+
+A template stimulus (one uniform block) and an array of 32-byte
+`psygfx_inst` records, all float so `psygfx_bind.field` binds any of them,
+drawn in one instanced draw. draw() copies the records into the frame's
+element staging; end() uploads them in one call into one of three element
+buffers (the ring of the uniform blocks) and draws with two vec4
+attributes, the glyph runs' layout. The template's block is followed by
+two more: the anchor in the pass's GL px and the center's offset from it,
+px per unit, the field mask, and the palette.
+
+The vertex shader computes each element's center and axes and hands the
+fragment shader flat replacements for the placement, look, color or dir
+and misc. A built-in body sees the template's frame at p / k (k the
+element's scale) and every distance is multiplied by k: a uniform scale is
+exact for any SDF, and what is in px (edge width, stroke, offset) is added
+after, so it does not scale. A user body sees its own px and psy_size
+scaled, as a group of that scale gives it.
+
+D3D's `sin` and `cos` are coarse (v0.3), so an element's angle comes from
+a polynomial in degrees: the turn reduced to a quarter, then degree-9 and
+degree-8 Taylor terms. Run in float on the CPU, as the shader runs it,
+from -720 to 720 degrees in steps of 0.001 degree: within 4.3e-7 of
+double.
+
+### Timeline bindings and the hit test
+
+A template field moves every element (a `psygfx_bind` on the instanced
+stimulus, which holds the template's fields); `psygfx_bind.field =
+&items[k].gate` moves one element. No new binding kind was needed.
+`psygfx_hit_index()` builds element i as its own stimulus (the template in
+a one-point group at the element's anchor, scaled and turned there) and
+runs the existing hit test on it, from the highest index down, skipping
+gate 0: the topmost element under a pixel, by the same field the GPU
+draws.
+
+### Tests
+
+`v0.4 inst`: each element against the same stimulus drawn alone, which
+the test composes itself (a one-point group at the element's anchor with
+its scale and turn, the fields applied); an RGBA32F scene, largest
+difference of full scale:
+
+| Template | Iris Xe | WARP | SwiftShader | Tolerance |
+|---|---|---|---|---|
+| gabor, every field (dir from the palette); two arrays in one frame | 8.3e-7 | 8.3e-7 | 8.3e-7 | 3e-5 |
+| grating in a cosine-edged circle; noise | 2.9e-6 | 3.4e-6 | 3.3e-6 | 3e-5 |
+| stroked CROSS (v0.2 program); vector RRECT with an offset | 9.5e-7 | 1.0e-6 | 1.0e-6 | 3e-5 |
+| linear image tinted by the palette | 9.5e-7 | 9.5e-7 | 9.5e-7 | 3e-5 |
+| USER at scale 0.5 to 1.5, turned, about an anchor at (0.3, 0.6) | 9.1e-6 | 9.2e-6 | 9.1e-6 | 3e-5 |
+| palette: integer entries (bit for bit); fractions against double | 0 wrong; 1.1e-7 | 0; 1.1e-7 | 0; 1.1e-7 | 0; 2e-7 |
+| `psygfx_hit_index()` against the GPU: 16 overlapping turned and scaled rects, one with gate 0 | 0 of 24712 wrong (4 ties) | same | same | 0 |
+| bindings: a template field, one element's field | 0 wrong | | | |
+| refusals: a DOTS template, PHASE on a shape, COLOR without a palette, SCALE on NOISE, a template with extension blocks, more than max_instances, 9000 + 9000 elements in one frame | 8 of 8 | 8 of 8 | 8 of 8 | all |
+
+The USER case is the coordinator's condition: the user's shader sees the
+same local coordinates whether drawn as an element or alone.
+
+## v0.4: the draw order
+
+### What interleaving cost
+
+1000 stimuli, four kinds in turn (gabor, soft circle, grating in a circle,
+RRECT), on a grid, no overlap, against the same stimuli grouped by kind by
+the caller (2026-10-06 10:36, AC, the lock held, no build running):
+
+| Workload | GPU over empty, ms | CPU over empty, us |
+|---|---|---|
+| interleaved, call order | 5.520 | 2239 |
+| grouped by kind | 0.470 | 124 |
+| interleaved, 10 % overlapping their neighbor | 5.517 | 2217 |
+
+So batching by call order gave interleaved kinds about one draw each, and
+about 5 us of GPU a draw through ANGLE's D3D11 backend. Built.
+
+### The rule
+
+In end(), within each pass, a draw joins the latest earlier batch of its
+kind (the same program, textures and blend, room for one more) when its
+bounds meet none of the batches between. The commands and their blocks
+are then written in the new order to a second staging, the members of a
+batch next to each other, and the two are swapped; nothing is allocated
+in the frame. The bounds: the draw's own quad, center +- (half size +
+margin) along its turned axes, plus 1 px; every fragment a draw writes is
+in its quad (soft edges, strokes, offsets and effects grow the margin).
+Instanced draws, dot fields and glyph runs place their pieces anywhere:
+their bounds are the whole pass, so nothing passes them. A draw looks
+back at most 64 batches.
+
+Two draws with disjoint bounds write no common pixel, and blending reads
+only the pixel it writes, so their order cannot change a value, for any
+blend: ADD (the gabors) moves too, and the result is bit-identical (the
+coordinator first excluded ADD; the argument was accepted). Target passes
+keep their order: each is its own segment. A group needs no barrier: it
+is composed into each draw's block on the CPU and sets no GL state.
+
+### Tests
+
+`v0.4 order`: each frame drawn in call order (the seam `no_reorder`) and
+reordered; the scene (RGBA32F) and the output codes (ordered dither)
+compared bit for bit.
+
+| Scene | Frames | Differed |
+|---|---|---|
+| sparse grids of 160 stimuli of five kinds (gabor, soft circle, RRECT, grating, linear image), turned | 3 | 0 |
+| dense: 400 at random places, most overlapping | 3 | 0 |
+| a draw that moves past two batches to join an earlier run, and one that may not pass a gabor three draws back | 1 | 0 |
+| a Gaussian-edged circle next to an RRECT, the quads from overlapping by 6.5 px to apart by 2.5 px | 9 | 0 |
+| an RRECT 40 x 40 at 45 degrees whose corner meets a circle's fringe, a copy of it far away | 4 | 0 |
+
+On all three renderers; 520 to 559 draw calls saved over the 20 frames.
+The two-batch move is checked by count: 7 draws become 5, not 4.
+
+### Cost
+
+`gfx_bench --only "v0.4 mixed"`, 2026-10-06 11:24, AC, the lock held, no
+build running during the part:
+
+| Workload | GPU over empty, ms | CPU over empty, us |
+|---|---|---|
+| 1000, 4 kinds interleaved, call order | 7.197 | 3335 |
+| the same, reordered | 1.133 | 467 |
+| the same, grouped by kind by the caller | 0.574 | 170 |
+| 10 % overlapping, call order | 7.305 | 3336 |
+| 10 % overlapping, reordered | 1.158 | 450 |
+| 1000 at random places (dense), call order | 6.937 | 3294 |
+| the same, reordered | 1.624 | 642 |
+
+The reorder saves 6.1 ms of GPU and 2.9 ms of CPU a frame here; its own
+cost is inside the 467 us (the grouped row shows what is left to gain: a
+caller who groups by kind still draws fewer, larger batches, because a
+batch's union bounds grow and stop later draws). Kept.
+
+## v0.4: the gallery's findings, and an audit
+
+Found by the gallery worker (examples/gfx_gallery.c), fixed, each with a
+test and a mutation:
+
+| Finding | Fix |
+|---|---|
+| `psygfx_cal_nominal()`, `cal_set_spectra()`, `cal_derive()`, then open: "CRC mismatch" until a `cal_save()` | derive() seals the CRC; `cal_add()` and `cal_set_spectra()` unseal it. The test runs the manual's recipe as written, and refuses a reading changed after derive |
+| A straight-alpha sprite drawn linear at 16x got dark fringes | the color image program filters straight-alpha RGBA and RG texels as premultiplied, then divides back; `image_desc.premultiplied` states a premultiplied texture. 1.0e-7 (Iris Xe), 6.3e-8 (WARP), 1.3e-7 (SwiftShader) from the premultiplied bilinear in double; v0.3's way was 0.196 off |
+| Glyph runs and masks on a DIST atlas clipped silently | the range rule holds on DIST atlases with `texture_desc.sdf_range` (twice the padding); only the outer reach is checked (inside, a DIST atlas holds true distances). A glyph run or a src rectangle on a DIST atlas with no range is refused. A whole-texture DIST mask without a range is v0.2's, unchecked |
+| A glyph run needed its own buffer | `first` on glyph and dot descs: a run from any record of a shared buffer; bit-equal to its own buffer |
+| An aperture's shape_p had to be set after construction | `shape_p[4]` on the grating, noise and user descs; bit-equal to setting it by hand |
+
+Found here, by the dots' mutation passing: **`psygfx_dots_desc.aperture`
+0 is PSYGFX_RECT, so a dot field with no aperture set had a 0 x 0 RECT
+field and every dot was culled**; the manual said the default was no
+aperture. Since v0.1. `gfx_bench`'s dots rows (above, "Frame cost") and
+`gfx_load`'s "10000 dots" run drew nothing; their numbers are void. The
+gallery set its apertures and was not affected.
+
+The audit of every constructor for the same trap (a nonempty stimulus
+that draws nothing by a zero default or a zero field):
+
+| Constructor | Zero default or field | Now |
+|---|---|---|
+| dots | aperture 0 = RECT, w 0 | no aperture (the manual's default); an explicit RECT or CIRCLE of no area, or dot_size 0 with dots, refused |
+| dots, glyph runs | count 0 | legal, draws nothing, returns OK (v0.3: ERR_ARG with no message) |
+| shape POLYGON | w, h 0 with vertices | the box is the vertices' own (they are from its center) |
+| shape CIRCLE, RECT, CROSS, LINE, ANNULUS; grating, noise, user | w (or LINE's width, CROSS's arm, ANNULUS's ring) 0 | refused with a message naming the field (v0.3 drew nothing) |
+| image | w, h 0 with no gfx to take the texels' size from | refused |
+| gabor | sigma 0 | refused with a message (v0.3: ERR_ARG with none) |
+| vector kinds, compounds, paths | w, h, widths 0 | refused already (v0.3) |
+| instances | a refused `psygfx_instances()` | draws nothing (v0.3 would have drawn the template once) |
+
+Every `return 0` in the packing now names its reason in `psygfx_error()`
+(a missing texture, buffer or pipeline; a src rectangle outside its
+texture; a mask's format or aspect; MITER where it does not apply). Test:
+14 cases, each refused with a message or drawn as the manual says; a
+polygon with no box drew 660 px, dots with no aperture 80 px.
+
+## v0.4 cost
+
+All on the Iris Xe at 1920 x 1200, RGBA16F scene, the lock held,
+`gfx_bench`. Three sessions, each named by its conditions:
+
+- A: 2026-10-06 10:36, AC, no build running (instances, mixed kinds).
+- B: 2026-10-06 11:19 to 11:26, AC, the re-run of every bar; a build
+  ran during open rounds 2 and 4 (the run paused while one was seen) and
+  at the end of the instances part.
+- C: 2026-10-06 11:27, AC, no build seen, but every row about 2.3 times
+  B's, the empty frame included: an unknown load. Given for the ratios.
+
+### Open
+
+| Session | No cache | Cold | Warm |
+|---|---|---|---|
+| B, five rounds | 2346 to 5287 ms | 2218 to 7590 ms | 11.5 to 35.0 ms |
+| earlier, AC (see "Open time") | 2410 to 4569 ms | 2289 to 4678 ms | 11.4 to 22.3 ms |
+
+Bars: warm at most 100 ms: met. Cold at most 5 % over none: met by the
+store's own time (32 to 120 ms of a 2.2 s or longer open).
+
+### Video, 1920 x 1080 (session B)
+
+| Workload | GPU over empty, ms | Ratio to RGBA8 | CPU over empty, us |
+|---|---|---|---|
+| RGBA8, draw | 0.555 | | 6 |
+| NV12, BT.709, BT1886, draw | 0.908 | 1.64 | 11 |
+| I420, the same | 0.935 | 1.68 | 10 |
+| RGBA8, upload + draw | 1.898 | | 955 |
+| NV12, upload planes + draw | 1.417 | 0.75 | 355 |
+| (transfers table) RGBA8, draw | 0.585 | | 12 |
+| NV12, LINEAR | 0.954 | 1.63 | 14 |
+| NV12, BT1886 | 0.971 | 1.66 | 18 |
+| NV12, DEVICE | 1.119 | 1.91 | 17 |
+
+The update call alone, A/B/A/B: RGBA8 906 and 1026 us mean (1631, 2351 p99);
+NV12 304 and 389 us (424, 799); I420 316 and 300 us (524, 476): 30 to 38 %
+of RGBA8's. Bars: update at most 50 % of RGBA8's: met. GPU at most 1.0 ms:
+met by NV12 and I420 with BT1886 and LINEAR (0.91 to 0.97 ms), missed by
+DEVICE (1.12 ms). GPU at most 1.5 times RGBA8: missed (1.63 to 1.91). The
+knob is the chroma fetches (above, "Cost, from a loaded machine"). A
+decoded 1080p NV12 frame uploaded and drawn takes 1.4 ms of GPU and 0.36
+ms of CPU: it fits a 16 ms frame with room for the rest.
+
+### Instances
+
+| Workload | GPU over empty, ms: A / B / C | CPU over empty, us: A / B / C |
+|---|---|---|
+| 10000 gabors 32 x 32, one stimulus each | 5.54 / 5.53 / 14.3 | 2804 / 3089 / 8321 |
+| the same, instanced (ring of 3 element buffers) | 1.26 / 1.33 / 3.13 | 177 / 191 / 527 |
+| the same, one element buffer orphaned each frame | 1.28 / 1.44 / 3.21 | 191 / 211 / 384 |
+| instanced, every element's ori set each frame | 1.38 / 1.52 / 3.25 | 167 / 244 / 425 |
+| 10000 LINE 16 px, instanced | 0.54 / 0.62 / 1.37 | 258 / 218 / 498 |
+| 10000 RRECT 14 x 9 (vector), instanced | 1.62 / 1.70 / 4.10 | 152 / 212 / 466 |
+| 1000 gabors 256 x 256, one stimulus each | 8.61 / 10.7 / 24.1 | 263 / 306 / 646 |
+| the same, instanced | 4.59 / 5.87 / 11.9 | 6 / 10 / 83 |
+| `psygfx_hit_index()` over 10000 RECT elements | 546 us (A), 1381 us (B, a build ran), 702 us (C) | |
+
+Bars (A and B): CPU at most 0.2 ms for 10000: met (177, 191 us); GPU at
+most 2 ms and at most one stimulus each: met (1.26 to 1.33 against 5.5);
+1000 large gabors within 5 % of one stimulus each: better, 0.53 to 0.55 of
+it; hit test at most 1 ms: met in A and C. The 1000 large gabors cost
+about half instanced: a likely cause is that the batched path indexes
+the uniform array per fragment while an element's values arrive as flat
+inputs; not confirmed. The ring and orphaning were equal within the
+noise in all three sessions (the ring 2 to 8 % faster on the GPU): the
+ring was kept and the orphaning seam deleted. 10000 elements of any of
+these kinds fit a 16 ms frame.
+
+### Dots, re-measured (session B)
+
+The rows of "Frame cost" drew nothing (above). Now drawn, `gfx_bench
+--only dots`, 120 frames back to back, GPU per frame including the empty
+frame (1.0 to 1.1 ms in the same session):
+
+| Workload | CPU mean, us | CPU p99, us | GPU, ms |
+|---|---|---|---|
+| dots x 1000, 4 px, upload every frame | 198 | 370 | 0.93 |
+| dots x 10000 | 171 | 393 | 1.30 |
+| dots x 100000 | 1301 | 1876 | 4.98 |
+
+Bars (v0.1's): 10000, GPU at most 0.5 ms over empty: met (about 0.2);
+100000, CPU at most 2 ms: met; GPU at most 3 ms: missed (about 3.9 over
+empty). `gfx_load`'s window run was not re-measured (it needs the panel,
+which the photodiode setup is using).
+
+### No regression (session B)
+
+| Row | v0.3 (2026-10-05) | v0.4 |
+|---|---|---|
+| empty frame, identity CLUT (GPU per frame) | 0.46 to 1.15 ms | 1.08 to 1.11 ms |
+| 1000 gabors 256 x 256, batched (GPU per frame) | 9.3 to 11.2 ms | 9.20, 9.45 ms (25.3 ms once, in a session where everything was slow) |
+| v0.2 rounded rect, RRECT, RRECT with OKLAB paint, dashed stroke, compound of 8 (GPU over empty) | 0.396, 0.929, 1.536, 0.903, 3.528 ms | 0.440, 0.967, 1.629, 0.983, 3.648 ms |
+| a run of 200 MSDF glyphs | 0.121 ms | 0.122 ms |
+
+The v0.3 rows moved by 1 to 11 % together, the v0.2 rect (whose program
+did not change) as much as the others: the machine, not v0.4.
+
+## v0.4 mutations
+
+`mutate04.pl` and `mutrun.sh` (scratchpad): each fault in a copy of the
+header, the test built against it (MSVC) and run on the Iris Xe (the CPU
+half alone for the CPU faults); a fault must fail the test.
+
+| # | Fault | Result |
+|---|---|---|
+| 0 | the payload hash not checked | caught |
+| 1 | the key without GL_RENDERER | caught (after the fake backend's renderer string was varied) |
+| 2 | the key without GL_VERSION | caught (same) |
+| 3 | block and sampler bindings not set after a binary load | caught |
+| 4 | a binary the driver refuses not compiled | caught |
+| 5 | the second hash and the length not checked | caught |
+| 6 | Cb and Cr swapped | caught |
+| 7 | limited range without its 16 / 219 offset | caught |
+| 8 | LEFT siting as CENTER | caught |
+| 9 | chroma replicated when sited | caught |
+| 10 | no clamp before the transfer | caught |
+| 11 | BT.709 weights for BT.601 | caught |
+| 12 | the display's transfer half a code off | caught |
+| 13 | rebind ignored | caught |
+| 14 | the primaries' matrix in the wrong order | caught |
+| 15 | an element's ori turned the other way | caught |
+| 16 | an element's phase not added | caught |
+| 17 | the field not rescaled at an element's scale | caught |
+| 18 | a palette fraction ignored | caught |
+| 19 | element offsets along the screen's axes, not the template's | caught |
+| 20 | an element's gate not multiplied | caught |
+| 21 | the vector program's look taken as the others' | caught |
+| 22 | two element arrays read at one offset | caught (after a two-array check was added) |
+| 23 | `psygfx_hit_index()` from the lowest index | caught |
+| 24 | the CRC not sealed by derive | caught (after the check compared the CRC itself) |
+| 25 | straight alpha filtered as v0.3 did | caught |
+| 26 | the DIST range rule off | caught |
+| 27 | dot fields ignore first | caught (after the dots bug was found and fixed: its test drew nothing) |
+| 28 | the reorder ignores overlap | caught |
+| 29 | the reorder checks only its neighbor batch | caught |
+| 30 | bounds without the quad's margin | caught |
+| 31 | bounds without the turn | caught (after the turned-box case was added) |
+| 32 | a stimulus of no area drawn as nothing | caught |
+| 33 | a dot field's zero default as a 0 x 0 RECT | caught |
+| 34 | a refused element array draws its template | caught (after the scene was checked) |
+
+35 of 35.
+
+## v0.4 builds
+
+Warnings as errors. MSVC 19.44 (CMake, build-gfx; and `cl` alone): the
+test as C and as C++17, the compile checks, `gfx_bench`, the examples and
+`test_psy_video`; the full test on the Iris Xe, WARP and SwiftShader.
+MinGW-w64 gcc 16.1 (winlibs): the test as C99, C11 and C++17, the
+psy_gfx compile checks (C11, C++17) against SDL3, psy_video's C11 compile
+check, `gfx_bench`; the C99 and C++17 tests run on WARP and SwiftShader.
+Not run for v0.4: WSL (gcc, llvmpipe, sanitizers) and emcc. llvmpipe would
+cover the cache's GL half with Mesa's binary format: CI will show it.
+
+## v0.4 departures from the design
+
+- Element bindings: no new binding kind was needed (the template's fields and
+  `psygfx_bind.field`).
+- Templates: USER without extension blocks, as approved; the design had
+  "any kind except USER with extension blocks".
+- The palette holds 16 entries, as approved.
+- The reorder, the audit and the gallery's fixes were not in the design;
+  they were asked for during the work.
+- No kind-specialized vector programs (below).
+
+## v0.5: the calibration moved to psy_color.h
+
+The calibration (`psycol_cal`, the same .psycal bytes), its calls, the
+cone table and PAINT's and VIDEO's color math are psy_color.h's now;
+docs/psy_color.md has the design and the stages. psy_gfx.h keeps the CLUT
+and transfer textures, the output stage, dithering, every shader, the
+per-draw gamut check and `psygfx_clipped()`.
+
+| Item | State |
+|---|---|
+| Stage A: the code moved, aliases for callers | Readback hashes of the whole test equal v0.4.0's on the Iris Xe, WARP and SwiftShader. |
+| Stage B: callers renamed, aliases deleted | Hashes equal again. psy_video.h needed no change. |
+| Stage C: a `psycol_ctx` at open; `desc.cones`, `desc.lum`, `psygfx_color()`, `PSYGFX_EV_COLOR` | v0.4's parts: hashes equal to stage B's on all three. |
+| OKLAB on absolute XYZ, the black included | The shader adds the row's w for OKLAB as it did for DKL_POLAR. A black without light changes no pixel. On a calibration with 0.5 cd/m2 of black under 80 cd/m2 of white, the test's gradient is within 6.98e-7 / 7.28e-7 / 7.28e-7 (Iris Xe / WARP / SwiftShader) of an independent double reference; v0.4's form would have moved it by 5.20e-3. |
+| A calibration that is not sealed | Refused at open (psy_color.h's context checks the CRC); derive() and save() seal it, as since v0.4. |
+
+The CPU form of OKLAB back to RGB (the clip sampling of a gradient) keeps
+Ottosson's printed 10-digit inverse of M2, as the shader does; psy_color.h
+inverts M2 exactly, 2.4e-7 away in linear RGB.
+
 ## Next
 
-In this order, decided 2026-10-06:
-
-1. **Program binary cache.** Every program adds 0.15 to 0.75 s to open
-   time, and open is at its 2.0 s bar. The cache brings open time down and
-   makes kind-specialized programs affordable. Those fix the missed v0.3
-   GPU bars (RRECT 2.3x, dashes 3.3x, OKLAB 1.65x, compound of 8 at
-   1.6 ms).
-2. **Planar YUV and texture import.** NV12 and I420 converted in the IMAGE
-   shader, plus import, rebind and per-plane update of textures. psy_video
-   needs both: at 1080p, converting on the pump costs more than decoding,
-   and the zero-copy Media Foundation path imports D3D11 textures.
-3. **Instanced stimuli.** One template stimulus (any kind but USER with
-   extension blocks) and a per-instance attribute buffer, drawn in one
-   call. The attributes come from a fixed set: position, ori, phase,
-   contrast, size scale, color and gate. Reason: a gabor array of N
-   elements is N blocks of 256 bytes today, uploaded every frame and drawn
-   16 per call. That is fine near 1000 elements and costly at 10,000
-   (2.5 MB of uniforms, 625 draws). Instances need 16 to 32 bytes each.
-   Open: how timeline bindings address one element or all of them, and a
-   hit test per element (a target in a search array).
+1. **Kind-specialized vector programs**, designed in the session notes of
+   2026-10-06 (defines per kind, a kinds mask for compounds, dash, paint
+   and space): compile time and GPU time of each variant in the harness
+   first; build one only where it closes at least half of its bar's gap
+   (RRECT 2.3x, dashes 3.3x, OKLAB 1.65x, compound of 8 with effects 1.6
+   ms). The program cache makes the extra programs cheap at open.
+2. **Sampler-filtered chroma** for the video program's 1.0 ms and 1.5x
+   bars (exact weights at 1:1).
+3. WSL, llvmpipe, sanitizer and emcc runs of v0.4.
 
 ## CI
 
@@ -886,3 +1450,12 @@ with GL on, everything passed under ASan and UBSan apart from that leak.
 - v0.3 costs on renderers other than the Iris Xe, and on battery.
 - ELLIPSE's distance error above an aspect of 9:1 (the test stops there;
   20:1 is allowed).
+- v0.4 on WSL (gcc, llvmpipe, ASan, UBSan) and emcc; the cache's GL half
+  on Mesa's binary format.
+- `gfx_load` with dots that draw (the v0.1 window run drew none).
+- D3D11 import on another GPU or driver; what leaving out the keyed
+  mutex does (the test's producer finishes long before ANGLE samples).
+- v0.4 in a real frame loop: no window run and no allocation count with
+  instances, video or the reorder (none allocates in the frame by design).
+- v0.4 costs on renderers other than the Iris Xe, and on battery (the
+  battery rows above are named).
