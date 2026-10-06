@@ -821,6 +821,29 @@ functions, a bounded fold (56 primitives), bounded paths (224 points). No
 SVG, no fill rules, no general path rasterizer. Artwork still goes
 through the pack tool, now also as MSDF.
 
+## Next
+
+In this order, decided 2026-10-06:
+
+1. **Program binary cache.** Every program adds 0.15 to 0.75 s to open
+   time, and open is at its 2.0 s bar. The cache brings open time down and
+   makes kind-specialized programs affordable. Those fix the missed v0.3
+   GPU bars (RRECT 2.3x, dashes 3.3x, OKLAB 1.65x, compound of 8 at
+   1.6 ms).
+2. **Planar YUV and texture import.** NV12 and I420 converted in the IMAGE
+   shader, plus import, rebind and per-plane update of textures. psy_video
+   needs both: at 1080p, converting on the pump costs more than decoding,
+   and the zero-copy Media Foundation path imports D3D11 textures.
+3. **Instanced stimuli.** One template stimulus (any kind but USER with
+   extension blocks) and a per-instance attribute buffer, drawn in one
+   call. The attributes come from a fixed set: position, ori, phase,
+   contrast, size scale, color and gate. Reason: a gabor array of N
+   elements is N blocks of 256 bytes today, uploaded every frame and drawn
+   16 per call. That is fine near 1000 elements and costly at 10,000
+   (2.5 MB of uniforms, 625 draws). Instances need 16 to 32 bytes each.
+   Open: how timeline bindings address one element or all of them, and a
+   hit test per element (a target in a search array).
+
 ## CI
 
 The `screen` job builds psy_gfx.h with SDL3 on Windows, Linux and macOS and
