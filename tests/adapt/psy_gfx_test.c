@@ -15,7 +15,11 @@
  *         on Linux. Pixel positions come from psygfx_local(), the inverse
  *         of the one coordinate transform, never from hard-coded positions.
  * With no GL it says so and passes, unless PSYGFX_TEST_REQUIRE_GL=1.
- * PSYGFX_TEST_DEVICES=warp,swiftshader,hardware,mesa picks renderers.
+ * PSYGFX_TEST_DEVICES=warp,swiftshader,hardware,mesa picks renderers; with
+ * none named it runs the first that opens. PSYGFX_TEST_FULL=1 runs every
+ * renderer and every condition (run it before a report); the default is
+ * the quick run, about a minute (docs/psy_gfx.md, v0.7).
+ * PSYGFX_TEST_THREADS sets the CPU references' threads.
  *
  *     gcc -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -O2 -I. \
  *         -o gfx_test tests/adapt/psy_gfx_test.c -lm -pthread -ldl && ./gfx_test
@@ -30,6 +34,9 @@
 #define PSY_GFX_IMPLEMENTATION
 #include "psy_gfx.h"
 #include "psy_gfx_headless.h"
+#include "psy_gfx_cset_build.h"
+#define PSY_OUTLINE_IMPLEMENTATION
+#include "psy_outline.h"   /* the outline builder's sets against the test builder's (v0.7) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +64,69 @@ static int g_failures = 0;
 static const char* g_where = "cpu";
 
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "psy_gfx_test [%s]: FAIL line %d: %s\n", g_where, __LINE__, #cond); g_failures++; } } while (0)
+
+/* The CPU references are most of the test's time: rows run on threads
+ * (PSYGFX_TEST_THREADS, default the hardware threads up to 16; 1 = none).
+ * A row's function writes only its own row of an output array; the checks
+ * reduce the arrays afterwards, in row order, so the results do not depend
+ * on the thread count. */
+/* PSYGFX_TEST_FULL=1: every renderer, every condition (docs/psy_gfx.md,
+ * v0.7); the default is the quick run of the edit-test loop. */
+static int cs_full(void) { const char* e = getenv("PSYGFX_TEST_FULL"); return e && e[0] == '1'; }
+
+typedef void (*par_fn)(void* ctx, int row);
+typedef struct par_arg { par_fn f; void* ctx; int n, t, nt; } par_arg;
+static void par_run(par_arg* a) { int j; for (j = a->t; j < a->n; j += a->nt) a->f(a->ctx, j); }
+#if defined(_WIN32)
+static DWORD WINAPI par_main(LPVOID p) { par_run((par_arg*)p); return 0; }
+#elif !defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_PTHREADS__)
+#include <pthread.h>
+#define PAR_PTHREADS 1
+static void* par_main(void* p) { par_run((par_arg*)p); return NULL; }
+#endif
+static int par_threads(void) {
+    static int n = 0;
+    const char* e = getenv("PSYGFX_TEST_THREADS");
+    if (n) return n;
+    n = e && e[0] ? atoi(e) : 0;
+#if defined(_WIN32)
+    if (n <= 0) { SYSTEM_INFO si; GetSystemInfo(&si); n = (int)si.dwNumberOfProcessors; }
+#elif defined(PAR_PTHREADS) && defined(_SC_NPROCESSORS_ONLN)
+    if (n <= 0) n = (int)sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    if (n < 1) n = 1;
+    if (n > 16) n = 16;
+    return n;
+}
+static void par_rows(par_fn f, void* ctx, int n) {
+    par_arg a[16];
+    int nt = par_threads(), t, started[16] = { 0 };
+#if defined(_WIN32)
+    HANDLE h[16];
+#elif defined(PAR_PTHREADS)
+    pthread_t h[16];
+#endif
+    for (t = 0; t < nt; t++) { a[t].f = f; a[t].ctx = ctx; a[t].n = n; a[t].t = t; a[t].nt = nt; }
+    for (t = 1; t < nt; t++) {
+#if defined(_WIN32)
+        h[t] = CreateThread(NULL, 0, par_main, &a[t], 0, NULL);
+        started[t] = h[t] != NULL;
+#elif defined(PAR_PTHREADS)
+        started[t] = pthread_create(&h[t], NULL, par_main, &a[t]) == 0;
+#endif
+        if (!started[t]) par_run(&a[t]);   /* no thread: this one runs it */
+    }
+    par_run(&a[0]);
+    for (t = 1; t < nt; t++) {
+        if (!started[t]) continue;
+#if defined(_WIN32)
+        WaitForSingleObject(h[t], INFINITE);
+        CloseHandle(h[t]);
+#elif defined(PAR_PTHREADS)
+        pthread_join(h[t], NULL);
+#endif
+    }
+}
 #define CHECK_LE(v, lim) do { double v_ = (double)(v), l_ = (double)(lim); if (!(v_ <= l_)) { \
     fprintf(stderr, "psy_gfx_test [%s]: FAIL line %d: %s = %.4g, limit %.4g\n", g_where, __LINE__, #v, v_, l_); g_failures++; } } while (0)
 
@@ -134,7 +204,7 @@ static void test_noise_cpu(void) {
     }
     /* Pinned: the same bits on every compiler and platform CI builds. */
     printf("noise uniform seed 7, 64x48: FNV-1a %08x, mean %.4f\n", (unsigned)h, sum / (64 * 48));
-    CHECK(h == 0xf70dbc0bu);
+    CHECK(h == 0x5f8bf9f7u);   /* v0.9: triple32 and psygfx_hash2() */
     CHECK(fabs(sum / (64 * 48)) < 0.03);
     CHECK(below > 1400 && below < 1672);
     psygfx_noise_fill(buf, 64, 48, 7, PSYGFX_BINARY);
@@ -147,6 +217,87 @@ static void test_noise_cpu(void) {
     CHECK(fabs(sum) < 0.06);
     CHECK(fabs(sq - 1.0) < 0.08);
     CHECK(psygfx_hash(0) == psygfx_hash(0) && psygfx_hash(1) != psygfx_hash(2));
+    {   /* triple32 (v0.9) maps 0 to 0; psygfx_hash2() as written,
+         * from the hash alone, and injective over a 65536 x 65536 window */
+        uint32_t k = psygfx_hash(5u), m = psygfx_hash(k ^ 0x9E3779B9u);
+        CHECK(psygfx_hash(0u) == 0u);
+        CHECK(psygfx_hash2(-3, 70000, 5u) == psygfx_hash(((uint32_t)-3 + ((uint32_t)70000 << 16)) * (k | 1u) ^ m));
+        CHECK(psygfx_hash2(1, 0, 5u) != psygfx_hash2(0, 1, 5u) && psygfx_hash2(65535, 0, 5u) != psygfx_hash2(0, 1, 5u) - 1u);
+    }
+    {   /* GAUSSIAN (v0.7): the table against quantiles found by bisection on
+         * erfc (none of the header's arithmetic), its moments, and 10^6
+         * checks against the normal CDF */
+        const float* t = psygfx__gauss_table();
+        static double q[65536];
+        double ss = 0, k, worst = 0, var = 0, d = 0, m1 = 0, m2 = 0, beyond3 = 0;
+        long bad_order = 0, bad_sym = 0;
+        int n = 1000000;
+        for (i = 0; i < 65536; i++) {
+            double p = ((double)i + 0.5) / 65536.0, lo = -10, hi = 10;
+            int it;
+            for (it = 0; it < 200; it++) { double mid = 0.5 * (lo + hi); if (0.5 * erfc(-mid / sqrt(2.0)) < p) lo = mid; else hi = mid; }
+            q[i] = 0.5 * (lo + hi);
+            ss += q[i] * q[i];
+        }
+        k = 1.0 / sqrt(ss / 65536.0);
+        for (i = 0; i < 65536; i++) {
+            double want = q[i] * k;
+            worst = maxd(worst, fabs(t[i] - want) / maxd(fabs(want), 1e-3));
+            var += (double)t[i] * t[i];
+            if (i && !(t[i] > t[i - 1])) bad_order++;
+            if (t[65535 - i] != -t[i]) bad_sym++;
+        }
+        var /= 65536.0;
+        for (i = 0; i < n; i++) {   /* checks along rows of a 1000 x 1000 field */
+            double v = psygfx_noise_value(i % 1000, i / 1000, 11, PSYGFX_GAUSSIAN);
+            m1 += v; m2 += v * v; beyond3 += fabs(v) > 3.0;
+        }
+        {   /* Kolmogorov-Smirnov: the empirical CDF from a histogram on the
+             * 65536 table values (each value is one bin), against Phi */
+            static long cnt[65536];
+            long acc = 0;
+            memset(cnt, 0, sizeof cnt);
+            for (i = 0; i < n; i++) {
+                uint32_t hh = psygfx_hash2(i % 1000, i / 1000, 11u);
+                cnt[hh >> 16]++;
+            }
+            for (i = 0; i < 65536; i++) {
+                double f0 = (double)acc / n, f1, phi = 0.5 * erfc(-(double)t[i] / sqrt(2.0));
+                acc += cnt[i];
+                f1 = (double)acc / n;
+                d = maxd(d, maxd(fabs(f0 - phi), fabs(f1 - phi)));
+            }
+        }
+        m1 /= n; m2 = m2 / n - m1 * m1;
+        printf("noise gaussian: table against bisection on erfc %.2e (relative), order wrong %ld, symmetry wrong %ld, "
+               "variance %.9f, largest %.4f; 10^6 checks: mean %+.4f, SD %.4f, beyond 3 SD %.5f, KS D %.5f\n",
+               worst, bad_order, bad_sym, var, (double)t[65535], m1, sqrt(m2), beyond3 / n, d);
+        CHECK_LE(worst, 2e-7);
+        CHECK(bad_order == 0 && bad_sym == 0);
+        CHECK_LE(fabs(var - 1.0), 1e-6);
+        CHECK_LE(fabs(m1), 0.005);
+        CHECK_LE(fabs(sqrt(m2) - 1.0), 0.005);
+        CHECK_LE(d, 1.63 / sqrt((double)n));   /* the 1 % critical value */
+        psygfx_noise_fill(buf, 64, 48, 7, PSYGFX_GAUSSIAN);
+        h = 2166136261u;
+        for (i = 0; i < 64 * 48; i++) {
+            uint32_t b;
+            memcpy(&b, &buf[i], 4);
+            h = (h ^ b) * 16777619u;
+        }
+        /* Pinned as the uniform's: a C library whose log differs in the last
+         * bit could change a table entry; CI's builds would show it here */
+        printf("noise gaussian seed 7, 64x48: FNV-1a %08x\n", (unsigned)h);
+        CHECK(h == 0x30886f1eu);   /* v0.9 */
+        h = 2166136261u;
+        for (i = 0; i < 65536; i++) {
+            uint32_t bb;
+            memcpy(&bb, &t[i], 4);
+            h = (h ^ bb) * 16777619u;
+        }
+        printf("noise gaussian table: FNV-1a %08x\n", (unsigned)h);
+        CHECK(h == 0x19ac94b1u);
+    }
 }
 
 static void test_cal_srgb(void) {
@@ -798,7 +949,7 @@ static void gl_noise(stats* st) {
     psygfx_stim s;
     int i, j, dist;
     if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) return;
-    for (dist = 0; dist < 2; dist++) {
+    for (dist = 0; dist < 3; dist++) {   /* UNIFORM, BINARY, GAUSSIAN */
         memset(&nd, 0, sizeof nd);
         nd.w = 64; nd.h = 48; nd.check = 2; nd.seed = 1234 + dist;
         nd.dist = (psygfx_noise_dist)dist;
@@ -1787,6 +1938,7 @@ static void gl_alpha_passes(stats* st) {
         gd.background[0] = 0.3f; gd.background[1] = 0.5f; gd.background[2] = 0.7f;
         psygfx__test_scene32 = 1;
         if (v) { gd.backend = &g_v01_be; gd.backend_ctx = &g_v01_ctx; }
+        else gd.cache = test_cache();
         if (!psygfx_open(&R->g, &gd)) { fprintf(stderr, "psy_gfx_test [%s]: open: %s\n", g_where, psygfx_error(&R->g)); g_failures++; return; }
         memset(&td, 0, sizeof td);
         td.w = 2; td.h = 2; td.format = PSYGFX_RGBA8; td.data = rgba;
@@ -1958,6 +2110,7 @@ static void gl_edge_truth(stats* st) {
 
 typedef struct stats4 {
     double soft, cpu_brute, dash_soft;   /* T1; T2 distance error (px), CPU form against brute force */
+    double ell_quarter;                  /* the quarter perimeter against Simpson, relative (v0.7) */
     long   hard_bad, hit_bad, ties, n_shapes;
     char   worst[64];
 } stats4;
@@ -2008,20 +2161,36 @@ static double vec_ref(const float* b, const psygfx_stim* s, int i, int j, int* t
 }
 
 /* One stimulus against the CPU form, every pixel. */
+typedef struct vc_ctx { const float* blk; const psygfx_stim* s; int hard; double* want; signed char* tie; signed char* hit; } vc_ctx;
+static void vc_row(void* p, int j) {
+    const vc_ctx* c = (const vc_ctx*)p;
+    int i, tie;
+    for (i = 0; i < W; i++) {
+        c->want[j * W + i] = vec_ref(c->blk, c->s, i, j, &tie);
+        c->tie[j * W + i] = (signed char)tie;
+        /* the hit test only where it is checked: it packs the block at each call */
+        c->hit[j * W + i] = (signed char)(c->hard ? psygfx_hit(&R->g, c->s, (float)i + 0.5f, (float)j + 0.5f) : 0);
+    }
+}
 static void vec_check(const psygfx_stim* s, const char* what) {
     static float blk[16 * 64];
+    static double wants[W * H];
+    static signed char ties[W * H], hits[W * H];
     double ext[2], worst = 0;
     const char* err = "";
     int clip, i, j, tie, n;
+    vc_ctx vc;
     n = psygfx__vpack(&R->g, s, blk, ext, &clip, &err);
     if (n < 0) { fprintf(stderr, "psy_gfx_test [%s]: %s refused: %s\n", g_where, what, err); g_failures++; return; }
     gl_frame(s, 1);
     S4.n_shapes++;
+    vc.blk = blk; vc.s = s; vc.hard = s->edge == PSYGFX_EDGE_HARD; vc.want = wants; vc.tie = ties; vc.hit = hits;
+    par_rows(vc_row, &vc, H);
     for (j = 0; j < H; j++)
         for (i = 0; i < W; i++) {
-            double want = vec_ref(blk, s, i, j, &tie), got = R->scene[(j * W + i) * 4];
-            int hit = psygfx_hit(&R->g, s, (float)i + 0.5f, (float)j + 0.5f);
-            if (tie) { S4.ties++; continue; }
+            double want = wants[j * W + i], got = R->scene[(j * W + i) * 4];
+            int hit = hits[j * W + i];
+            if (ties[j * W + i]) { S4.ties++; continue; }
             if (s->edge == PSYGFX_EDGE_HARD) {
                 if (fabs(got - want) > 1e-6) { S4.hard_bad++; if (S4.hard_bad < 40 && getenv("PSYGFX_TEST_VERBOSE")) fprintf(stderr, "  hard %s at %d %d: got %g want %g\n", what, i, j, got, want); }
                 S4.hit_bad += hit != (got >= 0.5);
@@ -2168,13 +2337,50 @@ static double piece_dist(const piece* p, double x, double y) {
         }
     }
 }
-static double pc_dist(double x, double y) {
-    double d = 1e300;
-    int k, in = 0, j;
-    for (k = 0; k < NPC; k++) d = fmin(d, piece_dist(&PC[k], x, y));
+/* Boxes of 32 pieces and of 32 polygon edges, so that a pixel skips what
+ * cannot be nearer than its best so far, or cannot cross its row: the
+ * same minimum and the same crossings as the loop over everything. */
+enum { PC_CH = 32 };
+static double PCB[8192 / PC_CH + 1][4], PXB[70000 / PC_CH + 1][2];
+static void pc_prep(void) {
+    int c, k;
+    for (c = 0; c * PC_CH < NPC; c++) {
+        double* b = PCB[c];
+        b[0] = b[1] = 1e300; b[2] = b[3] = -1e300;
+        for (k = c * PC_CH; k < NPC && k < (c + 1) * PC_CH; k++) {
+            const piece* p = &PC[k];
+            double lx = p->arc ? p->cx - p->r : fmin(p->ax, p->bx), hx = p->arc ? p->cx + p->r : fmax(p->ax, p->bx);
+            double ly = p->arc ? p->cy - p->r : fmin(p->ay, p->by), hy = p->arc ? p->cy + p->r : fmax(p->ay, p->by);
+            b[0] = fmin(b[0], lx); b[1] = fmin(b[1], ly); b[2] = fmax(b[2], hx); b[3] = fmax(b[3], hy);
+        }
+    }
+    for (c = 0; c * PC_CH < NPX; c++) {   /* edge k runs from point k - 1 */
+        PXB[c][0] = 1e300; PXB[c][1] = -1e300;
+        for (k = c * PC_CH - 1; k < NPX && k < (c + 1) * PC_CH; k++) {
+            int q = k < 0 ? NPX - 1 : k;
+            PXB[c][0] = fmin(PXB[c][0], PY_[q]); PXB[c][1] = fmax(PXB[c][1], PY_[q]);
+        }
+    }
+}
+static double pc_dist_lim(double x, double y, double lim) {
+    /* past cap the value is out of the caller's reach: any value past it will do */
+    double cap = (PC_OPEN ? lim + PC_HW : lim) + 1.0, d = cap;
+    int k, in = 0, j, c;
+    for (c = 0; c * PC_CH < NPC; c++) {
+        const double* b = PCB[c];
+        double ex = fmax(fmax(b[0] - x, x - b[2]), 0.0), ey = fmax(fmax(b[1] - y, y - b[3]), 0.0);
+        if (ex * ex + ey * ey >= d * d) continue;
+        for (k = c * PC_CH; k < NPC && k < (c + 1) * PC_CH; k++) d = fmin(d, piece_dist(&PC[k], x, y));
+    }
     if (PC_OPEN) return d - PC_HW;
-    for (k = 0, j = NPX - 1; k < NPX; j = k++)
-        if ((PY_[k] > y) != (PY_[j] > y) && x < (PX_[j] - PX_[k]) * (y - PY_[k]) / (PY_[j] - PY_[k]) + PX_[k]) in = !in;
+    if (d > lim) return d;   /* out of the caller's reach: the sign does not matter */
+    for (c = 0; c * PC_CH < NPX; c++) {
+        if (y < PXB[c][0] || y >= PXB[c][1]) continue;   /* a crossing needs a point above and one not */
+        for (k = c * PC_CH; k < NPX && k < (c + 1) * PC_CH; k++) {
+            j = k ? k - 1 : NPX - 1;
+            if ((PY_[k] > y) != (PY_[j] > y) && x < (PX_[j] - PX_[k]) * (y - PY_[k]) / (PY_[j] - PY_[k]) + PX_[k]) in = !in;
+        }
+    }
     return in ? -d : d;
 }
 
@@ -2223,24 +2429,77 @@ static stats5 S5;
 
 /* GPU coverage against F(brute-force Euclidean d), pixels whose distance is
  * within reach of the edge; *dist gets the CPU form's distance error. */
+typedef struct tc_ctx { const float* blk; const psygfx_stim* s; double sg; double* db; double* f; } tc_ctx;
+static void tc_row(void* p, int j) {
+    const tc_ctx* c = (const tc_ctx*)p;
+    int i;
+    for (i = 0; i < W; i++) {
+        float lx, ly;
+        double f0[4], f1[4];
+        psygfx_local(&R->g, c->s, (float)i + 0.5f, (float)j + 0.5f, &lx, &ly);
+        c->db[j * W + i] = pc_dist_lim(lx, ly, 6 * c->sg);
+        if (c->f && fabs(c->db[j * W + i]) <= 6 * c->sg) { psygfx__vfield(c->blk, lx, ly, f0, f1); c->f[j * W + i] = f0[0]; }
+    }
+}
 static double truth_check(const psygfx_stim* s, double sg, double* dist) {
     static float blk[16 * 64];
+    static double dbs[W * H], fs[W * H];
     double ext[2], worst = 0.0;
     const char* err;
     int clip, i, j;
+    tc_ctx tc;
     if (psygfx__vpack(&R->g, s, blk, ext, &clip, &err) < 0) { fprintf(stderr, "truth: %s\n", err); g_failures++; return 1; }
     gl_frame(s, 1);
+    tc.blk = blk; tc.s = s; tc.sg = sg; tc.db = dbs; tc.f = dist ? fs : NULL;
+    pc_prep();
+    par_rows(tc_row, &tc, H);
     for (j = 0; j < H; j++)
         for (i = 0; i < W; i++) {
-            float lx, ly;
-            double db, f0[4], f1[4];
-            psygfx_local(&R->g, s, (float)i + 0.5f, (float)j + 0.5f, &lx, &ly);
-            db = pc_dist(lx, ly);
+            double db = dbs[j * W + i];
             if (fabs(db) > 6 * sg) continue;
             worst = maxd(worst, fabs(R->scene[(j * W + i) * 4] - cov(PSYGFX_EDGE_GAUSSIAN, sg, db)));
-            if (dist) { psygfx__vfield(blk, lx, ly, f0, f1); *dist = maxd(*dist, fabs(f0[0] - db)); }
+            if (dist) *dist = maxd(*dist, fabs(fs[j * W + i] - db));
         }
     return worst;
+}
+
+/* The signed distance to a sampled zero set, exact within 13 px (the
+ * check uses 12), 13 or more past it; 1e300 where the field is far. The
+ * points sit in 2 px cells, so a pixel looks only at the cells within 13 px. */
+enum { ZS_GX = 94, ZS_GY = 64 };
+typedef struct zs_ctx {
+    const float* blk; const psygfx_stim* s; const double *zx, *zy; int nz; double* best;
+    int start[ZS_GX * ZS_GY + 1], idx[60000];
+} zs_ctx;
+static int zs_cx(double x) { int c = (int)floor((x + 94.0) * 0.5); return c < 0 ? 0 : (c > ZS_GX - 1 ? ZS_GX - 1 : c); }
+static int zs_cy(double y) { int c = (int)floor((y + 64.0) * 0.5); return c < 0 ? 0 : (c > ZS_GY - 1 ? ZS_GY - 1 : c); }
+static void zs_grid(zs_ctx* c) {
+    static int fill[ZS_GX * ZS_GY];
+    int z, k;
+    memset(c->start, 0, sizeof c->start);
+    for (z = 0; z < c->nz; z++) c->start[zs_cy(c->zy[z]) * ZS_GX + zs_cx(c->zx[z]) + 1]++;
+    for (k = 0; k < ZS_GX * ZS_GY; k++) c->start[k + 1] += c->start[k];
+    memcpy(fill, c->start, sizeof fill);
+    for (z = 0; z < c->nz; z++) c->idx[fill[zs_cy(c->zy[z]) * ZS_GX + zs_cx(c->zx[z])]++] = z;
+}
+static void zs_row(void* p, int j) {
+    const zs_ctx* c = (const zs_ctx*)p;
+    int i, z, cx, cy;
+    for (i = 0; i < W; i++) {
+        float lx, ly;
+        double f0[4], f1[4], best = 13.0 * 13.0;
+        c->best[j * W + i] = 1e300;
+        psygfx_local(&R->g, c->s, (float)i + 0.5f, (float)j + 0.5f, &lx, &ly);
+        psygfx__vfield(c->blk, lx, ly, f0, f1);
+        if (fabs(f0[0]) > 14) continue;
+        for (cy = zs_cy(ly - 13.0); cy <= zs_cy(ly + 13.0); cy++)
+            for (cx = zs_cx(lx - 13.0); cx <= zs_cx(lx + 13.0); cx++)
+                for (z = c->start[cy * ZS_GX + cx]; z < c->start[cy * ZS_GX + cx + 1]; z++) {
+                    int q = c->idx[z];
+                    best = fmin(best, (lx - c->zx[q]) * (lx - c->zx[q]) + (ly - c->zy[q]) * (ly - c->zy[q]));
+                }
+        c->best[j * W + i] = sqrt(best) * (f0[0] > 0 ? 1 : -1);
+    }
 }
 
 static void gl_v03_truth(stats* st) {
@@ -2393,7 +2652,7 @@ static void gl_v03_truth(stats* st) {
     {
         static psygfx_prim pr[2];
         static float blk[16 * 64];
-        static double zx[60000], zy[60000];
+        static double zx[60000], zy[60000], zbest[W * H];
         psygfx_compound_desc cd;
         int q;
         for (q = 0; q < 2; q++) {
@@ -2427,16 +2686,15 @@ static void gl_v03_truth(stats* st) {
                 }
             }
             gl_frame(&s, 1);
+            {
+                static zs_ctx zc;
+                zc.blk = blk; zc.s = &s; zc.zx = zx; zc.zy = zy; zc.nz = nz; zc.best = zbest;
+                zs_grid(&zc);
+                par_rows(zs_row, &zc, H);
+            }
             for (j = 0; j < H; j++)
                 for (i = 0; i < W; i++) {
-                    float lx, ly;
-                    double f0[4], f1[4], best = 1e300;
-                    int z;
-                    psygfx_local(&R->g, &s, (float)i + 0.5f, (float)j + 0.5f, &lx, &ly);
-                    psygfx__vfield(blk, lx, ly, f0, f1);
-                    if (fabs(f0[0]) > 14) continue;
-                    for (z = 0; z < nz; z++) best = fmin(best, (lx - zx[z]) * (lx - zx[z]) + (ly - zy[z]) * (ly - zy[z]));
-                    best = sqrt(best) * (f0[0] > 0 ? 1 : -1);
+                    double best = zbest[j * W + i];
                     if (fabs(best) > 12) continue;
                     worst = maxd(worst, fabs(R->scene[(j * W + i) * 4] - cov(PSYGFX_EDGE_GAUSSIAN, 2, best)));
                 }
@@ -2727,6 +2985,7 @@ static void gl_v03_paint(stats* st) {
         gd.screen = &R->scr;
         gd.background[0] = 0.4f; gd.background[1] = 0.5f; gd.background[2] = 0.3f;
         gd.cal = sp == 2 ? &cal2 : (sp == 1 ? &cal : NULL);
+        gd.cache = test_cache();
         psygfx__test_scene32 = 1;
         if (!psygfx_open(&R->g, &gd)) { fprintf(stderr, "paint open: %s\n", psygfx_error(&R->g)); g_failures++; return; }
         for (k = 0; k < 3; k++) {   /* LINEAR, RADIAL, ANGULAR */
@@ -2951,6 +3210,20 @@ static void gl_v03_msdf(stats* st) {
 }
 
 /* v0.3's CPU half: field bindings, the new tables, refusals before GL. */
+/* An ellipse's quarter perimeter by composite Simpson in double, 20000
+ * panels: none of the header's arithmetic (v0.7 replaced its quadrature
+ * by the arithmetic-geometric mean). */
+static double ell_quarter_ref(double a, double b) {
+    const int n = 20000;
+    double h = 0.5 * 3.14159265358979323846 / n, sum = 0;
+    int k;
+    for (k = 0; k <= n; k++) {
+        double u = k * h, f = sqrt(a * a * sin(u) * sin(u) + b * b * cos(u) * cos(u));
+        sum += f * (k == 0 || k == n ? 1 : (k % 2 ? 4 : 2));
+    }
+    return sum * h / 3.0;
+}
+
 static void test_v03_cpu(void) {
     int n = 0, i, j;
     const psygfx_param* t;
@@ -2964,6 +3237,18 @@ static void test_v03_cpu(void) {
     b[0].field = &pr[1].x; b[0].channel = 0;
     b[1].field = &fx.drop.opacity; b[1].channel = 1;
     b[2].stim = NULL; b[2].param = 0; b[2].channel = 2;   /* bad: no stim, no field */
+    {   /* the ellipse's quarter perimeter (dashes and trim on ELLIPSE) */
+        static const double asp[7] = { 1, 1.001, 1.7, 2, 4.5, 10, 20 }, sc[3] = { 0.5, 45, 900 };
+        double worst = 0;
+        for (i = 0; i < 7; i++)
+            for (j = 0; j < 3; j++) {
+                double a = sc[j] * asp[i], bb = sc[j], r = ell_quarter_ref(a, bb);
+                worst = maxd(worst, fabs(psygfx__ell_quarter(a, bb) - r) / r);
+                worst = maxd(worst, fabs(psygfx__ell_quarter(bb, a) - r) / r);
+            }
+        S4.ell_quarter = worst;
+        CHECK_LE(worst, 1e-12);
+    }
     CHECK(psygfx_apply(b, 3, v) == PSYGFX_ERR_ARG && pr[1].x == 0.0f);
     CHECK(psygfx_apply(b, 2, v) == 2 && pr[1].x == 12.0f && fx.drop.opacity == 0.25f);
     t = psygfx_prim_params(&n);
@@ -3045,7 +3330,7 @@ static void mc_clear(memcache* m) {
 
 /* A backend whose "binary" is a hash of the program's text: the cache's
  * logic, every reject path included, without GL. */
-#define FB_PROGS 11
+#define FB_PROGS (11 + PSYGFX__N_VSPEC)
 static psygfx__null g_fb_ctx;
 static psygfx_backend g_fb;
 static uint64_t g_fb_hash[256];
@@ -3289,12 +3574,15 @@ static void gl_v04_cache(stats* st) {
     c.load = mc_load; c.store = mc_store; c.user = &mc;
     mc_clear(&mc);
     g_use_mc = 0;
-    /* the reference: no cache */
-    t0 = psyrt_now_ns();
-    if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_ORDERED)) { g_use_mc = 1; return; }
-    S6.open_cold_ms = (double)(psyrt_now_ns() - t0) * 1e-6;
-    cache_frame(ref_s, ref_o);
-    psygfx_close(&R->g);
+    /* the reference: no cache. A cold open costs 3 to 4 s on ANGLE's D3D11:
+     * the default takes case 0's frame, compiled while storing, instead */
+    if (cs_full()) {
+        t0 = psyrt_now_ns();
+        if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_ORDERED)) { g_use_mc = 1; return; }
+        S6.open_cold_ms = (double)(psyrt_now_ns() - t0) * 1e-6;
+        cache_frame(ref_s, ref_o);
+        psygfx_close(&R->g);
+    }
     /* cases: 0 cold, 1 warm, 2 payload flipped, 3 warm again, 4 collisions
      * cold, 5 collisions warm, 6 another identity, 7 driver refuses a
      * re-hashed truncated payload */
@@ -3321,6 +3609,7 @@ static void gl_v04_cache(stats* st) {
         t0 = psyrt_now_ns();
         if (!psygfx_open(&R->g, &gd)) { CHECK(0); continue; }
         if (k == 1) S6.open_warm_ms = (double)(psyrt_now_ns() - t0) * 1e-6;
+        if (k == 0 && !cs_full()) S6.open_cold_ms = (double)(psyrt_now_ns() - t0) * 1e-6;
         psygfx_program_stats(&R->g, &ps);
         n = (int)(ps.loaded + ps.compiled);
         S6.programs = n;
@@ -3346,6 +3635,7 @@ static void gl_v04_cache(stats* st) {
             S6.cache_bad += !(p.id && ps.compiled == 0 && ps.loaded == (uint32_t)n + 1);
         }
         cache_frame(s1, o1);
+        if (k == 0 && !cs_full()) { memcpy(ref_s, s1, sizeof s1); memcpy(ref_o, o1, sizeof o1); }
         S6.cache_bad += memcmp(s1, ref_s, sizeof s1) != 0 || memcmp(o1, ref_o, sizeof o1) != 0;
         if (S6.cache_bad != before)
             fprintf(stderr, "  cache case %d: loaded %u compiled %u rejected %u stored %u; frame %s\n", k, ps.loaded, ps.compiled,
@@ -3363,7 +3653,7 @@ static void gl_v04_cache(stats* st) {
         snprintf(top, sizeof top, "psygfx_test_cache_%u", (unsigned)(psyrt_now_ns() & 0xFFFFFF));
         snprintf(dir, sizeof dir, "%s/sub", top);
         g_fk.n = 0;
-        for (k = 0; k < 3; k++) {
+        for (k = 0; k < (cs_full() ? 3 : 2); k++) {
             memset(&gd, 0, sizeof gd);
             gd.screen = &R->scr; gd.dither = PSYGFX_DITHER_ORDERED; gd.seed = 99;
             if (k == 2) {   /* a file where the folder would be */
@@ -4817,6 +5107,203 @@ static void gl_v05_color(stats* st) {
     }
 }
 
+static void gl_v06_text(stats* st);
+typedef struct stats8 {
+    double mean[2][4];         /* rays, exact + rays: the mean edge error per size, worst rotation */
+    double max_edge, off, exact, alone, buffer, target, added, jump, jump_ray, jump_corner, pal_frac, cpu;
+    double rays_exact, rays_same;   /* .rays against the exact area; against the program without it */
+    double ol_exact, ol_same;       /* psy_outline.h's set: against the exact coverage; against the test builder's */
+    int    ol_ran;
+    double cached[4];               /* a run cached in a target against drawn: RGBA16F over black, gray;
+                                     * RGBA32F; an RGBA32F target in an RGBA16F scene over gray */
+    long   hit_bad, hit_n, pal_bad, top_bad, refused_ok, refused_n;
+    int    ran;
+} stats8;
+static stats8 S8;
+#define CS_NCOND 64
+static float* cs_xr[8][CS_NCOND];
+static int    cs_xr_dev = -1;
+typedef struct cs_xd { double max; long n_1e3; int i, j, cond; } cs_xd;
+static cs_xd cs_xdiff[8];
+static void gl_v06_blur(stats* st);
+static void gl_v08(stats* st);
+static void s10_report(void);
+static void gl_v10_simplex(stats* st);
+static void s11_report(void);
+static void test_v10_simplex_cpu(void);
+typedef struct stats9 {
+    double rect[3][2][6];      /* format x supersample x sigma: max error against the erf product */
+    double cover;              /* an R16F result drawn as tinted coverage against its values */
+    double edge;               /* a rect at the layer's corner: outside is empty */
+    long   refused_ok, refused_n;
+    int    ran;
+} stats9;
+static stats9 S9;
+static int cs_dev;
+
+/* --------------------------------------------------------------- kinds */
+
+/* The specialized vector programs: each stimulus drawn alone by the generic
+ * program (area threshold out of reach) and as the pick routes it
+ * (threshold 0), the RGBA32F scenes compared bit for bit; the program each
+ * draw took against the one the case expects. */
+typedef struct statsk {
+    long   ran, n, differ, wrong_pick, used[PSYGFX__N_VSPEC], threshold_bad, inst_bad;
+    double maxd;
+} statsk;
+static statsk SK;
+
+/* -1: the generic program; else the index in psygfx__vspecs. */
+static int kinds_took(void) {
+    int c, i, took = -2;
+    for (c = 0; c < (int)R->g.n_cmds; c++) {
+        int t = -1;
+        for (i = 0; i < PSYGFX__N_VSPEC; i++) if (R->g.cmds[c].pipe == R->g.vspec[i]) t = i;
+        if (R->g.cmds[c].pipe == R->g.builtin[PSYGFX__B_VECTOR] || t >= 0) took = t;
+    }
+    return took;
+}
+
+static void kinds_one(const psygfx_stim* s, int want) {
+    static float ref[W * H * 4];
+    int i, took;
+    psygfx__vspec_area = 1e300;
+    gl_frame(s, 1);
+    memcpy(ref, R->scene, sizeof ref);
+    SK.wrong_pick += kinds_took() != -1;
+    psygfx__vspec_area = 0.0;
+    gl_frame(s, 1);
+    took = kinds_took();
+    if (took >= 0) SK.used[took]++;
+    SK.wrong_pick += took != want;
+    for (i = 0; i < W * H * 4; i++)
+        if (memcmp(&ref[i], &R->scene[i], sizeof ref[i]) != 0) { SK.differ++; SK.maxd = maxd(SK.maxd, fabs(ref[i] - R->scene[i])); }
+    if (getenv("PSYGFX_TEST_VERBOSE") && took != want) fprintf(stderr, "  kinds: stimulus %ld took %d, wanted %d\n", SK.n, took, want);
+    SK.n++;
+}
+
+static void gl_v05_kinds(stats* st) {
+    static psygfx_prim pr[6];
+    static float path[8] = { -60, -20, -10, 30, 40, -25, 70, 20 }, tri[6] = { -60, -40, 60, -30, 0, 50 };
+    static psygfx_fx fx;
+    static psygfx_paint pt;
+    static psygfx_group grp;
+    psygfx_shape_desc d;
+    psygfx_compound_desc cd;
+    psygfx_group_desc gd;
+    psygfx_stim s;
+    int i, e;
+    static const psygfx_edge edges[3] = { PSYGFX_EDGE_COSINE, PSYGFX_EDGE_GAUSSIAN, PSYGFX_EDGE_HARD };
+    (void)st;
+    SK.ran = 1;
+    if (!gl_open(1, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) return;
+    memset(&fx, 0, sizeof fx);
+    fx.dx = 4; fx.dy = 3; fx.drop.sigma = 3; fx.drop.opacity = 0.5f; fx.glow.sigma = 2; fx.glow.spread = 1; fx.glow.opacity = 0.4f;
+    fx.glow.color[1] = 0.9f; fx.inner.sigma = 2; fx.inner.opacity = 0.5f; fx.band[0].a1 = -2; fx.band[0].opacity = 1;
+    fx.band[1].a1 = 1; fx.band[1].a2 = 3; fx.band[1].opacity = 0.7f; fx.band[1].color[2] = 1;
+    memset(&pt, 0, sizeof pt);
+    pt.kind = PSYGFX_PAINT_LINEAR; pt.n = 2; pt.x0 = -50; pt.x1 = 50; pt.stops[0].color[0] = 0.9f; pt.stops[1].t = 1; pt.stops[1].color[2] = 0.9f;
+    memset(&gd, 0, sizeof gd);
+    gd.x = 5; gd.y = -3; gd.ori = 30; gd.scale = 1.3f; gd.opacity = 0.8f;
+    grp = psygfx_group_make(&gd);
+    for (e = 0; e < 3; e++) {
+        /* RRECT, no dash, trim, paint or fx: specialized program 0 */
+        memset(&d, 0, sizeof d);
+        d.shape = PSYGFX_RRECT; d.w = 140; d.h = 90; d.ori = 17; d.edge = edges[e]; d.edge_width = e == 1 ? 1.5f : 2.0f;
+        d.shape_p[0] = 10; d.shape_p[1] = 20; d.shape_p[2] = 5; d.shape_p[3] = 30;
+        d.color[0] = 0.7f; d.color[1] = 0.4f; d.color[2] = 0.2f;
+        s = psygfx_shape(&d); kinds_one(&s, 0);
+        d.stroke = 6; d.stroke_align = (psygfx_stroke_align)e; s = psygfx_shape(&d); kinds_one(&s, 0);
+        d.stroke = 0; d.offset = 3; d.opacity = 0.7f; s = psygfx_shape(&d); s.gate = 0.8f; kinds_one(&s, 0);
+        d.offset = 0; d.opacity = 0; d.group = &grp; s = psygfx_shape(&d); kinds_one(&s, 0);
+        d.group = NULL; d.shape_p[0] = d.shape_p[1] = d.shape_p[2] = d.shape_p[3] = 0; s = psygfx_shape(&d); kinds_one(&s, 0);
+        /* RRECT with paint, fx or dashes: the generic program */
+        d.shape_p[0] = d.shape_p[1] = d.shape_p[2] = d.shape_p[3] = 12;
+        d.paint = &pt; s = psygfx_shape(&d); kinds_one(&s, -1);
+        d.paint = NULL; d.fx = &fx; s = psygfx_shape(&d); kinds_one(&s, -1);
+        d.fx = NULL; d.stroke = 4; d.dash[0] = 12; d.dash[1] = 6; s = psygfx_shape(&d); kinds_one(&s, -1);
+        /* a dashed or trimmed CIRCLE: specialized program 1 */
+        memset(&d, 0, sizeof d);
+        d.shape = PSYGFX_CIRCLE; d.w = 150; d.stroke = 6; d.stroke_align = (psygfx_stroke_align)e; d.edge = edges[e]; d.edge_width = 1.5f;
+        d.color[0] = 0.2f; d.color[1] = 0.8f; d.color[2] = 0.5f; d.dash[0] = 20; d.dash[1] = 10;
+        s = psygfx_shape(&d); kinds_one(&s, 1);
+        d.dash_snap = true; d.dash_offset = 7; d.cap = PSYGFX_CAP_ROUND; s = psygfx_shape(&d); kinds_one(&s, 1);
+        d.dash[0] = d.dash[1] = 0; d.dash_snap = false; d.trim[0] = 0.1f; d.trim[1] = 0.7f; d.stroke = 8; s = psygfx_shape(&d); kinds_one(&s, 1);
+        d.dash[0] = 9; d.dash[1] = 5; d.cap = PSYGFX_CAP_SQUARE; d.ori = 40; s = psygfx_shape(&d); kinds_one(&s, 1);
+        d.group = &grp; s = psygfx_shape(&d); kinds_one(&s, 1);
+        d.group = NULL; d.paint = &pt; s = psygfx_shape(&d); kinds_one(&s, -1);
+        d.paint = NULL; d.fx = &fx; s = psygfx_shape(&d); kinds_one(&s, -1);
+        /* a compound of CIRCLEs, every op: specialized program 2, fx too */
+        for (i = 0; i < 6; i++) {
+            memset(&pr[i], 0, sizeof pr[i]);
+            pr[i].shape = PSYGFX_CIRCLE; pr[i].w = 50.0f + 7.0f * (float)i; pr[i].x = (float)(i * 23 - 60); pr[i].y = (float)((i % 3) * 17 - 15);
+            pr[i].op = (uint8_t)i; pr[i].k = 9;
+        }
+        pr[2].onion = 3;
+        memset(&cd, 0, sizeof cd);
+        cd.prims = pr; cd.n = 6; cd.w = 200; cd.h = 120; cd.edge = edges[e]; cd.edge_width = 2; cd.ori = 12;
+        cd.color[0] = 0.5f; cd.color[1] = 0.5f; cd.color[2] = 0.9f;
+        s = psygfx_compound(&cd); kinds_one(&s, 2);
+        cd.fx = &fx; s = psygfx_compound(&cd); kinds_one(&s, 2);
+        cd.onion = 2; cd.offset = 1.5f; cd.stroke = 3; s = psygfx_compound(&cd); kinds_one(&s, 2);
+        cd.group = &grp; s = psygfx_compound(&cd); kinds_one(&s, 2);
+        cd.group = NULL; cd.paint = &pt; s = psygfx_compound(&cd); kinds_one(&s, -1);
+        cd.paint = NULL; pr[4].shape = PSYGFX_RRECT; pr[4].h = 40; s = psygfx_compound(&cd); kinds_one(&s, -1);
+        /* every other vector kind keeps the generic program */
+        {
+            static const psygfx_shape_kind kinds[] = { PSYGFX_ARC, PSYGFX_PIE, PSYGFX_CAPSULE, PSYGFX_NGON, PSYGFX_STAR,
+                                                       PSYGFX_ELLIPSE, PSYGFX_POLYLINE, PSYGFX_QBEZIER, PSYGFX_POLYGON, PSYGFX_ANNULUS };
+            int q;
+            for (q = 0; q < (int)(sizeof kinds / sizeof kinds[0]); q++) {
+                memset(&d, 0, sizeof d);
+                d.shape = kinds[q]; d.w = 130; d.h = 80; d.edge = edges[e]; d.edge_width = 2; d.ori = 9;
+                d.color[0] = 0.3f; d.color[1] = 0.6f; d.color[2] = 0.6f;
+                d.shape_p[0] = 200; d.shape_p[1] = 14; d.shape_p[2] = 30;
+                if (kinds[q] == PSYGFX_CAPSULE) { d.shape_p[0] = 20; d.shape_p[1] = 12; }
+                if (kinds[q] == PSYGFX_NGON || kinds[q] == PSYGFX_STAR) { d.shape_p[0] = 6; d.shape_p[1] = kinds[q] == PSYGFX_STAR ? 0.5f : 4; d.shape_p[2] = 3; }
+                if (kinds[q] == PSYGFX_POLYLINE) { d.path = path; d.n_path = 4; d.shape_p[0] = 10; }
+                if (kinds[q] == PSYGFX_QBEZIER) { d.path = path; d.n_path = 3; d.shape_p[0] = 10; }
+                if (kinds[q] == PSYGFX_POLYGON) { d.vertices = tri; d.shape_p[0] = 3; d.shape_p[1] = 8; }
+                if (kinds[q] == PSYGFX_ANNULUS) { d.shape_p[0] = 40; d.stroke = 4; d.dash[0] = 10; d.dash[1] = 5; }
+                s = psygfx_shape(&d); kinds_one(&s, -1);
+                if (kinds[q] != PSYGFX_POLYGON && kinds[q] != PSYGFX_ANNULUS) {   /* and with dashes */
+                    d.stroke = 4; d.dash[0] = 10; d.dash[1] = 5;
+                    s = psygfx_shape(&d); kinds_one(&s, -1);
+                }
+            }
+        }
+    }
+    {   /* the area threshold: a small RRECT stays generic, a large one does not */
+        int took_small, took_large;
+        memset(&d, 0, sizeof d);
+        d.shape = PSYGFX_RRECT; d.w = 40; d.h = 30; d.edge = PSYGFX_EDGE_COSINE; d.edge_width = 2; d.shape_p[0] = d.shape_p[1] = d.shape_p[2] = d.shape_p[3] = 6;
+        d.color[0] = 0.5f;
+        psygfx__vspec_area = 10000.0;
+        s = psygfx_shape(&d); gl_frame(&s, 1); took_small = kinds_took();
+        d.w = 140; d.h = 90; s = psygfx_shape(&d); gl_frame(&s, 1); took_large = kinds_took();
+        SK.threshold_bad = (took_small != -1) + (took_large != 0);
+        /* an element array keeps the generic program at any size */
+        {
+            static psygfx_inst el[2];
+            psygfx_instances_desc id;
+            psygfx_stim t;
+            memset(el, 0, sizeof el);
+            el[0].x = -60; el[1].x = 60;
+            memset(&id, 0, sizeof id);
+            id.inst = el; id.n = 2; id.fields = PSYGFX_I_XY;
+            psygfx__vspec_area = 0.0;
+            t = psygfx_instances(&R->g, &s, &id);
+            SK.inst_bad += t.n_inst != 2;
+            if (t.n_inst == 2) {
+                gl_frame(&t, 1);
+                for (i = 0; i < (int)R->g.n_cmds; i++) SK.inst_bad += R->g.cmds[i].pipe == R->g.vspec[0];
+            }
+        }
+    }
+    psygfx__vspec_area = 65536.0;
+    psygfx_close(&R->g);
+}
+
 static int gl_suite(const char* name, psygfx_hl_device dev) {
     psyscr_desc d;
     stats st;
@@ -4835,16 +5322,19 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
     }
     g_where = name;
     printf("GL %s: %s\n", name, R->hl.renderer);
+    cs_dev = (int)dev;
     {
         static void (*const parts[])(stats*) = { gl_shapes, gl_gratings, gl_gabors, gl_dots, gl_images,
                                                  gl_noise, gl_output, gl_user_batch_rows,
                                                  gl_strokes, gl_masks, gl_sprites, gl_tint, gl_groups, gl_targets,
                                                  gl_alpha_passes, gl_edge_truth, gl_v03_kinds, gl_v03_truth, gl_v03_fx, gl_v03_paint, gl_v03_msdf,
-                                                 gl_v04_cache, gl_v04_fixes, gl_v04_video, gl_v04_inst, gl_v04_order, gl_v05_color };
+                                                 gl_v04_cache, gl_v04_fixes, gl_v04_video, gl_v04_inst, gl_v04_order, gl_v05_color,
+                                                 gl_v06_text, gl_v06_blur, gl_v05_kinds, gl_v08, gl_v10_simplex };
         static const char* const names[] = { "shapes", "gratings", "gabors", "dots", "images", "noise",
                                              "output", "user+batch+rows", "strokes", "masks", "sprites", "tint",
                                              "groups", "targets", "alpha+passes", "edge truth", "v0.3 kinds", "v0.3 truth", "v0.3 fx", "v0.3 paint", "v0.3 msdf",
-                                             "v0.4 cache", "v0.4 fixes", "v0.4 video", "v0.4 inst", "v0.4 order", "v0.5 color" };
+                                             "v0.4 cache", "v0.4 fixes", "v0.4 video", "v0.4 inst", "v0.4 order", "v0.5 color",
+                                             "v0.6 text", "v0.6 blur", "vspec", "v0.8", "v0.10 simplex" };
         int k;
         memset(&S2, 0, sizeof S2);
         memset(&S3, 0, sizeof S3);
@@ -4852,6 +5342,8 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
         memset(&S5, 0, sizeof S5);
         memset(&S6, 0, sizeof S6);
         memset(&S7, 0, sizeof S7);
+        memset(&S8, 0, sizeof S8);
+        memset(&SK, 0, sizeof SK);
         mc_clear(&g_mc);
         printf("  seconds:");
         for (k = 0; k < (int)(sizeof parts / sizeof parts[0]); k++) {
@@ -4899,7 +5391,9 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
     CHECK(st.out_bad == 0);
     CHECK(st.lut_bad == 0);
     CHECK(st.dither_bad == 0);
-    CHECK_LE(fabs(st.dither_mean), 0.005);   /* the same on every renderer: the hash is exact */
+    /* the same on every renderer (the hash is exact); 32768 draws of a
+     * Bernoulli(0.3) code step: SD 0.0025, so 4 SD */
+    CHECK_LE(fabs(st.dither_mean), 0.01);
     CHECK_LE(st.anchor_diff, 1e-6);
     CHECK_LE(st.overlap, 4e-7);
     CHECK(st.batch_diff == 0.0);
@@ -5028,6 +5522,16 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
         CHECK(S7.ctx_bad == 0);
         CHECK(S7.refused_ok == S7.refused_n);
     }
+    if (SK.ran) {
+        printf("  kinds: %ld stimuli drawn by the generic and the picked program: values differ %ld (max %.2e); "
+               "wrong pick %ld; specialized draws %ld, %ld, %ld; threshold wrong %ld; element arrays wrong %ld\n",
+               SK.n, SK.differ, SK.maxd, SK.wrong_pick, SK.used[0], SK.used[1], SK.used[2], SK.threshold_bad, SK.inst_bad);
+        CHECK(SK.differ == 0);
+        CHECK(SK.wrong_pick == 0);
+        CHECK(SK.used[0] > 0 && SK.used[1] > 0 && SK.used[2] > 0);
+        CHECK(SK.threshold_bad == 0);
+        CHECK(SK.inst_bad == 0);
+    }
     printf("  v0.4 cache: %d programs, open without a cache %.0f ms, warm %.0f ms; %ld cases, wrong %ld\n",
            S6.programs, S6.open_cold_ms, S6.open_warm_ms, S6.cache_cases, S6.cache_bad);
     CHECK(S6.cache_bad == 0);
@@ -5096,9 +5600,1886 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
         CHECK(S6.order_saved > 0);
         CHECK(S6.order_pass_ok == 1);
     }
+    if (S8.ran) {
+        int v;
+        printf("  v0.6 curve runs: exact area on resolved glyphs at rotation 0, max %.2e; mean edge error, worst rotation, rays "
+               "%.4f %.4f %.4f %.4f, with exact area %.4f %.4f %.4f %.4f (8, 12, 24, 48 px); largest edge error %.3f, off the "
+               "edges %.3f\n", S8.exact, S8.mean[0][0], S8.mean[0][1], S8.mean[0][2], S8.mean[0][3], S8.mean[1][0], S8.mean[1][1],
+               S8.mean[1][2], S8.mean[1][3], S8.max_edge, S8.off);
+        printf("  v0.6 curve runs: items alone against one run %.2e, a buffer against copied items %.2e, a target against the scene "
+               "%.2e, a glyph added at run time %.2e; palette integers wrong %ld, fractions %.2e; hit wrong %ld of %ld, topmost wrong "
+               "%ld; a 0.005 px move changes a pixel by at most %.4f (exact area), %.4f (rays, a smooth outline), %.4f (rays at "
+               "corners); refusals %ld of %ld\n", S8.alone, S8.buffer, S8.target, S8.added, S8.pal_bad, S8.pal_frac, S8.hit_bad,
+               S8.hit_n, S8.top_bad, S8.jump, S8.jump_ray, S8.jump_corner, S8.refused_ok, S8.refused_n);
+        CHECK_LE(S8.exact, 5e-5);
+        CHECK_LE(S8.mean[0][0], 0.035); CHECK_LE(S8.mean[0][1], 0.024); CHECK_LE(S8.mean[0][2], 0.012); CHECK_LE(S8.mean[0][3], 0.005);
+        CHECK_LE(S8.mean[1][0], 0.035); CHECK_LE(S8.mean[1][1], 0.024); CHECK_LE(S8.mean[1][2], 0.012); CHECK_LE(S8.mean[1][3], 0.005);
+        CHECK_LE(S8.max_edge, 0.6);
+        CHECK_LE(S8.off, 0.3);
+        CHECK(S8.alone == 0.0);
+        CHECK(S8.buffer == 0.0);
+        CHECK_LE(S8.target, 1e-3);   /* the target holds RGBA16F */
+        CHECK(S8.added == 0.0);
+        CHECK(S8.pal_bad == 0);
+        CHECK_LE(S8.pal_frac, 2e-7);
+        CHECK(S8.hit_bad == 0);
+        CHECK(S8.top_bad == 0);
+        CHECK_LE(S8.jump, 0.02);       /* the move's own change: 0.005 px x a slope near 1 */
+        CHECK_LE(S8.jump_ray, 0.05);
+        printf("  v0.6 curve runs: the rays against their CPU form in double, every glyph at 24 px: %.2e\n", S8.cpu);
+        printf("  v0.6 curve runs: .rays against the program without the exact area %.2e, against the exact area %.2e\n",
+               S8.rays_same, S8.rays_exact);
+        CHECK(S8.rays_same == 0.0);
+        CHECK(S8.rays_exact > 1e-3);
+        if (S8.ol_ran) {
+            printf("  v0.6 curve runs: psy_outline.h's set of the test glyphs (resolved), 12 px: against the exact coverage %.2e "
+                   "(every glyph); against the test builder's set where both are resolved %.2e\n", S8.ol_exact, S8.ol_same);
+            CHECK_LE(S8.ol_exact, 5e-5);
+            CHECK_LE(S8.ol_same, 5e-5);
+        }
+        printf("  v0.6 curve runs: cached in a target and composited 1:1, against drawn into the scene: RGBA16F over black %.2e, "
+               "over gray %.2e; RGBA32F %.2e; an RGBA32F target in an RGBA16F scene over gray %.2e\n", S8.cached[0], S8.cached[1],
+               S8.cached[2], S8.cached[3]);
+        CHECK(S8.cached[0] == 0.0);
+        CHECK_LE(S8.cached[1], 4.9e-4);   /* one f16 step below 1 is 4.88e-4 */
+        CHECK(S8.cached[2] == 0.0);
+        CHECK(S8.cached[3] == 0.0);
+        CHECK_LE(S8.cpu, 1e-3);
+        CHECK(S8.refused_ok == S8.refused_n);
+        if (cs_dev != cs_xr_dev)
+            for (v = 0; v < 2; v++) {
+                printf("  v0.6 curve runs, %s, against the first renderer pixel by pixel: max %.2e, %ld pixels above 1e-3\n",
+                       v ? "exact area" : "rays", cs_xdiff[v].max, cs_xdiff[v].n_1e3);
+                /* a pixel whose ray passes a corner within rounding takes the
+                 * corner's jump on one renderer and not on another: a few */
+                CHECK(cs_xdiff[v].n_1e3 <= 3);
+            }
+        memset(cs_xdiff, 0, sizeof cs_xdiff);
+        memset(&S8, 0, sizeof S8);
+    }
+    s10_report();
+    s11_report();
+    if (S9.ran) {
+        static const char* const fn[3] = { "RGBA32F", "RGBA16F", "R16F" };
+        int f, q;
+        for (f = 0; f < 3; f++)
+            for (q = 0; q < 2; q++)
+                printf("  v0.6 blur %s %dx: rect against the erf product, sigma 0.5 1 2 4 8 16: %.2e %.2e %.2e %.2e %.2e %.2e\n",
+                       fn[f], q + 1, S9.rect[f][q][0], S9.rect[f][q][1], S9.rect[f][q][2], S9.rect[f][q][3], S9.rect[f][q][4],
+                       S9.rect[f][q][5]);
+        printf("  v0.6 blur: an R16F result drawn as tinted coverage %.2e; a rect at the layer's corner, sigma 4 %.2e; refusals %ld of %ld\n",
+               S9.cover, S9.edge, S9.refused_ok, S9.refused_n);
+        {   /* about 1.25 times the measured error (docs/psy_gfx.md); f16 storage limits the larger sigma */
+            static const double lim[3][2][6] = {
+                { { 0.26, 0.04, 0.011, 2.8e-3, 7e-4, 2e-4 }, { 0.048, 0.0096, 2.7e-3, 7e-4, 1.8e-4, 5e-5 } },
+                { { 0.26, 0.04, 0.011, 3.0e-3, 1.2e-3, 1e-3 }, { 0.048, 0.010, 2.8e-3, 1.25e-3, 1.2e-3, 1.1e-3 } },
+                { { 0.26, 0.04, 0.011, 3.0e-3, 1.2e-3, 1e-3 }, { 0.048, 0.010, 2.8e-3, 1.25e-3, 1.2e-3, 1.1e-3 } } };
+            int k;
+            for (f = 0; f < 3; f++) for (q = 0; q < 2; q++) for (k = 0; k < 6; k++) CHECK_LE(S9.rect[f][q][k], lim[f][q][k]);
+        }
+        CHECK_LE(S9.cover, 1e-3);   /* R16F texels */
+        CHECK_LE(S9.edge, 2.8e-3);
+        CHECK(S9.refused_ok == S9.refused_n);
+        memset(&S9, 0, sizeof S9);
+    }
     mc_clear(&g_mc);
     g_where = "cpu";
     return 1;
+}
+
+/* ------------------------------------------------- v0.6 curve sets (CPU) */
+
+/* The format's test vector (docs/psy_gfx.md, "Curve sets: the format",
+ * appendix): a square with a square hole, nonzero, 2 x 2 bands. The outline
+ * builder's first test compares its bytes with these. */
+static const double cs_sq_outer[] = { 0, 0, 0, 0,  1, 0, 1, 0,  1, 1, 1, 1,  0, 1, 0, 1 };
+static const double cs_sq_hole[]  = { 0.25, 0.25, 0.25, 0.25,  0.25, 0.75, 0.25, 0.75,
+                                      0.75, 0.75, 0.75, 0.75,  0.75, 0.25, 0.75, 0.25 };
+
+static void cs_appendix(tcs_set* s) {
+    const tcs_contour c[2] = { { cs_sq_outer, 8 }, { cs_sq_hole, 8 } };
+    tcs_init(s, 1);
+    tcs_glyph(s, 0, c, 2, 2, 2, 0);
+}
+
+/* The test glyphs, in em units, y down; every one is drawn by the GL part
+ * too. Lines have p1 = p0. */
+#define CS_N 12
+static double cs_pts[CS_N][4][96];
+static int    cs_np[CS_N][4], cs_nc[CS_N];
+static uint32_t cs_flags[CS_N];
+
+static void cs_line(int g, int c, double x, double y) {   /* a line from x, y */
+    double* p = cs_pts[g][c] + cs_np[g][c];
+    p[0] = x; p[1] = y; p[2] = x; p[3] = y;
+    cs_np[g][c] += 4;
+}
+static void cs_quad(int g, int c, double x, double y, double cx, double cy) {
+    double* p = cs_pts[g][c] + cs_np[g][c];
+    p[0] = x; p[1] = y; p[2] = cx; p[3] = cy;
+    cs_np[g][c] += 4;
+}
+static void cs_rect(int g, int c, double x0, double y0, double x1, double y1, int ccw) {
+    if (!ccw) { cs_line(g, c, x0, y0); cs_line(g, c, x1, y0); cs_line(g, c, x1, y1); cs_line(g, c, x0, y1); }
+    else { cs_line(g, c, x0, y0); cs_line(g, c, x0, y1); cs_line(g, c, x1, y1); cs_line(g, c, x1, y0); }
+}
+/* an ellipse of 8 quadratics, clockwise on the screen, the first curve
+ * from angle ph */
+static void cs_ellipse_ph(int g, int c, double cx, double cy, double rx, double ry, double ph) {
+    int k;
+    const double pi = 3.14159265358979323846, m = 1.0 / cos(pi / 8);
+    for (k = 0; k < 8; k++) {
+        double a = ph + k * pi / 4, b = a + pi / 8;
+        cs_quad(g, c, cx + rx * cos(a), cy + ry * sin(a), cx + rx * m * cos(b), cy + ry * m * sin(b));
+    }
+}
+static void cs_ellipse(int g, int c, double cx, double cy, double rx, double ry) {
+    cs_ellipse_ph(g, c, cx, cy, rx, ry, 0.0);
+}
+
+static void cs_glyphs(void) {
+    static int made = 0;
+    int k;
+    const double pi = 3.14159265358979323846;
+    if (made) return;
+    made = 1;
+    memset(cs_np, 0, sizeof cs_np);
+    cs_flags[0] = cs_flags[1] = cs_flags[2] = cs_flags[7] = cs_flags[8] = cs_flags[10] = cs_flags[11] = PSYGFX_CSET_RESOLVED;
+    /* 0 a rect; 1 the square with a hole; 2 a circle with its extrema inside
+     * curves, so that rays near them cross one curve twice */
+    cs_rect(0, 0, 0.1, -0.7, 0.6, 0.0, 0); cs_nc[0] = 1;
+    memcpy(cs_pts[1][0], cs_sq_outer, sizeof cs_sq_outer); cs_np[1][0] = 16;
+    memcpy(cs_pts[1][1], cs_sq_hole, sizeof cs_sq_hole); cs_np[1][1] = 16; cs_nc[1] = 2;
+    cs_ellipse_ph(2, 0, 0.5, -0.35, 0.4, 0.4, pi / 8); cs_nc[2] = 1;
+    /* 3 two overlapping rects (winding 2 in the overlap); 4 the same, even-odd */
+    cs_rect(3, 0, 0.0, -0.7, 0.5, -0.1, 0); cs_rect(3, 1, 0.3, -0.5, 0.8, 0.0, 0); cs_nc[3] = 2;
+    memcpy(cs_pts[4], cs_pts[3], sizeof cs_pts[3]); memcpy(cs_np[4], cs_np[3], sizeof cs_np[3]); cs_nc[4] = 2;
+    cs_flags[4] = PSYGFX_CSET_EVENODD;
+    /* 5 a pentagram (self-intersecting), nonzero; 6 the same, even-odd */
+    for (k = 0; k < 5; k++) {
+        double a = -pi / 2 + k * 4 * pi / 5;
+        cs_line(5, 0, 0.5 + 0.45 * cos(a), -0.4 + 0.45 * sin(a));
+    }
+    cs_nc[5] = 1;
+    memcpy(cs_pts[6], cs_pts[5], sizeof cs_pts[5]); memcpy(cs_np[6], cs_np[5], sizeof cs_np[5]); cs_nc[6] = 1;
+    cs_flags[6] = PSYGFX_CSET_EVENODD;
+    /* 7 thin stems: 0.025 em (0.3 px at 12 px per em) and 0.0667 em */
+    cs_rect(7, 0, 0.1, -0.7, 0.125, 0.0, 0); cs_rect(7, 1, 0.4, -0.7, 0.4667, 0.0, 0); cs_nc[7] = 2;
+    /* 8 a flat ellipse (tight curvature at its ends) and a slanted bar */
+    cs_ellipse(8, 0, 0.45, -0.55, 0.42, 0.08);
+    cs_line(8, 1, 0.1, -0.05); cs_line(8, 1, 0.3, -0.4); cs_line(8, 1, 0.42, -0.4); cs_line(8, 1, 0.22, -0.05);
+    cs_nc[8] = 2;
+    /* 9 a CJK-like grid of strokes, overlapping at the crossings */
+    for (k = 0; k < 2; k++) cs_rect(9, k, 0.05, -0.65 + k * 0.4, 0.85, -0.58 + k * 0.4, 0);
+    for (k = 0; k < 2; k++) cs_rect(9, 2 + k, 0.2 + k * 0.4, -0.8, 0.27 + k * 0.4, 0.0, 0);
+    cs_nc[9] = 4;
+    /* 10 a ring far from the origin, where f16 would hold 0.03 em: f32 holds it */
+    cs_ellipse(10, 0, 60.5, -40.4, 0.4, 0.4); cs_ellipse(10, 1, 60.5, -40.4, 0.18, 0.18);
+    {   /* the hole the other way round */
+        double t[96];
+        int n = cs_np[10][1], j;
+        for (j = 0; j < n / 4; j++) {
+            int s = (n / 4 - j) % (n / 4);
+            int e = (n / 4 - j - 1);
+            t[4 * j] = cs_pts[10][1][4 * s]; t[4 * j + 1] = cs_pts[10][1][4 * s + 1];
+            t[4 * j + 2] = cs_pts[10][1][4 * e + 2]; t[4 * j + 3] = cs_pts[10][1][4 * e + 3];
+        }
+        memcpy(cs_pts[10][1], t, (size_t)n * sizeof(double));
+    }
+    cs_nc[10] = 2;
+    /* 11 a rect with a degenerate curve (all three points equal) in it */
+    cs_line(11, 0, 0.1, -0.6); cs_line(11, 0, 0.7, -0.6); cs_quad(11, 0, 0.7, -0.1, 0.7, -0.1);
+    cs_line(11, 0, 0.7, -0.1); cs_line(11, 0, 0.1, -0.1);
+    cs_nc[11] = 1;
+}
+
+/* The test set: glyphs 0 .. CS_N - 1, then glyph CS_N empty and CS_N + 1
+ * absent. bands 0 = the builder's default; flags | extra (backward lists). */
+static void cs_build(tcs_set* s, int bands, uint32_t extra) {
+    int g;
+    cs_glyphs();
+    tcs_init(s, CS_N + 2);
+    for (g = 0; g < CS_N; g++) {
+        tcs_contour c[4];
+        int k;
+        for (k = 0; k < cs_nc[g]; k++) { c[k].pts = cs_pts[g][k]; c[k].n = cs_np[g][k] / 2; }
+        CHECK(tcs_glyph(s, (uint32_t)g, c, cs_nc[g], bands, bands, cs_flags[g] | extra) == 0);
+    }
+    CHECK(tcs_glyph(s, CS_N, NULL, 0, 0, 0, 0) == 0);
+}
+
+/* The winding number by brute force over the contours, with roots from the
+ * quadratic formula and the half-open [0, 1) rule: none of the header's
+ * arithmetic. Points are the floats the set holds. */
+static int cs_wind_ref(int g, double x, double y) {
+    int c, j, w = 0;
+    for (c = 0; c < cs_nc[g]; c++) {
+        int n = cs_np[g][c] / 4;
+        for (j = 0; j < n; j++) {
+            const double* p = cs_pts[g][c] + 4 * j;
+            const double* q = cs_pts[g][c] + 4 * ((j + 1) % n);
+            double x0 = (float)p[0], y0 = (float)p[1], x1 = (float)p[2], y1 = (float)p[3], x2 = (float)q[0], y2 = (float)q[1];
+            double A = y0 - 2 * y1 + y2, B = 2 * (y1 - y0), C = y0 - y, ts[2];
+            int nt = 0, r;
+            if (fabs(A) < 1e-300) { if (B != 0) ts[nt++] = -C / B; }
+            else {
+                double D = B * B - 4 * A * C;
+                if (D >= 0) { ts[nt++] = (-B - sqrt(D)) / (2 * A); ts[nt++] = (-B + sqrt(D)) / (2 * A); }
+            }
+            for (r = 0; r < nt; r++) {
+                double t = ts[r], xt, dy;
+                if (!(t >= 0 && t < 1)) continue;
+                xt = (1 - t) * (1 - t) * x0 + 2 * t * (1 - t) * x1 + t * t * x2;
+                dy = 2 * A * t + B;
+                if (xt > x && dy != 0) w += dy > 0 ? 1 : -1;
+            }
+        }
+    }
+    return w;
+}
+
+/* The test glyphs through psy_outline.h: the same contours as paths, a set
+ * whose glyphs it resolved (overlaps removed). */
+static psyol_ctx cs_ol_cx;
+static psyol_cset cs_ol;
+static int cs_ol_ok = -1;
+static void cs_ol_build(void) {
+    int g, c, j;
+    psyol_path pa;
+    psyol_cset_desc od;
+    if (cs_ol_ok >= 0) return;
+    cs_glyphs();
+    cs_ol_ok = 0;
+    if (psyol_init(&cs_ol_cx, NULL) != PSYOL_OK) return;
+    memset(&od, 0, sizeof od);
+    od.n_glyphs = CS_N;
+    if (psyol_cset_init(&cs_ol, &cs_ol_cx, &od) != PSYOL_OK) return;
+    psyol_path_init(&pa, &cs_ol_cx);
+    for (g = 0; g < CS_N; g++) {
+        psyol_path_clear(&pa);
+        pa.rule = (cs_flags[g] & PSYGFX_CSET_EVENODD) ? PSYOL_EVENODD : PSYOL_NONZERO;
+        for (c = 0; c < cs_nc[g]; c++) {
+            int n = cs_np[g][c] / 4;
+            for (j = 0; j < n; j++) {
+                const double* q = cs_pts[g][c] + 4 * j;
+                const double* e = cs_pts[g][c] + 4 * ((j + 1) % n);
+                /* the floats the test builder stores, so both sets hold one shape */
+                double x0 = (float)q[0], y0 = (float)q[1], cx = (float)q[2], cy = (float)q[3], x1 = (float)e[0], y1 = (float)e[1];
+                if (j == 0) psyol_move(&pa, x0, y0);
+                if (cx == x0 && cy == y0) psyol_line(&pa, x1, y1);
+                else psyol_quad(&pa, cx, cy, x1, y1);
+            }
+            psyol_close(&pa);
+        }
+        if (psyol_path_end(&pa) != PSYOL_OK || psyol_cset_add(&cs_ol, (uint32_t)g, &pa) != PSYOL_OK) { psyol_path_free(&pa); return; }
+    }
+    psyol_path_free(&pa);
+    cs_ol_ok = 1;
+}
+
+static uint32_t cs_rng = 777u;
+static double cs_u(void) { cs_rng = cs_rng * 1664525u + 1013904223u; return (cs_rng >> 8) * (1.0 / 16777216.0); }
+
+/* Appendix A's words, as the builder writes them (checked in by hand once,
+ * then compared bit for bit). */
+static const uint32_t cs_appendix_words[] = {
+    0x43595350u, 1, 1, 0, 0, 0, 0, 0,  12, 0, 0, 0,
+    0x00000000u, 0x00000000u, 0x3f800000u, 0x3f800000u, 0x00020002u, 0, 0, 10,
+    36, 6, 0, 0,  42, 6, 0, 0,  48, 6, 0, 0,  54, 6, 0, 0,
+    0, 1, 7, 8, 5, 3,      1, 2, 6, 7, 5, 3,
+    2, 3, 5, 6, 8, 0,      1, 2, 6, 7, 8, 0,
+};
+
+static void test_v06_cset_cpu(void) {
+    tcs_set s;
+    psygfx_cset_desc d;
+    char msg[256];
+    long wrong = 0, n = 0;
+    int g, k, bands, bwd;
+    /* the test vector */
+    cs_appendix(&s);
+    memset(&d, 0, sizeof d);
+    d.texels = s.texels; d.n_texels = s.n_texels; d.words = s.words; d.n_words = s.n_words;
+    CHECK(psygfx_cset_check(&d, msg, sizeof msg) == PSYGFX_OK);
+    if (getenv("PSYGFX_TEST_VERBOSE")) {
+        uint32_t i;
+        printf("v0.6 appendix A: %u texels, %u words:", s.n_texels, s.n_words);
+        for (i = 0; i < s.n_words; i++) printf("%s%u", i % 12 ? " " : "\n  ", s.words[i]);
+        printf("\n");
+    }
+    CHECK(s.n_texels == 10);
+    CHECK(s.n_words == sizeof cs_appendix_words / 4 && memcmp(s.words, cs_appendix_words, sizeof cs_appendix_words) == 0);
+    CHECK(psygfx_cset_winding(&d, 0, 0.1, 0.1) == 1);
+    CHECK(psygfx_cset_winding(&d, 0, 0.5, 0.5) == 0);
+    CHECK(psygfx_cset_winding(&d, 0, 1.5, 0.5) == 0);
+    CHECK(psygfx_cset_winding(&d, 1, 0.5, 0.5) == 0);   /* past the table */
+    /* one fault per rule: each refused, with the word or the glyph named */
+    {
+        static const struct { int word; uint32_t value; const char* says; } F[] = {
+            { 0, 0x12345678u, "magic" }, { 1, 2, "version" }, { 5, 1, "reserved" }, { 2, 1u << 24, "glyph table" },
+            { 8, 13, "multiple of 4" }, { 8, 4, "multiple of 4" }, { 13, 0x7fc00000u, "not finite" },
+            { 16, 0x00000002u, "one band count" }, { 14, 0, "bbox" }, { 14, 0x3f000000u, "passes its bbox" },
+            { 17, 8, "reserved bits" }, { 22, 36, "backward list" }, { 19, 30, "texels" },
+            { 20, 9999, "passes the words" }, { 36, 9, "not a curve" }, { 36, 4, "not sorted" }, { 36, 5, "not sorted" },
+        };
+        size_t f;
+        for (f = 0; f < sizeof F / sizeof F[0]; f++) {
+            uint32_t* w2 = (uint32_t*)malloc(4u * s.n_words);
+            psygfx_cset_desc d2 = d;
+            int rc;
+            memcpy(w2, s.words, 4u * s.n_words);
+            w2[F[f].word] = F[f].value;
+            if (F[f].word == 22) w2[23] = 1;   /* a backward list without the flag */
+            d2.words = w2;
+            rc = psygfx_cset_check(&d2, msg, sizeof msg);
+            if (rc != PSYGFX_ERR_FORMAT || !strstr(msg, F[f].says)) {
+                fprintf(stderr, "psy_gfx_test [cpu]: FAIL v0.6 check fault %d (word %d = 0x%x): rc %d, \"%s\"\n",
+                        (int)f, F[f].word, F[f].value, rc, msg);
+                g_failures++;
+            }
+            free(w2);
+        }
+        {   /* a texel that is not finite */
+            float* t2 = (float*)malloc(16u * s.n_texels);
+            psygfx_cset_desc d2 = d;
+            memcpy(t2, s.texels, 16u * s.n_texels);
+            t2[13] = (float)(1e300 * 1e300);
+            d2.texels = t2;
+            CHECK(psygfx_cset_check(&d2, msg, sizeof msg) == PSYGFX_ERR_FORMAT && strstr(msg, "texel 3"));
+            free(t2);
+        }
+    }
+    tcs_free(&s);
+    /* the test set: the CPU winding against brute force at random points,
+     * with the builder's default bands, 1, 3 and 16 bands, backward lists */
+    for (bands = 0; bands < 4; bands++)
+        for (bwd = 0; bwd < 2; bwd++) {
+            static const int nb[4] = { 0, 1, 3, 16 };
+            cs_build(&s, nb[bands], bwd ? PSYGFX_CSET_BACKWARD : 0u);
+            memset(&d, 0, sizeof d);
+            d.texels = s.texels; d.n_texels = s.n_texels; d.words = s.words; d.n_words = s.n_words;
+            k = psygfx_cset_check(&d, msg, sizeof msg);
+            if (k != PSYGFX_OK) { fprintf(stderr, "psy_gfx_test [cpu]: FAIL v0.6 test set: %s\n", msg); g_failures++; }
+            for (g = 0; g < CS_N; g++) {
+                uint32_t o = s.words[8 + g];
+                double x0 = s.texels ? (double)psygfx__u2f(s.words[o]) : 0, y0 = psygfx__u2f(s.words[o + 1]);
+                double x1 = psygfx__u2f(s.words[o + 2]), y1 = psygfx__u2f(s.words[o + 3]);
+                double mx = 0.1 * (x1 - x0), my = 0.1 * (y1 - y0);
+                int nc = 0, c, j;
+                for (c = 0; c < cs_nc[g]; c++) nc += cs_np[g][c] / 4;
+                for (k = 0; k < 2000 + 4 * nc; k++) {
+                    double x = x0 - mx + (x1 - x0 + 2 * mx) * cs_u(), y = y0 - my + (y1 - y0 + 2 * my) * cs_u(), yr = y;
+                    int a, b;
+                    if (k >= 2000) {   /* on a curve's endpoint row: on the ray is not above, as at y just past it */
+                        for (c = 0, j = (k - 2000) / 4; j >= cs_np[g][c] / 4; c++) j -= cs_np[g][c] / 4;
+                        y = (float)cs_pts[g][c][4 * j + 1];
+                        yr = y + 1e-9;
+                    }
+                    a = psygfx_cset_winding(&d, (uint32_t)g, x, y); b = cs_wind_ref(g, x, yr);
+                    n++;
+                    if (a != b) {
+                        wrong++;
+                        if (getenv("PSYGFX_TEST_VERBOSE")) printf("  v0.6 winding: glyph %d at %.9g %.9g: %d, brute force %d\n", g, x, y, a, b);
+                    }
+                }
+            }
+            CHECK(psygfx_cset_winding(&d, CS_N, 0.3, -0.3) == 0);       /* empty */
+            CHECK(psygfx_cset_winding(&d, CS_N + 1, 0.3, -0.3) == 0);   /* absent */
+            CHECK(psygfx_cset_winding(&d, CS_N + 9, 0.3, -0.3) == 0);   /* past the table */
+            tcs_free(&s);
+        }
+    printf("v0.6 curve sets: appendix A checked bit for bit; the CPU winding against brute force wrong at %ld of %ld points\n",
+           wrong, n);
+    CHECK(wrong == 0);
+    {   /* psy_outline.h's set of the same contours: overlaps resolved, the
+         * format checked, its fill equal to the brute force's */
+        long ow = 0, on = 0;
+        cs_ol_build();
+        if (cs_ol_ok) {
+            memset(&d, 0, sizeof d);
+            d.texels = cs_ol.texels; d.n_texels = cs_ol.n_texels; d.words = cs_ol.words; d.n_words = cs_ol.n_words;
+            CHECK(psygfx_cset_check(&d, msg, sizeof msg) == PSYGFX_OK);
+            for (g = 0; g < CS_N; g++) {
+                uint32_t o = d.words[8 + g];
+                double x0 = psygfx__u2f(d.words[o]), y0 = psygfx__u2f(d.words[o + 1]);
+                double x1 = psygfx__u2f(d.words[o + 2]), y1 = psygfx__u2f(d.words[o + 3]);
+                CHECK((d.words[o + 5] & PSYGFX_CSET_RESOLVED) != 0);
+                for (k = 0; k < 2000; k++) {
+                    double x = x0 + (x1 - x0) * cs_u(), y = y0 + (y1 - y0) * cs_u();
+                    int a = psygfx_cset_winding(&d, (uint32_t)g, x, y), b = cs_wind_ref(g, x, y);
+                    int fill = (cs_flags[g] & PSYGFX_CSET_EVENODD) ? (b & 1) != 0 : b != 0;
+                    on++;
+                    ow += (a != 0) != fill || (a != 0 && a != 1);
+                }
+            }
+        } else {
+            fprintf(stderr, "psy_gfx_test [cpu]: FAIL v0.6 psy_outline.h set: %s\n", psyol_error(&cs_ol_cx));
+            g_failures++;
+        }
+        printf("v0.6 curve sets: psy_outline.h's set of the test glyphs passes the check; its winding 0 or 1 and its fill "
+               "against brute force wrong at %ld of %ld points\n", ow, on);
+        CHECK(ow == 0);
+    }
+}
+
+/* ------------------------------------------------- v0.6 runs (GL) */
+
+/* The exact box-filter coverage of a pixel by a glyph, in double: the
+ * curves mapped to the screen, each scanline's covered length in the pixel
+ * from its crossings and the fill rule on its integer winding, integrated
+ * over y by adaptive Gauss-Kronrod between the y of every endpoint and
+ * extremum. None of the header's arithmetic. */
+typedef struct cs_scr { double p[6]; } cs_scr;   /* a curve on the screen */
+static cs_scr cs_sc[256];
+static int    cs_nsc, cs_eo;
+
+/* glyph g's curves through S = o + M em */
+static void cs_map(int g, const double o[2], const double M[4]) {
+    int c, j;
+    cs_nsc = 0;
+    cs_eo = (cs_flags[g] & PSYGFX_CSET_EVENODD) != 0;
+    for (c = 0; c < cs_nc[g]; c++) {
+        int n = cs_np[g][c] / 4;
+        for (j = 0; j < n; j++) {
+            const double* p = cs_pts[g][c] + 4 * j;
+            const double* q = cs_pts[g][c] + 4 * ((j + 1) % n);
+            double e[6];
+            int k;
+            e[0] = (float)p[0]; e[1] = (float)p[1]; e[2] = (float)p[2]; e[3] = (float)p[3]; e[4] = (float)q[0]; e[5] = (float)q[1];
+            for (k = 0; k < 3; k++) {
+                cs_sc[cs_nsc].p[2 * k] = o[0] + M[0] * e[2 * k] + M[1] * e[2 * k + 1];
+                cs_sc[cs_nsc].p[2 * k + 1] = o[1] + M[2] * e[2 * k] + M[3] * e[2 * k + 1];
+            }
+            cs_nsc++;
+        }
+    }
+}
+
+static int cs_dcmp(const void* a, const void* b) {
+    double x = ((const double*)a)[0], y = ((const double*)b)[0];
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+/* the covered length of [x0, x1] on the scanline y; rows: the curves that
+ * meet the pixel's rows (nrow of them), or all when nrow < 0 */
+static double cs_line_cov(const int* rows, int nrow, double y, double x0, double x1) {
+    double xs[1024];
+    int n = 0, k, w = 0;
+    double len = 0.0, prev = -1e300;
+    int nk = nrow < 0 ? cs_nsc : nrow;
+    for (k = 0; k < nk; k++) {
+        const double* p = cs_sc[nrow < 0 ? k : rows[k]].p;
+        double A = p[1] - 2 * p[3] + p[5], B = 2 * (p[3] - p[1]), C = p[1] - y, ts[2];
+        int nt = 0, r;
+        if (fabs(A) < 1e-14 * (fabs(B) + 1e-300)) { if (B != 0) ts[nt++] = -C / B; }
+        else {
+            double D = B * B - 4 * A * C;
+            if (D >= 0) { double sq = sqrt(D), q = -0.5 * (B + (B >= 0 ? sq : -sq)); ts[nt++] = q / A; if (q != 0) ts[nt++] = C / q; }
+        }
+        for (r = 0; r < nt && n < 510; r++) {
+            double t = ts[r], dy;
+            if (!(t >= 0 && t < 1)) continue;
+            dy = 2 * A * t + B;
+            if (dy == 0) continue;
+            xs[2 * n] = (1 - t) * (1 - t) * p[0] + 2 * t * (1 - t) * p[2] + t * t * p[4];
+            xs[2 * n + 1] = dy > 0 ? 1 : -1;
+            n++;
+        }
+    }
+    for (k = 1; k < n; k++) {   /* few crossings: insertion sort */
+        double x = xs[2 * k], sg = xs[2 * k + 1];
+        int m = k - 1;
+        while (m >= 0 && xs[2 * m] > x) { xs[2 * m + 2] = xs[2 * m]; xs[2 * m + 3] = xs[2 * m + 1]; m--; }
+        xs[2 * m + 2] = x; xs[2 * m + 3] = sg;
+    }
+    for (k = 0; k <= n; k++) {
+        double x = k < n ? xs[2 * k] : 1e300;
+        int in = cs_eo ? (w & 1) != 0 : w != 0;
+        if (in) {
+            double a = prev > x0 ? prev : x0, b = x < x1 ? x : x1;
+            if (b > a) len += b - a;
+        }
+        if (k < n) { w += (int)xs[2 * k + 1]; prev = x; }
+    }
+    return len;
+}
+
+static const double cs_gk_x[8] = { 0.991455371120812639, 0.949107912342758525, 0.864864423359769073, 0.741531185599394440,
+                                   0.586087235467691130, 0.405845151377397167, 0.207784955007898468, 0.0 };
+static const double cs_gk_wk[8] = { 0.022935322010529225, 0.063092092629978553, 0.104790010322250184, 0.140653259715525919,
+                                    0.169004726639267903, 0.190350578064785410, 0.204432940075298892, 0.209482141084727828 };
+static const double cs_gk_wg[4] = { 0.129484966168869693, 0.279705391489276668, 0.381830050505118945, 0.417959183673469388 };
+
+static double cs_gk(const int* rows, int nrow, double a, double b, double x0, double x1, int depth) {
+    double c = 0.5 * (a + b), h = 0.5 * (b - a), k = 0, gs = 0;
+    int i;
+    for (i = 0; i < 8; i++) {
+        double f1 = cs_line_cov(rows, nrow, c - h * cs_gk_x[i], x0, x1), f2 = i < 7 ? cs_line_cov(rows, nrow, c + h * cs_gk_x[i], x0, x1) : 0;
+        k += cs_gk_wk[i] * (i < 7 ? f1 + f2 : f1);
+        if (i % 2 == 1) gs += cs_gk_wg[i / 2] * (f1 + f2);
+        if (i == 7) gs += cs_gk_wg[3] * f1;
+    }
+    k *= h; gs *= h;
+    if (depth > 8 || fabs(k - gs) < 1e-9) return k;
+    return cs_gk(rows, nrow, a, c, x0, x1, depth + 1) + cs_gk(rows, nrow, c, b, x0, x1, depth + 1);
+}
+
+/* pixel (i, j)'s exact coverage */
+static double cs_pix_ref(int i, int j) {
+    double br[1100];
+    int nb = 0, k, rows[256], nrow = 0;
+    double y0 = j, y1 = j + 1, cov = 0;
+    br[nb++] = y0; br[nb++] = y1;
+    for (k = 0; k < cs_nsc && nb < 1090; k++) {
+        const double* p = cs_sc[k].p;
+        double ys[3], den = p[1] - 2 * p[3] + p[5];
+        int m;
+        ys[0] = p[1]; ys[1] = p[5]; ys[2] = y0 - 1;
+        if (den != 0) { double t = (p[1] - p[3]) / den; if (t > 0 && t < 1) ys[2] = (1 - t) * (1 - t) * p[1] + 2 * t * (1 - t) * p[3] + t * t * p[5]; }
+        for (m = 0; m < 3; m++) if (ys[m] > y0 && ys[m] < y1) br[nb++] = ys[m];
+        {   /* where the curve crosses the pixel's sides, the scanline's length has a kink */
+            int sd;
+            for (sd = 0; sd < 2; sd++) {
+                double X = i + sd, A = p[0] - 2 * p[2] + p[4], B = 2 * (p[2] - p[0]), C = p[0] - X, D;
+                double ts[2];
+                int nt = 0, r;
+                if (A == 0) { if (B != 0) ts[nt++] = -C / B; }
+                else if ((D = B * B - 4 * A * C) >= 0) { ts[nt++] = (-B - sqrt(D)) / (2 * A); ts[nt++] = (-B + sqrt(D)) / (2 * A); }
+                for (r = 0; r < nt; r++) {
+                    double t = ts[r], yy;
+                    if (!(t >= 0 && t <= 1)) continue;
+                    yy = (1 - t) * (1 - t) * p[1] + 2 * t * (1 - t) * p[3] + t * t * p[5];
+                    if (yy > y0 && yy < y1) br[nb++] = yy;
+                }
+            }
+        }
+    }
+    qsort(br, (size_t)nb, sizeof(double), cs_dcmp);
+    for (k = 0; k < cs_nsc; k++) {
+        const double* p = cs_sc[k].p;
+        double ly = p[1] < p[3] ? (p[1] < p[5] ? p[1] : p[5]) : (p[3] < p[5] ? p[3] : p[5]);
+        double hy = p[1] > p[3] ? (p[1] > p[5] ? p[1] : p[5]) : (p[3] > p[5] ? p[3] : p[5]);
+        if (hy >= y0 && ly <= y1) rows[nrow++] = k;
+    }
+    for (k = 0; k + 1 < nb; k++)
+        if (br[k + 1] > br[k]) cov += cs_gk(rows, nrow, br[k], br[k + 1], i, i + 1, 0);
+    return cov;
+}
+
+/* whether any curve's hull meets pixel (i, j) grown by a margin */
+static int cs_pix_near(int i, int j, double m) {
+    int k;
+    for (k = 0; k < cs_nsc; k++) {
+        const double* p = cs_sc[k].p;
+        double lx = p[0], hx = p[0], ly = p[1], hy = p[1];
+        int q;
+        for (q = 1; q < 3; q++) {
+            if (p[2 * q] < lx) lx = p[2 * q];
+            if (p[2 * q] > hx) hx = p[2 * q];
+            if (p[2 * q + 1] < ly) ly = p[2 * q + 1];
+            if (p[2 * q + 1] > hy) hy = p[2 * q + 1];
+        }
+        if (hx >= i - m && lx <= i + 1 + m && hy >= j - m && ly <= j + 1 + m) return 1;
+    }
+    return 0;
+}
+
+/* The probe's conditions: every test glyph at a size, a rotation (each
+ * item's ori about its glyph box's center) and a subpixel offset, in one run;
+ * the scene against the exact coverage. Returns the edge pixels' max and
+ * mean error, and the largest error off the edges. */
+typedef struct cs_err { double max, mean, off, oref, ogot; long n_edge; int wi, wj, oi, oj; } cs_err;
+
+static int cs_layout(tcs_set* s, double size, double rot, double dx, double dy, psygfx_citem* it, double org[][2], double* cell) {
+    int g, n = 0;
+    *cell = 1.6 * size;
+    for (g = 0; g < CS_N; g++) {
+        uint32_t o = s->words[8 + g];
+        double bx0 = psygfx__u2f(s->words[o]), by0 = psygfx__u2f(s->words[o + 1]);
+        double bx1 = psygfx__u2f(s->words[o + 2]), by1 = psygfx__u2f(s->words[o + 3]);
+        int per = (int)((W - 8) / *cell);
+        double cx = 4 + (g % per) * *cell + 0.5 * *cell + dx, cy = 4 + (g / per) * *cell + 0.5 * *cell + dy;
+        if (4 + (g / per + 1) * *cell > H) break;
+        memset(&it[n], 0, sizeof it[n]);
+        /* the glyph box's center on the cell's center */
+        it[n].x = (float)(cx - size * 0.5 * (bx0 + bx1));
+        it[n].y = (float)(cy - size * 0.5 * (by0 + by1));
+        it[n].glyph = (float)g;
+        it[n].ori = (float)rot;
+        it[n].scale = 1; it[n].gate = 1; it[n].contrast = 1;
+        org[n][0] = it[n].x; org[n][1] = it[n].y;
+        n++;
+    }
+    return n;
+}
+
+/* The exact coverage of every pixel by every item of the layout, summed
+ * (cells' margins overlap), cached per condition: the reference does not
+ * depend on the variant drawn. owner: the item whose curves pass the pixel. */
+static float* cs_ref_cache[CS_NCOND];
+static signed char* cs_own_cache[CS_NCOND];
+
+/* one pixel of one item's box (a box has too few rows to share them out):
+ * pixels of an item are apart, items run in turn */
+typedef struct cr_ctx { int i0, nw, j0, k; float* ref; signed char* own; } cr_ctx;
+static void cr_pix(void* p, int idx) {
+    const cr_ctx* c = (const cr_ctx*)p;
+    int i = c->i0 + idx % c->nw, j = c->j0 + idx / c->nw;
+    double r;
+    if (i < 0 || j < 0 || i >= W || j >= H) return;
+    if (cs_pix_near(i, j, 1e-9)) { r = cs_pix_ref(i, j); c->own[j * W + i] = (signed char)c->k; }
+    else r = cs_line_cov(NULL, -1, j + 0.5, i + 0.5 - 1e-9, i + 0.5 + 1e-9) > 0 ? 1.0 : 0.0;
+    c->ref[j * W + i] += (float)r;
+}
+
+static void cs_reference(tcs_set* s, const psygfx_citem* it, int n, double size, double rot, int cond) {
+    int k;
+    float* ref;
+    signed char* own;
+    if (cs_ref_cache[cond]) return;
+    ref = (float*)calloc((size_t)W * H, sizeof(float));
+    own = (signed char*)malloc((size_t)W * H);
+    if (!ref || !own) { free(ref); free(own); return; }
+    if (getenv("PSYGFX_TEST_REFDIR")) {   /* a development seam: references kept on disk */
+        char path[600];
+        FILE* fp;
+        snprintf(path, sizeof path, "%s/ref%02d.bin", getenv("PSYGFX_TEST_REFDIR"), cond);
+        fp = fopen(path, "rb");
+        if (fp) {
+            size_t a = fread(ref, sizeof(float), (size_t)W * H, fp), b = fread(own, 1, (size_t)W * H, fp);
+            fclose(fp);
+            if (a == (size_t)W * H && b == (size_t)W * H) { cs_ref_cache[cond] = ref; cs_own_cache[cond] = own; return; }
+        }
+    }
+    memset(own, -1, (size_t)W * H);
+    for (k = 0; k < n; k++) {
+        int g = (int)it[k].glyph;
+        uint32_t o = s->words[8 + g];
+        double bc[2], o2[2], M[4], c = cos(rot * 3.14159265358979323846 / 180), sn = sin(rot * 3.14159265358979323846 / 180);
+        double lo[2] = { 1e9, 1e9 }, hi[2] = { -1e9, -1e9 };
+        int q;
+        bc[0] = 0.5 * (psygfx__u2f(s->words[o]) + psygfx__u2f(s->words[o + 2]));
+        bc[1] = 0.5 * (psygfx__u2f(s->words[o + 1]) + psygfx__u2f(s->words[o + 3]));
+        /* S = it + size (bc + R (em - bc)), R turning +x toward +y */
+        M[0] = size * c; M[1] = -size * sn; M[2] = size * sn; M[3] = size * c;
+        o2[0] = it[k].x + size * bc[0] - (M[0] * bc[0] + M[1] * bc[1]);
+        o2[1] = it[k].y + size * bc[1] - (M[2] * bc[0] + M[3] * bc[1]);
+        cs_map(g, o2, M);
+        for (q = 0; q < cs_nsc; q++) {
+            int m;
+            for (m = 0; m < 3; m++) {
+                if (cs_sc[q].p[2 * m] < lo[0]) lo[0] = cs_sc[q].p[2 * m];
+                if (cs_sc[q].p[2 * m] > hi[0]) hi[0] = cs_sc[q].p[2 * m];
+                if (cs_sc[q].p[2 * m + 1] < lo[1]) lo[1] = cs_sc[q].p[2 * m + 1];
+                if (cs_sc[q].p[2 * m + 1] > hi[1]) hi[1] = cs_sc[q].p[2 * m + 1];
+            }
+        }
+        {
+            cr_ctx cr;
+            cr.i0 = (int)floor(lo[0]) - 1; cr.nw = (int)floor(hi[0]) + 1 - cr.i0 + 1; cr.j0 = (int)floor(lo[1]) - 1; cr.k = k;
+            cr.ref = ref; cr.own = own;
+            par_rows(cr_pix, &cr, cr.nw * ((int)floor(hi[1]) + 1 - cr.j0 + 1));
+        }
+    }
+    cs_ref_cache[cond] = ref;
+    cs_own_cache[cond] = own;
+    if (getenv("PSYGFX_TEST_REFDIR")) {
+        char path[600];
+        FILE* fp;
+        snprintf(path, sizeof path, "%s/ref%02d.bin", getenv("PSYGFX_TEST_REFDIR"), cond);
+        fp = fopen(path, "wb");
+        if (fp) { fwrite(ref, sizeof(float), (size_t)W * H, fp); fwrite(own, 1, (size_t)W * H, fp); fclose(fp); }
+    }
+}
+
+static cs_err cs_measure(const psygfx_citem* it, int cond, double* gmax) {
+    cs_err e;
+    int i, j;
+    double sum = 0;
+    const float* ref = cs_ref_cache[cond];
+    const signed char* own = cs_own_cache[cond];
+    memset(&e, 0, sizeof e);
+    if (!ref) return e;
+    for (j = 0; j < H; j++)
+        for (i = 0; i < W; i++) {
+            double r = ref[j * W + i], got = R->scene[(j * W + i) * 4], d = fabs(got - r);
+            if (r > 1e-6 && r < 1 - 1e-6) {
+                e.n_edge++;
+                sum += d;
+                if (d > e.max) { e.max = d; e.wi = i; e.wj = j; }
+                if (own[j * W + i] >= 0) {
+                    int g = (int)it[own[j * W + i]].glyph;
+                    if (d > gmax[g]) gmax[g] = d;
+                }
+            } else if (d > e.off) { e.off = d; e.oi = i; e.oj = j; e.oref = r; e.ogot = got; }
+        }
+    e.mean = e.n_edge ? sum / (double)e.n_edge : 0;
+    return e;
+}
+
+/* The first renderer's scenes, per variant and condition: every later
+ * renderer is compared with it pixel by pixel. */
+
+static void cs_cross(int v, int cond, int dev) {
+    float* keep;
+    int i;
+    if (cs_xr_dev < 0) cs_xr_dev = dev;
+    if (dev == cs_xr_dev) {
+        if (!cs_xr[v][cond]) cs_xr[v][cond] = (float*)malloc(sizeof(float) * W * H);
+        if (cs_xr[v][cond]) for (i = 0; i < W * H; i++) cs_xr[v][cond][i] = R->scene[4 * i];
+        return;
+    }
+    keep = cs_xr[v][cond];
+    if (!keep) return;
+    for (i = 0; i < W * H; i++) {
+        double d = fabs((double)keep[i] - R->scene[4 * i]);
+        if (d > 1e-3) cs_xdiff[v].n_1e3++;
+        if (d > cs_xdiff[v].max) { cs_xdiff[v].max = d; cs_xdiff[v].i = i % W; cs_xdiff[v].j = i / W; cs_xdiff[v].cond = cond; }
+    }
+}
+
+
+/* PSYGFX_TEST_FULL=1: every condition of the text part (4 sizes, 3
+ * rotations, 2 offsets: 24 exact references, about 25 s of CPU on 12
+ * threads). The default runs 5 of them, chosen so that every mutant of
+ * tests/mutate/gfx.toml is still caught (docs/psy_gfx.md, v0.7). */
+static int cs_cond_on(int si, int ri, int oi) {
+    static const int def[5][3] = { { 0, 1, 0 }, { 1, 0, 1 }, { 1, 2, 0 }, { 2, 1, 1 }, { 3, 0, 0 } };
+    int k;
+    if (cs_full()) return 1;
+    for (k = 0; k < 5; k++) if (def[k][0] == si && def[k][1] == ri && def[k][2] == oi) return 1;
+    return 0;
+}
+
+/* One variant of the text program over the probe's conditions: sizes,
+ * rotations and two subpixel offsets. */
+static void cs_variant(tcs_set* s, int v3, int xi, const char* name) {
+    psygfx_cset_desc d;
+    psygfx_cset set;
+    static const double sizes[4] = { 8, 12, 24, 48 }, rots[3] = { 0, 15, 45 };
+    static const double offs[2][2] = { { 0, 0 }, { 0.37, 0.61 } };
+    double gmax[CS_N], gmax0[CS_N], mx[4][3], mn[4][3];
+    int si, ri, oi, g;
+    psygfx__text_v3 = v3;
+    if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) return;
+    memset(&d, 0, sizeof d);
+    d.texels = s->texels; d.n_texels = s->n_texels; d.words = s->words; d.n_words = s->n_words;
+    set = psygfx_cset_make(&R->g, &d);
+    if (!set.id) { fprintf(stderr, "psy_gfx_test [%s]: FAIL v0.6 cset_make: %s\n", g_where, psygfx_error(&R->g)); g_failures++; psygfx_close(&R->g); return; }
+    for (g = 0; g < CS_N; g++) gmax[g] = gmax0[g] = 0;
+    for (si = 0; si < 4; si++)
+        for (ri = 0; ri < 3; ri++) {
+            double m = 0, sum = 0;
+            long n_e = 0;
+            for (oi = 0; oi < 2; oi++) {
+                const int cond = (si * 3 + ri) * 2 + oi;
+                psygfx_citem it[CS_N];
+                if (!cs_cond_on(si, ri, oi)) continue;
+                double org[CS_N][2], cell;
+                int n = cs_layout(s, sizes[si], rots[ri], offs[oi][0], offs[oi][1], it, org, &cell);
+                psygfx_crun_desc rd;
+                psygfx_stim run;
+                cs_err e;
+                memset(&rd, 0, sizeof rd);
+                rd.place = PSYGFX_TOP_LEFT; rd.anchor = PSYGFX_TOP_LEFT; rd.set = set; rd.items = it; rd.n = n;
+                rd.size = (float)sizes[si]; rd.w = W; rd.h = H; rd.color[0] = rd.color[1] = rd.color[2] = 1; rd.fields = PSYGFX_I_ORI;
+                run = psygfx_crun(&R->g, &rd);
+                cs_reference(s, it, n, sizes[si], rots[ri], cond);
+                gl_frame(&run, 1);
+                cs_cross(xi, cond, cs_dev);
+                e = cs_measure(it, cond, ri == 0 ? gmax0 : gmax);
+                if (e.max > m) m = e.max;
+                sum += e.mean * (double)e.n_edge; n_e += e.n_edge;
+                if (e.off > S8.off) S8.off = e.off;
+                if (getenv("PSYGFX_TEST_VERBOSE"))
+                    printf("    %s %2.0f px rot %2.0f off %d: edge max %.3f at %d %d, mean %.4f; off-edge %.2e at %d %d (ref %g got %g)\n",
+                           name, sizes[si], rots[ri], oi, e.max, e.wi, e.wj, e.mean, e.off, e.oi, e.oj, e.oref, e.ogot);
+            }
+            mx[si][ri] = m;
+            mn[si][ri] = n_e ? sum / (double)n_e : 0;
+            if (m > S8.max_edge) S8.max_edge = m;
+            if (mn[si][ri] > S8.mean[xi][si]) S8.mean[xi][si] = mn[si][ri];
+        }
+    printf("  v0.6 text %s, max / mean edge error by size (rows 8, 12, 24, 48 px) and rotation (0, 15, 45)%s:\n", name,
+           cs_full() ? "" : "; the default 5 of 24 conditions, 0 = not run");
+    for (si = 0; si < 4; si++)
+        printf("    %2.0f px: %.3f / %.4f   %.3f / %.4f   %.3f / %.4f\n", sizes[si],
+               mx[si][0], mn[si][0], mx[si][1], mn[si][1], mx[si][2], mn[si][2]);
+    printf("    per glyph max, turned:");
+    for (g = 0; g < CS_N; g++) printf(" %d:%.3f", g, gmax[g]);
+    printf("\n    per glyph max, rotation 0:");
+    for (g = 0; g < CS_N; g++) printf(" %d:%.2e", g, gmax0[g]);
+    printf("\n");
+    if (v3)   /* the resolved glyphs: exact area at rotation 0 */
+        for (g = 0; g < CS_N; g++)
+            if ((cs_flags[g] & PSYGFX_CSET_RESOLVED) && gmax0[g] > S8.exact) S8.exact = gmax0[g];
+    psygfx_close(&R->g);
+}
+
+/* the scene's red channel, for bit-for-bit comparisons */
+static void cs_red(float* out) { int i; for (i = 0; i < W * H; i++) out[i] = R->scene[4 * i]; }
+static double cs_rdiff(const float* a) {
+    int i;
+    double m = 0;
+    for (i = 0; i < W * H; i++) { double d = fabs((double)a[i] - R->scene[4 * i]); if (d > m) m = d; }
+    return m;
+}
+
+static psygfx_crun_desc cs_rd(psygfx_cset set, psygfx_citem* it, int n, float size) {
+    psygfx_crun_desc rd;
+    memset(&rd, 0, sizeof rd);
+    rd.place = PSYGFX_TOP_LEFT; rd.anchor = PSYGFX_TOP_LEFT; rd.set = set; rd.items = it; rd.n = n;
+    rd.size = size; rd.w = W; rd.h = H; rd.color[0] = rd.color[1] = rd.color[2] = 1;
+    return rd;
+}
+
+/* The ray path of the text program on the CPU, in double, step for step:
+ * for diagnosing a pixel (PSYGFX_TEST_VERBOSE). em = c + J^-1 (pixel -
+ * screen center) for an item without turn or scale at origin (ox, oy) and
+ * px per em sp; returns the coverage and fills the two rays. */
+static double cpu_hp(double z, double a, double b) {
+    double w0 = a < b ? a : b, w1 = a < b ? b : a, u = z + 0.5 * (a + b), r;
+    if (u <= 0) return 0;
+    if (u >= a + b) return 1;
+    if (w0 < 1e-6) { double v = u / w1; return v < 0 ? 0 : (v > 1 ? 1 : v); }
+    if (u < w0) return u * u / (2 * w0 * w1);
+    if (u <= w1) return (u - 0.5 * w0) / w1;
+    r = a + b - u;
+    return 1 - r * r / (2 * w0 * w1);
+}
+static double cpu_cl(double x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
+
+static void cpu_ray(const tcs_set* s, int g, double px, double py, double sp, int hz, double* cov, double* wgt) {
+    const uint32_t* w = s->words;
+    uint32_t o = w[8 + g], nh = w[o + 4] & 0xFFFF, nv = w[o + 4] >> 16, fl = w[o + 5];
+    double bb[4], E[2], F[2], c = 0, wg = 0, sg, hpx = 0.5, cap = 1.0;
+    int nb = hz ? (int)nh : (int)nv, kb, j, end, bw, k;
+    for (k = 0; k < 4; k++) bb[k] = psygfx__u2f(w[o + k]);
+    {
+        double ac = hz ? py : px, lo = hz ? bb[1] : bb[0], hi = hz ? bb[3] : bb[2];
+        double al = hz ? px : py, alo = hz ? bb[0] : bb[1], ahi = hz ? bb[2] : bb[3];
+        kb = (int)floor((ac - lo) * nb / (hi - lo));
+        if (kb < 0) kb = 0;
+        if (kb > nb - 1) kb = nb - 1;
+        bw = (fl & 2) && al < 0.5 * (alo + ahi);
+    }
+    {
+        uint32_t dw = o + 8 + 4 * (uint32_t)(hz ? kb : (int)nh + kb);
+        j = (int)w[dw + (bw ? 2 : 0)]; end = j + (int)w[dw + (bw ? 3 : 1)];
+    }
+    E[0] = hz ? 1 : 0; E[1] = hz ? 0 : 1; F[0] = hz ? 0 : -1; F[1] = hz ? 1 : 0;
+    sg = bw ? -1 : 1;
+    E[0] *= sg; E[1] *= sg;
+    for (; j < end; j++) {
+        int r = (int)w[j];
+        const float* T = s->texels + 4 * (size_t)r;
+        double q[6], u[3], v[3], a, b, D, sD, qq, tr = 0, tf = 0, au, bu;
+        int s1, s2, s3, two, fall, rise, m;
+        for (m = 0; m < 3; m++) { q[2 * m] = T[2 * m] - px; q[2 * m + 1] = T[2 * m + 1] - py; }
+        for (m = 0; m < 3; m++) { u[m] = q[2 * m] * E[0] + q[2 * m + 1] * E[1]; v[m] = q[2 * m] * F[0] + q[2 * m + 1] * F[1]; }
+        if ((u[0] > u[1] ? (u[0] > u[2] ? u[0] : u[2]) : (u[1] > u[2] ? u[1] : u[2])) < -cap / sp) break;
+        s1 = v[0] > 0; s2 = v[1] > 0; s3 = v[2] > 0;
+        two = s1 == s3 && s2 != s1;
+        fall = (s1 && !s3) || two; rise = (!s1 && s3) || two;
+        if (!fall && !rise) continue;
+        a = v[0] - 2 * v[1] + v[2]; b = v[0] - v[1];
+        D = b * b - a * v[0];
+        if (two && D < 0) continue;
+        sD = sqrt(D > 0 ? D : 0);
+        qq = b + (b >= 0 ? sD : -sD);
+        if (qq != 0) { if (b >= 0) { tr = qq / a; tf = v[0] / qq; } else { tf = qq / a; tr = v[0] / qq; } }
+        au = u[0] - 2 * u[1] + u[2]; bu = u[0] - u[1];
+        for (m = 0; m < 2; m++) {
+            double t = m ? tf : tr, sgn = m ? -1 : 1, up, A2[2], B2[2], Tn[2], dr[2], e2[2], de, f, wv, kk, tl;
+            if (m ? !fall : !rise) continue;
+            up = ((au * t - 2 * bu) * t + u[0]) * sp;
+            A2[0] = q[0] - 2 * q[2] + q[4]; A2[1] = q[1] - 2 * q[3] + q[5]; B2[0] = q[0] - q[2]; B2[1] = q[1] - q[3];
+            if (B2[0] == 0 && B2[1] == 0) { Tn[0] = A2[0]; Tn[1] = A2[1]; } else { Tn[0] = A2[0] * t - B2[0]; Tn[1] = A2[1] * t - B2[1]; }
+            dr[0] = t * (t * A2[0] - 2 * B2[0]); dr[1] = t * (t * A2[1] - 2 * B2[1]);
+            e2[0] = q[4] - q[0]; e2[1] = q[5] - q[1];
+            de = sp * sqrt(fmin(dr[0] * dr[0] + dr[1] * dr[1], (dr[0] - e2[0]) * (dr[0] - e2[0]) + (dr[1] - e2[1]) * (dr[1] - e2[1])));
+            tl = Tn[0] * Tn[0] + Tn[1] * Tn[1];
+            if (fabs(up) > cap || !(tl > 0)) { c += up > 0 ? sgn : 0; continue; }
+            {
+                double n0 = -Tn[1] / sqrt(tl), n1 = Tn[0] / sqrt(tl), ce = fabs(n0 * E[0] + n1 * E[1]), aa = fabs(n0), bb2 = fabs(n1), z = up * ce;
+                f = cpu_hp(z, aa, bb2);
+                wv = ce * cpu_cl(1 - fabs(z) / (0.5 * (aa + bb2)));
+                kk = de; (void)kk; (void)hpx;
+            }
+            c += sgn * f;
+            if (wv > wg) wg = wv;
+            if (getenv("PSYGFX_TEST_CPU"))
+                printf("      %s ray, curve %d: root %s t %.4f up %.4f de %.3f f %.4f w %.4f\n", hz ? "x" : "y", r, m ? "fall" : "rise", t, up, de, f, wv);
+        }
+    }
+    *cov = sg * c;
+    *wgt = wg;
+}
+
+/* the shader's mix of the two rays */
+static double cpu_cov(const tcs_set* s, int g, double ex, double ey, double sp) {
+    double cx, wx, cy, wy, fx, fy, sw, e = 1.0 / 64.0, t;
+    const uint32_t o = s->words[8 + g];
+    const int eo = (s->words[o + 5] & 1) != 0;
+    cpu_ray(s, g, ex, ey, sp, 1, &cx, &wx);
+    cpu_ray(s, g, ex, ey, sp, 0, &cy, &wy);
+    cx = fabs(cx); cy = fabs(cy);
+    fx = eo ? 1 - fabs(1 - fmod(cx, 2)) : (cx < 1 ? cx : 1);
+    fy = eo ? 1 - fabs(1 - fmod(cy, 2)) : (cy < 1 ? cy : 1);
+    sw = wx + wy; t = sw / e < 1 ? sw / e : 1;
+    return 0.5 * (fx + fy) + ((sw > 0 ? (fx * wx + fy * wy) / sw : 0) - 0.5 * (fx + fy)) * t;
+}
+
+/* one refusal: counted, and named when it was not refused */
+static void cs_refused(int k, int ok) {
+    S8.refused_n++;
+    S8.refused_ok += ok != 0;
+    if (!ok) printf("    v0.6 refusal %d was not refused\n", k);
+}
+
+static void gl_v06_text(stats* st) {
+    static float ref[W * H], ref2[W * H];
+    tcs_set s;
+    psygfx_cset_desc d;
+    psygfx_cset set;
+    psygfx_citem it[CS_N];
+    double org[CS_N][2], cell;
+    int n, i, j, k;
+    (void)st;
+    S8.ran = 1;
+    cs_build(&s, 0, 0);
+    cs_variant(&s, 0, 0, "rays");
+    tcs_free(&s);
+    cs_build(&s, 0, PSYGFX_CSET_BACKWARD);
+    cs_variant(&s, 1, 1, "rays and exact area, backward lists");
+    psygfx__text_v3 = 1;
+
+    /* psy_outline.h's set of the same glyphs (overlaps resolved, so every
+     * glyph takes the exact area) at 12 px, rotation 0: against the exact
+     * coverage, and against the test builder's set on the glyphs that both
+     * hold resolved */
+    cs_ol_build();
+    if (cs_ol_ok == 1 && gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) {
+        static float mine[W * H];
+        const int cond = (1 * 3 + 0) * 2 + 1;   /* 12 px, rotation 0, offset 1: a default condition */
+        double gm[CS_N];
+        psygfx_cset_desc od;
+        psygfx_cset os, ts;
+        psygfx_stim run;
+        cs_err e;
+        n = cs_layout(&s, 12, 0, 0.37, 0.61, it, org, &cell);
+        cs_reference(&s, it, n, 12, 0, cond);
+        memset(&d, 0, sizeof d);
+        d.texels = s.texels; d.n_texels = s.n_texels; d.words = s.words; d.n_words = s.n_words;
+        ts = psygfx_cset_make(&R->g, &d);
+        memset(&od, 0, sizeof od);
+        od.texels = cs_ol.texels; od.n_texels = cs_ol.n_texels; od.words = cs_ol.words; od.n_words = cs_ol.n_words;
+        os = psygfx_cset_make(&R->g, &od);
+        CHECK(ts.id != 0 && os.id != 0);
+        {
+            psygfx_crun_desc rd = cs_rd(ts, it, n, 12);
+            run = psygfx_crun(&R->g, &rd);
+            gl_frame(&run, 1);
+            cs_red(mine);
+            rd.set = os;
+            run = psygfx_crun(&R->g, &rd);
+            gl_frame(&run, 1);
+        }
+        for (k = 0; k < CS_N; k++) gm[k] = 0;
+        e = cs_measure(it, cond, gm);
+        S8.ol_exact = maxd(e.max, e.off);
+        S8.ol_same = 0;
+        for (j = 0; j < H; j++)
+            for (i = 0; i < W; i++) {
+                int ow = cs_own_cache[cond] ? cs_own_cache[cond][j * W + i] : -1;
+                if (ow >= 0 && (cs_flags[(int)it[ow].glyph] & PSYGFX_CSET_RESOLVED))
+                    S8.ol_same = maxd(S8.ol_same, fabs((double)mine[j * W + i] - R->scene[4 * (j * W + i)]));
+            }
+        S8.ol_ran = 1;
+        psygfx_cset_free(&R->g, ts);
+        psygfx_cset_free(&R->g, os);
+        psygfx_close(&R->g);
+    }
+
+    /* runs: every item alone against all in one run; copied against a
+     * buffer; reordered against call order; a target against the scene */
+    if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) { tcs_free(&s); return; }
+    memset(&d, 0, sizeof d);
+    d.texels = s.texels; d.n_texels = s.n_texels; d.words = s.words; d.n_words = s.n_words; d.keep = true;
+    set = psygfx_cset_make(&R->g, &d);
+    CHECK(set.id != 0);
+    n = cs_layout(&s, 24, 15, 0.21, 0.43, it, org, &cell);
+    for (k = 0; k < n; k++) { it[k].scale = 1.0f + 0.05f * (float)(k % 3); it[k].contrast = 1.0f - 0.1f * (float)(k % 4); it[k].color = (float)(k % 3); }
+    {
+        static const float pal[9] = { 1, 1, 1, 0.5f, 0.25f, 0.125f, 0.2f, 0.9f, 0.4f };
+        psygfx_crun_desc rd = cs_rd(set, it, n, 24);
+        psygfx_stim one, many[CS_N], fromb;
+        psygfx_buf b = psygfx_buffer(&R->g, sizeof(psygfx_citem) * (size_t)n);
+        rd.fields = PSYGFX_I_ORI | PSYGFX_I_SCALE | PSYGFX_I_CONTRAST | PSYGFX_I_COLOR;
+        rd.palette = pal; rd.n_palette = 3;
+        one = psygfx_crun(&R->g, &rd);
+        gl_frame(&one, 1);
+        cs_red(ref);
+        for (k = 0; k < n; k++) { rd.items = &it[k]; rd.n = 1; many[k] = psygfx_crun(&R->g, &rd); }
+        gl_frame(many, n);
+        S8.alone = cs_rdiff(ref);
+        R->g.no_reorder = 1;
+        gl_frame(many, n);
+        S8.alone = maxd(S8.alone, cs_rdiff(ref));
+        R->g.no_reorder = 0;
+        psygfx_buffer_update(&R->g, b, 0, it, sizeof(psygfx_citem) * (size_t)n);
+        rd.items = NULL; rd.buf = b; rd.n = n;
+        fromb = psygfx_crun(&R->g, &rd);
+        gl_frame(&fromb, 1);
+        S8.buffer = cs_rdiff(ref);
+        /* the palette: an integer is its entry, bit for bit; a fraction mixes
+         * two; contrast scales alpha. A rect glyph's interior over black. */
+        {
+            psygfx_citem pi[3];
+            psygfx_crun_desc pd;
+            psygfx_stim ps;
+            const uint32_t o = s.words[8];
+            const double cx = 0.5 * (psygfx__u2f(s.words[o]) + psygfx__u2f(s.words[o + 2]));
+            const double cy = 0.5 * (psygfx__u2f(s.words[o + 1]) + psygfx__u2f(s.words[o + 3]));
+            static const float want[3][3] = { { 0.5f, 0.25f, 0.125f }, { 0.35f, 0.575f, 0.2625f }, { 0.5f, 0.5f, 0.5f } };
+            memset(pi, 0, sizeof pi);
+            for (k = 0; k < 3; k++) {
+                pi[k].x = (float)(50 + 100 * k - 48 * cx); pi[k].y = (float)(100 - 48 * cy);
+                pi[k].contrast = k == 2 ? 0.5f : 1.0f; pi[k].color = k == 0 ? 1.0f : (k == 1 ? 1.5f : 0.0f);
+            }
+            pd = cs_rd(set, pi, 3, 48);
+            pd.fields = PSYGFX_I_COLOR | PSYGFX_I_CONTRAST; pd.palette = pal; pd.n_palette = 3;
+            pd.aliased = true;   /* coverage 1 exactly: the color is the palette's */
+            ps = psygfx_crun(&R->g, &pd);
+            gl_frame(&ps, 1);
+            for (k = 0; k < 3; k++) {
+                const float* px = R->scene + 4 * (100 * W + 50 + 100 * k);
+                int q;
+                for (q = 0; q < 3; q++) {
+                    double dd = fabs((double)px[q] - want[k][q]);
+                    if (k == 0 && dd != 0.0) S8.pal_bad++;
+                    if (k > 0) S8.pal_frac = maxd(S8.pal_frac, dd);
+                }
+            }
+            /* two items on one place: the topmost is the later */
+            pi[1].x = pi[0].x; pi[1].y = pi[0].y;
+            pd.items = pi; pd.n = 2; pd.fields = 0;
+            ps = psygfx_crun(&R->g, &pd);
+            S8.top_bad = psygfx_hit_index(&R->g, &ps, 50.5f, 100.5f) != 1;
+            S8.top_bad += psygfx_hit_index(&R->g, &ps, 250.5f, 100.5f) != -1;
+        }
+        /* hits: with the set's arrays kept, psygfx_hit() against aliased coverage */
+        rd.items = it; rd.buf.id = 0; rd.aliased = true;
+        rd.fields = PSYGFX_I_ORI | PSYGFX_I_SCALE;
+        one = psygfx_crun(&R->g, &rd);
+        gl_frame(&one, 1);
+        S8.hit_bad = 0;
+        for (j = 0; j < H; j++)
+            for (i = 0; i < W; i++) {
+                int gpu = R->scene[4 * (j * W + i)] > 0.5f, cpu = psygfx_hit(&R->g, &one, (float)i + 0.5f, (float)j + 0.5f);
+                if (gpu != cpu) S8.hit_bad++;
+                S8.hit_n++;
+            }
+        psygfx_buffer_free(&R->g, b);
+    }
+    /* a run through a target against the scene: the same values */
+    {
+        psygfx_target_desc td;
+        psygfx_tex t;
+        static float tg[W * H * 4];
+        psygfx_crun_desc rd = cs_rd(set, it, n, 24);
+        psygfx_stim one;
+        static const float zero[4] = { 0, 0, 0, 0 };
+        rd.fields = PSYGFX_I_ORI;
+        one = psygfx_crun(&R->g, &rd);
+        gl_frame(&one, 1);
+        cs_red(ref);
+        memset(&td, 0, sizeof td);
+        td.w = W; td.h = H;
+        t = psygfx_target(&R->g, &td);
+        CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+        CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+        CHECK(psygfx_begin_target(&R->g, t, zero) == PSYGFX_OK);
+        CHECK(psygfx_draw(&R->g, &one) == PSYGFX_OK);
+        CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+        CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+        CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+        CHECK(psygfx_read_target(&R->g, t, 0, 0, W, H, tg) == PSYGFX_OK);
+        S8.target = 0;
+        for (i = 0; i < W * H; i++) S8.target = maxd(S8.target, fabs((double)tg[4 * i] - ref[i]));   /* RGBA16F: half precision */
+        psygfx_texture_free(&R->g, t);
+    }
+    /* a glyph added at run time draws as when it was there at make */
+    {
+        tcs_set s2;
+        psygfx_cset_desc d2;
+        psygfx_cset set2;
+        psygfx_crun_desc rd;
+        psygfx_stim one;
+        uint32_t gid = 2;
+        cs_glyphs();
+        tcs_init(&s2, CS_N + 2);
+        for (k = 0; k < CS_N; k++) {
+            tcs_contour c[4];
+            int q;
+            if ((uint32_t)k == gid) continue;
+            for (q = 0; q < cs_nc[k]; q++) { c[q].pts = cs_pts[k][q]; c[q].n = cs_np[k][q] / 2; }
+            tcs_glyph(&s2, (uint32_t)k, c, cs_nc[k], 0, 0, cs_flags[k] | PSYGFX_CSET_BACKWARD);
+        }
+        memset(&d2, 0, sizeof d2);
+        d2.texels = s2.texels; d2.n_texels = s2.n_texels; d2.words = s2.words; d2.n_words = s2.n_words;
+        d2.cap_texels = s2.n_texels + 4096; d2.cap_words = s2.n_words + 65536;
+        set2 = psygfx_cset_make(&R->g, &d2);
+        CHECK(set2.id != 0);
+        {
+            tcs_contour c[4];
+            int q;
+            for (q = 0; q < cs_nc[gid]; q++) { c[q].pts = cs_pts[gid][q]; c[q].n = cs_np[gid][q] / 2; }
+            tcs_glyph(&s2, gid, c, cs_nc[gid], 0, 0, cs_flags[gid] | PSYGFX_CSET_BACKWARD);
+        }
+        d2.texels = s2.texels; d2.n_texels = s2.n_texels; d2.words = s2.words; d2.n_words = s2.n_words;
+        rd = cs_rd(set, it, n, 24);
+        rd.fields = PSYGFX_I_ORI;
+        one = psygfx_crun(&R->g, &rd);
+        gl_frame(&one, 1);
+        cs_red(ref2);
+        rd.set = set2;
+        one = psygfx_crun(&R->g, &rd);
+        gl_frame(&one, 1);
+        {   /* before the add: every glyph but the absent one */
+            double before = cs_rdiff(ref2);
+            CHECK(before > 0.1);
+        }
+        CHECK(psygfx_cset_add(&R->g, set2, &d2, &gid, 1) == PSYGFX_OK);
+        gl_frame(&one, 1);
+        S8.added = cs_rdiff(ref2);
+        /* past its room */
+        d2.n_texels = 0x40000000u;   /* the room is checked before any texel is read */
+        cs_refused(12, psygfx_cset_add(&R->g, set2, &d2, &gid, 1) == PSYGFX_ERR_FULL);
+        psygfx_cset_free(&R->g, set2);
+        tcs_free(&s2);
+    }
+    /* refusals: each names its reason */
+    {
+        psygfx_crun_desc rd = cs_rd(set, it, n, 24);
+        psygfx_stim r1;
+        psygfx_citem bad[1];
+        int rc;
+        CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+        CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+        rd.set.id = 0; r1 = psygfx_crun(&R->g, &rd);
+        cs_refused(1, psygfx_draw(&R->g, &r1) == PSYGFX_ERR_ARG && strstr(psygfx_error(&R->g), "curve set"));
+        rd = cs_rd(set, it, n, 0); r1 = psygfx_crun(&R->g, &rd);
+        cs_refused(2, psygfx_draw(&R->g, &r1) == PSYGFX_ERR_ARG && strstr(psygfx_error(&R->g), "size"));
+        rd = cs_rd(set, it, n, 24); r1 = psygfx_crun(&R->g, &rd); r1.edge = PSYGFX_EDGE_GAUSSIAN; r1.edge_width = 2;
+        cs_refused(3, psygfx_draw(&R->g, &r1) == PSYGFX_ERR_ARG && strstr(psygfx_error(&R->g), "box filter"));
+        r1.edge = PSYGFX_EDGE_HARD; r1.edge_width = 0; r1.stroke = 2;
+        cs_refused(4, psygfx_draw(&R->g, &r1) == PSYGFX_ERR_ARG && strstr(psygfx_error(&R->g), "box filter"));
+        memset(bad, 0, sizeof bad);
+        bad[0].glyph = 1.5f;
+        rd = cs_rd(set, bad, 1, 24); r1 = psygfx_crun(&R->g, &rd);
+        cs_refused(5, psygfx_draw(&R->g, &r1) == PSYGFX_ERR_ARG && strstr(psygfx_error(&R->g), "glyph"));
+        bad[0].glyph = (float)(CS_N + 5);
+        cs_refused(6, psygfx_draw(&R->g, &r1) == PSYGFX_ERR_ARG && strstr(psygfx_error(&R->g), "glyph"));
+        rd = cs_rd(set, it, n, 24); rd.fields = PSYGFX_I_COLOR; r1 = psygfx_crun(&R->g, &rd);
+        cs_refused(7, psygfx_draw(&R->g, &r1) == PSYGFX_ERR_ARG && strstr(psygfx_error(&R->g), "palette"));
+        /* inside a frame: no set made, none added */
+        cs_refused(8, psygfx_cset_make(&R->g, &d).id == 0);
+        rc = psygfx_cset_add(&R->g, set, &d, NULL, 0);
+        cs_refused(9, rc == PSYGFX_ERR_ORDER);
+        CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+        CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+        /* a run as an instances template */
+        {
+            psygfx_inst el[2];
+            psygfx_instances_desc idd;
+            psygfx_stim tp;
+            rd = cs_rd(set, it, n, 24);
+            r1 = psygfx_crun(&R->g, &rd);
+            psygfx_inst_grid(el, 2, 1, 10, 10);
+            memset(&idd, 0, sizeof idd);
+            idd.inst = el; idd.n = 2;
+            tp = psygfx_instances(&R->g, &r1, &idd);
+            cs_refused(10, tp.n_inst == 0);
+        }
+        /* a malformed set */
+        {
+            psygfx_cset_desc d3 = d;
+            uint32_t* w2 = (uint32_t*)malloc(4u * d.n_words);
+            memcpy(w2, d.words, 4u * d.n_words);
+            w2[1] = 7;
+            d3.words = w2;
+            cs_refused(11, psygfx_cset_make(&R->g, &d3).id == 0 && strstr(psygfx_error(&R->g), "version"));
+            free(w2);
+        }
+    }
+    /* the GPU against the CPU form of the rays (cpu_ray: the shader in
+     * double), every glyph at rotation 0 */
+    {
+        psygfx_citem one_it[1];
+        psygfx_crun_desc rd;
+        psygfx_stim one;
+        int g2;
+        psygfx_cset_free(&R->g, set);
+        psygfx_close(&R->g);
+        psygfx__text_v3 = 0;
+        if (gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) {
+            set = psygfx_cset_make(&R->g, &d);
+            for (g2 = 0; g2 < CS_N; g2++) {
+                const uint32_t o = s.words[8 + g2];
+                double bx0 = psygfx__u2f(s.words[o]), by0 = psygfx__u2f(s.words[o + 1]);
+                double bx1 = psygfx__u2f(s.words[o + 2]), by1 = psygfx__u2f(s.words[o + 3]);
+                memset(one_it, 0, sizeof one_it);
+                one_it[0].glyph = (float)g2;
+                one_it[0].x = (float)(100.37 - 24 * bx0); one_it[0].y = (float)(60.21 - 24 * by0);
+                rd = cs_rd(set, one_it, 1, 24);
+                one = psygfx_crun(&R->g, &rd);
+                gl_frame(&one, 1);
+                for (j = 58; j < 60 + (int)(24 * (by1 - by0)) + 3; j++)
+                    for (i = 98; i < 100 + (int)(24 * (bx1 - bx0)) + 3; i++) {
+                        double c = cpu_cov(&s, g2, (i + 0.5 - one_it[0].x) / 24.0, (j + 0.5 - one_it[0].y) / 24.0, 24.0);
+                        S8.cpu = maxd(S8.cpu, fabs(c - R->scene[4 * (j * W + i)]));
+                    }
+            }
+        }
+    }
+    /* .rays (v0.7): where the exact area would apply, a run with it draws
+     * what the program without the exact area draws, bit for bit */
+    {
+        static float ra[W * H], rb[W * H];
+        psygfx_citem ri[CS_N];
+        psygfx_crun_desc rd;
+        psygfx_stim one;
+        int nr = cs_layout(&s, 24, 0, 0.21, 0.43, ri, org, &cell);
+        psygfx_cset_free(&R->g, set);   /* the CPU form above left the program without the exact area */
+        psygfx_close(&R->g);
+        psygfx__text_v3 = 1;
+        if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) { tcs_free(&s); return; }
+        set = psygfx_cset_make(&R->g, &d);
+        rd = cs_rd(set, ri, nr, 24);
+        rd.rays = true;
+        one = psygfx_crun(&R->g, &rd);
+        gl_frame(&one, 1);
+        cs_red(ra);
+        rd.rays = false;
+        one = psygfx_crun(&R->g, &rd);
+        gl_frame(&one, 1);
+        cs_red(rb);
+        S8.rays_exact = cs_rdiff(ra);
+        psygfx_cset_free(&R->g, set);
+        psygfx_close(&R->g);
+        psygfx__text_v3 = 0;
+        S8.rays_same = 1;
+        if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) { tcs_free(&s); return; }
+        set = psygfx_cset_make(&R->g, &d);
+        rd.set = set;
+        one = psygfx_crun(&R->g, &rd);
+        gl_frame(&one, 1);
+        S8.rays_same = cs_rdiff(ra);
+        (void)rb;
+    }
+    /* continuity: one glyph moved 0.005 px at a time. The exact area and the
+     * rays on a smooth outline change a pixel by no more than the move can;
+     * the rays at a corner jump where a ray passes the corner, which the
+     * report gives */
+    {
+        static const struct { int glyph; double rot; int v3; } C[5] = { { 0, 0, 1 }, { 2, 0, 1 }, { 2, 15, 0 }, { 2, 45, 0 }, { 9, 15, 0 } };
+        int ci, step;
+        for (ci = 0; ci < 5; ci++) {
+            psygfx_citem one_it[1];
+            psygfx_crun_desc rd;
+            psygfx_stim one;
+            double jmax = 0;
+            if (C[ci].v3 != psygfx__text_v3) {   /* a program per variant: a new open */
+                psygfx_cset_free(&R->g, set);
+                psygfx_close(&R->g);
+                psygfx__text_v3 = C[ci].v3;
+                if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) break;
+                set = psygfx_cset_make(&R->g, &d);
+            }
+            memset(one_it, 0, sizeof one_it);
+            one_it[0].glyph = (float)C[ci].glyph; one_it[0].ori = (float)C[ci].rot;
+            for (step = 0; step < 100; step++) {
+                one_it[0].x = 100.0f + 0.005f * (float)step; one_it[0].y = 150.0f + 0.0031f * (float)step;
+                rd = cs_rd(set, one_it, 1, 24);
+                rd.fields = PSYGFX_I_ORI;
+                one = psygfx_crun(&R->g, &rd);
+                gl_frame(&one, 1);
+                if (step) jmax = maxd(jmax, cs_rdiff(ref));
+                cs_red(ref);
+            }
+            if (ci < 2) S8.jump = maxd(S8.jump, jmax);
+            else if (ci < 4) S8.jump_ray = maxd(S8.jump_ray, jmax);
+            else S8.jump_corner = jmax;
+            if (getenv("PSYGFX_TEST_VERBOSE")) printf("    continuity: glyph %d rotation %.0f exact %d: %.4f\n", C[ci].glyph, C[ci].rot, C[ci].v3, jmax);
+        }
+        psygfx__text_v3 = 1;
+    }
+    /* static text cached (v0.7): a run drawn once into a target and
+     * composited at 1:1 on whole px, against the run drawn into the scene.
+     * The text program works in px with y down, so the target pass computes
+     * the scene's coverage bits; the composite is exact (texelFetch, times
+     * 1). Over black the same bits. Over gray an RGBA16F target has rounded
+     * alpha before the blend: one f16 step; an RGBA32F target has not */
+    {
+        int bg;
+        S8.cached[0] = S8.cached[1] = S8.cached[2] = S8.cached[3] = 1;
+        for (bg = 0; bg < 4; bg++) {
+            static float direct[W * H * 4];
+            psygfx_target_desc td;
+            psygfx_image_desc idd;
+            psygfx_tex t;
+            psygfx_stim one, img;
+            psygfx_crun_desc rd;
+            static const float zero[4] = { 0, 0, 0, 0 };
+            psygfx_cset_free(&R->g, set);
+            psygfx_close(&R->g);
+            if (!gl_open(bg == 1 || bg == 3, bg == 2 ? PSYGFX_RGBA32F : PSYGFX_RGBA16F, PSYGFX_DITHER_NONE)) { tcs_free(&s); return; }
+            set = psygfx_cset_make(&R->g, &d);
+            n = cs_layout(&s, 12, 0, 0, 0, it, org, &cell);
+            rd = cs_rd(set, it, n, 12);
+            one = psygfx_crun(&R->g, &rd);
+            gl_frame(&one, 1);
+            memcpy(direct, R->scene, sizeof direct);
+            memset(&td, 0, sizeof td);
+            td.w = W; td.h = H; td.format = bg >= 2 ? PSYGFX_RGBA32F : PSYGFX_RGBA16F;
+            t = psygfx_target(&R->g, &td);
+            CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+            CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+            CHECK(psygfx_begin_target(&R->g, t, zero) == PSYGFX_OK);
+            CHECK(psygfx_draw(&R->g, &one) == PSYGFX_OK);
+            CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+            CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+            CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+            memset(&idd, 0, sizeof idd);
+            idd.tex = t;
+            img = psygfx_image(&R->g, &idd);
+            gl_frame(&img, 1);
+            S8.cached[bg] = 0;
+            for (i = 0; i < W * H * 4; i++)   /* rgb: the scene's alpha is never read */
+                if ((i & 3) != 3) S8.cached[bg] = maxd(S8.cached[bg], fabs((double)R->scene[i] - direct[i]));
+            psygfx_texture_free(&R->g, t);
+        }
+    }
+    psygfx_cset_free(&R->g, set);
+    psygfx_close(&R->g);
+    tcs_free(&s);
+}
+
+/* ------------------------------------------------- v0.6 blur (GL) */
+
+
+/* The rect [x0, x1] x [y0, y1] blurred by a Gaussian of SD s, at a point:
+ * a product of erf differences. */
+static double bl_rect(double x, double y, double x0, double x1, double y0, double y1, double s) {
+    double k = 1.0 / (s * sqrt(2.0));
+    return 0.25 * (erf((x1 - x) * k) - erf((x0 - x) * k)) * (erf((y1 - y) * k) - erf((y0 - y) * k));
+}
+
+/* ------------------------------------------------- v0.8 (GL) */
+
+/* Setup passes and the automatic rays program. */
+typedef struct stats10 {
+    int    ran;
+    double setup_target, setup_comp, next_scene, next_out, blur_same;
+    long   frames_moved, refused_ok, refused_n;
+    double auto_diff[5];   /* auto against the exact-area program, bit for bit */
+    long   auto_pick_bad;  /* runs on the program the rule does not name */
+} stats10;
+static stats10 S10;
+
+static void s10_refuse(int ok) { S10.refused_n++; S10.refused_ok += ok != 0; }
+
+static void gl_v08(stats* st) {
+    static float ta[W * H * 4], tb[W * H * 4], sa[W * H * 4], oa8[W * H * 4];
+    static uint8_t oa[W * H * 4];
+    tcs_set s;
+    psygfx_cset_desc d;
+    psygfx_cset set;
+    psygfx_citem it[CS_N];
+    double org[CS_N][2], cell;
+    psygfx_target_desc td;
+    psygfx_tex t1, t2;
+    psygfx_crun_desc rd;
+    psygfx_stim page, img, gab;
+    psygfx_gabor_desc gd;
+    psygfx_image_desc id;
+    static const float zero[4] = { 0, 0, 0, 0 };
+    int n, i, k;
+    uint64_t frames0;
+    (void)st; (void)oa8;
+    memset(&S10, 0, sizeof S10);
+    S10.ran = 1;
+    cs_build(&s, 0, PSYGFX_CSET_BACKWARD);
+    if (!gl_open(1, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) { tcs_free(&s); return; }
+    memset(&d, 0, sizeof d);
+    d.texels = s.texels; d.n_texels = s.n_texels; d.words = s.words; d.n_words = s.n_words;
+    set = psygfx_cset_make(&R->g, &d);
+    n = cs_layout(&s, 12, 0, 0, 0, it, org, &cell);
+    rd = cs_rd(set, it, n, 12);
+    page = psygfx_crun(&R->g, &rd);
+    memset(&td, 0, sizeof td);
+    td.w = W; td.h = H; td.format = PSYGFX_RGBA32F;
+    t1 = psygfx_target(&R->g, &td);
+    t2 = psygfx_target(&R->g, &td);
+    memset(&id, 0, sizeof id);
+    id.tex = t1;
+    img = psygfx_image(&R->g, &id);
+    memset(&gd, 0, sizeof gd);
+    gd.x = 20; gd.sigma = 12; gd.sf = 1 / 9.0f; gd.contrast = 0.4f; gd.ori = 30;
+    gab = psygfx_gabor(&gd);
+
+    /* a frame of reference: the gabor and the run in the scene */
+    {
+        psygfx_stim two[2];
+        two[0] = gab; two[1] = page;
+        gl_frame(two, 2);
+        memcpy(sa, R->scene, sizeof sa);
+        memcpy(oa, R->out, sizeof oa);
+    }
+    frames0 = R->g.frames;
+    /* the page at setup into t1 */
+    CHECK(psygfx_begin_setup(&R->g) == PSYGFX_OK);
+    CHECK(psygfx_begin_target(&R->g, t1, zero) == PSYGFX_OK);
+    CHECK(psygfx_draw(&R->g, &page) == PSYGFX_OK);
+    CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+    CHECK(psygfx_end_setup(&R->g) == PSYGFX_OK);
+    S10.frames_moved = (long)(R->g.frames - frames0);
+    /* the next frame: as if no setup pass had run */
+    {
+        psygfx_stim two[2];
+        two[0] = gab; two[1] = page;
+        gl_frame(two, 2);
+        S10.next_scene = 0; S10.next_out = 0;
+        for (i = 0; i < W * H * 4; i++) S10.next_scene = maxd(S10.next_scene, fabs((double)R->scene[i] - sa[i]));
+        S10.next_out = memcmp(R->out, oa, sizeof oa) != 0;
+    }
+    /* the same page in a frame into t2: the targets bit for bit, and each
+     * composited 1:1 */
+    CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+    CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+    CHECK(psygfx_begin_target(&R->g, t2, zero) == PSYGFX_OK);
+    CHECK(psygfx_draw(&R->g, &page) == PSYGFX_OK);
+    CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+    CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+    CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+    CHECK(psygfx_read_target(&R->g, t1, 0, 0, W, H, ta) == PSYGFX_OK);
+    CHECK(psygfx_read_target(&R->g, t2, 0, 0, W, H, tb) == PSYGFX_OK);
+    S10.setup_target = memcmp(ta, tb, sizeof ta) != 0;
+    gl_frame(&img, 1);
+    memcpy(sa, R->scene, sizeof sa);
+    img.tex = t2;
+    gl_frame(&img, 1);
+    S10.setup_comp = memcmp(sa, R->scene, sizeof sa) != 0;
+    img.tex = t1;
+    /* a blur applied at setup against one applied in a frame */
+    {
+        psygfx_blur b1, b2;
+        psygfx_blur_desc bd;
+        static float r1[W * H * 4], r2[W * H * 4];
+        memset(&bd, 0, sizeof bd);
+        bd.w = 200; bd.h = 120; bd.format = PSYGFX_RGBA16F; bd.sigma = 2.5f;
+        CHECK(psygfx_blur_make(&R->g, &b1, &bd) == PSYGFX_OK);
+        CHECK(psygfx_blur_make(&R->g, &b2, &bd) == PSYGFX_OK);
+        rd.place = PSYGFX_CENTER; rd.anchor = PSYGFX_CENTER; rd.w = 0; rd.h = 0; rd.n = 3;
+        {
+            psygfx_stim word = psygfx_crun(&R->g, &rd);
+            frames0 = R->g.frames;
+            CHECK(psygfx_begin_setup(&R->g) == PSYGFX_OK);
+            CHECK(psygfx_begin_target(&R->g, b1.layer, zero) == PSYGFX_OK);
+            CHECK(psygfx_draw(&R->g, &word) == PSYGFX_OK);
+            CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+            CHECK(psygfx_blur_apply(&R->g, &b1) == PSYGFX_OK);
+            CHECK(psygfx_end_setup(&R->g) == PSYGFX_OK);
+            S10.frames_moved += (long)(R->g.frames - frames0);
+            CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+            CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+            CHECK(psygfx_begin_target(&R->g, b2.layer, zero) == PSYGFX_OK);
+            CHECK(psygfx_draw(&R->g, &word) == PSYGFX_OK);
+            CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+            CHECK(psygfx_blur_apply(&R->g, &b2) == PSYGFX_OK);
+            CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+            CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+        }
+        CHECK(psygfx_read_target(&R->g, b1.result, 0, 0, 200, 120, r1) == PSYGFX_OK);
+        CHECK(psygfx_read_target(&R->g, b2.result, 0, 0, 200, 120, r2) == PSYGFX_OK);
+        S10.blur_same = memcmp(r1, r2, sizeof(float) * 4 * 200 * 120) != 0;
+        psygfx_blur_free(&R->g, &b1);
+        psygfx_blur_free(&R->g, &b2);
+        rd = cs_rd(set, it, n, 12);
+    }
+    /* refusals */
+    CHECK(psygfx_begin_setup(&R->g) == PSYGFX_OK);
+    s10_refuse(psygfx_draw(&R->g, &page) == PSYGFX_ERR_ORDER);           /* the scene is a frame's */
+    s10_refuse(psygfx_end(&R->g) == PSYGFX_ERR_ORDER);                   /* a setup pass ends with end_setup */
+    s10_refuse(psygfx_begin(&R->g, &R->f) == PSYGFX_ERR_ORDER);          /* no frame inside it */
+    s10_refuse(psygfx_begin_setup(&R->g) == PSYGFX_ERR_ORDER);           /* nor a second setup pass */
+    CHECK(psygfx_begin_target(&R->g, t1, NULL) == PSYGFX_OK);
+    s10_refuse(psygfx_begin_target(&R->g, t2, NULL) == PSYGFX_ERR_ORDER); /* not nested */
+    CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+    for (k = 1; k < PSYGFX_MAX_PASSES; k++) { CHECK(psygfx_begin_target(&R->g, t2, NULL) == PSYGFX_OK); CHECK(psygfx_end_target(&R->g) == PSYGFX_OK); }
+    s10_refuse(psygfx_begin_target(&R->g, t2, NULL) == PSYGFX_ERR_ORDER); /* the 16 passes */
+    CHECK(psygfx_end_setup(&R->g) == PSYGFX_OK);
+    s10_refuse(psygfx_end_setup(&R->g) == PSYGFX_ERR_ORDER);             /* no setup pass open */
+    CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+    CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+    s10_refuse(psygfx_begin_setup(&R->g) == PSYGFX_ERR_ORDER);           /* not inside a frame */
+    s10_refuse(psygfx_end_setup(&R->g) == PSYGFX_ERR_ORDER);
+    CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+    CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+
+    /* the rays program automatically: every case drawn by the rule and by
+     * the exact-area program (the seam), bit for bit; the program each took */
+    {
+        static float ref[W * H];
+        psygfx_buf b = psygfx_buffer(&R->g, sizeof(psygfx_citem) * CS_N);
+        int c;
+        for (c = 0; c < 5; c++) {
+            psygfx_stim run;
+            int want_rays, a;
+            n = cs_layout(&s, 24, c == 0 ? 15 : 0, 0.21, 0.43, it, org, &cell);
+            rd = cs_rd(set, it, n, 24);
+            if (c == 0) { rd.ori = 15; want_rays = 1; }                                   /* the run turned */
+            else if (c == 1) { for (k = 0; k < n; k++) it[k].ori = 7.0f + 11.0f * (float)k; rd.fields = PSYGFX_I_ORI; want_rays = 1; }
+            else if (c == 2) {                                                             /* one item on a quarter turn */
+                for (k = 0; k < n; k++) it[k].ori = k == 1 ? 90.0f : 7.0f + 11.0f * (float)k;
+                rd.fields = PSYGFX_I_ORI; want_rays = 0;
+            } else if (c == 3) { rd.aliased = true; want_rays = 1; }                      /* aliased, not turned */
+            else {                                                                         /* turned items in a buffer */
+                for (k = 0; k < n; k++) it[k].ori = 7.0f + 11.0f * (float)k;
+                psygfx_buffer_update(&R->g, b, 0, it, sizeof(psygfx_citem) * (size_t)n);
+                rd.items = NULL; rd.buf = b; rd.fields = PSYGFX_I_ORI; want_rays = 0;
+            }
+            run = psygfx_crun(&R->g, &rd);
+            for (a = 1; a >= 0; a--) {
+                psygfx__text_auto = a;
+                gl_frame(&run, 1);
+                if (a) {
+                    cs_red(ref);
+                    S10.auto_pick_bad += (R->g.cmds[0].pipe == R->g.text_rays_pipe) != want_rays;
+                } else {
+                    S10.auto_diff[c] = cs_rdiff(ref);
+                    S10.auto_pick_bad += R->g.cmds[0].pipe != R->g.text_pipe;
+                }
+            }
+            psygfx__text_auto = 1;
+            for (k = 0; k < n; k++) it[k].ori = 0;
+        }
+        psygfx_buffer_free(&R->g, b);
+    }
+    psygfx_texture_free(&R->g, t1);
+    psygfx_texture_free(&R->g, t2);
+    psygfx_cset_free(&R->g, set);
+    psygfx_close(&R->g);
+    tcs_free(&s);
+}
+
+static void s10_report(void) {
+    if (!S10.ran) return;
+    printf("  v0.8 setup passes: a page at setup against in a frame: target %s, composite %s; the next frame against one "
+           "without a setup pass: scene %.2e, output %s; a blur at setup against in a frame: %s; frames counted by setup "
+           "passes %ld; refusals %ld of %ld\n",
+           S10.setup_target ? "differs" : "equal", S10.setup_comp ? "differs" : "equal", S10.next_scene,
+           S10.next_out ? "differs" : "equal", S10.blur_same ? "differs" : "equal", S10.frames_moved, S10.refused_ok, S10.refused_n);
+    printf("  v0.8 automatic rays: against the exact-area program, run turned %.2e, items turned %.2e, one item on a quarter "
+           "turn %.2e, aliased %.2e, buffer %.2e; wrong program %ld\n", S10.auto_diff[0], S10.auto_diff[1], S10.auto_diff[2],
+           S10.auto_diff[3], S10.auto_diff[4], S10.auto_pick_bad);
+    CHECK(S10.setup_target == 0);
+    CHECK(S10.setup_comp == 0);
+    CHECK(S10.next_scene == 0.0);
+    CHECK(S10.next_out == 0);
+    CHECK(S10.blur_same == 0);
+    CHECK(S10.frames_moved == 0);
+    CHECK(S10.refused_ok == S10.refused_n && S10.refused_n == 9);
+    CHECK(S10.auto_diff[0] == 0.0 && S10.auto_diff[1] == 0.0 && S10.auto_diff[2] == 0.0 && S10.auto_diff[3] == 0.0 &&
+          S10.auto_diff[4] == 0.0);
+    CHECK(S10.auto_pick_bad == 0);
+    S10.ran = 0;
+}
+
+/* ------------------------------------------------- v0.10 SIMPLEX */
+
+/* The integer simplex in double from the same Q12 lattice point: the same
+ * lattice, keys and gradients, none of the integer rounding. Its distance
+ * from psygfx_simplex_value() is the integer form's quantization. */
+static double gn_ref(double x, double y, double z, uint32_t S) {
+    static const int G[16][3] = { { 1, 1, 0 }, { -1, 1, 0 }, { 1, -1, 0 }, { -1, -1, 0 }, { 1, 0, 1 }, { -1, 0, 1 }, { 1, 0, -1 },
+                                  { -1, 0, -1 }, { 0, 1, 1 }, { 0, -1, 1 }, { 0, 1, -1 }, { 0, -1, -1 }, { 1, 1, 0 }, { -1, 1, 0 },
+                                  { 0, -1, 1 }, { 0, -1, -1 } };
+    double v[3], sk, x0[3], sum = 0;
+    int64_t c[3];
+    int e[3], i1[3], i2[3], j, k;
+    v[0] = x; v[1] = y; v[2] = z;
+    sk = (x + y + z) / 3.0;
+    for (j = 0; j < 3; j++) c[j] = (int64_t)floor(v[j] + sk);
+    for (j = 0; j < 3; j++) x0[j] = v[j] - (double)c[j] + (double)(c[0] + c[1] + c[2]) / 6.0;
+    for (j = 0; j < 3; j++) e[j] = x0[j] >= x0[(j + 1) % 3];
+    for (j = 0; j < 3; j++) { i1[j] = e[j] * (1 - e[(j + 2) % 3]); i2[j] = 1 - e[(j + 2) % 3] * (1 - e[j]); }
+    for (k = 0; k < 4; k++) {
+        int o[3];
+        double d[3], t;
+        for (j = 0; j < 3; j++) {
+            o[j] = k == 0 ? 0 : (k == 1 ? i1[j] : (k == 2 ? i2[j] : 1));
+            d[j] = x0[j] - o[j] + k / 6.0;
+        }
+        t = 0.6 - (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (t > 0) {
+            uint32_t cz = (uint32_t)(c[2] + o[2]), kk = psygfx_hash(cz ^ S), m = psygfx_hash(kk ^ 0x9E3779B9u);
+            uint32_t h = psygfx_hash(((uint32_t)(c[0] + o[0]) + ((uint32_t)(c[1] + o[1]) << 16)) * (kk | 1u) ^ m);
+            const int* g = G[h >> 28];
+            t *= t;
+            sum += t * t * (g[0] * d[0] + g[1] * d[1] + g[2] * d[2]);
+        }
+    }
+    return 32.0 * sum;
+}
+
+typedef struct stats11 {
+    int    ran;
+    long   bad, n, refused_ok, refused_n;
+    double quant, turned_max, turned_mean, sd[3];
+} stats11;
+static stats11 S11;
+
+/* CPU: the integer form against double, one octave, at every lattice point
+ * of a 512 x 512 field (Q12 inputs as the GPU makes them) */
+static void test_v10_simplex_cpu(void) {
+    double worst = 0;
+    uint32_t S = psygfx_hash(7u);
+    int i, j;
+    for (j = 0; j < 512; j++)
+        for (i = 0; i < 512; i++) {
+            uint32_t r = 16384u / 23u, vx = ((2u * (uint32_t)i + 1u) * r) >> 1, vy = ((2u * (uint32_t)j + 1u) * r) >> 1, vz = 22222u;
+            int32_t a = psygfx__gn_i(vx + 0x10000000u, vy + 0x10000000u, vz + 0x10000000u, S);
+            double want = gn_ref((vx + 0x10000000u) / 16384.0, (vy + 0x10000000u) / 16384.0, (vz + 0x10000000u) / 16384.0, S);
+            worst = maxd(worst, fabs(a * (32.0 / 1073741824.0) - want));
+        }
+    S11.quant = worst;
+    printf("v0.10 simplex: the integer form against double on the same lattice points, one octave: max %.2e\n", worst);
+    CHECK_LE(worst, 2e-3);
+    {   /* the SD by octaves the manual states (1024 x 1024, 4 seeds there;
+         * 512 x 512, one seed here: within 0.02) */
+        static psygfx_gfx g0;
+        static const int oc[3] = { 1, 4, 8 };
+        static const double sd_doc[3] = { 0.425, 0.261, 0.246 };
+        int q;
+        g0.ppu = 1.0f;
+        for (q = 0; q < 3; q++) {
+            psygfx_noise_desc nd;
+            psygfx_stim st;
+            double sum = 0, sq = 0;
+            memset(&nd, 0, sizeof nd);
+            nd.w = 512; nd.h = 512; nd.dist = PSYGFX_SIMPLEX; nd.scale = 32; nd.octaves = oc[q]; nd.seed = 3;
+            st = psygfx_noise(&nd);
+            for (j = 0; j < 512; j++)
+                for (i = 0; i < 512; i++) { double v = psygfx_simplex_value(&g0, &st, i, j); sum += v; sq += v * v; }
+            sum /= 512.0 * 512.0;
+            S11.sd[q] = sqrt(sq / (512.0 * 512.0) - sum * sum);
+            CHECK_LE(fabs(S11.sd[q] - sd_doc[q]), 0.02);
+        }
+        printf("v0.10 simplex: SD of 1, 4, 8 octaves %.3f %.3f %.3f (manual 0.425 0.261 0.246)\n", S11.sd[0], S11.sd[1], S11.sd[2]);
+    }
+}
+
+static void gl_v10_simplex(stats* st) {
+    static const struct { float scale, z, lac, gain; int oct; uint32_t seed; float x, y, w, h; } C[6] = {
+        { 16, 0.0f, 2.0f, 0.5f, 1, 7, 20, 10, 200, 150 },
+        { 40, 3.37f, 2.0f, 0.5f, 4, 9, 7, 3, 300, 190 },
+        { 23, 1.5f, 1.7f, 0.8f, 8, 12345, 0, 0, 320, 200 },
+        { 5, -2.25f, 2.0f, 0.6f, 3, 1, 50, 40, 120, 100 },
+        { 200, 0.75f, 3.0f, 0.4f, 2, 77, 10, 10, 300, 180 },
+        { 2, 0.0f, 1.0f, 1.0f, 1, 3, 30, 30, 100, 100 },
+    };
+    psygfx_noise_desc nd;
+    psygfx_stim s;
+    int c, i, j;
+    (void)st;
+    memset(&S11, 0, sizeof S11);
+    S11.ran = 1;
+    if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) return;
+    for (c = 0; c < 6; c++) {
+        memset(&nd, 0, sizeof nd);
+        nd.place = PSYGFX_TOP_LEFT; nd.anchor = PSYGFX_TOP_LEFT;
+        nd.x = C[c].x; nd.y = C[c].y; nd.w = C[c].w; nd.h = C[c].h;
+        nd.dist = PSYGFX_SIMPLEX; nd.scale = C[c].scale; nd.z = C[c].z; nd.octaves = C[c].oct;
+        nd.lacunarity = C[c].lac; nd.gain = C[c].gain; nd.seed = C[c].seed;
+        nd.aperture = PSYGFX_NO_APERTURE; nd.dir[0] = nd.dir[1] = nd.dir[2] = 1;
+        s = psygfx_noise(&nd);
+        gl_frame(&s, 1);
+        for (j = 0; j < (int)C[c].h; j++)
+            for (i = 0; i < (int)C[c].w; i++) {
+                int px = (int)C[c].x + i, py = (int)C[c].y + j;
+                float got, want = psygfx_simplex_value(&R->g, &s, i, j);
+                if (px >= W || py >= H) continue;
+                got = R->scene[(py * W + px) * 4];
+                S11.n++;
+                if (got != want) {
+                    S11.bad++;
+                    if (S11.bad < 5 && getenv("PSYGFX_TEST_VERBOSE")) printf("  simplex %d at %d %d: got %.9g want %.9g\n", c, i, j, got, want);
+                }
+            }
+    }
+    {   /* turned: the same field, its values in range, its mean near 0 */
+        double sum = 0;
+        long n = 0;
+        memset(&nd, 0, sizeof nd);
+        nd.w = 280; nd.h = 180; nd.ori = 30; nd.dist = PSYGFX_SIMPLEX; nd.scale = 12; nd.octaves = 3; nd.seed = 5;
+        nd.aperture = PSYGFX_NO_APERTURE; nd.dir[0] = nd.dir[1] = nd.dir[2] = 1;
+        s = psygfx_noise(&nd);
+        gl_frame(&s, 1);
+        for (j = 0; j < H; j++)
+            for (i = 0; i < W; i++) {
+                double v = R->scene[(j * W + i) * 4];
+                S11.turned_max = maxd(S11.turned_max, fabs(v));
+                sum += v; n++;
+            }
+        S11.turned_mean = fabs(sum / n);
+    }
+    {   /* refusals */
+        psygfx_stim b[6];
+        memset(&nd, 0, sizeof nd);
+        nd.w = 50; nd.dist = PSYGFX_SIMPLEX; nd.scale = 10; nd.dir[0] = 1;
+        for (i = 0; i < 6; i++) b[i] = psygfx_noise(&nd);
+        b[0].gn_scale = 0;
+        b[1].gn_octaves = 9;
+        b[2].gn_lacunarity = 9;
+        b[3].gn_gain = 1.5f;
+        b[4].shape = PSYGFX_POLYGON; b[4].shape_p[0] = 3;   /* refused before its vertices are read */
+        b[5].gn_scale = 0.001f;   /* a cell below 1/32 px */
+        CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+        CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+        for (i = 0; i < 6; i++) { S11.refused_n++; S11.refused_ok += psygfx_draw(&R->g, &b[i]) == PSYGFX_ERR_ARG; }
+        CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+        CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+    }
+    psygfx_close(&R->g);
+}
+
+static void s11_report(void) {
+    if (!S11.ran) return;
+    printf("  v0.10 simplex: GPU against psygfx_simplex_value(), 6 fields: wrong %ld of %ld; turned: largest |value| %.3f, "
+           "mean %.4f; refusals %ld of %ld\n", S11.bad, S11.n, S11.turned_max, S11.turned_mean, S11.refused_ok, S11.refused_n);
+    CHECK(S11.bad == 0 && S11.n > 100000);
+    CHECK_LE(S11.turned_max, 1.0);
+    CHECK_LE(S11.turned_mean, 0.05);
+    CHECK(S11.refused_ok == S11.refused_n && S11.refused_n == 6);
+    S11.ran = 0;
+}
+
+static void gl_v06_blur(stats* st) {
+    static const psygfx_format fm[3] = { PSYGFX_RGBA32F, PSYGFX_RGBA16F, PSYGFX_R16F };
+    static const double sig[6] = { 0.5, 1, 2, 4, 8, 16 };
+    static float res[W * H * 4];
+    int f, ss, k;
+    (void)st;
+    if (!gl_open(0, PSYGFX_RGBA32F, PSYGFX_DITHER_NONE)) return;
+    S9.ran = 1;
+    for (f = 0; f < 3; f++)
+        for (ss = 1; ss <= 2; ss++) {
+            psygfx_blur bl;
+            psygfx_blur_desc bd;
+            psygfx_shape_desc sd;
+            psygfx_stim rect;
+            memset(&bd, 0, sizeof bd);
+            bd.w = W; bd.h = H; bd.format = fm[f]; bd.supersample = ss;
+            if (psygfx_blur_make(&R->g, &bl, &bd) != PSYGFX_OK) {
+                fprintf(stderr, "psy_gfx_test [%s]: FAIL v0.6 blur_make: %s\n", g_where, psygfx_error(&R->g));
+                g_failures++;
+                continue;
+            }
+            /* a rect on whole pixels: its point samples are its box coverage */
+            memset(&sd, 0, sizeof sd);
+            sd.place = PSYGFX_TOP_LEFT; sd.anchor = PSYGFX_TOP_LEFT; sd.shape = PSYGFX_RECT;
+            sd.x = 120; sd.y = 70; sd.w = 80; sd.h = 60; sd.color[0] = sd.color[1] = sd.color[2] = 1;
+            rect = psygfx_shape(&sd);
+            for (k = 0; k < 6; k++) {
+                static const float zero[4] = { 0, 0, 0, 0 };
+                int i, j;
+                double mx = 0;
+                CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+                CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+                CHECK(psygfx_begin_target(&R->g, bl.layer, zero) == PSYGFX_OK);
+                CHECK(psygfx_draw(&R->g, &rect) == PSYGFX_OK);
+                CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+                bl.sigma = (float)sig[k];
+                CHECK(psygfx_blur_apply(&R->g, &bl) == PSYGFX_OK);
+                CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+                CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+                CHECK(psygfx_read_target(&R->g, bl.result, 0, 0, W, H, res) == PSYGFX_OK);
+                for (j = 0; j < H; j++)
+                    for (i = 0; i < W; i++) {
+                        double d = fabs(res[(j * W + i) * 4] - bl_rect(i + 0.5, j + 0.5, 120, 200, 70, 130, sig[k]));
+                        if (d > mx) mx = d;
+                    }
+                S9.rect[f][ss - 1][k] = mx;
+            }
+            if (f == 0 && ss == 1) {   /* a rect at the layer's corner: the plane outside is empty */
+                static const float zero[4] = { 0, 0, 0, 0 };
+                psygfx_stim corner = rect;
+                int q;
+                corner.x = 0; corner.y = 0; corner.w = 40; corner.h = 60;
+                CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+                CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+                CHECK(psygfx_begin_target(&R->g, bl.layer, zero) == PSYGFX_OK);
+                CHECK(psygfx_draw(&R->g, &corner) == PSYGFX_OK);
+                CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+                bl.sigma = 4;
+                CHECK(psygfx_blur_apply(&R->g, &bl) == PSYGFX_OK);
+                CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+                CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+                CHECK(psygfx_read_target(&R->g, bl.result, 0, 0, W, H, res) == PSYGFX_OK);
+                for (q = 0; q < W * H; q++)
+                    S9.edge = maxd(S9.edge, fabs(res[4 * q] - bl_rect(q % W + 0.5, q / W + 0.5, 0, 40, 0, 60, 4)));
+            }
+            if (f == 2 && ss == 1) {   /* the coverage image: tint.rgb, coverage x tint.a */
+                int q;
+                bl.image.place = PSYGFX_TOP_LEFT; bl.image.ax = 0; bl.image.ay = 0;
+                bl.image.tint[0] = 0.2f; bl.image.tint[1] = 0.4f; bl.image.tint[2] = 0.6f; bl.image.tint[3] = 0.5f;
+                gl_frame(&bl.image, 1);
+                for (q = 0; q < W * H; q++) {
+                    double a = 0.5 * res[4 * q];
+                    S9.cover = maxd(S9.cover, fabs(R->scene[4 * q] - 0.2 * a));
+                    S9.cover = maxd(S9.cover, fabs(R->scene[4 * q + 2] - 0.6 * a));
+                }
+            }
+            psygfx_blur_free(&R->g, &bl);
+        }
+    {   /* refusals */
+        psygfx_blur bl;
+        psygfx_blur_desc bd;
+        static const float zero[4] = { 0, 0, 0, 0 };
+        memset(&bd, 0, sizeof bd);
+        bd.w = 64; bd.h = 32; bd.format = PSYGFX_RGBA8;
+        S9.refused_n++; S9.refused_ok += psygfx_blur_make(&R->g, &bl, &bd) == PSYGFX_ERR_ARG;
+        bd.format = PSYGFX_R16F; bd.supersample = 3;
+        S9.refused_n++; S9.refused_ok += psygfx_blur_make(&R->g, &bl, &bd) == PSYGFX_ERR_ARG;
+        bd.supersample = 0; bd.sigma = 0.2f;
+        CHECK(psygfx_blur_make(&R->g, &bl, &bd) == PSYGFX_OK);
+        S9.refused_n++; S9.refused_ok += psygfx_blur_apply(&R->g, &bl) == PSYGFX_ERR_ORDER;   /* outside a frame */
+        CHECK(psyscr_begin(&R->scr, &R->f) == PSYSCR_OK);
+        CHECK(psygfx_begin(&R->g, &R->f) == PSYGFX_OK);
+        S9.refused_n++; S9.refused_ok += psygfx_blur_apply(&R->g, &bl) == PSYGFX_ERR_ARG && strstr(psygfx_error(&R->g), "box");
+        bl.sigma = 40;
+        S9.refused_n++; S9.refused_ok += psygfx_blur_apply(&R->g, &bl) == PSYGFX_ERR_ARG;
+        bl.sigma = 1;
+        {
+            psygfx_blur b2;
+            S9.refused_n++; S9.refused_ok += psygfx_blur_make(&R->g, &b2, &bd) == PSYGFX_ERR_ORDER;   /* inside a frame */
+        }
+        CHECK(psygfx_begin_target(&R->g, bl.layer, zero) == PSYGFX_OK);
+        S9.refused_n++; S9.refused_ok += psygfx_blur_apply(&R->g, &bl) == PSYGFX_ERR_ORDER;   /* inside a target pass */
+        CHECK(psygfx_end_target(&R->g) == PSYGFX_OK);
+        {   /* the 16 passes: 14 used, the blur's 2 fit; 15 used, they do not */
+            int q;
+            for (q = 0; q < 13; q++) { CHECK(psygfx_begin_target(&R->g, bl.layer, NULL) == PSYGFX_OK); CHECK(psygfx_end_target(&R->g) == PSYGFX_OK); }
+            S9.refused_n++; S9.refused_ok += psygfx_blur_apply(&R->g, &bl) == PSYGFX_OK;
+            S9.refused_n++; S9.refused_ok += psygfx_blur_apply(&R->g, &bl) == PSYGFX_ERR_ORDER;
+        }
+        CHECK(psygfx_end(&R->g) == PSYGFX_OK);
+        CHECK(psyscr_flip(&R->scr) == PSYSCR_OK);
+        psygfx_blur_free(&R->g, &bl);
+    }
+    psygfx_close(&R->g);
 }
 
 #if defined(__SANITIZE_ADDRESS__)
@@ -5114,12 +7495,16 @@ static int gl_suite(const char* name, psygfx_hl_device dev) {
 
 static int sanitized(void) { return SANITIZED; }   /* not a constant: C4127 */
 
-static int wanted(const char* name) {
+/* ran: renderers that ran so far. With no list the default runs the first
+ * renderer that opens (hardware, else WARP, else SwiftShader); a list, or
+ * PSYGFX_TEST_FULL=1, runs each one named, or all. */
+static int wanted(const char* name, int ran) {
     const char* e = getenv("PSYGFX_TEST_DEVICES");
     /* Under ASan, Mesa leaves 112 bytes from a module it unloads, which a
      * suppression cannot name: GL runs only when asked for by name. */
     if (sanitized() && (!e || !e[0])) return 0;
-    return !e || !e[0] || strstr(e, name) != NULL;
+    if (e && e[0]) return strstr(e, name) != NULL;
+    return cs_full() || ran == 0;
 }
 
 int main(void) {
@@ -5136,17 +7521,22 @@ int main(void) {
     test_v04_cache_cpu();
     test_v04_fixes_cpu();
     test_v04_inst_cpu();
+    test_v06_cset_cpu();
+    test_v10_simplex_cpu();
     printf("v0.4 instances: the shader's cosine and sine of degrees, -720 to 720, against double: max %.2e\n", S6.csd_err);
+    printf("v0.7 ellipse: the quarter perimeter against Simpson's rule, aspect 1 to 20: max relative %.2e\n", S4.ell_quarter);
     R = (rig*)calloc(1, sizeof *R);
     if (!R) return 1;
 #if defined(_WIN32)
-    if (wanted("hardware")) ran += gl_suite("ANGLE D3D11 hardware", PSYGFX_HL_HARDWARE);
-    if (wanted("warp")) ran += gl_suite("ANGLE D3D11 WARP", PSYGFX_HL_WARP);
-    if (wanted("swiftshader")) ran += gl_suite("ANGLE Vulkan SwiftShader", PSYGFX_HL_SWIFTSHADER);
+    if (wanted("hardware", ran)) ran += gl_suite("ANGLE D3D11 hardware", PSYGFX_HL_HARDWARE);
+    if (wanted("warp", ran)) ran += gl_suite("ANGLE D3D11 WARP", PSYGFX_HL_WARP);
+    if (wanted("swiftshader", ran)) ran += gl_suite("ANGLE Vulkan SwiftShader", PSYGFX_HL_SWIFTSHADER);
 #else
-    if (wanted("mesa")) ran += gl_suite("Mesa llvmpipe", PSYGFX_HL_MESA_SOFTWARE);
+    if (wanted("mesa", ran)) ran += gl_suite("Mesa llvmpipe", PSYGFX_HL_MESA_SOFTWARE);
 #endif
     free(R);
+    if (cs_ol_ok == 1) psyol_cset_free(&cs_ol);
+    if (cs_ol_ok >= 0) psyol_free(&cs_ol_cx);
     if (!ran) {
         printf("no GL ES 3.0 renderer opened%s: the GL checks did not run\n",
                sanitized() ? " (a sanitizer build runs GL only with PSYGFX_TEST_DEVICES)" : "");

@@ -20,6 +20,7 @@ function test_mex()
     test_quest();
     test_gp();
     test_trials();
+    test_trials_v02();
     fprintf('PASS\n');
 end
 
@@ -366,4 +367,71 @@ function test_trials()
     expect_error('psy_trials:arg', @() psy_trials('open', struct('n_conditions', 2, 'reps', 1, 'nosuch', 1)));
     psy_trials('close', h);
     fprintf('psy_trials: ok\n');
+end
+
+% ---------------------------------------------------------------------------
+% psy_trials v0.2: tables, names, rules, units, balance, groups, Latin squares.
+
+function test_trials_v02()
+    csv = sprintf(['target,contrast,word\n' ...
+                   'a,0.25,cat\na,0.5,dog\nb,0.25,"new york"\nb,0.5,ox\ncatch,0,emu\ncatch,0,yak\n']);
+    info = psy_trials('table', csv);
+    check(isequal(info.columns, {'target', 'contrast', 'word'}), 'table columns');
+    check(isequal(info.types, {'string', 'number', 'string'}), 'table types');
+    check(info.n_rows == 6 && strcmp(info.values{3, 3}, 'new york'), 'table values');
+    check(isequal(info.levels{1}, {'a', 'b', 'catch'}), 'table levels');
+    expect_error('psy_trials:table', @() psy_trials('table', struct('csv', sprintf('x,y\n1,a\n"0,5",b\n'), 'types', struct('x', 'number'))));
+    % The same design by names and by rules gives one schedule.
+    d = struct('table', csv, 'reps', 6, 'order', 'constrained', 'rng', 99, 'block_size', 12);
+    d.constraints = [psy_trials('max_run', 'target', 'any', 2), ...
+                     psy_trials('max_in_window', 'target', 'catch', 2, 1), ...
+                     psy_trials('first_not', 'target', 'catch')];
+    h = psy_trials('open', d);
+    r = struct('table', csv, 'rng', 99, 'rules', sprintf(['order constrained\nreps 6\n' ...
+               'max_run target 2\nmax_in_window target=catch 2 1\nfirst_not target=catch\nblock_size 12\n']));
+    h2 = psy_trials('open', r);
+    check(isequal(psy_trials('schedule', h), psy_trials('schedule', h2)), 'rules and names give different schedules');
+    r.rules = psy_trials('format_rules', h2);
+    h3 = psy_trials('open', r);
+    check(isequal(psy_trials('schedule', h3), psy_trials('schedule', h2)), 'format_rules does not paste back');
+    row = psy_trials('values', h, 3);
+    check(strcmp(row.word, 'new york') && row.contrast == 0.25, 'values');
+    psy_trials('close', h); psy_trials('close', h2); psy_trials('close', h3);
+    expect_error('psy_trials:rules', @() psy_trials('open', struct('table', csv, 'rules', 'maxrep target 2')));
+    % Units: every prime directly followed by a target.
+    u = sprintf('kind\nprime\ntarget\nfill\nfill\n');
+    h = psy_trials('open', struct('table', u, 'reps', 5, 'order', 'constrained', 'rng', 4, ...
+                                  'constraints', psy_trials('followed_by', 'kind', 'prime', 'target')));
+    s = psy_trials('schedule', h);
+    for k = 1:numel(s)
+        if s(k) == 1, check(k < numel(s) && s(k + 1) == 2, 'a prime not followed by a target'); end
+    end
+    psy_trials('close', h);
+    % Balance: every ordered pair twice, a flagged lead-in.
+    h = psy_trials('open', struct('table', sprintf('lvl\nA\nB\nC\n'), 'reps', 6, 'order', 'constrained', ...
+                                  'rng', 12, 'constraints', psy_trials('balance', 'lvl')));
+    s = psy_trials('schedule', h);
+    check(numel(s) == 19, 'balance length');
+    cnt = zeros(3);
+    for k = 2:numel(s), cnt(s(k - 1), s(k)) = cnt(s(k - 1), s(k)) + 1; end
+    check(all(cnt(:) == 2), 'balance pair counts');
+    while ~isempty(psy_trials('next', h)), psy_trials('update', h, 1); end
+    H = psy_trials('history', h);
+    check(H.leadin(1) && ~any(H.leadin(2:end)), 'lead-in flag');
+    psy_trials('close', h);
+    % Groups in Williams order; Latin squares.
+    g = sprintf('block,item\nA,1\nA,2\nB,1\nB,2\nC,1\nC,2\nD,1\nD,2\n');
+    h = psy_trials('open', struct('table', g, 'reps', 1, 'order', 'full_random', 'rng', 2, ...
+        'groups', struct('factor', 'block', 'mode', 'blocked', 'order', 'balanced_latin', 'participant', 1)));
+    s = psy_trials('schedule', h);
+    want = psy_trials('latin', 4, 1, true);
+    blocks = ceil(s / 2);
+    check(isequal(blocks(1:2:end).', want), 'groups in Williams order');
+    psy_trials('close', h);
+    [w, rows] = psy_trials('latin', 5, 7, true);
+    check(rows == 10 && isequal(sort(w), 1:5), 'latin rows and permutation');
+    h = psy_trials('open', struct('n_conditions', 4, 'order', 'list', 'order_list', [4 1 1 3]));
+    check(isequal(psy_trials('schedule', h).', [4 1 1 3]), 'order list');
+    psy_trials('close', h);
+    fprintf('psy_trials v0.2: ok\n');
 end

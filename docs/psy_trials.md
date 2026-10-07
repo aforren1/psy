@@ -1,8 +1,15 @@
 # psy_trials.h design
 
-Status: **v0.1.1, implemented and compared.** Registered in
-`CMakeLists.txt`, with `tests/adapt/psy_trials_test.c` under ctest and two
-examples in CI; gcc and MSVC clean, sanitizer clean. The Python binding
+Status: **v0.2.0, implemented, 2026-10-07.** v0.2 adds conditions files
+and trial lists as tables (psy_table.h, docs/psy_table.md), order lists,
+draws with replacement, subsets, blocked and alternating groups in
+Latin-square order, units ("b always follows a"), first-order transition
+balance, Latin squares and a rules text; every v0.1 desc behaves as in
+v0.1.1, pinned by a test. "What v0.2 adds", the v0.2 Decisions, "Verification (v0.2)" and
+"Cost (v0.2)" below record the design, the measurements behind it and
+the verification. v0.1.1 status follows.
+Registered in `CMakeLists.txt`, with `tests/adapt/psy_trials_test.c` under
+ctest and two examples in CI; gcc and MSVC clean, sanitizer clean. The Python binding
 `psy.trials` and the MEX function `psy_trials` exist, and
 `tests/compare/compare_trials_psychopy.py` checks the binding against
 PsychoPy's TrialHandler: identical sequential order, and the block
@@ -36,13 +43,11 @@ what the implementation changed; the header says what it does.
 - Timing, stimuli, I/O. The header never touches a clock, a file or a
   device; `psytr_format_row` formats a line the caller writes.
 - Fitting. Per-condition proportions are the estimate; the fit is offline.
-- Counterbalancing across sessions or subjects (Latin squares, de Bruijn
-  sequences, Williams designs). Those are design-time tools with their own
-  literature; a session-level sequencer should not pretend to them.
-- Transition balancing within a session (every level following every
-  other equally often). It is a soft objective, not a constraint, and it
-  interacts with every hard constraint; v0.2 may add it as a scored
-  repair once the hard-constraint solver has been used in anger.
+- (v0.1) Counterbalancing across sessions or subjects, and transition
+  balancing within a session. v0.2 reversed both at the user's request:
+  Latin and Williams squares by participant number, and exact first-order
+  transition balance by an Euler circuit rather than a scored repair (see
+  Decisions).
 - Multi-session experiment structure (PsychoPy's ExperimentHandler). One
   handle is one session; the caller strings sessions together.
 
@@ -61,6 +66,32 @@ what the implementation changed; the header says what it does.
 | Resume | `saveAsPickle` | `psytr_save` / `psytr_load` byte snapshot, or `psytr_restore` from the outcomes plus the seed (a re-queue is its own outcome value so replay can tell it from an invalid response) |
 
 Psychtoolbox has no equivalent; labs write their own. Palamedes has none.
+
+## What v0.2 adds
+
+v0.2 adds what the v0.1 non-goals and the rig plan
+([rig_spec.md](rig_spec.md) 14.1 and 14.5) asked for:
+
+- Conditions files and fixed trial lists from CSV, as tables. The parser,
+  the number parser and the table block are a separate header,
+  psy_table.h ([psy_table.md](psy_table.md)), because the pack stores the
+  same block.
+- jsPsych's sample types: with replacement, a subset without replacement,
+  fixed repetitions, alternating groups and an explicit order list.
+- Groups of trials in an outer order, with Latin-square group orders by
+  participant.
+- "b always follows a" and its variants, as units.
+- First-order transition balance.
+- Latin and Williams squares by participant number.
+- A rules text with one statement per C call or desc field.
+- The Python and MEX bindings of all of it.
+
+Every v0.1 desc gives the same schedule, draws, history, records,
+tallies, format lines (but the version token) and snapshot bytes as
+v0.1.1. `tests/adapt/psy_trials_pins.h` holds the hashes of 600 v0.1.1
+sessions (30 designs x 20 seeds); the test checks them.
+
+The v0.2 decisions follow the v0.1 ones under Decisions.
 
 ## Decisions
 
@@ -159,7 +190,7 @@ how every analysis pipeline already works.
 
 `PSYTR_MAX_TRIALS` (4096) and `PSYTR_MAX_CONDITIONS` (1024) size the
 handle at compile time: 19 bytes per trial, 91480 bytes (89 KB) at the
-defaults on x86-64. A session of more than 4096 trials is two handles.
+defaults on x86-64 in v0.1.1, 110528 bytes (108 KB) in v0.2. A session of more than 4096 trials is two handles.
 The caller's per-trial record is the one variable-size
 thing and lives in a buffer the caller provides, sized by
 `record_size x PSYTR_MAX_TRIALS`, so nothing allocates.
@@ -175,7 +206,326 @@ block and the blocks in order; under `fullRandom`, every condition exactly
 rules are checked directly on generated orders, and the failure path is
 checked with a design known to be impossible.
 
-## Verification
+### v0.2: tables are a separate header
+
+The conditions file, the trial list in a pack and the table a script
+makes are one thing, so they have one form: the PSTB block of
+psy_table.h. It is position independent, so a pack can map it and a CSV
+parse can build it in an arena; both give the same bytes and the same
+hash. psy_trials.h requires psy_table.h, as psy_gfx.h requires
+psy_color.h, and compiles its implementation with its own. The split
+keeps a CSV parser out of the trial sequencer for a caller who only views
+packed tables, and gives the parser its own test, fuzz target and
+mutation list. psy_table.md has the parser's decisions: the RFC 4180
+dialect, the bounds (32767 rows, 64 columns, 4096 bytes per field), the
+correctly rounded number syntax with no locale, int32 integer columns,
+and errors that name the line, the row and the column.
+
+A table's rows are the conditions and its columns the factors, a factor's
+levels the column's distinct values in order of first appearance. A rule
+names a level by number in C and by its text in the rules text; a numeric
+column compares by value, so `0.50` finds `0.5`. A fixed trial list
+played in file order is a table with SEQUENTIAL order and 1 repetition;
+nothing more is needed.
+
+### v0.2: sampling: jsPsych's types, mapped
+
+| jsPsych `sample.type` | Here |
+|---|---|
+| `fixed-repetitions` | `reps` (or `cond_reps`) with FULL_RANDOM, the v0.1 order |
+| `with-replacement` (size, weights) | `PSYTR_ORDER_WITH_REPLACEMENT`, `draws`, `weights` |
+| `without-replacement` (size) | `subset` k with FULL_RANDOM and 1 repetition |
+| `alternate-groups` (groups, randomize_group_order) | `groups` ALTERNATE, group order RANDOM or any other |
+| `custom` (a function) | `PSYTR_ORDER_LIST`; the caller's function writes the list |
+
+Two differences are deliberate. jsPsych cuts alternating groups of
+unequal size to the smallest; this header refuses them and names the
+sizes, because a silent cut changes the design. A subset is chosen once
+at open and not again per repetition; a design that wants a new subset
+per block is one handle per block.
+
+Draws with replacement use cumulative weights and bisection. A linear
+scan measured 39 ms for 10000 draws over 10000 rows; bisection measured
+1 to 2 ms (indicative, not under the lock; the Cost table has the locked
+numbers). The cumulative sums use the tally arrays as scratch, so the
+handle did not grow for them.
+
+### v0.2: nesting is one level
+
+Groups are the one level of nesting. The schedule is a flat array fixed
+at open, which preloading (`psytr_condition_at`) and replay need. Deeper
+trees, parameters inherited down a tree, and nodes decided at run time
+(jsPsych's loop and conditional functions) belong to an experiment
+definition above this header. A blocked group is a block for every v0.1
+purpose (first_in_block, warmups, constraint segments), so groups reuse
+the block machinery and need no new run-time state.
+
+### v0.2: units, not a repair rule
+
+The first design treated "b always follows a" as one more rule for the
+swap repair. A Python prototype of both the rule and the alternative,
+units shuffled as wholes, measured this (200 or 50 seeds per design;
+success count, median repair steps, maximum in brackets):
+
+| Design | As a repaired rule | As units |
+|---|---|---|
+| 10a 10b 20c, a->b | 200/200, 10 (20) | 200/200, 0 |
+| 40a 40b 80c, a->b | 200/200, 43 (75) | 200/200, 0 |
+| 100a 100b + 4 x 50 fillers, a->b | 200/200, 123 (214) | 200/200, 0 |
+| 40a 40b 80c, a->b, max run 2 | 50/50, 5984 (62656) | 50/50, 172 (298) |
+| 100a 100b + 4 x 50, a->b, max run 2 | 50/50, 139 (194) | 50/50, 5 (10) |
+| 40a 40b 40c 40d, a->b, max run 1 | 50/50, 176 (592) | 50/50, 26 (44) |
+| 20a 30b 50c (spare b), max run of c 2 | 50/50, 43 (83) | 50/50, 46 (72) |
+
+The repair also biases the order. Over every valid order of a small
+design, the chi-square of the observed against a uniform distribution
+(99.9 % critical value in brackets):
+
+| Design | Valid orders | As a repaired rule | As units |
+|---|---|---|---|
+| 2a 2b 2c, a->b | 6 | 730.6 (15) | 2.7 |
+| 2a 2b 3c, a->b, max run of c 2 | 7 | 1743.5 (17) | 1223.1 |
+| 2a 2b 2c 2d, a->b, max run 1 | 42 | 2689.7 (69) | 270.6 |
+
+With no other rule, units give a uniform order at no repair cost. With
+other rules, the repair moves whole units and is still biased, much less
+than the rule-based repair. The first unit repair swapped units of equal
+length and failed 0/50 on the tight design (40a 40b 80c, max run 2): when
+every one-trial unit is a c, a swap of two of them changes nothing. The
+shipped repair moves a unit to another boundary and closes the gap, which
+passes 50/50.
+
+followed_by and preceded_by pair the trials by a shuffle, so spare
+b-trials are free trials and fewer b- than a-trials is an error at open.
+A chunk column makes longer units (a cue, a target and a probe that run
+together). Two structural rules may not touch the same rows: a longer
+unit is a chunk column, and overlapping pairs have no clear meaning.
+
+At run time a unit runs back to back: no track trial, no draw, no
+forward move and no block start inside it. A block_size boundary waits
+for the unit's end, and the later blocks keep the block_size grid, so a
+unit costs one block a few trials and does not shift the rest. A re-queue
+of any trial in a unit re-queues the whole unit, because a b without its
+a is not the trial the design asked for.
+
+### v0.2: balance by Euler circuit
+
+Transition balance (every ordered pair of levels adjacent equally often)
+is exact, not scored. A balanced order is an Euler circuit of the
+complete directed graph on the levels, each arc lambda times. Kandel,
+Matias, Unger and Winkler (1996) draw such a circuit uniformly; Brooks
+(2012) recommends it for exactly this use. The prototype checked
+uniformity over every balanced order of small designs:
+
+| Levels | lambda | Self pairs | Orders | Draws | chi-square / df |
+|---|---|---|---|---|---|
+| 2 | 1 | yes | 4 | 40000 | 1.8 / 3 |
+| 3 | 1 | yes | 216 | 43200 | 215.3 / 215 |
+| 2 | 2 | yes | 36 | 40000 | 21.2 / 35 |
+| 3 | 1 | no | 18 | 40000 | 16.0 / 17 |
+| 4 | 1 | no | 3072 | 614400 | 3026.3 / 3071 |
+
+The C test repeats the 3-level cases on the header (chi-square 183.0 on
+215 df with self pairs, 19.7 on 17 without).
+
+A circuit of n^2 lambda arcs visits n^2 lambda + 1 positions, so one
+level occurs once more than the others. The header puts that trial
+first, as a LEAD-IN, so all transitions occur and the other trials keep
+equal counts (Brooks: "each sequence contains an extra trial of one
+condition"). The lead-in is on by default because a missing transition
+is a silent loss and an extra trial is visible. It is a main trial (the
+observer sees it and the rules count it), flagged PSYTR_FLAG_LEADIN, with
+rep -1 and no tally, and it cannot be re-queued.
+`PSYTR_BALANCE_NO_LEADIN` leaves it out for a short sequence that cannot
+afford the trial; one transition, last to first, is then missing, and
+the manual says so. The test runs both.
+
+No field was added to `psytr_trial_info` for the lead-in. A positional
+initializer of the struct in the examples broke under
+`-Wmissing-field-initializers` when one was, and callers have the same
+initializers; the history flag and rep -1 tell the lead-in.
+
+A rule on the balanced factor itself is refused. Rejection of balanced
+orders with a run limit fails as sessions grow. The prototype measured
+the chance that a uniform balanced order (with self pairs) meets a run
+limit:
+
+| Levels | lambda | Trials | P(run <= 2) | P(run <= 3) | P(run <= 4) |
+|---|---|---|---|---|---|
+| 2 | 4 | 17 | 0.003 | 0.360 | 0.811 |
+| 2 | 16 | 65 | 0.000 | 0.002 | 0.070 |
+| 4 | 4 | 65 | 0.014 | 0.657 | 0.961 |
+| 4 | 16 | 257 | 0.000 | 0.042 | 0.552 |
+| 8 | 4 | 257 | 0.035 | 0.826 | 0.992 |
+| 8 | 16 | 1025 | 0.000 | 0.211 | 0.856 |
+
+A repair would break the balance, and no exact sampler gives both
+properties. `psytr_balance_no_repeat` covers the common case (no level
+twice in a row) exactly. Rules on other factors are repaired by swaps
+between trials of the same balanced level, which keep every transition.
+
+### v0.2: latin squares by participant
+
+`psytr_latin(n, row, balanced, out)` gives one row of a cyclic or a
+Williams (1949) square, with the row taken modulo the design's rows, so a
+participant number goes in directly. It is one function, not a design
+object: a row is an order list, a group order (LATIN, BALANCED_LATIN) or
+a session plan, and the caller stores nothing. For odd n the Williams
+design needs 2n rows (each row and its reverse); the function returns the
+row count so the caller can plan recruitment.
+
+### v0.2: the rules text
+
+The rules text maps 1:1 onto the C calls: the verbs are the C helper
+names (`max_run target 3` is `psytr_max_run`). `psytr_format_rules`
+writes a session's settings in the same text, so a logged session pastes
+back in, and the bindings take the same text. Columns and levels go by
+name, which the C API cannot do without the table.
+
+| Source | Form | What was taken |
+|---|---|---|
+| OpenSesame loop operations | `constrain col maxrep=N mindist=D`, `weight col`, `shuffle` | the three lines, with OpenSesame's meaning (mindist counts rows, so `mindist=2` is `min_gap 1`) |
+| OpenSesame | `slice`, `sort`, `sortby`, `reverse`, `roll`, `shuffle_horiz`, `fullfactorial`, `setcycle` | refused by name with a reason; they edit the table, which the caller does before open |
+| jsPsych `sample` | an object per timeline | the sample types, as statements (`draws`, `subset`, `groups`) |
+| PsychoPy loop | `Selected rows` | `where COLUMN=VALUE`, with `@participant` for one list per participant |
+| Mix (van Casteren and Davis 2006) | max repetition, min distance | already in v0.1 as max_run and min_gap |
+
+An unknown verb that is close to a known one gets "did you mean"; a word
+from another tool (maxrep, mindist) gets the statement here. The
+participant number is session data, so it comes from the call, never
+from the text: one rules file serves every participant.
+
+### v0.2: snapshots: format 1 stays
+
+A desc with no v0.2 field saves format 1, the v0.1.1 bytes, so a v0.1
+snapshot loads in v0.2 and a v0.1 session saves bytes v0.1.1 can load.
+A desc with any v0.2 field saves format 2, which adds the table's hash,
+the v0.2 desc fields, a hash of the order list, weights and group list
+(arrays the handle does not keep), and the unit and lead-in state. load()
+takes the format the desc implies and names the first desc field that
+differs, so a snapshot cannot resume under a changed table or list.
+
+### v0.2: not done
+
+| Item | Why |
+|---|---|
+| Second-order or higher transition balance | no exact sampler is known to be practical; first order covers the designs in the rig plan |
+| Balance with tracks, groups or units | track trials and unit boundaries cut transitions |
+| A rule on the balanced factor | measured above: rejection fails as sessions grow |
+| A new subset per repetition | one handle per block does it |
+| Trees deeper than one group level, run-time nodes | experiment definition, above this header |
+| OpenSesame's table edits (slice, sort, roll) | the caller edits the table before open |
+| More than 32767 rows or 64 columns | psy_table.h bounds; refused by name |
+
+### v0.2: bindings
+
+The Python binding (`psy.trials`, version 0.2.0) takes a `Table` from
+CSV text or a file, every v0.2 desc field as a keyword, the rules text,
+and the helpers `followed_by`, `preceded_by`, `chunk`, `balance`,
+`groups`, `latin` and `latin_rows`. The MEX function takes `desc.table`
+(CSV text, or a struct with the CSV and its options), the same desc
+fields and the rules text, and adds the commands `table`, `latin`,
+`balance`, `chunk`, `followed_by`, `preceded_by`, `values`, `table_info`
+and `format_rules`. Both builds stage psy_table.h beside psy_trials.h.
+
+## Verification (v0.2)
+
+All on Windows 11 with MinGW-w64 gcc 16.1 (C11, C99, C++17, warnings as
+errors) and MSVC 19.44 (/W4 /WX, C and C++17), and on Linux (WSL2) with
+gcc 11.4 as C11 and C++17 under AddressSanitizer and
+UndefinedBehaviorSanitizer, with no report. The header's STATUS block
+lists every check; in summary:
+
+- v0.1 behavior: the hashes of 600 v0.1.1 sessions (30 designs x 20
+  seeds; schedule, history, tallies, records, format lines and snapshot
+  bytes) match on gcc, MSVC and Linux gcc. Both v0.1 examples print what
+  v0.1.1 printed but the version token.
+- `tests/adapt/psy_trials_test_v02.h`, at `PSYTR_MAX_TRIALS` 4096 and 256:
+  each v0.2 order's properties by chi-square against its stated
+  distribution (draws against weights, pairs of draws, subsets, group
+  orders, unit orders, the slot of a free trial, balanced orders over all
+  216 and all 18 of two small designs); exact counts where the design
+  promises them (Latin and Williams squares for n = 1 to 64, the pair
+  counts of 1600 balanced orders, 0 broken pairs in 200 unit sessions with
+  re-queues and blocks); the rules text against the C calls; snapshot
+  format 2 loaded at every third cut; and a digest of v0.2 sessions,
+  `c9b59a3bb40a8f68` on every compiler and on Linux.
+
+| Statistic | Value | df |
+|---|---|---|
+| Draws against weights, worst of three weight sets | 0.20 of the 99.9 % bound | 1 to 3 |
+| Pairs of successive draws | 1.3 | 8 |
+| 2-subsets of 5 | 13.8 | 9 |
+| RANDOM group order | 3.1 | 5 |
+| Units, the 6 valid orders | 7.4 | 5 |
+| Balance, 3 levels with self pairs, 216 orders | 183.0 | 215 |
+| Balance, 3 levels without self pairs, 18 orders | 19.7 | 17 |
+
+- `tests/adapt/psy_table_test.c` for the parser; docs/psy_table.md has
+  its results (10,000,084 numbers against strtod on each Windows
+  compiler, 0 disagreements).
+- Fuzzing, MSVC 19.44 libFuzzer with AddressSanitizer, from the seeds the
+  targets write, then the corpus replayed on Linux gcc 11.4 under ASan
+  and UBSan as C11 and C++17:
+
+| Target | Time | Inputs | Coverage features | Corpus | Result |
+|---|---|---|---|---|---|
+| `tests/fuzz/psy_table_fuzz.c` | 1351 s | 5,906,077 | 3208 | 958 | no crash, no timeout; replay clean |
+| `tests/fuzz/psy_trials_fuzz.c` | 1351 s | 9,734,743 | 7493 | 1383 | no crash, no timeout; replay clean |
+
+  The trials target reads rules text against a fixed table, opens with
+  a repair budget of 2000 swaps, and runs up to 300 trials with
+  re-queues, breaks, the format functions and a save and load.
+- Mutations (`tests/mutate/trials.toml`: 6 in the v0.1 core, which the
+  pins must catch, and 23 in the v0.2 code): 29 killed. Three needed new
+  checks before they were: u-01 (the unit move does not check the slot
+  that closes the gap) is caught by the digest; u-05 (a chunk that joins
+  rows that are not next to each other) needed the chi-square of a free
+  trial's slot; and s-01 (`>=` in the draw bisection) needed draws
+  with the variate fixed at 0 and 0.5, because only a variate exactly on a
+  running sum tells the two apart and then picks a zero-weight row.
+  `tests/mutate/table.toml`: 24 of 25 killed, the survivor equivalent
+  (docs/psy_table.md).
+- Python binding: 152 tests, among them the parser against Python's `csv`
+  module (40 random files) and `float()` (5000 values). MEX: the v0.2
+  part of `test_mex.m` passes in MATLAB R2023a and Octave 10.1.
+
+Not done: a run on macOS or big-endian hardware; the extra gcc 11.4
+warnings and the clang 11.1 builds that v0.1.1 ran.
+
+## Cost (v0.2)
+
+All on the Iris Xe laptop, AC, the measurement lock held (`guard.sh time
+trials`), 2026-10-07, `examples/trials_bench.c`, 21 rounds, MinGW gcc 16.1
+-O2 and MSVC 19.44 /O2, built with `PSYTR_MAX_TRIALS` and
+`PSYTR_MAX_CONDITIONS` at 16384 so one handle holds 10,000 trials (the
+handle is then 608192 bytes). The table has 10,000 rows; open() builds
+the whole schedule.
+
+| Design | Trials | gcc median ms (min to max) | MSVC median ms (min to max) | Repair steps |
+|---|---|---|---|---|
+| List in file order (SEQUENTIAL) | 10000 | 0.02 (0.02 to 0.26) | 0.02 (0.02 to 0.22) | 0 |
+| FULL_RANDOM | 10000 | 0.04 (0.04 to 0.04) | 0.04 (0.04 to 0.05) | 0 |
+| CONSTRAINED, max_run 3 on 4 levels | 10000 | 1.82 (1.25 to 2.36) | 1.54 (1.08 to 1.90) | 159 |
+| Units (followed_by) + max_run 3 | 10000 | 5.02 (4.20 to 6.19) | 7.03 (5.31 to 9.78) | 168 |
+| WITH_REPLACEMENT, 10,000 draws of 10,000 rows | 10000 | 0.73 (0.73 to 0.75) | 1.33 (1.30 to 1.36) | 0 |
+| Subset 5,000 of 10,000, FULL_RANDOM | 5000 | 0.14 (0.13 to 0.14) | 0.14 (0.14 to 0.15) | 0 |
+| Balance, 8 levels | 9985 | 0.26 (0.26 to 0.27) | 0.30 (0.29 to 0.33) | 0 |
+| BLOCKED groups (8, Williams) + max_run 3 | 10000 | 1.79 (1.61 to 2.00) | 1.73 (1.60 to 2.66) | 119 |
+
+open() runs before the session, so these costs are outside any frame.
+At run time, next() + update() over 5 runs of the units design with 5 %
+re-queues (54,034 calls) took 0.04 us on average on both compilers; the
+worst call was 19.0 us under gcc and 2.2 us under MSVC, the worst case a
+forward move or a unit re-queue, far inside a 16 ms frame.
+
+Two v0.2 paths changed because of indicative runs (not under the lock):
+the subset's check of the remaining counts went from O(n k) to a
+histogram (30 ms to 0.2 ms for 5,000 of 10,000), and draws with
+replacement from a linear scan to bisection (39 ms to 1 to 2 ms).
+
+
+## Verification (v0.1)
 
 The header's STATUS block has the numbers. In summary:
 

@@ -250,7 +250,7 @@ static void test_version(void) {
              PSYTR_VERSION_MAJOR, PSYTR_VERSION_MINOR, PSYTR_VERSION_PATCH);
     CHECK(strcmp(PSYTR_VERSION_STRING, want) == 0);
     CHECK(strcmp(psytr_version(), PSYTR_VERSION_STRING) == 0);
-    CHECK(strcmp(psytr_version(), "0.1.1") == 0);
+    CHECK(strcmp(psytr_version(), "0.2.0") == 0);
 }
 
 /* splitmix64 from seed 0: the reference's first two outputs are
@@ -1629,8 +1629,13 @@ static void test_bad_descs(void) {
     d = ok; d.reps = -3;                   REJECT(d, "desc.reps must be at least 1");
     d = ok; d.cond_reps = neg;             REJECT(d, "cond_reps[1] is negative");
     d = ok; d.cond_reps = zeros;           REJECT(d, "sums to 0");
-    d = ok; d.order = (psytr_order)9;      REJECT(d, "desc.order");
+    /* Out-of-range enum values: within the enum's bit range, since in C++
+     * a value outside it is undefined (UBSan says so); psytr_interleave
+     * has no such value in C++, so that check is C only. */
+    d = ok; d.order = (psytr_order)7;      REJECT(d, "desc.order");
+#ifndef __cplusplus
     d = ok; d.interleave = (psytr_interleave)5; REJECT(d, "desc.interleave");
+#endif
     d = ok; d.n_constraints = -1;          REJECT(d, "n_constraints");
     d = ok; d.n_constraints = PSYTR_MAX_CONSTRAINTS + 1; REJECT(d, "n_constraints");
     d = ok; d.order = PSYTR_ORDER_RANDOM; d.constraints[0] = psytr_max_run(PSYTR_CONDITION, 0, 1);
@@ -1762,7 +1767,7 @@ static void test_format(void) {
     CHECK_I(psytr_format_row(&g_t, 3, NULL, 0), n);
 
     n = psytr_format_meta(&g_t, buf, sizeof(buf));
-    CHECK_S(buf, "psy_trials=0.1.1 conditions=6 factors=3 levels=2x3x1 reps=1 "
+    CHECK_S(buf, "psy_trials=0.2.0 conditions=6 factors=3 levels=2x3x1 reps=1 "
                  "order=sequential constraints= max_swaps=100000 swaps=0 span_blocks=0 "
                  "tracks=1 interleave=random weights=1 track_rate=1 block_size=0 "
                  "practice=1 warmup=0 warmup_conditions= requeue_gap=0 record_size=8 "
@@ -1844,6 +1849,8 @@ static void test_catch_with_tracks(void) {
 
 /* -------------------------------------------------------------------- main */
 
+#include "psy_trials_test_v02.h"
+
 int main(void) {
     test_version();
     test_splitmix();
@@ -1865,6 +1872,7 @@ int main(void) {
     test_bad_descs();
     test_format();
     test_catch_with_tracks();
+    test_v02();
 
     if (g_failures != 0) {
         fprintf(stderr, "psy_trials_test: %d check(s) failed\n", g_failures);

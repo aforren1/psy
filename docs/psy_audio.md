@@ -421,7 +421,11 @@ loopback test and audio_clockstats), gcc 11.4 in WSL2 (C99 -O3, C11 under
 ASan and UBSan, C11 under ThreadSanitizer: 0 reports in 3 runs), emcc
 6.0.10 (the core test under node with threads; the header with
 miniaudio's Web Audio backend compiled as gnu11 and gnu++17). The compile
-checks play a stream on miniaudio's null device.
+checks play a stream on miniaudio's null device. Again on 2026-10-06:
+gcc 13.3 in WSL2 (the core test at -O2 and under ASan and UBSan), gcc
+13.3 and clang 18.1 in an Ubuntu 24.04 container (every target, ctest
+and `audio_tone --null`, with the CI jobs' flags), MinGW-w64 gcc 16.2
+and the CI wasm job's commands: pass.
 
 Mutations of the header, each in a scratch copy. All 18 below made the
 core test fail. The last two are races that only ThreadSanitizer can see:

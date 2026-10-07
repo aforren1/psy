@@ -1,0 +1,274 @@
+# psy_trials.h mutants: the v0.1 core (which the v0.1 pins must catch) and
+# the v0.2 sampling, groups, units, balance, Latin squares, rules text and
+# snapshot. docs/psy_trials.md lists the results.
+header = "psy_trials.h"
+
+[test.trials]
+source = "tests/adapt/psy_trials_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 300
+
+# --- v0.1 core: the pins (tests/adapt/psy_trials_pins.h) catch these ------
+
+[[mutant]]
+id = "core-01"
+name = "repair tries 64 -> 63"
+test = "trials"
+why = "The partner search of every repair, v0.1 included: any change moves v0.1 orders, which the pins forbid."
+find = '#define PSYTR__REPAIR_TRIES 64'
+replace = '#define PSYTR__REPAIR_TRIES 63'
+
+[[mutant]]
+id = "core-02"
+name = "v0.1 partner start k + s"
+test = "trials"
+why = "The v0.1 repair's partner search starts one slot later than the draw says."
+find = 'j = (k + 1 + (s + step) % (n - 1)) % n;'
+replace = 'j = (k + (s + step) % (n - 1)) % n;'
+
+[[mutant]]
+id = "core-03"
+name = "Fisher-Yates draws below i"
+test = "trials"
+why = "The shuffle never leaves an item in place: a biased order, and v0.1 orders change."
+find = '''
+        j = psytr__draw(t, i + 1);
+        tmp = a[i]; a[i] = a[j]; a[j] = tmp;'''
+replace = '''
+        j = psytr__draw(t, i);
+        tmp = a[i]; a[i] = a[j]; a[j] = tmp;'''
+
+[[mutant]]
+id = "core-04"
+name = "max_run counts one short"
+test = "trials"
+why = "A run of n + 1 would pass the check."
+find = 'for (j = k - 1; j >= seg && cnt <= c->n; j--) {'
+replace = 'for (j = k - 1; j >= seg && cnt < c->n; j--) {'
+
+[[mutant]]
+id = "core-05"
+name = "window one trial short"
+test = "trials"
+why = "max_in_window looks at w - 1 trials, so a window of w can hold n + 1."
+find = 'lo = k - c->window + 1;'
+replace = 'lo = k - c->window + 2;'
+
+[[mutant]]
+id = "core-06"
+name = "snapshot writes n_run for n_done"
+test = "trials"
+why = "A format-1 snapshot must keep its v0.1 bytes, and load() would restore a wrong count."
+find = 'psytr__put_i32(w, t->n_done, "n_done");'
+replace = 'psytr__put_i32(w, t->n_run, "n_done");'
+
+# --- v0.2 sampling and groups -------------------------------------------------
+
+[[mutant]]
+id = "s-01"
+name = "draws: >= in the bisection"
+test = "trials"
+why = "Row c owns [cum[c-1], cum[c]); >= gives a variate on a running sum to the row before, which can be a zero-weight row (u = 0 does it). The test draws with u fixed at 0 and 0.5."
+find = 'if (psytr__cum_get(t, mid) > x) hi = mid;'
+replace = 'if (psytr__cum_get(t, mid) >= x) hi = mid;'
+
+[[mutant]]
+id = "s-02"
+name = "subset: partial Fisher-Yates one short"
+test = "trials"
+why = "The last eligible row could never be kept: inclusion is no longer uniform."
+find = 'j = i + psytr__draw(t, m - i);'
+replace = 'j = i + psytr__draw(t, m - i - 1);'
+
+[[mutant]]
+id = "s-03"
+name = "alternate: groups out of their order"
+test = "trials"
+why = "ALTERNATE must cycle the groups in the drawn group order."
+find = 'for (gi = 0; gi < ng; gi++) base[k * ng + gi] = tmp[gl[order[gi]] + k];'
+replace = 'for (gi = 0; gi < ng; gi++) base[k * ng + gi] = tmp[gl[order[(gi + 1) % ng]] + k];'
+
+[[mutant]]
+id = "s-04"
+name = "groups LIST: a missing group is not an error"
+test = "trials"
+why = "A group with trials left out of groups.list must fail open(), not run last or vanish."
+find = '''
+            if (present[l] == 1) {
+                memset(present, 0, sizeof(int32_t) * (size_t)nlev);'''
+replace = '''
+            if (false) {
+                memset(present, 0, sizeof(int32_t) * (size_t)nlev);'''
+
+[[mutant]]
+id = "t-01"
+name = "table levels read 8 bits"
+test = "trials"
+why = "A level number is 16-bit: a column with more than 256 levels would alias its levels."
+find = 'return (int)p[2 * c] | (int)p[2 * c + 1] << 8;'
+replace = 'return (int)p[2 * c];'
+
+# --- units ----------------------------------------------------------------------
+
+[[mutant]]
+id = "u-01"
+name = "unit move: the closing gap is not checked"
+test = "trials"
+why = "The move repair checks the moved trials and the slot that closes the gap; without the second check it takes moves that break a rule there and needs more of them, which changes the orders the v0.2 digest pins."
+find = 'if (fits && g < hi && psytr__violation(t, seq, lo, g) >= 0) fits = false;'
+replace = ''
+
+[[mutant]]
+id = "u-02"
+name = "a track trial inside a unit"
+test = "trials"
+why = "Inside a unit the next trial of the unit must run; a track trial would split prime and target."
+find = 'if (in_unit) use_track = false;'
+replace = 'if (false) use_track = false;'
+
+[[mutant]]
+id = "u-03"
+name = "a block starts inside a unit"
+test = "trials"
+why = "A rest screen (and warmups) between prime and target."
+find = 'if (in_unit) starts_block = false;'
+replace = 'if (false) starts_block = false;'
+
+[[mutant]]
+id = "u-04"
+name = "re-queue copies one trial, not the unit"
+test = "trials"
+why = "A re-queued target would come back without its prime."
+find = '''
+    len = ue - us;
+    left = t->n_scheduled - t->schedule_pos;'''
+replace = '''
+    us = cur;
+    ue = cur + 1;
+    len = 1;
+    left = t->n_scheduled - t->schedule_pos;'''
+
+[[mutant]]
+id = "u-05"
+name = "chunk joins rows that are not next to each other"
+test = "trials"
+why = "A chunk is contiguous rows; joining across a gap makes units of the wrong rows."
+find = 'if (b == a + 1 && psytr__touches(t, r, a) &&'
+replace = 'if (psytr__touches(t, r, a) &&'
+
+# --- balance ---------------------------------------------------------------------
+
+[[mutant]]
+id = "b-01"
+name = "tree arc not last"
+test = "trials"
+why = "Kandel's method needs each level's tree arc last, or the walk can end before using every arc."
+find = '''
+            (void)psytr__swap16(a, j, deg - 1);
+            psytr__shuffle2(t, a, NULL, deg - 1);'''
+replace = '''
+            psytr__shuffle2(t, a, NULL, deg);'''
+
+[[mutant]]
+id = "b-02"
+name = "the tree points the other way"
+test = "trials"
+why = "The first entry into w must record w's arc toward the walk's previous vertex (an arborescence toward the start)."
+find = 'tw[w] = (int16_t)cur;'
+replace = 'tw[w] = (int16_t)w;'
+
+[[mutant]]
+id = "b-03"
+name = "lead-in not flagged"
+test = "trials"
+why = "The lead-in would be tallied as an ordinary trial and not marked in the data."
+find = 'fl[0] = PSYTR__SLOT_LEADIN;'
+replace = 'fl[0] = 0;'
+
+[[mutant]]
+id = "b-04"
+name = "a level's trials not shuffled into its places"
+test = "trials"
+why = "Rows of one level would come in row order; the v0.2 digest pins the order."
+find = 'psytr__shuffle2(t, arcs, NULL, k);'
+replace = ''
+
+[[mutant]]
+id = "b-05"
+name = "lead-in tallied"
+test = "trials"
+why = "The lead-in is an extra trial of one level; tallying it unbalances the counts per condition."
+find = 'PSYTR_FLAG_PRACTICE | PSYTR_FLAG_WARMUP | PSYTR_FLAG_LEADIN))) {'
+replace = 'PSYTR_FLAG_PRACTICE | PSYTR_FLAG_WARMUP))) {'
+
+[[mutant]]
+id = "b-06"
+name = "backward walk picks the wrong predecessor"
+test = "trials"
+why = "Without self pairs the walk skips the current level; an off-by-one makes the tree non-uniform or broken."
+find = 'w = loops ? j : (j >= cur ? j + 1 : j);'
+replace = 'w = loops ? j : (j > cur ? j + 1 : j);'
+
+# --- Latin squares ------------------------------------------------------------------
+
+[[mutant]]
+id = "l-01"
+name = "odd balanced square not mirrored"
+test = "trials"
+why = "Williams for odd n needs the reversed rows; without them a pair is adjacent once or three times."
+find = 'if (r >= n) {           /* the mirrored half of an odd balanced design */'
+replace = 'if (false) {           /* the mirrored half of an odd balanced design */'
+
+[[mutant]]
+id = "l-02"
+name = "Williams first row off by one"
+test = "trials"
+why = "0, 1, n-1, 2, n-2, ...: n - j/2 - 1 repeats items."
+find = 'else v = (j == 0) ? 0 : (j % 2 == 1 ? (j + 1) / 2 : n - j / 2);'
+replace = 'else v = (j == 0) ? 0 : (j % 2 == 1 ? (j + 1) / 2 : n - j / 2 - 1);'
+
+# --- rules text --------------------------------------------------------------------
+
+[[mutant]]
+id = "r-01"
+name = "no COLUMN=VALUE selectors"
+test = "trials"
+why = "Every level-specific rule would read as an unknown token."
+find = "if (part == 0 && i < n && p[i] == '=') {"
+replace = "if (false && part == 0 && i < n && p[i] == '=') {"
+
+[[mutant]]
+id = "r-02"
+name = "OpenSesame mindist read as a gap"
+test = "trials"
+why = "mindist counts rows (2 = no immediate repeat); a gap of D is one too strict."
+find = 'if (!psytr__rl_add(rl, psytr_min_gap(f, PSYTR_ANY_LEVEL, x - 1))) return false;'
+replace = 'if (!psytr__rl_add(rl, psytr_min_gap(f, PSYTR_ANY_LEVEL, x))) return false;'
+
+[[mutant]]
+id = "r-03"
+name = "a statement given twice is accepted"
+test = "trials"
+why = "A second `order` line would silently win; the user meant one of them."
+find = 'if (rl->first[which]) {'
+replace = 'if (false) {'
+
+[[mutant]]
+id = "r-04"
+name = "@participant off by one"
+test = "trials"
+why = "Participant p must get level p mod n of the column."
+find = 'return rl->r->participant % nl;'
+replace = 'return (rl->r->participant + 1) % nl;'
+
+# --- snapshot format 2 -------------------------------------------------------------
+
+[[mutant]]
+id = "v-01"
+name = "format 2 loses blk_next"
+test = "trials"
+why = "A resumed session with units and block_size would start its blocks on the wrong trials."
+find = 'psytr__put_i32(w, t->blk_next, "blk_next");'
+replace = 'psytr__put_i32(w, 0, "blk_next");'

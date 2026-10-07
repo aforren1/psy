@@ -1,0 +1,861 @@
+
+# psy_gfx.h mutants: the v0.4 list (docs/psy_gfx.md, "v0.4 mutations").
+# The v0.3 list (mutate03.py) was lost; docs/psy_gfx.md keeps its table.
+# PSYGFX_TEST_PARTS limits a run to the parts that can see the fault, and
+# "none" runs the CPU half alone. PSYGFX_TEST_DEVICES=hardware is the GPU
+# the v0.4 run used (an Intel Iris Xe through ANGLE on D3D11). With a part
+# filter, six summary checks of parts that did not run fail (S2.alpha_control,
+# S2.epoch_control_bad, S2.lost_ok, S3.vtx_blur, S5.t3_connect, S5.t4_fd);
+# the baseline has the same failures, so the runner ignores them.
+header = "psy_gfx.h"
+
+[test.gfx]
+source = "tests/adapt/psy_gfx_test.c"
+compiler = "msvc"
+flags = ["/O1", "/W3", "/D_CRT_SECURE_NO_WARNINGS"]
+timeout = 600
+env_default = { PSYSCR_ANGLE_DIR = "C:/Program Files/Docker/Docker/frontend" }
+
+[[mutant]]
+id = "v04-00"
+name = "payload hash not checked"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 cache", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A corrupted program-cache file must be refused, not handed to the driver as a binary."
+find = 'hd.payload_hash == psygfx__fnv64(buf + PSYGFX__PROG_HEAD, hd.payload_bytes)'
+replace = '1'
+
+[[mutant]]
+id = "v04-01"
+name = "key without GL_RENDERER"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "A cached binary from one GPU must not load on another GPU. Caught after the fake backend varied its renderer string."
+find = '''
+        psygfx__h2_str(&h, g->caps.renderer);
+'''
+replace = ''
+
+[[mutant]]
+id = "v04-02"
+name = "key without GL_VERSION"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "A driver update must make cached binaries stale. Caught after the fake backend varied its version string."
+find = '''
+        psygfx__h2_str(&h, g->caps.version);
+'''
+replace = ''
+
+[[mutant]]
+id = "v04-03"
+name = "bindings not set after a binary load"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 cache", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A program loaded from the cache must bind its uniform blocks and samplers as a compiled one does, or it draws with the wrong inputs."
+find = '''
+            gl->f.GenVertexArrays(1, &p->vao);
+            psygfx__gl_slots(gl, p);'''
+replace = '            gl->f.GenVertexArrays(1, &p->vao);'
+
+[[mutant]]
+id = "v04-04"
+name = "a refused binary not compiled"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 cache", PSYGFX_TEST_DEVICES = "hardware" }
+why = "When the driver refuses a cached binary, open must compile the source, not fail."
+find = '''
+        gl->f.DeleteProgram(p->prog);
+        p->prog = 0;
+        while (gl->f.GetError() != PSYGFX__GL_NO_ERROR) {}
+'''
+replace = '''
+        gl->f.DeleteProgram(p->prog);
+        p->prog = 0;
+        return PSYGFX_ERR_GL;
+'''
+
+[[mutant]]
+id = "v04-05"
+name = "second hash and length not checked"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 cache", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The second key hash and the material length guard against a key collision and a truncated record."
+find = 'hd.key2 == r->key2 && hd.material_bytes == r->material &&'
+replace = ''
+
+[[mutant]]
+id = "v04-06"
+name = "Cb and Cr swapped"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Swapped chroma planes give the wrong hue on every video frame."
+find = '"        q = q * K.z + K.w;\n"'
+replace = '"        q = q.yx * K.z + K.w;\n"'
+
+[[mutant]]
+id = "v04-07"
+name = "limited range without its offset"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Limited-range video must map code 16 to black and 235 to white."
+find = 'b[37] = (float)(lim ? -16.0 / 219.0 : 0.0);'
+replace = 'b[37] = 0.0f;'
+
+[[mutant]]
+id = "v04-08"
+name = "LEFT siting as CENTER"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "H.264 and MPEG-2 chroma is LEFT sited by default; CENTER shifts chroma by a quarter of a luma texel."
+find = 'b[46] = e->siting == PSYGFX_SITING_LEFT || e->siting == PSYGFX_SITING_TOP_LEFT ? 0.25f : 0.0f;'
+replace = 'b[46] = e->siting == PSYGFX_SITING_TOP_LEFT ? 0.25f : 0.0f;'
+
+[[mutant]]
+id = "v04-09"
+name = "chroma replicated when sited"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Sited chroma must be interpolated between samples, not replicated."
+find = '"        if (M0.x > 0.5) {\n"'
+replace = '"        if (M0.x > -0.5) {\n"'
+
+[[mutant]]
+id = "v04-10"
+name = "no clamp before the transfer"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Out-of-range Y'CbCr values must be clamped before the transfer function."
+find = '"    e = clamp(e, 0.0, 1.0);\n"'
+replace = '"\n"'
+
+[[mutant]]
+id = "v04-11"
+name = "BT.709 weights for BT.601"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "SD video uses the BT.601 luma weights; BT.709 weights tint every color."
+find = 'double kr = 0.299, kb = 0.114, kg, m[9]'
+replace = 'double kr = 0.2126, kb = 0.0722, kg, m[9]'
+
+[[mutant]]
+id = "v04-12"
+name = "display transfer half a code off"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The DEVICE transfer must invert the display's table at code centers, not half a code off."
+find = 'double y = k / 255.0, L;'
+replace = 'double y = (k + 0.5) / 255.0, L;'
+
+[[mutant]]
+id = "v04-13"
+name = "rebind ignored"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A VIDEO texture rebound to a new frame must draw the new frame."
+find = '''
+        if (r->view) r = &g->tex[r->view - 1];   /* rebound (VIDEO) */
+'''
+replace = ''
+
+[[mutant]]
+id = "v04-14"
+name = "primaries matrix in the wrong order"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Source primaries go to XYZ and then to the display's RGB; the product in the other order is a different matrix. The code moved from psy_gfx.h to psy_color.h (psycol__src_matrix) in psy_gfx v0.5."
+file = "psy_color.h"
+find = '            psycol__mm3(x2d, src, m);'
+replace = '            psycol__mm3(src, x2d, m);'
+
+[[mutant]]
+id = "v04-15"
+name = "element ori turned the other way"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Instanced elements must turn the same way as single stimuli."
+find = 'se = s0 * cs.x + c0 * cs.y;'
+replace = 'se = s0 * cs.x - c0 * cs.y;'
+
+[[mutant]]
+id = "v04-16"
+name = "element phase not added"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "An element's phase must be added to the template's phase."
+find = '(m & 4) != 0 ? psy_a0.w : 0.0'
+replace = '(m & 4) != 0 ? 0.0 : 0.0'
+
+[[mutant]]
+id = "v04-17"
+name = "scale applied to the edge (no field rescale)"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A scaled element's edge must keep its width in pixels, so the field is rescaled with the element."
+find = '"    vec2 d = ki * psy_sdf2_(p / ki, (a + psy_misc.x) / ki) - psy_misc.x;\n"'
+replace = '"    vec2 d = psy_sdf2_(p / ki, (a + psy_misc.x) / ki) - psy_misc.x;\n"'
+
+[[mutant]]
+id = "v04-18"
+name = "palette fraction ignored"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "An element's palette fraction selects its color; ignoring it draws every element in the first color."
+find = '''pc = f > 0.0 ? mix(psy_v[32 + i0].rgb, psy_v[32 + min(i0 + 1, n - 1)].rgb, f) : psy_v[32 + i0].rgb;\n"
+    "    }\n"
+    "#ifdef PSY_INST_MOD\n"'''
+replace = '''pc = f > 2.0 ? mix(psy_v[32 + i0].rgb, psy_v[32 + min(i0 + 1, n - 1)].rgb, f) : psy_v[32 + i0].rgb;\n"
+    "    }\n"
+    "#ifdef PSY_INST_MOD\n"'''
+
+[[mutant]]
+id = "v04-19"
+name = "element offsets along the screen axes"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Element offsets must follow the template's rotation, not the screen's axes."
+find = 'Q.x * (psy_a0.x * tx + psy_a0.y * ty)'
+replace = 'Q.x * vec2(psy_a0.x, sg * psy_a0.y)'
+
+[[mutant]]
+id = "v04-20"
+name = "element gate not multiplied"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "An element's gate (its contrast envelope) must multiply its look."
+find = '"    psy_ilook = psy_v[2] * vec4(cf, cf, gf, 1.0);\n"'
+replace = '"    psy_ilook = psy_v[2] * vec4(cf, cf, 1.0, 1.0);\n"'
+
+[[mutant]]
+id = "v04-21"
+name = "vector look as the others"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The vector program packs its look in a different order from the other programs."
+find = '"    psy_ilook = psy_v[2] * vec4(cf, gf, 1.0, 1.0);\n"'
+replace = '"    psy_ilook = psy_v[2] * vec4(cf, cf, gf, 1.0);\n"'
+
+[[mutant]]
+id = "v04-22"
+name = "two arrays at one offset"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Two element arrays in one frame must each read their own data. Caught after a two-array check was added."
+find = '''
+    cmd->inst_off = (uint32_t)g->inst_used;
+    cmd->count = s->n_inst;'''
+replace = '''
+    cmd->inst_off = 0;
+    cmd->count = s->n_inst;'''
+
+[[mutant]]
+id = "v04-23"
+name = "hit_index from the bottom"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 inst", PSYGFX_TEST_DEVICES = "hardware" }
+why = "psygfx_hit_index() must report the top element (the last drawn), not the lowest index."
+find = 'for (i = (int)s->n_inst - 1; i >= 0; i--) {'
+replace = 'for (i = 0; i < (int)s->n_inst; i++) {'
+
+[[mutant]]
+id = "v04-24"
+name = "CRC not sealed by derive"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "derive() must seal the calibration's CRC, or a calibration made by the manual's recipe fails its check. The code moved from psy_gfx.h to psy_color.h (psycol_cal_derive) in psy_gfx v0.5. Caught after the check compared the CRC itself."
+file = "psy_color.h"
+find = '        if (rc >= 0) c->crc = psycol__crc32(c, offsetof(psycol_cal, crc));'
+replace = '        (void)0;'
+
+[[mutant]]
+id = "v04-25"
+name = "straight alpha filtered as v0.3"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 fixes", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Straight-alpha images must be premultiplied before filtering, or their edges darken."
+find = '{ "#define PSY_STRAIGHT 1\n", NULL, PSYGFX_COLOR, 0, "image" },'
+replace = '{ "", NULL, PSYGFX_COLOR, 0, "image" },'
+
+[[mutant]]
+id = "v04-26"
+name = "DIST range rule off"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 fixes", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A distance field drawn past its encoded range must be refused, not drawn wrong."
+find = 'if (m->sdf_range > 0.0f && reach > (0.5 * m->sdf_range - 1.5) * pxpt) {'
+replace = 'if (0) {'
+
+[[mutant]]
+id = "v04-27"
+name = "dots ignore first"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 fixes", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A dot field's first index selects the dots drawn. Caught after the dots' aperture bug was fixed (its test drew nothing)."
+find = 'cmd->inst_off = s->first * 8u;'
+replace = 'cmd->inst_off = 0;'
+
+[[mutant]]
+id = "v04-28"
+name = "reorder ignores overlap"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 order", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The batch reorder must not move a stimulus past one it overlaps; the draw order changes the pixels."
+find = '                if (psygfx__box_meet(B[j].box, box)) break;'
+replace = '                (void)0;'
+
+[[mutant]]
+id = "v04-29"
+name = "reorder checks only its neighbor"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 order", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The batch reorder must check every batch it moves past, not only the next one."
+find = '                if (psygfx__box_meet(B[j].box, box)) break;'
+replace = '                if (j == nb - 1 && psygfx__box_meet(B[j].box, box)) break;'
+
+[[mutant]]
+id = "v04-30"
+name = "bounds without the quad margin"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 order", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The overlap boxes must include the antialiasing margin of the quad."
+find = 'hx = b[4] + b[7]; hy = b[5] + b[7];'
+replace = 'hx = b[4]; hy = b[5];'
+
+[[mutant]]
+id = "v04-31"
+name = "bounds without the turn"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 order", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The overlap boxes must include the stimulus's rotation. Caught after the turned-box case was added."
+find = 'ex = fabsf(b[2]) * hx + fabsf(b[3]) * hy + 1.0f;'
+replace = 'ex = hx + 1.0f;'
+
+[[mutant]]
+id = "v04-32"
+name = "no-pixel boxes drawn as nothing"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 fixes", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A stimulus whose box has no area must still be classified correctly (a LINE has no width but draws)."
+find = '        if (!(hx > 0.0f && hy > 0.0f)) no = shape == PSYGFX_LINE'
+replace = '        if (0) no = shape == PSYGFX_LINE'
+
+[[mutant]]
+id = "v04-33"
+name = "dots with the zero default as a 0 x 0 RECT"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 fixes", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A dot field with the zero-default aperture must not be a 0 x 0 RECT that culls every dot (a v0.1 bug found by a mutant)."
+find = '((d->aperture == PSYGFX_RECT && d->w > 0.0f) || d->aperture == PSYGFX_CIRCLE ?'
+replace = '(d->aperture == PSYGFX_RECT || d->aperture == PSYGFX_CIRCLE ?'
+
+[[mutant]]
+id = "v04-34"
+name = "a refused instance array draws its template"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 fixes", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A refused element array must draw nothing, not the template alone. Caught after the scene was checked."
+find = ' || (s->inst && s->n_inst == 0)) {'
+replace = ') {'
+
+# The v0.6 list (docs/psy_gfx.md, "v0.6 mutations"). The text part computes
+# its exact references once per run (about 4 min on the Iris Xe); the blur
+# part takes seconds; "none" runs the CPU half alone.
+
+[[mutant]]
+id = "v06-00"
+name = "a ray's band one off"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A ray must read the band its pixel row is in, or it misses the curves it crosses."
+find = '''    "    int kb = clamp(int(floor((ac - lo) * float(nb) / (hi - lo))), 0, nb - 1);\n"'''
+replace = '''    "    int kb = clamp(int(floor((ac - lo) * float(nb) / (hi - lo))) + 1, 0, nb - 1);\n"'''
+
+[[mutant]]
+id = "v06-01"
+name = "early exit without the window"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A curve just behind the pixel center still covers part of the pixel: the loop may stop only past the window."
+find = '''    "        if (max(max(u.x, u.y), u.z) < cut) break;\n"'''
+replace = '''    "        if (max(max(u.x, u.y), u.z) < 0.0) break;\n"'''
+
+[[mutant]]
+id = "v06-02"
+name = "the root rule without the two-root rows"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A curve that dips across the ray and back crosses it twice; counting one root gives a wrong winding."
+find = '''    "        bool fall = (s1 && !s3) || two, rise = (!s1 && s3) || two;\n"'''
+replace = '''    "        bool fall = (s1 && !s3), rise = (!s1 && s3) || two;\n"'''
+
+[[mutant]]
+id = "v06-03"
+name = "an endpoint on the ray counted twice"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "Two curves share an endpoint: one convention (on the ray is not above) for both counts the crossing once. The CPU winding uses the rule the shader does."
+find = '    int s1 = v[0] > 0.0, s2 = v[1] > 0.0, s3 = v[2] > 0.0, n = 0;'
+replace = '    int s1 = v[0] >= 0.0, s2 = v[1] > 0.0, s3 = v[2] > 0.0, n = 0;'
+
+[[mutant]]
+id = "v06-04"
+name = "even-odd drawn as nonzero"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Artwork states its fill rule; an even-odd path drawn nonzero fills its holes."
+find = '''    "    bool eo = (fl & 1u) != 0u;\n"'''
+replace = '''    "    bool eo = false;\n"'''
+
+[[mutant]]
+id = "v06-05"
+name = "a backward ray's winding not negated"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A ray cast the other way counts the crossings on the other side: the winding comes with the opposite sign."
+find = '''    "    float sg = bw ? -1.0 : 1.0;\n"'''
+replace = '''    "    float sg = 1.0;\n"'''
+
+[[mutant]]
+id = "v06-06"
+name = "the glyph table read one word off"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Item i must draw the glyph its id names."
+find = '''    "    int ti = 8 + int(gid);\n"'''
+replace = '''    "    int ti = 9 + int(gid);\n"'''
+
+[[mutant]]
+id = "v06-07"
+name = "an item turned the other way"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "ori turns +x toward +y, clockwise on the screen, as for every stimulus."
+find = '''    "    vec2 ex = cs.x * ax + cs.y * ay, ey = cs.x * ay - cs.y * ax;\n"'''
+replace = '''    "    vec2 ex = cs.x * ax - cs.y * ay, ey = cs.x * ay + cs.y * ax;\n"'''
+
+[[mutant]]
+id = "v06-08"
+name = "an item's scale ignored"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "PSYGFX_I_SCALE scales a glyph about its box's center."
+find = '''    "    float sp = B1.w * k;\n"'''
+replace = '''    "    float sp = B1.w;\n"'''
+
+[[mutant]]
+id = "v06-09"
+name = "a palette fraction ignored"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A fractional palette position mixes two entries in linear light, as INSTANCES."
+find = '''        pc = f > 0.0 ? mix(psy_v[32 + i0].rgb, psy_v[32 + min(i0 + 1, n - 1)].rgb, f) : psy_v[32 + i0].rgb;\n"
+    "    }\n"
+    "    psy_tq = vec4(Q, ce);'''
+replace = '''        pc = psy_v[32 + i0].rgb;\n"
+    "    }\n"
+    "    psy_tq = vec4(Q, ce);'''
+
+[[mutant]]
+id = "v06-10"
+name = "a run's local y axis without the pass's sign"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A target's rows run the other way in GL's axes: a run drawn into one must not flip. (v0.6.1: the text program works in px with y down and flips only the scene's quad.)"
+find = '''    "    if (psy_axes.x < 0.0) w.y = psy_target.y - w.y;\n"'''
+replace = '''    "    if (psy_axes.x > 0.0) w.y = psy_target.y - w.y;\n"'''
+
+[[mutant]]
+id = "v06-11"
+name = "the half-plane's corner as a ramp"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A turned edge's box coverage is quadratic where the square's corner meets it; a ramp blurs turned text."
+find = '''    "    if (u < w0) return u * u / (2.0 * w0 * w1);\n"'''
+replace = '''    "    if (u < w0) return u / (2.0 * w1);\n"'''
+
+[[mutant]]
+id = "v06-12"
+name = "the rays' mix without its fade"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Where neither ray crosses near the pixel, the two windings are the answer; a mix of zero weights gives 0."
+find = '''"            float fy = psy_fill_(ry.x, eo), sw = rx.y + ry.y, t = clamp(sw / psy_v[5].y, 0.0, 1.0);\n"'''
+replace = '''"            float fy = psy_fill_(ry.x, eo), sw = rx.y + ry.y, t = 1.0;\n"'''
+
+[[mutant]]
+id = "v06-13"
+name = "aliased coverage with the window"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "aliased is 0 or 1 from the winding at the pixel center, which psygfx_hit() gives on the CPU."
+find = '''    "    if (psy_alias || abs(up) > psy_cap || !(tl > 0.0)) { c += up > 0.0 ? s : 0.0; return; }\n"'''
+replace = '''    "    if (abs(up) > psy_cap || !(tl > 0.0)) { c += up > 0.0 ? s : 0.0; return; }\n"'''
+
+[[mutant]]
+id = "v06-14"
+name = "an added glyph's table entry not uploaded"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A glyph added at run time must draw: its table word is what the shader finds it by."
+find = '        rc = psygfx__cs_upload(g, c->tex_w, c->lt, now->words, t, t + 1);'
+replace = '        rc = PSYGFX_OK; (void)t;'
+
+[[mutant]]
+id = "v06-15"
+name = "the check skips the reference range"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "A reference outside its glyph's texels makes the shader read another glyph's curves; the check must refuse it."
+find = '                if (r < first || (uint64_t)r + 2 > (uint64_t)first + n)'
+replace = '                if (0)'
+
+[[mutant]]
+id = "v06-16"
+name = "the exact area's backward rise term dropped"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "From the left, the integral of clamp(x) - W counts the curves left of the pixel; without -W x the rise, it counts nothing."
+find = ''' - (bw ? W * (clamp(q2.y, 0.0, yb - ya) - clamp(q0.y, 0.0, yb - ya)) : 0.0);\n"'''
+replace = ''';\n"'''
+
+[[mutant]]
+id = "v06-17"
+name = "the exact area's band part from the pixel's bottom"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Where the pixel's rows meet two bands, each band integrates its own rows; integrating all of them in each counts the area twice."
+find = '''    "        float ya = k == 0 ? 0.0 : clamp(psy_tb.y + float(k) * bh - (p.y - hw.y), 0.0, 2.0 * hw.y);\n"'''
+replace = '''    "        float ya = 0.0;\n"'''
+
+[[mutant]]
+id = "v06-18"
+name = "blur without the box term"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 blur", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Box-filtered coverage has 1/12 px^2 of variance already: blurring by sigma again gives too wide a blur at small sigma."
+find = '    var = (double)b->sigma * b->sigma - (b->src_ == PSYGFX_BLUR_BOX ? 1.0 / (12.0 * r * r) : 0.0);'
+replace = '    var = (double)b->sigma * b->sigma;'
+
+[[mutant]]
+id = "v06-19"
+name = "taps to 3 SD"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 blur", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The kernel reaches 5 SD; cut at 3 it misses 0.27 % of the mass."
+find = '        k[36] = (float)in->w; k[37] = (float)in->h; k[38] = (float)(5.0 * sp);'
+replace = '        k[36] = (float)in->w; k[37] = (float)in->h; k[38] = (float)(3.0 * sp);'
+
+[[mutant]]
+id = "v06-20"
+name = "weights not normalized"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 blur", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The taps' weights sum to sqrt(2 pi) s', not 1."
+find = '''    "    psy_out = acc / ws;\n"'''
+replace = '''    "    psy_out = acc;\n"'''
+
+[[mutant]]
+id = "v06-21"
+name = "both passes horizontal"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 blur", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A separable blur runs one pass along each axis."
+find = '        k[32] = pass ? 0.0f : 1.0f; k[33] = pass ? 1.0f : 0.0f; k[34] = (float)r; k[35] = (float)sp;'
+replace = '        k[32] = 1.0f; k[33] = 0.0f; k[34] = (float)r; k[35] = (float)sp;'
+
+[[mutant]]
+id = "v06-22"
+name = "the output center half a texel off"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 blur", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A tap's weight is its distance from the output pixel's center in input texels; off by half, the result moves."
+find = '''    "    float c = P.z * (hz ? gl_FragCoord.x : gl_FragCoord.y);\n"'''
+replace = '''    "    float c = P.z * (hz ? gl_FragCoord.x : gl_FragCoord.y) + 0.5;\n"'''
+
+[[mutant]]
+id = "v06-23"
+name = "taps past the layer clamped to its edge"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 blur", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Outside the layer is empty; repeating its edge adds mass that is not there. Caught by the rect at the layer's corner."
+find = '''    "        if (j >= j0 && j <= j1) acc += w * texelFetch(psy_tex0, hz ? ivec2(j, o.y) : ivec2(o.x, j), 0);\n"'''
+replace = '''    "        acc += w * texelFetch(psy_tex0, hz ? ivec2(clamp(j, 0, n - 1), o.y) : ivec2(o.x, clamp(j, 0, n - 1)), 0);\n"'''
+
+[[mutant]]
+id = "v06-24"
+name = "coverage drawn without the tint"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 blur", PSYGFX_TEST_DEVICES = "hardware" }
+why = "An R16F result is coverage: its color is the tint."
+find = '''    "    if (psy_misc.w > 0.5) { float a = c.r * psy_color.a; return psy_misc.z > 0.5 ? vec4(psy_color.rgb * a, a) : vec4(psy_color.rgb, a); }\n"'''
+replace = '''    "    if (psy_misc.w > 0.5) { float a = c.r * psy_color.a; return psy_misc.z > 0.5 ? vec4(vec3(a), a) : vec4(psy_color.rgb, a); }\n"'''
+
+[[mutant]]
+id = "v06-25"
+name = "a 2x layer at 1x px per unit"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 blur", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Drawing into a 2x layer, units come out twice the px, so the result lines up with the 1x screen."
+find = '    if (r->ss > 1) { g->ppu_keep = g->ppu; g->ppu *= (float)r->ss; }'
+replace = '    (void)0;'
+
+[[mutant]]
+id = "v06-26"
+name = "the video constants read one block off"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.4 video", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The video program's constants now arrive as flat inputs from the vertex shader; they must be the image's own."
+find = '''    "    for (int k = 0; k < 7; k++) psy_vk[k] = psy_v[i * 16 + 8 + k];\n"'''
+replace = '''    "    for (int k = 0; k < 7; k++) psy_vk[k] = psy_v[i * 16 + 7 + k];\n"'''
+
+[[mutant]]
+id = "v06-27"
+name = "a two-root row that misses the ray counted"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Where a curve turns back before the ray, D < 0: clamping it gives two roots that do not cancel. Found by v06-02 and v06-03 surviving: no test glyph had a curve with an extremum inside it."
+find = '''    "        if (two && D < 0.0) continue;\n"'''
+replace = ''
+
+[[mutant]]
+id = "v06-28"
+name = "the CPU winding counts a two-root row that misses the ray"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "The CPU winding must follow the shader's rule, or a hit test disagrees with the pixels near a curve's extremum."
+find = '        if (fall && rise) return 0;'
+replace = ''
+
+# v0.6.1 (docs/psy_gfx.md, "v0.6.1 mutations")
+
+[[mutant]]
+id = "v06-29"
+name = "a .rays run on the program with the exact area"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = ".rays must take the program without the exact area: the flag alone is 0.7 ms slower on a page, and an exact-area draw is not the rays."
+find = '    if ((s->flags & PSYGFX_STIM_RAYS) ||'
+replace = '    if (0 ||'
+
+[[mutant]]
+id = "v06-30"
+name = "the scene's y down by another rounding path"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.6 text", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A run cached in a target equals the run drawn only when both passes compute a pixel's em point from the same bits."
+find = 'psy_target.y - gl_FragCoord.y'
+replace = 'psy_target.y * 1.0000002 - gl_FragCoord.y'
+
+[[mutant]]
+id = "v06-31"
+name = "the ellipse's perimeter series off by half a term"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "Dashes, trim and snap on an ELLIPSE use its quarter perimeter; the GPU and its CPU form share the value, so only a reference outside the header sees it."
+find = '        sum += p2 * c * c;'
+replace = '        sum += 0.5 * p2 * c * c;'
+
+# The kind-specialized vector programs (the kinds worker's five, run on the
+# Iris Xe here; docs/psy_gfx.md, "Kind-specialized vector programs").
+
+[[mutant]]
+id = "v07-00"
+name = "the dashed CIRCLE program without the arc length"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "vspec", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Dashes run along the arc length: a program that leaves it out draws other dashes than the generic program."
+find = '''"#define PSY_VK 0x2\n#define PSY_V1 1\n#define PSY_WS 1\n'''
+replace = '''"#define PSY_VK 0x2\n#define PSY_V1 1\n#define PSY_WS 0\n'''
+
+[[mutant]]
+id = "v07-01"
+name = "paint not checked by the pick"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "vspec", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The specialized programs have no paint: a painted stimulus must stay on the generic program."
+find = '|| (fl & PSYGFX__VF_PAINT)) return pipe;'
+replace = ') return pipe;'
+
+[[mutant]]
+id = "v07-02"
+name = "a compound's kinds not checked by the pick"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "vspec", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The compound program evaluates CIRCLEs only: a compound with another kind must stay generic."
+find = 'if ((int)vd[16 * i + 4] != kind) return pipe;'
+replace = 'if (0) return pipe;'
+
+[[mutant]]
+id = "v07-03"
+name = "the area threshold inverted"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "vspec", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Below 256 x 256 px a program switch costs more CPU than the stimulus saves on the GPU."
+find = 'if (4.0 * ex * ey < psygfx__vspec_area'
+replace = 'if (4.0 * ex * ey > psygfx__vspec_area'
+
+[[mutant]]
+id = "v07-04"
+name = "fx not checked for one primitive"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "vspec", PSYGFX_TEST_DEVICES = "hardware" }
+why = "PLAIN and ALONG have no effects: a primitive with fx must stay generic."
+find = 'if (fl & PSYGFX__VF_FX) return pipe;'
+replace = ''
+
+# NOISE GAUSSIAN (v0.7)
+
+[[mutant]]
+id = "v07-05"
+name = "the quantile table's row and column swapped"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "noise", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The GPU must read the entry psygfx_noise_value() reads: h >> 16, rows of 256."
+find = 'texelFetch(psy_tex0, ivec2(int((h >> 16u) & 255u), int(h >> 24u)), 0).r'
+replace = 'texelFetch(psy_tex0, ivec2(int(h >> 24u), int((h >> 16u) & 255u)), 0).r'
+
+[[mutant]]
+id = "v07-06"
+name = "the table not scaled to unit variance"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "contrast is the noise's SD only if the 65536 values have variance 1."
+find = '    k = 1.0 / sqrt(ss / 32768.0);'
+replace = '    k = 1.0;'
+
+[[mutant]]
+id = "v07-07"
+name = "GAUSSIAN drawn as UNIFORM"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "noise", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The GPU must draw the distribution the stimulus names."
+find = 'if (psy_misc.z > 1.5) return texelFetch'
+replace = 'if (psy_misc.z > 2.5) return texelFetch'
+
+# v0.8: setup passes and the automatic rays program
+
+[[mutant]]
+id = "v08-00"
+name = "a setup pass draws into the scene"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.8", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The scene belongs to frames: a setup pass has no frame to show it in."
+find = '    if (g->in_setup && !g->in_target) {'
+replace = '    if (0) {'
+
+[[mutant]]
+id = "v08-01"
+name = "end_setup runs the output stage and counts a frame"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.8", PSYGFX_TEST_DEVICES = "hardware" }
+why = "A setup pass is not a frame: the frame count and the back buffer are the screen frames'."
+find = '''    if (setup) {
+        g->clipped_total += g->clipped;'''
+replace = '''    if (0) {
+        g->clipped_total += g->clipped;'''
+
+[[mutant]]
+id = "v08-02"
+name = "end() accepted in a setup pass"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.8", PSYGFX_TEST_DEVICES = "hardware" }
+why = "end() would run the output stage on a pass that is not a frame."
+find = '    if (g && g->open && g->in_setup) {'
+replace = '    if (0) {'
+
+[[mutant]]
+id = "v08-03"
+name = "the automatic rays ignore the items' own turns"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.8", PSYGFX_TEST_DEVICES = "hardware" }
+why = "An item on a quarter turn takes the exact area: its run must stay on the exact-area program."
+find = '''            if (turned && (f & PSYGFX_I_ORI)) {   /* the item's turn adds to the run's */'''
+replace = '            if (0) {'
+
+[[mutant]]
+id = "v08-04"
+name = "the automatic rays for items in a buffer"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.8", PSYGFX_TEST_DEVICES = "hardware" }
+why = "Items in a buffer are on the GPU only: their turns cannot be checked, so the run stays on the exact-area program."
+find = '        turned = (f & PSYGFX_I_ORI) ? (s->items != NULL) : (t > 0.01 && t < 89.99);'
+replace = '        turned = (f & PSYGFX_I_ORI) ? 1 : (t > 0.01 && t < 89.99);'
+
+# v0.9: the noise hash (docs/psy_gfx.md, "v0.9: the noise hash")
+
+[[mutant]]
+id = "v09-00"
+name = "the shaders' key without the odd multiplier"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "noise", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The GPU's key must be psygfx_hash2()'s, or NOISE and its CPU twin draw different checks."
+find = '''    "    return psy_hash((c.x + (c.y << 16u)) * (k | 1u) ^ m);\n"'''
+replace = '''    "    return psy_hash((c.x + (c.y << 16u)) ^ k ^ m);\n"'''
+count = 2
+
+[[mutant]]
+id = "v09-01"
+name = "the CPU twin's key nested as before v0.9"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "psygfx_hash2() is the shaders' key; the pinned digests and the twin's formula check it."
+find = '    return psygfx_hash(((uint32_t)cx + ((uint32_t)cy << 16)) * (k | 1u) ^ m);'
+replace = '    return psygfx_hash((uint32_t)cx ^ psygfx_hash((uint32_t)cy ^ psygfx_hash(seed)));'
+
+[[mutant]]
+id = "v09-02"
+name = "the hash a step short"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "triple32 as published: a weaker mix changes every pattern and the avalanche the docs report."
+find = '    x ^= x >> 15; x *= 0x31848babu;'
+replace = '    x ^= x >> 15;'
+
+# v0.10: NOISE SIMPLEX
+
+[[mutant]]
+id = "v10-00"
+name = "the GPU's second simplex corner a unit off"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.10 simplex", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The GPU and psygfx_simplex_value() must compute the same integers, step for step."
+find = '''x[2] = x0 - i2 * 16384 + 5461; x[3] = x0 - 8192;\n"'''
+replace = '''x[2] = x0 - i2 * 16384 + 5460; x[3] = x0 - 8192;\n"'''
+
+[[mutant]]
+id = "v10-01"
+name = "the GPU's z layer ignored"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.10 simplex", PSYGFX_TEST_DEVICES = "hardware" }
+why = "z is the field's third coordinate: without it the field cannot evolve."
+find = '''    "uvec2 psy_gn_layer_(uint z, uint S) { uint k = psy_hash(z ^ S);'''
+replace = '''    "uvec2 psy_gn_layer_(uint z, uint S) { uint k = psy_hash(S);'''
+
+[[mutant]]
+id = "v10-02"
+name = "the octave weights not normalized"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "The weights sum to 1 so that the SD by octaves is the manual's; GPU and CPU share them, so only a statistic sees it."
+find = '            out->w[o] = (int32_t)floor(4096.0 * a / tot + 0.5);'
+replace = '            out->w[o] = (int32_t)floor(4096.0 * a + 0.5);'
+
+[[mutant]]
+id = "v10-03"
+name = "the integer t to the fourth at lower precision"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "The integer form's distance from the noise in double is stated (1.4e-3); coarser steps break it."
+find = '''            t >>= 12; t = (t * t) >> 16; t = (t * t) >> 16;
+            sum += t * (gr[0] * x[k][0] + gr[1] * x[k][1] + gr[2] * x[k][2]);'''
+replace = '''            t >>= 16; t = (t * t) >> 12; t = (t * t) >> 12; t <<= 4;
+            sum += t * (gr[0] * x[k][0] + gr[1] * x[k][1] + gr[2] * x[k][2]);'''
+
+[[mutant]]
+id = "v10-04"
+name = "a POLYGON aperture accepted under SIMPLEX"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "v0.10 simplex", PSYGFX_TEST_DEVICES = "hardware" }
+why = "The polygon's vertices and the octaves share the block: one would overwrite the other."
+find = '    if (s->shape == PSYGFX_POLYGON) return "SIMPLEX keeps its octaves where a POLYGON aperture keeps its vertices: use MASK_TEX";'
+replace = ''

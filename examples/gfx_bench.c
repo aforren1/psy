@@ -26,6 +26,8 @@
 #define PSY_GFX_IMPLEMENTATION
 #include "psy_gfx.h"
 #include "tests/adapt/psy_gfx_headless.h"
+#define PSY_OUTLINE_IMPLEMENTATION
+#include "psy_outline.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,6 +126,7 @@ static int memc_store(void* u, uint64_t key, const void* data, size_t n) {
 }
 static const psygfx_cache memc_cache = { memc_load, memc_store, NULL };
 
+static bool reopen(psygfx_format fmt, psygfx_dither dither, int lut);
 static bool reopen(psygfx_format fmt, psygfx_dither dither, int lut) {
     psygfx_desc gd;
     psygfx_close(&gfx);
@@ -327,11 +330,12 @@ typedef struct {
     psygfx_tex t;                  /* a target pass first when pass != 0      */
     const psygfx_stim* in;         /* drawn into that pass                    */
     int n_in;
-    int pass;
+    int pass;                      /* 2: in is drawn into blur's layer, then blurred */
     void (*prep)(int);
+    psygfx_blur* blur;
 } bench_work;
 
-enum { CMP_MAX = 8, CMP_REPS = 25, CMP_BLOCK = 12 };
+enum { CMP_MAX = 10, CMP_REPS = 25, CMP_BLOCK = 12 };
 static double cmp_gpu[CMP_MAX][CMP_REPS], cmp_cpu[CMP_MAX][CMP_REPS], cmp_tmp[CMP_REPS];
 
 static double median_of(const double* v, int n) {
@@ -345,7 +349,13 @@ static void cmp_frame(const bench_work* w, psyscr_frame* f, int i) {
     static const float zero[4] = { 0, 0, 0, 0 };
     if (w->prep) w->prep(i);   /* before begin: an upload must be */
     psygfx_begin(&gfx, f);
-    if (w->pass) {
+    if (w->pass == 2) {
+        psygfx_begin_target(&gfx, w->blur->layer, zero);
+        if (w->n_in) psygfx_draw_n(&gfx, w->in, w->n_in);
+        psygfx_end_target(&gfx);
+        psygfx_blur_apply(&gfx, w->blur);
+        psygfx_draw(&gfx, &w->blur->image);
+    } else if (w->pass) {
         psygfx_begin_target(&gfx, w->t, zero);
         if (w->n_in) psygfx_draw_n(&gfx, w->in, w->n_in);
         psygfx_end_target(&gfx);
@@ -501,6 +511,320 @@ static void bench_v04_video(void) {
     }
     for (k = 0; k < 3; k++) psygfx_texture_free(&gfx, vid_t[k]);
     free(mem);
+}
+
+/* --- v0.6: curve runs and the blur pass ------------------------------------------ */
+
+/* Fonts through psy_outline.h: a system font read at run time, so no
+ * outline is committed. */
+typedef struct tt_font {
+    unsigned char* d; size_t n;
+    psyol_font f;
+} tt_font;
+static psyol_ctx tt_cx;
+
+static int tt_open(tt_font* f, const char* path) {
+    FILE* fp = fopen(path, "rb");
+    char err[200];
+    memset(f, 0, sizeof *f);
+    if (!fp) return 0;
+    fseek(fp, 0, SEEK_END);
+    f->n = (size_t)ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    f->d = (unsigned char*)malloc(f->n);
+    if (!f->d || fread(f->d, 1, f->n, fp) != f->n) { fclose(fp); free(f->d); f->d = NULL; return 0; }
+    fclose(fp);
+    if (psyol_font_open(&f->f, f->d, f->n, 0, err, sizeof err) < 0) { printf("v0.6 text: %s: %s\n", path, err); return 0; }
+    return 1;
+}
+
+static int tt_gid(const tt_font* f, int ch) { return (int)psyol_font_glyph_index(&f->f, (uint32_t)ch); }
+
+static double tt_adv(const tt_font* f, int g) {
+    double a, l;
+    return psyol_font_hmetrics(&f->f, (uint32_t)g, &a, &l) >= 0 ? a : 0.5;
+}
+
+/* A set of glyphs gids[0 .. n - 1] (table entries by glyph id), resolved
+ * unless PSYGFX_BENCH_UNRESOLVED, bands as given (0: the builder's rule). */
+static int tt_build(const tt_font* f, psyol_cset* s, const int* gids, int n, int bands, int backward, int keep) {
+    static unsigned char seen[65536];
+    static uint32_t list[65536];
+    psyol_cset_desc d;
+    uint32_t m = 0;
+    int i;
+    memset(seen, 0, sizeof seen);
+    for (i = 0; i < n; i++) if (gids[i] > 0 && gids[i] < 65536 && !seen[gids[i]]) { seen[gids[i]] = 1; list[m++] = (uint32_t)gids[i]; }
+    memset(&d, 0, sizeof d);
+    d.n_glyphs = (uint32_t)f->f.n_glyphs; d.nh = d.nv = bands; d.backward = backward != 0; d.keep_overlaps = keep != 0;
+    if (psyol_cset_init(s, &tt_cx, &d) != PSYOL_OK) return 0;
+    if (psyol_cset_add_font(s, &f->f, list, m, 0) < 0) { printf("v0.6 text: %s\n", psyol_error(&tt_cx)); return 0; }
+    return 1;
+}
+
+/* A page of text: lines of glyphs of em size px, advanced by the font. */
+static int tt_page(const tt_font* f, const int* gids, int ng, double px, double lh, psygfx_citem* it, int cap) {
+    double x = 4, y = px;
+    int n = 0, k = 0;
+    while (n < cap) {
+        int g = gids[k++ % ng];
+        double a = tt_adv(f, g) * px;
+        if (x + a > W - 4) { x = 4; y += lh; }
+        if (y > H - 4) break;
+        memset(&it[n], 0, sizeof it[n]);
+        it[n].x = (float)x; it[n].y = (float)y; it[n].glyph = (float)g;
+        n++;
+        x += a;
+    }
+    return n;
+}
+
+static psygfx_stim bt_run(psygfx_cset set, psygfx_buf buf, int n, double px, float ori) {
+    psygfx_crun_desc rd;
+    memset(&rd, 0, sizeof rd);
+    rd.place = PSYGFX_TOP_LEFT; rd.anchor = PSYGFX_TOP_LEFT; rd.set = set; rd.buf = buf; rd.n = n;
+    rd.size = (float)px; rd.w = (float)W; rd.h = (float)H; rd.ori = ori;
+    rd.color[0] = rd.color[1] = rd.color[2] = 0.9f;
+    return psygfx_crun(&gfx, &rd);
+}
+
+static void bench_v06_text(void) {
+    static psygfx_citem it[4][30000];
+    static int lat[95], cjk[7000];
+    tt_font fl, fc;
+    psyol_cset sl, sc;
+    psygfx_cset setl, setc;
+    psygfx_buf buf[4];
+    psygfx_stim st[10];
+    psygfx_tex page;
+    bench_work w[CMP_MAX];
+    psygfx_cset_desc d;
+    int n[4], i, nl = 0, bands = getenv("PSYGFX_BENCH_BANDS") ? atoi(getenv("PSYGFX_BENCH_BANDS")) : 0;
+    int bwd = getenv("PSYGFX_BENCH_FORWARD") ? 0 : 1, keep = getenv("PSYGFX_BENCH_UNRESOLVED") != NULL;
+    uint64_t t0;
+    if (!run("v0.6 text")) return;
+    if (!tt_open(&fl, "C:/Windows/Fonts/segoeui.ttf") || !tt_open(&fc, "C:/Windows/Fonts/msyh.ttc")) {
+        printf("v0.6 text: needs Segoe UI and Microsoft YaHei (C:/Windows/Fonts)\n");
+        return;
+    }
+    if (getenv("PSYGFX_BENCH_TEXT_V3")) psygfx__text_v3 = atoi(getenv("PSYGFX_BENCH_TEXT_V3"));
+    if (getenv("PSYGFX_BENCH_NOAUTO")) psygfx__text_auto = 0;   /* turned runs on the exact-area program, as v0.7 */
+    if (!reopen(scene_fmt, PSYGFX_DITHER_NONE, 0)) return;
+    for (i = 33; i < 127; i++) { int g = tt_gid(&fl, i); if (g) lat[nl++] = g; }
+    for (i = 0; i < 7000; i++) cjk[i] = tt_gid(&fc, 0x4E00 + i);
+    t0 = psyrt_now_ns();
+    if (psyol_init(&tt_cx, NULL) != PSYOL_OK) return;
+    if (!tt_build(&fl, &sl, lat, nl, bands, bwd, keep) || !tt_build(&fc, &sc, cjk, 7000, bands, bwd, keep)) { printf("v0.6 text: build failed\n"); return; }
+    printf("v0.6 text: psy_outline.h built %d Latin and 7000 CJK glyphs in %.0f ms (bands %d, backward %d, %s): %u + %u texels, "
+           "%u + %u words\n", nl, (double)(psyrt_now_ns() - t0) * 1e-6, bands, bwd, keep ? "overlaps kept" : "resolved",
+           sl.n_texels, sc.n_texels, sl.n_words, sc.n_words);
+    memset(&d, 0, sizeof d);
+    d.texels = sl.texels; d.n_texels = sl.n_texels; d.words = sl.words; d.n_words = sl.n_words;
+    t0 = psyrt_now_ns();
+    setl = psygfx_cset_make(&gfx, &d);
+    printf("v0.6 text: psygfx_cset_make, Latin set (first, with the program): %.1f ms\n", (double)(psyrt_now_ns() - t0) * 1e-6);
+    d.texels = sc.texels; d.n_texels = sc.n_texels; d.words = sc.words; d.n_words = sc.n_words;
+    t0 = psyrt_now_ns();
+    setc = psygfx_cset_make(&gfx, &d);
+    printf("v0.6 text: psygfx_cset_make, 7000 CJK glyphs: %.1f ms\n", (double)(psyrt_now_ns() - t0) * 1e-6);
+    if (!setl.id || !setc.id) { printf("v0.6 text: %s\n", psygfx_error(&gfx)); return; }
+    n[0] = tt_page(&fl, lat, nl, 12, 14, it[0], 30000);
+    n[1] = tt_page(&fl, lat, nl, 48, 56, it[1], 30000);
+    n[2] = tt_page(&fc, cjk, 7000, 16, 20, it[2], 30000);
+    n[3] = tt_page(&fc, cjk + 100, 45, 200, 240, it[3], 45);
+    for (i = 0; i < 4; i++) {
+        buf[i] = psygfx_buffer(&gfx, (size_t)n[i] * sizeof(psygfx_citem));
+        psygfx_buffer_update(&gfx, buf[i], 0, it[i], (size_t)n[i] * sizeof(psygfx_citem));
+    }
+    st[0] = bt_run(setl, buf[0], n[0], 12, 0);
+    st[1] = bt_run(setl, buf[1], n[1], 48, 0);
+    st[2] = bt_run(setc, buf[2], n[2], 16, 0);
+    st[3] = bt_run(setc, buf[3], n[3], 200, 0);
+    st[4] = bt_run(setl, buf[0], n[0], 12, 15);
+    st[5] = bt_run(setc, buf[2], n[2], 16, 15);
+    /* the 12 px page with .rays (v0.7), and drawn once into an RGBA16F
+     * target that is composited each frame at 1:1 on whole px */
+    {
+        psygfx_crun_desc rd;
+        memset(&rd, 0, sizeof rd);
+        rd.place = PSYGFX_TOP_LEFT; rd.anchor = PSYGFX_TOP_LEFT; rd.set = setl; rd.buf = buf[0]; rd.n = n[0];
+        rd.size = 12; rd.w = (float)W; rd.h = (float)H; rd.rays = true;
+        rd.color[0] = rd.color[1] = rd.color[2] = 0.9f;
+        st[7] = psygfx_crun(&gfx, &rd);
+    }
+    {
+        psygfx_target_desc td;
+        psygfx_image_desc idd;
+        psyscr_frame f;
+        static const float zero[4] = { 0, 0, 0, 0 };
+        memset(&td, 0, sizeof td);
+        td.w = W; td.h = H; td.format = PSYGFX_RGBA16F;
+        page = psygfx_target(&gfx, &td);
+        memset(&f, 0, sizeof f);
+        psygfx_begin(&gfx, &f);
+        psygfx_begin_target(&gfx, page, zero);
+        psygfx_draw(&gfx, &st[0]);
+        psygfx_end_target(&gfx);
+        psygfx_end(&gfx);
+        memset(&idd, 0, sizeof idd);
+        idd.tex = page;
+        st[8] = psygfx_image(&gfx, &idd);
+    }
+    memset(w, 0, sizeof w);
+    {
+        static char nm[8][80];
+        static const char* const what[8] = { "12 px Latin page", "48 px Latin", "16 px CJK page", "200 px CJK", "12 px Latin page, turned 15 deg",
+                                             "16 px CJK page, turned 15 deg", "12 px Latin page, .rays", "12 px Latin page, cached in RGBA16F" };
+        static const int src[8] = { 0, 1, 2, 3, 0, 2, 0, 0 }, sti[8] = { 0, 1, 2, 3, 4, 5, 7, 8 };
+        w[0].name = "empty frame";
+        for (i = 0; i < 8; i++) {
+            snprintf(nm[i], sizeof nm[i], "%s, %d glyphs", what[i], n[src[i]]);
+            w[1 + i].name = nm[i]; w[1 + i].s = &st[sti[i]]; w[1 + i].n = 1;
+        }
+        bench_cmp("v0.6 text", w, 9);
+    }
+    {   /* a 40-glyph line at 48 px with its items copied each frame: the CPU of draw() */
+        psygfx_crun_desc rd;
+        static psygfx_citem line[40];
+        memcpy(line, it[1], sizeof line);
+        memset(&rd, 0, sizeof rd);
+        rd.place = PSYGFX_TOP_LEFT; rd.anchor = PSYGFX_TOP_LEFT; rd.set = setl; rd.items = line; rd.n = 40; rd.size = 48;
+        rd.w = (float)W; rd.h = (float)H; rd.color[0] = 1; rd.fields = PSYGFX_I_ORI | PSYGFX_I_GATE;
+        for (i = 0; i < 40; i++) line[i].gate = 1;
+        st[6] = psygfx_crun(&gfx, &rd);
+        memset(w, 0, sizeof w);
+        w[0].name = "empty frame";
+        w[1].name = "a 40-glyph line at 48 px, items copied"; w[1].s = &st[6]; w[1].n = 1;
+        bench_cmp("v0.6 text line", w, 2);
+    }
+    for (i = 0; i < 4; i++) psygfx_buffer_free(&gfx, buf[i]);
+    psygfx_texture_free(&gfx, page);
+    psygfx_cset_free(&gfx, setl); psygfx_cset_free(&gfx, setc);
+    psyol_cset_free(&sl); psyol_cset_free(&sc);
+    psyol_free(&tt_cx);
+    free(fl.d); free(fc.d);
+}
+
+static void bench_v06_blur(void) {
+    static const psygfx_format fm[3] = { PSYGFX_R16F, PSYGFX_RGBA16F, PSYGFX_RGBA32F };
+    static const char* const fn[3] = { "R16F", "RGBA16F", "RGBA32F" };
+    static psygfx_blur bl[8];
+    static char nm[8][80];
+    bench_work w[CMP_MAX];
+    psygfx_shape_desc sd;
+    psygfx_stim rect;
+    int k;
+    if (!run("v0.6 blur")) return;
+    if (!reopen(scene_fmt, PSYGFX_DITHER_NONE, 0)) return;
+    memset(&sd, 0, sizeof sd);
+    sd.shape = PSYGFX_RECT; sd.w = 200; sd.h = 100; sd.color[0] = sd.color[1] = sd.color[2] = 1;
+    rect = psygfx_shape(&sd);
+    /* full screen, sigma 0.5, 1, 2, 4 (R16F), then the formats at 2, then 2x */
+    {
+        static const double sg[4] = { 0.5, 1, 2, 4 };
+        for (k = 0; k < 4; k++) {
+            psygfx_blur_desc bd;
+            memset(&bd, 0, sizeof bd);
+            bd.w = W; bd.h = H; bd.format = PSYGFX_R16F; bd.sigma = (float)sg[k];
+            if (psygfx_blur_make(&gfx, &bl[k], &bd) != PSYGFX_OK) { printf("v0.6 blur: %s\n", psygfx_error(&gfx)); return; }
+        }
+        memset(w, 0, sizeof w);
+        w[0].name = "empty frame";
+        for (k = 0; k < 4; k++) {
+            snprintf(nm[k], sizeof nm[k], "full screen R16F, sigma %.1f", sg[k]);
+            w[1 + k].name = nm[k]; w[1 + k].pass = 2; w[1 + k].blur = &bl[k]; w[1 + k].in = &rect; w[1 + k].n_in = 1;
+        }
+        bench_cmp("v0.6 blur, full screen", w, 5);
+        for (k = 0; k < 4; k++) psygfx_blur_free(&gfx, &bl[k]);
+    }
+    {
+        for (k = 0; k < 3; k++) {
+            psygfx_blur_desc bd;
+            memset(&bd, 0, sizeof bd);
+            bd.w = W; bd.h = H; bd.format = fm[k]; bd.sigma = 2;
+            if (psygfx_blur_make(&gfx, &bl[k], &bd) != PSYGFX_OK) { printf("v0.6 blur: %s\n", psygfx_error(&gfx)); return; }
+        }
+        memset(w, 0, sizeof w);
+        w[0].name = "empty frame";
+        for (k = 0; k < 3; k++) {
+            snprintf(nm[k], sizeof nm[k], "full screen %s, sigma 2", fn[k]);
+            w[1 + k].name = nm[k]; w[1 + k].pass = 2; w[1 + k].blur = &bl[k]; w[1 + k].in = &rect; w[1 + k].n_in = 1;
+        }
+        bench_cmp("v0.6 blur, formats", w, 4);
+        for (k = 0; k < 3; k++) psygfx_blur_free(&gfx, &bl[k]);
+    }
+    {   /* a word: 400 x 200, at 1x and 2x, sigma 0.5 to 32 */
+        static const double sg[7] = { 0.5, 1, 2, 4, 8, 16, 32 };
+        int q;
+        for (q = 1; q <= 2; q++) {
+            for (k = 0; k < 7; k++) {
+                psygfx_blur_desc bd;
+                memset(&bd, 0, sizeof bd);
+                bd.w = 400; bd.h = 200; bd.format = PSYGFX_R16F; bd.sigma = (float)sg[k]; bd.supersample = q;
+                if (psygfx_blur_make(&gfx, &bl[k], &bd) != PSYGFX_OK) { printf("v0.6 blur: %s\n", psygfx_error(&gfx)); return; }
+            }
+            memset(w, 0, sizeof w);
+            w[0].name = "empty frame";
+            for (k = 0; k < 7; k++) {
+                snprintf(nm[k], sizeof nm[k], "word 400 x 200 R16F %dx, sigma %.1f", q, sg[k]);
+                w[1 + k].name = nm[k]; w[1 + k].pass = 2; w[1 + k].blur = &bl[k]; w[1 + k].in = &rect; w[1 + k].n_in = 1;
+            }
+            bench_cmp(q == 1 ? "v0.6 blur, word 1x" : "v0.6 blur, word 2x", w, 8);
+            for (k = 0; k < 7; k++) psygfx_blur_free(&gfx, &bl[k]);
+        }
+    }
+}
+
+/* --- v0.7: NOISE GAUSSIAN against UNIFORM and BINARY, full screen ----------------- */
+
+static void bench_v07_noise(void) {
+    static psygfx_stim st[6];
+    static char nm[6][80];
+    static const char* const dn[3] = { "UNIFORM", "BINARY", "GAUSSIAN" };
+    bench_work w[CMP_MAX];
+    int k;
+    if (!run("v0.7 noise")) return;
+    if (!reopen(scene_fmt, PSYGFX_DITHER_NONE, 0)) return;
+    memset(w, 0, sizeof w);
+    w[0].name = "empty frame";
+    for (k = 0; k < 6; k++) {
+        psygfx_noise_desc nd;
+        memset(&nd, 0, sizeof nd);
+        nd.w = (float)W; nd.h = (float)H; nd.check = k < 3 ? 1.0f : 4.0f; nd.contrast = 0.2f;
+        nd.aperture = PSYGFX_NO_APERTURE; nd.dist = (psygfx_noise_dist)(k % 3); nd.seed = 7;
+        st[k] = psygfx_noise(&nd);
+        snprintf(nm[k], sizeof nm[k], "noise %s, check %d px, full screen", dn[k % 3], k < 3 ? 1 : 4);
+        w[1 + k].name = nm[k]; w[1 + k].s = &st[k]; w[1 + k].n = 1;
+    }
+    bench_cmp("v0.7 noise", w, 7);
+    /* the dither's hash runs in the output stage, every pixel, every frame */
+    if (reopen(scene_fmt, PSYGFX_DITHER_ORDERED, 1)) bench("v0.7 noise: empty frame, CLUT, ordered dither", NULL, 0, NULL, 0);
+    if (reopen(scene_fmt, PSYGFX_DITHER_NOISE, 1)) bench("v0.7 noise: empty frame, CLUT, noise dither", NULL, 0, NULL, 0);
+}
+
+/* --- v0.10: NOISE SIMPLEX, full screen, by octaves --------------------------------- */
+
+static void bench_v10_simplex(void) {
+    static psygfx_stim st[6];
+    static char nm[6][80];
+    static const int oc[5] = { 1, 2, 3, 4, 8 };
+    bench_work w[CMP_MAX];
+    int k;
+    if (!run("v0.10 simplex")) return;
+    if (!reopen(scene_fmt, PSYGFX_DITHER_NONE, 0)) return;
+    memset(w, 0, sizeof w);
+    w[0].name = "empty frame";
+    for (k = 0; k < 6; k++) {
+        psygfx_noise_desc nd;
+        memset(&nd, 0, sizeof nd);
+        nd.w = (float)W; nd.h = (float)H; nd.contrast = 0.4f; nd.aperture = PSYGFX_NO_APERTURE; nd.seed = 7;
+        nd.dist = k < 5 ? PSYGFX_SIMPLEX : PSYGFX_UNIFORM; nd.scale = 32; nd.octaves = k < 5 ? oc[k] : 1; nd.z = 0.5f;
+        st[k] = psygfx_noise(&nd);
+        if (k < 5) snprintf(nm[k], sizeof nm[k], "SIMPLEX, %d octave(s), scale 32 px, full screen", oc[k]);
+        else snprintf(nm[k], sizeof nm[k], "UNIFORM, 1 px checks, full screen");
+        w[1 + k].name = nm[k]; w[1 + k].s = &st[k]; w[1 + k].n = 1;
+    }
+    bench_cmp("v0.10 simplex", w, 7);
 }
 
 /* --- v0.4: instances and interleaved kinds ------------------------------------- */
@@ -1168,6 +1492,7 @@ int main(int argc, char** argv) {
     if (run("v0.2")) bench_v02(g);
     if (run("v0.3")) bench_v03();
     bench_v04_video(); bench_v04_inst(); bench_v04_mixed();   /* each checks --only */
+    bench_v06_text(); bench_v06_blur(); bench_v07_noise(); bench_v10_simplex();
     psygfx_close(&gfx);
     psyscr_close(&scr);
     return 0;

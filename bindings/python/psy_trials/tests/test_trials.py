@@ -322,3 +322,198 @@ def test_version_matches_pyproject():
         m = re.search(r'^version\s*=\s*"([^"]+)"', f.read(), re.M)
     assert m, "no version in pyproject.toml"
     assert pt.__version__ == m.group(1)
+
+
+# --------------------------------------------------------------------- v0.2
+# Tables (psy_table.h), order lists, draws, subsets, groups, units, balance,
+# Latin squares and rules text, through the binding. The CSV parser and the
+# number parser are checked against two oracles written by other people:
+# Python's csv module and float().
+
+import csv
+import io
+import random
+
+COND_CSV = (
+    "target,contrast,word,list,n\n"
+    "a,0.25,cat,1,2\na,0.5,dog,1,1\nb,0.25,\"new york\",2,2\nb,0.5,ox,2,1\n"
+    "catch,0,emu,1,1\ncatch,0,yak,2,1\n"
+)
+
+
+def test_table_basics_and_bytes():
+    tab = pt.Table(COND_CSV)
+    assert tab.columns == ["target", "contrast", "word", "list", "n"]
+    assert tab.types == ["string", "number", "string", "integer", "integer"]
+    assert len(tab) == tab.n_rows == 6
+    assert tab.value(2, "word") == "new york"
+    assert tab.value(1, 1) == 0.5 and tab.value(0, "n") == 2
+    assert tab.levels("target") == ["a", "b", "catch"]
+    assert tab.find("contrast", "0.50") == 1
+    assert tab.row(4) == {"target": "catch", "contrast": 0.0, "word": "emu", "list": 1, "n": 1}
+    b = tab.to_bytes()
+    assert b[:4] == b"PSTB" and len(b) % 8 == 0
+    t2 = pt.Table.from_bytes(b)
+    assert t2.hash == tab.hash and t2.row(2) == tab.row(2)
+    bad = bytearray(b)
+    bad[60] ^= 1
+    with pytest.raises(pt.ArgumentError, match="hash"):
+        pt.Table.from_bytes(bytes(bad))
+    with pytest.raises(pt.ArgumentError,
+                       match="line 3, row 2, column 'x' \\(1\\): '0,5' is not a number; the decimal"):
+        pt.Table('x,y\n1,a\n"0,5",b\n', types={"x": "number"})
+    t3 = pt.Table("code\n007\n7\n", types={"code": "string"})
+    assert t3.levels("code") == ["007", "7"]
+
+
+def _random_field(rng):
+    alphabet = ["a", "b", "z", " ", ",", '"', "\n", "\r\n", "1", ".", "é", "中", "x"]
+    return "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 8)))
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_csv_against_the_csv_module(seed):
+    rng = random.Random(seed)
+    ncol = rng.randint(1, 6)
+    rows = []
+    while len(rows) < rng.randint(1, 30):
+        row = [_random_field(rng) for _ in range(ncol)]
+        if any(row):                                   # all-empty rows are skipped by design
+            rows.append(row)
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator=rng.choice(["\n", "\r\n"]))
+    w.writerow(["c%d" % i for i in range(ncol)])
+    w.writerows(rows)
+    text = buf.getvalue()
+    if rng.random() < 0.3:
+        text = "﻿" + text                         # a byte order mark
+    tab = pt.Table(text, types={"c%d" % i: "string" for i in range(ncol)})
+    want = list(csv.reader(io.StringIO(text.lstrip("﻿"), newline="")))[1:]
+    assert tab.n_rows == len(want)
+    for r, row in enumerate(want):
+        assert [tab.value(r, c) for c in range(ncol)] == row
+
+
+def _random_decimal(rng):
+    nd = rng.randint(1, 19)
+    digits = str(rng.randint(1, 9)) + "".join(str(rng.randint(0, 9)) for _ in range(nd - 1))
+    pt_at = rng.randint(0, nd)
+    s = digits[:pt_at] + ("." if pt_at < nd and rng.random() < 0.7 else "") + digits[pt_at:]
+    if s.startswith("."):
+        s = "0" + s
+    if rng.random() < 0.5:
+        s += "e%d" % rng.randint(-330, 300)
+    if rng.random() < 0.3:
+        s = "-" + s
+    return s
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_numbers_against_float(seed):
+    rng = random.Random(1000 + seed)
+    vals = []
+    while len(vals) < 500:
+        s = _random_decimal(rng)
+        v = float(s)
+        if v == 0.0 or math.isinf(v):
+            continue                                   # range errors are tested in C
+        vals.append((s, v))
+    text = "v\n" + "\n".join(s for s, _ in vals) + "\n"
+    tab = pt.Table(text, types={"v": "number"})
+    for r, (s, v) in enumerate(vals):
+        got = tab.value(r, 0)
+        assert got == v and math.copysign(1, got) == math.copysign(1, v), s
+
+
+def test_table_conditions_and_names():
+    tab = pt.Table(COND_CSV)
+    t = pt.Trials(table=tab, reps=4, order=pt.ORDER_CONSTRAINED, rng=3,
+                  constraints=[pt.max_run("target", pt.ANY_LEVEL, 1),
+                               pt.max_in_window("target", "catch", 2, 1)])
+    assert t.n_conditions == 6 and t.n_factors == 5 and t.table is tab
+    s = t.schedule()
+    lv = [tab.level(c, "target") for c in s]
+    assert all(a != b for a, b in zip(lv, lv[1:]))
+    assert t.values(2)["word"] == "new york"
+    assert t.format_header().endswith("target,contrast,word,list,n\n")
+    with pytest.raises(pt.ArgumentError, match="no level 'd'"):
+        pt.Trials(table=tab, reps=2, order=pt.ORDER_CONSTRAINED, rng=1,
+                  constraints=[pt.max_run("target", "d", 1)])
+
+
+def test_rules_give_the_c_schedule():
+    tab = pt.Table(COND_CSV)
+    a = pt.Trials(table=tab, reps=6, order=pt.ORDER_CONSTRAINED, rng=99, block_size=12,
+                  constraints=[pt.max_run("target", pt.ANY_LEVEL, 2),
+                               pt.max_in_window("target", "catch", 2, 1),
+                               pt.first_not("target", "catch"),
+                               pt.min_gap("word", "new york", 3)])
+    rules = ("order constrained\nreps 6\nmax_run target 2\nmax_in_window target=catch 2 1\n"
+             "first_not target=catch\nmin_gap word=\"new york\" 3\nblock_size 12\n")
+    b = pt.Trials(table=tab, rules=rules, rng=99)
+    assert a.schedule() == b.schedule()
+    c = pt.Trials(table=tab, rules=b.format_rules(), rng=99)
+    assert c.schedule() == b.schedule()
+    with pytest.raises(pt.ArgumentError, match="rules line 2.*did you mean 'max_run'"):
+        pt.Trials(table=tab, rules="reps 2\nmax_runn target 2\n", rng=1)
+    with pytest.raises(pt.ArgumentError, match="the statement here is 'min_gap'"):
+        pt.Trials(table=tab, rules="mindist target 2\n", rng=1)
+
+
+def test_list_draws_subset():
+    t = pt.Trials(n_conditions=4, order=pt.ORDER_LIST, order_list=[3, 0, 0, 2])
+    assert t.schedule() == [3, 0, 0, 2]
+    t = pt.Trials(n_conditions=3, order=pt.ORDER_WITH_REPLACEMENT, draws=3000,
+                  weights=[1, 0, 3], rng=5)
+    s = t.schedule()
+    assert s.count(1) == 0 and abs(s.count(2) / 3000 - 0.75) < 0.04
+    t = pt.Trials(n_conditions=10, reps=1, subset=4, rng=8)
+    s = t.schedule()
+    assert len(s) == 4 and s == sorted(s)
+
+
+def test_latin():
+    for n in range(1, 13):
+        for bal in (False, True):
+            rows = pt.latin_rows(n, bal)
+            seen = collections.Counter()
+            for r in range(rows):
+                row = pt.latin(n, r, bal)
+                assert sorted(row) == list(range(n))
+                if bal:
+                    seen.update(zip(row, row[1:]))
+            if bal:
+                want = 2 if n % 2 else 1
+                assert all(seen[(a, b)] == want for a in range(n) for b in range(n) if a != b)
+    assert pt.latin(4, 0, True) == [0, 1, 3, 2]
+
+
+def test_groups_and_units():
+    tab = pt.Table("block,kind\nA,prime\nA,target\nA,fill\nB,prime\nB,target\nB,fill\n")
+    t = pt.Trials(table=tab, reps=3, order=pt.ORDER_CONSTRAINED, rng=4,
+                  groups=pt.groups("block", "blocked", "balanced_latin", participant=1),
+                  constraints=[pt.followed_by("kind", "prime", "target")])
+    s = t.schedule()
+    blocks = [tab.value(c, "block") for c in s]
+    assert blocks == ["B"] * 9 + ["A"] * 9
+    kinds = [tab.value(c, "kind") for c in s]
+    for i, k in enumerate(kinds):
+        if k == "prime":
+            assert kinds[i + 1] == "target"
+
+
+def test_balance_pairs_and_leadin():
+    tab = pt.Table("lvl\nA\nB\nC\n")
+    t = pt.Trials(table=tab, reps=6, order=pt.ORDER_CONSTRAINED, rng=12,
+                  constraints=[pt.balance("lvl")])
+    s = t.schedule()
+    assert len(s) == 19
+    pairs = collections.Counter(zip(s, s[1:]))
+    assert all(pairs[(a, b)] == 2 for a in range(3) for b in range(3))
+    run_all(t)
+    h = t.history()
+    assert h[0].leadin and h[0].rep == -1 and not any(x.leadin for x in h[1:])
+    t = pt.Trials(table=tab, reps=4, order=pt.ORDER_CONSTRAINED, rng=12,
+                  constraints=[pt.balance("lvl", no_repeat=True, no_leadin=True)])
+    s = t.schedule()
+    assert len(s) == 12 and all(a != b for a, b in zip(s, s[1:]))

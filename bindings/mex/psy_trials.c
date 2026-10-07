@@ -9,6 +9,12 @@
  *                'reps', 20, 'order', 'constrained', 'rng', 20260923);
  *     d.constraints = psy_trials('max_run', 'orientation', 'any', 3);
  *     h = psy_trials('open', d);
+ *
+ *     % v0.2: a conditions file, rules text, names
+ *     d = struct('table', fileread('conditions.csv'), 'participant', 7, 'rng', 1, ...
+ *                'rules', sprintf('order constrained\nreps 10\nmax_run target 3\n'));
+ *     h = psy_trials('open', d);
+ *     row = psy_trials('values', h, ti.condition);   % struct of the row
  *     ti = psy_trials('next', h);
  *     while ~isempty(ti)
  *         psy_trials('update', h, run_trial(ti.levels));
@@ -51,6 +57,12 @@ typedef struct tn {
     uint8_t*     rec_tmp;     /* one record, for update()                    */
     size_t       record_size;
     char*        names[PSYTR_MAX_FACTORS];
+    uint64_t*    table_mem;   /* the parsed table block (desc.table)          */
+    psytb_table  table;
+    int*         order_list;
+    double*      weights;
+    int*         group_list;
+    uint64_t*    rules_arena; /* psytr_rules() output, read at open            */
     tn_track     tracks[PSYTR_MAX_TRACKS];
     int          n_tracks;
     mxArray*     done_str;    /* persistent 'done', the command a track gets  */
@@ -68,12 +80,21 @@ static void tn_destroy(void* obj) {
     pm_rng_free(&n->rng);
     free(n->records);
     free(n->rec_tmp);
+    free(n->table_mem);
+    free(n->order_list);
+    free(n->weights);
+    free(n->group_list);
+    free(n->rules_arena);
     free(n);
 }
 
-static const char* const t_order_names[] = { "sequential", "random", "full_random", "constrained" };
+static const char* const t_order_names[] = { "sequential", "random", "full_random", "constrained",
+                                              "list", "with_replacement" };
 static const char* const t_inter_names[] = { "random", "round_robin" };
-static const char* const t_rule_names[]  = { "max_run", "max_in_window", "min_gap", "no_transition", "first_not" };
+static const char* const t_rule_names[]  = { "max_run", "max_in_window", "min_gap", "no_transition", "first_not",
+                                              "followed_by", "preceded_by", "chunk", "balance" };
+static const char* const t_gmode_names[] = { "none", "blocked", "alternate" };
+static const char* const t_gorder_names[] = { "sequential", "random", "latin", "balanced_latin", "list" };
 
 static void t_check(int rc) {
     if (rc >= 0 || rc == PSYTR_DONE) return;
@@ -130,12 +151,17 @@ static mxArray* t_con_make(int rule, const mxArray* factor, const mxArray* level
     return s;
 }
 
-/* Factor: a 1-based index, a factor name, or 'condition' for the row. */
+/* Factor: a 1-based index, a factor or table column name, or 'condition'
+ * for the row. */
 static int t_factor(const mxArray* a, const psytr_desc* d, tn* n) {
     int i;
     if (mxIsChar(a)) {
         char* v = mxArrayToString(a);
         if (pm_lower_eq(v, "condition")) return PSYTR_CONDITION;
+        if (d->table) {
+            i = psytb_col(d->table, v);
+            if (i >= 0) return i;
+        }
         for (i = 0; i < d->n_factors; i++)
             if (n->names[i] && strcmp(n->names[i], v) == 0) return i;
         pm_err("arg", "constraint names unknown factor '%s'", v);
@@ -145,12 +171,19 @@ static int t_factor(const mxArray* a, const psytr_desc* d, tn* n) {
     return i - 1;
 }
 
-static int t_level(const mxArray* a) {
+/* Level: a 1-based level number, 'any', or with a table a column value
+ * (text, or a number looked up by value when given as a string). */
+static int t_level(const mxArray* a, const psytr_desc* d, int factor) {
     int i;
     if (mxIsChar(a)) {
         char* v = mxArrayToString(a);
         if (pm_lower_eq(v, "any")) return PSYTR_ANY_LEVEL;
-        pm_err("arg", "a constraint level is a 1-based index or 'any'");
+        if (d->table && factor >= 0) {
+            i = psytb_find(d->table, factor, v);
+            if (i < 0) pm_err("arg", "column '%s' has no level '%s'", psytb_col_name(d->table, factor), v);
+            return i;
+        }
+        pm_err("arg", "a constraint level is a 1-based index, 'any', or a table value");
     }
     i = pm_int(a, "constraint level");
     if (i < 1) pm_err("arg", "constraint level must be >= 1 or 'any'");
@@ -161,12 +194,14 @@ static void t_constraint(const mxArray* s, size_t e, const psytr_desc* d, tn* n,
     const mxArray* f;
     memset(c, 0, sizeof(*c));
     if (!(f = mxGetField(s, e, "rule"))) pm_err("arg", "a constraint needs a rule; build it with psy_trials('max_run', ...)");
-    c->rule = (psytr_rule)pm_enum(f, "rule", t_rule_names, 5);
+    c->rule = (psytr_rule)pm_enum(f, "rule", t_rule_names, 9);
     if (!(f = mxGetField(s, e, "factor"))) pm_err("arg", "a constraint needs a factor");
     c->factor = t_factor(f, d, n);
-    if (!(f = mxGetField(s, e, "level"))) pm_err("arg", "a constraint needs a level");
-    c->level = t_level(f);
-    if ((f = mxGetField(s, e, "level2")) && !mxIsEmpty(f)) c->level2 = t_level(f);
+    if (c->rule != PSYTR_RULE_CHUNK && c->rule != PSYTR_RULE_BALANCE) {
+        if (!(f = mxGetField(s, e, "level"))) pm_err("arg", "a constraint needs a level");
+        c->level = t_level(f, d, c->factor);
+        if ((f = mxGetField(s, e, "level2")) && !mxIsEmpty(f)) c->level2 = t_level(f, d, c->factor);
+    }
     if ((f = mxGetField(s, e, "n")) && !mxIsEmpty(f)) c->n = pm_int(f, "n");
     if ((f = mxGetField(s, e, "window")) && !mxIsEmpty(f)) c->window = pm_int(f, "window");
 }
@@ -177,8 +212,79 @@ static const char* const t_fields[] = {
     "n_conditions", "factors", "reps", "cond_reps", "order", "constraints",
     "max_swaps", "tracks", "track_weights", "interleave", "track_rate",
     "block_size", "constraints_span_blocks", "n_practice", "n_warmup",
-    "warmup_conditions", "requeue_gap", "rng", "record_size"
+    "warmup_conditions", "requeue_gap", "rng", "record_size",
+    "table", "order_list", "draws", "weights", "subset", "groups", "rules", "participant"
 };
+
+/* Parse CSV text (char) or struct('csv', text, 'types', struct(name, type),
+ * 'delimiter', ',', 'allow_empty', false) into a block the caller frees,
+ * viewed in *out. Temporary memory is mxMalloc'd, freed on an error. */
+static uint64_t* t_parse_table(const mxArray* a, psytb_table* out) {
+    static const char* const tfields[] = { "csv", "types", "delimiter", "allow_empty" };
+    static const char* const tnames[] = { "auto", "integer", "number", "string" };
+    psytb_csv_desc cd;
+    psytb_table t;
+    const mxArray* f = a;
+    char* text;
+    uint64_t *arena, *mem;
+    memset(&cd, 0, sizeof(cd));
+    if (mxIsStruct(a)) {
+        pm_check_fields(a, tfields, 4, "table");
+        if (!(f = mxGetField(a, 0, "csv"))) pm_err("arg", "table needs csv");
+        {
+            const mxArray* ty = mxGetField(a, 0, "types");
+            if (ty && !mxIsEmpty(ty)) {
+                int k, nk;
+                if (!mxIsStruct(ty)) pm_err("arg", "table.types must be a struct of column name to type");
+                nk = mxGetNumberOfFields(ty);
+                if (nk > PSYTB_MAX_COLUMNS) pm_err("arg", "too many table.types");
+                for (k = 0; k < nk; k++) {
+                    cd.types[k].name = mxGetFieldNameByNumber(ty, k);
+                    cd.types[k].type = (psytb_type)pm_enum(mxGetFieldByNumber(ty, 0, k), "type", tnames, 4);
+                }
+                cd.n_types = nk;
+            }
+            ty = mxGetField(a, 0, "delimiter");
+            if (ty && !mxIsEmpty(ty)) {
+                char* dl = pm_string(ty, "delimiter");
+                if (strlen(dl) != 1) pm_err("arg", "table.delimiter is one character");
+                cd.delimiter = dl[0];
+            }
+            ty = mxGetField(a, 0, "allow_empty");
+            if (ty && !mxIsEmpty(ty)) cd.allow_empty = pm_bool(ty, "allow_empty") != 0;
+        }
+    }
+    if (!mxIsChar(f)) pm_err("arg", "desc.table is CSV text or struct('csv', text, ...)");
+#ifdef OCTMEX_API
+    text = mxArrayToString(f);           /* Octave's char arrays hold UTF-8 */
+#else
+    text = mxArrayToUTF8String(f);       /* MATLAB's hold UTF-16          */
+#endif
+    if (!text) pm_err("arg", "the CSV text is not convertible to UTF-8");
+    cd.text = text;
+    cd.len = strlen(text);
+    psytb_csv(&t, &cd);                       /* sizing */
+    if (t.need == 0) pm_err("table", "%s", psytb_error(&t));
+    arena = (uint64_t*)mxMalloc((t.need + 7) & ~(size_t)7);
+    cd.arena = arena;
+    cd.arena_size = t.need;
+    if (!psytb_csv(&t, &cd)) pm_err("table", "%s", psytb_error(&t));
+    mem = (uint64_t*)malloc((t.size + 7) & ~(size_t)7);
+    if (!mem) pm_err("memory", "out of memory");
+    memcpy(mem, t.base, t.size);
+    mxFree(arena);
+    if (!psytb_view(out, mem, t.size)) { free(mem); pm_err("table", "%s", psytb_error(out)); }
+    return mem;
+}
+
+static int t_rows(const psytr_desc* d) {
+    int rows = d->table ? d->table->n_rows : d->n_conditions, f;
+    if (rows == 0 && d->n_factors > 0) {
+        rows = 1;
+        for (f = 0; f < d->n_factors; f++) rows *= d->factors[f].n_levels > 0 ? d->factors[f].n_levels : 1;
+    }
+    return rows;
+}
 
 /* Reads the desc into d and fills the node's owned copies (factor names,
  * tracks, records). Everything that can raise on a bad argument runs before
@@ -187,6 +293,10 @@ static void t_read_desc(const mxArray* s, psytr_desc* d, tn* n, int** cond_reps,
     const mxArray* f;
     int i;
     pm_check_fields(s, t_fields, (int)(sizeof(t_fields) / sizeof(t_fields[0])), "desc");
+    if ((f = pm_field(s, "table"))) {
+        n->table_mem = t_parse_table(f, &n->table);
+        d->table = &n->table;
+    }
     if ((f = pm_field(s, "n_conditions"))) d->n_conditions = pm_int(f, "n_conditions");
     if ((f = pm_field(s, "factors"))) {
         /* A cell of {name, n_levels} pairs, or an n x 2 cell. */
@@ -228,7 +338,7 @@ static void t_read_desc(const mxArray* s, psytr_desc* d, tn* n, int** cond_reps,
         *cond_reps = c;
         d->cond_reps = c;
     }
-    if ((f = pm_field(s, "order")))     d->order = (psytr_order)pm_enum(f, "order", t_order_names, 4);
+    if ((f = pm_field(s, "order")))     d->order = (psytr_order)pm_enum(f, "order", t_order_names, 6);
     if ((f = pm_field(s, "max_swaps"))) d->max_swaps = pm_int(f, "max_swaps");
     if ((f = pm_field(s, "constraints"))) {
         /* A struct array from the helpers, or a cell of them. */
@@ -313,6 +423,62 @@ static void t_read_desc(const mxArray* s, psytr_desc* d, tn* n, int** cond_reps,
         d->n_warmup_conditions = m;
     }
     if ((f = pm_field(s, "requeue_gap"))) d->requeue_gap = pm_int(f, "requeue_gap");
+    if ((f = pm_field(s, "order_list"))) {
+        int m = (int)mxGetNumberOfElements(f);
+        double* v = (double*)mxMalloc((size_t)(m > 0 ? m : 1) * sizeof(double));
+        pm_vector(f, "order_list", v, m);
+        n->order_list = (int*)malloc((size_t)(m > 0 ? m : 1) * sizeof(int));
+        if (!n->order_list) pm_err("memory", "out of memory");
+        for (i = 0; i < m; i++) {
+            if (v[i] != floor(v[i]) || v[i] < 1) pm_err("arg", "order_list holds 1-based condition indices");
+            n->order_list[i] = (int)v[i] - 1;
+        }
+        d->order_list = n->order_list;
+        d->n_order_list = m;
+    }
+    if ((f = pm_field(s, "draws")))  d->draws = pm_int(f, "draws");
+    if ((f = pm_field(s, "subset"))) d->subset = pm_int(f, "subset");
+    if ((f = pm_field(s, "weights"))) {
+        int m = (int)mxGetNumberOfElements(f), rows = t_rows(d);
+        if (m != rows) pm_err("arg", "weights has %d entries, the design has %d conditions", m, rows);
+        n->weights = (double*)malloc((size_t)(m > 0 ? m : 1) * sizeof(double));
+        if (!n->weights) pm_err("memory", "out of memory");
+        pm_vector(f, "weights", n->weights, m);
+        d->weights = n->weights;
+    }
+    if ((f = pm_field(s, "participant"))) d->groups.participant = pm_int(f, "participant");
+    if ((f = pm_field(s, "groups"))) {
+        /* struct('factor', name or 1-based, 'mode', 'blocked', 'order',
+         * 'sequential', 'participant', p, 'list', {values} or 1-based levels) */
+        static const char* const gfields[] = { "factor", "mode", "order", "participant", "list" };
+        const mxArray* g;
+        if (!mxIsStruct(f)) pm_err("arg", "desc.groups must be a struct");
+        pm_check_fields(f, gfields, 5, "groups");
+        if (!(g = mxGetField(f, 0, "factor"))) pm_err("arg", "groups needs a factor");
+        d->groups.factor = t_factor(g, d, n);
+        d->groups.mode = PSYTR_GROUPS_BLOCKED;
+        if ((g = mxGetField(f, 0, "mode")) && !mxIsEmpty(g))
+            d->groups.mode = (psytr_group_mode)pm_enum(g, "groups.mode", t_gmode_names, 3);
+        if ((g = mxGetField(f, 0, "order")) && !mxIsEmpty(g))
+            d->groups.order = (psytr_group_order)pm_enum(g, "groups.order", t_gorder_names, 5);
+        if ((g = mxGetField(f, 0, "participant")) && !mxIsEmpty(g))
+            d->groups.participant = pm_int(g, "groups.participant");
+        if ((g = mxGetField(f, 0, "list")) && !mxIsEmpty(g)) {
+            int m = (int)mxGetNumberOfElements(g), k;
+            n->group_list = (int*)malloc((size_t)(m > 0 ? m : 1) * sizeof(int));
+            if (!n->group_list) pm_err("memory", "out of memory");
+            for (k = 0; k < m; k++) {
+                if (mxIsCell(g)) n->group_list[k] = t_level(mxGetCell(g, (size_t)k), d, d->groups.factor);
+                else {
+                    double v = mxGetPr(g)[k];
+                    if (v != floor(v) || v < 1) pm_err("arg", "groups.list holds 1-based levels or a cell of values");
+                    n->group_list[k] = (int)v - 1;
+                }
+            }
+            d->groups.list = n->group_list;
+            d->groups.n_list = m;
+        }
+    }
     if ((f = pm_field(s, "record_size"))) {
         double r = pm_scalar(f, "record_size");
         if (r < 0 || r != floor(r) || r > 65536) pm_err("arg", "record_size must be an integer in 0..65536");
@@ -322,6 +488,25 @@ static void t_read_desc(const mxArray* s, psytr_desc* d, tn* n, int** cond_reps,
         pm_rng_parse(f, &n->rng);
         d->rng = pm_rng_call;
         d->rng_ctx = &n->rng;
+    }
+    if ((f = pm_field(s, "rules"))) {
+        /* Rules text over the fields above (psytr_rules); its arrays live in
+         * the node until open() has read them. */
+        psytr_rules_desc rd;
+        char err[512];
+        char* txt = pm_string(f, "rules");
+        int rows = t_rows(d);
+        size_t sz = (size_t)4 * PSYTR_MAX_TRIALS + (size_t)32 * (size_t)(rows > 0 ? rows : PSYTR_MAX_CONDITIONS) + 1024;
+        n->rules_arena = (uint64_t*)malloc(sz);
+        if (!n->rules_arena) pm_err("memory", "out of memory");
+        memset(&rd, 0, sizeof(rd));
+        rd.text = txt;
+        rd.len = strlen(txt);
+        rd.table = d->table;
+        rd.participant = d->groups.participant;
+        rd.arena = n->rules_arena;
+        rd.arena_size = sz;
+        if (psytr_rules(d, &rd, err, sizeof(err)) != 0) pm_err("rules", "%s", err);
     }
     if (n->record_size) {
         n->records = (uint8_t*)calloc(PSYTR_MAX_TRIALS, n->record_size);
@@ -349,6 +534,8 @@ static tn* t_make(const mxArray* s, const uint8_t* bytes, size_t len) {
     n->busy = 1;
     ok = bytes ? psytr_load(&n->t, &d, bytes, len) : psytr_open(&n->t, &d);
     n->busy = 0;
+    free(n->rules_arena);
+    n->rules_arena = NULL;
     pm_unregister(n);
     if (!ok || pm_pending) {
         char msg[300];
@@ -387,17 +574,17 @@ static mxArray* t_info(const tn* n, const psytr_trial_info* ti) {
 static mxArray* t_history(const psytr_trials* t) {
     static const char* fields[] = { "condition", "track", "rep", "block", "outcome", "flags",
                                     "practice", "requeued", "done", "warmup", "after_break",
-                                    "first_in_block", "violation" };
+                                    "first_in_block", "violation", "leadin" };
     static const int bits[] = { PSYTR_FLAG_PRACTICE, PSYTR_FLAG_REQUEUED, PSYTR_FLAG_DONE,
                                 PSYTR_FLAG_WARMUP, PSYTR_FLAG_AFTER_BREAK,
-                                PSYTR_FLAG_FIRST_IN_BLOCK, PSYTR_FLAG_VIOLATION };
+                                PSYTR_FLAG_FIRST_IN_BLOCK, PSYTR_FLAG_VIOLATION, PSYTR_FLAG_LEADIN };
     int n = 0, i, b;
     const psytr_trial* h = psytr_history(t, &n);
-    mxArray* s = mxCreateStructMatrix(1, 1, 13, fields);
+    mxArray* s = mxCreateStructMatrix(1, 1, 14, fields);
     mxArray* col[6];
-    mxArray* flag[7];
+    mxArray* flag[8];
     for (i = 0; i < 6; i++) col[i] = mxCreateDoubleMatrix((size_t)n, 1, mxREAL);
-    for (b = 0; b < 7; b++) flag[b] = mxCreateLogicalMatrix((size_t)n, 1);
+    for (b = 0; b < 8; b++) flag[b] = mxCreateLogicalMatrix((size_t)n, 1);
     for (i = 0; i < n; i++) {
         mxGetPr(col[0])[i] = h[i].condition + 1.0;   /* 0 = a track trial     */
         mxGetPr(col[1])[i] = h[i].track + 1.0;       /* 0 = a condition trial */
@@ -405,10 +592,10 @@ static mxArray* t_history(const psytr_trials* t) {
         mxGetPr(col[3])[i] = h[i].block + 1.0;       /* 0 = practice          */
         mxGetPr(col[4])[i] = h[i].outcome;           /* a value, not an index */
         mxGetPr(col[5])[i] = h[i].flags;
-        for (b = 0; b < 7; b++) mxGetLogicals(flag[b])[i] = (h[i].flags & bits[b]) != 0;
+        for (b = 0; b < 8; b++) mxGetLogicals(flag[b])[i] = (h[i].flags & bits[b]) != 0;
     }
     for (i = 0; i < 6; i++) mxSetField(s, 0, fields[i], col[i]);
-    for (b = 0; b < 7; b++) mxSetField(s, 0, fields[6 + b], flag[b]);
+    for (b = 0; b < 8; b++) mxSetField(s, 0, fields[6 + b], flag[b]);
     return s;
 }
 
@@ -416,6 +603,53 @@ static mxArray* t_history(const psytr_trials* t) {
 typedef int (*t_fmt_fn)(const psytr_trials*, int, char*, size_t);
 static int t_fmt_header(const psytr_trials* t, int i, char* b, size_t c) { (void)i; return psytr_format_header(t, b, c); }
 static int t_fmt_meta(const psytr_trials* t, int i, char* b, size_t c) { (void)i; return psytr_format_meta(t, b, c); }
+static int t_fmt_rules(const psytr_trials* t, int i, char* b, size_t c) { (void)i; return psytr_format_rules(t, b, c); }
+
+/* A table's cell as a MATLAB value: double for numbers, char for text. */
+static mxArray* t_cell(const psytb_table* tb, int r, int c) {
+    if (psytb_col_type(tb, c) == PSYTB_STRING) return mxCreateString(psytb_text(tb, r, c));
+    return mxCreateDoubleScalar(psytb_num(tb, r, c));
+}
+
+static mxArray* t_row_struct(const psytb_table* tb, int r) {
+    const char* names[PSYTB_MAX_COLUMNS];
+    mxArray* s;
+    int c;
+    for (c = 0; c < tb->n_cols; c++) names[c] = psytb_col_name(tb, c);
+    s = mxCreateStructMatrix(1, 1, tb->n_cols, names);
+    for (c = 0; c < tb->n_cols; c++) mxSetFieldByNumber(s, 0, c, t_cell(tb, r, c));
+    return s;
+}
+
+/* Everything about a table, for inspection: columns, types, levels, values. */
+static mxArray* t_table_info(const psytb_table* tb) {
+    static const char* fields[] = { "columns", "types", "n_rows", "n_skipped", "levels", "values", "hash" };
+    mxArray* s = mxCreateStructMatrix(1, 1, 7, fields);
+    mxArray *cols = mxCreateCellMatrix(1, (size_t)tb->n_cols), *types = mxCreateCellMatrix(1, (size_t)tb->n_cols);
+    mxArray *levels = mxCreateCellMatrix(1, (size_t)tb->n_cols);
+    mxArray* vals = mxCreateCellMatrix((size_t)tb->n_rows, (size_t)tb->n_cols);
+    char hx[20];
+    int c, r, l;
+    for (c = 0; c < tb->n_cols; c++) {
+        int nl = psytb_n_levels(tb, c);
+        mxArray* lv = mxCreateCellMatrix(1, (size_t)nl);
+        mxSetCell(cols, (size_t)c, mxCreateString(psytb_col_name(tb, c)));
+        mxSetCell(types, (size_t)c, mxCreateString(psytb_type_name(psytb_col_type(tb, c))));
+        for (l = 0; l < nl; l++) mxSetCell(lv, (size_t)l, mxCreateString(psytb_level_text(tb, c, l)));
+        mxSetCell(levels, (size_t)c, lv);
+        for (r = 0; r < tb->n_rows; r++)
+            mxSetCell(vals, (size_t)r + (size_t)c * (size_t)tb->n_rows, t_cell(tb, r, c));
+    }
+    snprintf(hx, sizeof(hx), "%016llx", (unsigned long long)psytb_hash(tb));
+    mxSetField(s, 0, "columns", cols);
+    mxSetField(s, 0, "types", types);
+    mxSetField(s, 0, "n_rows", mxCreateDoubleScalar(tb->n_rows));
+    mxSetField(s, 0, "n_skipped", mxCreateDoubleScalar(tb->n_skipped));
+    mxSetField(s, 0, "levels", levels);
+    mxSetField(s, 0, "values", vals);
+    mxSetField(s, 0, "hash", mxCreateString(hx));
+    return s;
+}
 
 static mxArray* t_format(const psytr_trials* t, t_fmt_fn fn, int i) {
     char small[512];
@@ -451,7 +685,11 @@ static const char* const t_con_usage[] = {
     "c = psy_trials('max_in_window', factor, level, window, n)",
     "c = psy_trials('min_gap', factor, level, gap)",
     "c = psy_trials('no_transition', factor, from_level, to_level)",
-    "c = psy_trials('first_not', factor, level)"
+    "c = psy_trials('first_not', factor, level)",
+    "c = psy_trials('followed_by', factor, level, next_level)",
+    "c = psy_trials('preceded_by', factor, level, prev_level)",
+    "c = psy_trials('chunk', factor)",
+    "c = psy_trials('balance', factor [, 'no_repeat'] [, 'no_leadin'])"
 };
 
 void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
@@ -496,9 +734,56 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         if (nlhs >= 2) plhs[1] = pm_u64_out(st);
         return;
     }
-    for (r = 0; r < 5; r++) {
+    if (strcmp(cmd, "latin") == 0) {
+        /* Row `row` (0-based, taken modulo the design's rows) of an n x n
+         * square, as 1-based items; the second output is the row count. */
+        int nn, row, bal = 0, rows, j;
+        int* out;
+        pm_nargs(nrhs, 3, "[items, rows] = psy_trials('latin', n, row [, balanced])");
+        nn = pm_int(prhs[1], "n");
+        row = pm_int(prhs[2], "row");
+        if (nrhs >= 4) bal = pm_bool(prhs[3], "balanced");
+        if (nn < 1 || nn > PSYTR_MAX_CONDITIONS || row < 0) pm_err("arg", "n in [1, %d] and row >= 0", PSYTR_MAX_CONDITIONS);
+        out = (int*)mxMalloc((size_t)nn * sizeof(int));
+        rows = psytr_latin(nn, row, bal != 0, out);
+        plhs[0] = mxCreateDoubleMatrix(1, (size_t)nn, mxREAL);
+        for (j = 0; j < nn; j++) mxGetPr(plhs[0])[j] = out[j] + 1.0;
+        if (nlhs >= 2) plhs[1] = mxCreateDoubleScalar(rows);
+        return;
+    }
+    if (strcmp(cmd, "table") == 0) {
+        psytb_table tb;
+        uint64_t* mem;
+        pm_nargs(nrhs, 2, "info = psy_trials('table', csv_text_or_struct)");
+        mem = t_parse_table(prhs[1], &tb);
+        plhs[0] = t_table_info(&tb);
+        free(mem);
+        return;
+    }
+    if (strcmp(cmd, "balance") == 0) {
+        int k, flags = 0;
+        mxArray* z = mxCreateDoubleMatrix(0, 0, mxREAL);
+        pm_nargs(nrhs, 2, t_con_usage[8]);
+        for (k = 2; k < nrhs; k++) {
+            char* o = pm_string(prhs[k], "balance option");
+            if (pm_lower_eq(o, "no_repeat")) flags |= PSYTR_BALANCE_NO_REPEAT;
+            else if (pm_lower_eq(o, "no_leadin")) flags |= PSYTR_BALANCE_NO_LEADIN;
+            else pm_err("arg", "balance options are 'no_repeat' and 'no_leadin'");
+        }
+        plhs[0] = t_con_make(PSYTR_RULE_BALANCE, prhs[1], z, NULL, flags, 0);
+        mxDestroyArray(z);
+        return;
+    }
+    if (strcmp(cmd, "chunk") == 0) {
+        mxArray* z = mxCreateDoubleMatrix(0, 0, mxREAL);
+        pm_nargs(nrhs, 2, t_con_usage[7]);
+        plhs[0] = t_con_make(PSYTR_RULE_CHUNK, prhs[1], z, NULL, 0, 0);
+        mxDestroyArray(z);
+        return;
+    }
+    for (r = 0; r < 7; r++) {
         if (strcmp(cmd, t_rule_names[r]) == 0) {
-            static const int need[] = { 4, 5, 4, 4, 3 };
+            static const int need[] = { 4, 5, 4, 4, 3, 4, 4 };
             pm_nargs(nrhs, need[r], t_con_usage[r]);
             switch (r) {
                 case PSYTR_RULE_MAX_RUN:
@@ -508,6 +793,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 case PSYTR_RULE_MIN_GAP:
                     plhs[0] = t_con_make(r, prhs[1], prhs[2], NULL, pm_int(prhs[3], "gap"), 0); break;
                 case PSYTR_RULE_NO_TRANSITION:
+                case PSYTR_RULE_FOLLOWED_BY:
+                case PSYTR_RULE_PRECEDED_BY:
                     plhs[0] = t_con_make(r, prhs[1], prhs[2], prhs[3], 0, 0); break;
                 default:
                     plhs[0] = t_con_make(r, prhs[1], prhs[2], NULL, 0, 0); break;
@@ -637,6 +924,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         plhs[0] = t_format(t, t_fmt_header, 0);
     } else if (strcmp(cmd, "format_meta") == 0) {
         plhs[0] = t_format(t, t_fmt_meta, 0);
+    } else if (strcmp(cmd, "format_rules") == 0) {
+        plhs[0] = t_format(t, t_fmt_rules, 0);
+    } else if (strcmp(cmd, "values") == 0) {
+        pm_nargs(nrhs, 3, "row = psy_trials('values', h, condition)");
+        if (!t->desc.table) pm_err("arg", "values needs a session with a table");
+        plhs[0] = t_row_struct(t->desc.table, pm_index(prhs[2], "condition", psytr_n_conditions(t)));
+    } else if (strcmp(cmd, "table_info") == 0) {
+        if (!t->desc.table) pm_err("arg", "the session has no table");
+        plhs[0] = t_table_info(t->desc.table);
     } else if (strcmp(cmd, "save") == 0) {
         size_t sz = psytr_save_size(t);
         mxArray* out = mxCreateNumericMatrix(1, sz, mxUINT8_CLASS, mxREAL);

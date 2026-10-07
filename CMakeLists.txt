@@ -102,13 +102,14 @@ endif()
 # compiler's own header dependencies rebuild every target after a psy_rt.h
 # edit. rt comes first so its compile checks run before its dependents'.
 # The list has four groups: the transports (rt, parallel, serial), the
-# adaptive methods (stair, quest, gp), the trial sequencer (trials), the
-# timeline (timeline) and color (color), then the rig headers.
+# adaptive methods (stair, quest, gp), tables and the trial sequencer
+# (table, trials), the timeline (timeline) and color (color), then the rig
+# headers.
 # A header with a tests/adapt/psy_<name>_test.c gets that self-checking
 # program registered with ctest too, and one with PSY_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
 # PSY<X>_ASYNC defined, which is the opt-in layer that pulls in psy_rt.h.
-set(PSY_LIBS rt parallel serial stair quest gp trials timeline color screen audio gfx video)
+set(PSY_LIBS rt parallel serial stair quest gp table trials timeline color rdk outline screen audio gfx video)
 
 set(PSY_PREFIX_rt          PSYRT)
 set(PSY_PLATFORMS_rt       Windows Linux Darwin)
@@ -139,7 +140,14 @@ set(PSY_PLATFORMS_gp       Windows Linux Darwin)
 set(PSY_THREADS_gp         OFF)
 set(PSY_ASYNC_gp           ON)
 
-# The trial sequencer includes nothing at all, not even psy_rt.h.
+# Typed tables (CSV and the pack's table block) include nothing; psy_trials.h
+# and later psy_timeline.h and the pack tool read tables through it.
+set(PSY_PREFIX_table       PSYTB)
+set(PSY_PLATFORMS_table    Windows Linux Darwin)
+set(PSY_THREADS_table      OFF)
+
+# The trial sequencer requires psy_table.h beside it (its implementation
+# includes psy_table.h's, as psy_gfx.h's does psy_color.h's), and nothing else.
 set(PSY_PREFIX_trials      PSYTR)
 set(PSY_PLATFORMS_trials   Windows Linux Darwin)
 set(PSY_THREADS_trials     OFF)
@@ -153,6 +161,19 @@ set(PSY_THREADS_timeline   OFF)
 set(PSY_PREFIX_color       PSYCOL)
 set(PSY_PLATFORMS_color    Windows Linux Darwin)
 set(PSY_THREADS_color      OFF)
+
+# Random dot kinematograms: pure computation on integers, nothing included.
+# Its examples/rdk_*.c run on the CPU; examples/gfx_rdk*.c draw through gfx.
+set(PSY_PREFIX_rdk         PSYRDK)
+set(PSY_PLATFORMS_rdk      Windows Linux Darwin)
+set(PSY_THREADS_rdk        OFF)
+
+# The outline builder is pure computation: fonts, paths, strokes, exact
+# alpha and curve sets. Its test includes psy_gfx.h (no SDL) for the curve
+# set check only; examples/outline_bench.c uses psy_rt.h's clock.
+set(PSY_PREFIX_outline     PSYOL)
+set(PSY_PLATFORMS_outline  Windows Linux Darwin)
+set(PSY_THREADS_outline    OFF)
 
 # The display header is the one with an external dependency. PSY_DEPS_<name>
 # lists CMake targets it links; when one is missing, only its tests/adapt test
@@ -268,6 +289,13 @@ foreach(lib IN LISTS PSY_LIBS)
                 target_compile_options(compile_psy_color_macros PRIVATE -Wno-missing-field-initializers)
             endif()
         endif()
+        # psy_outline.h's desc structs set by designated initializers.
+        if(TARGET compile_psy_outline_desc)
+            set_target_properties(compile_psy_outline_desc PROPERTIES CXX_STANDARD 20)
+            if(NOT MSVC)
+                target_compile_options(compile_psy_outline_desc PRIVATE -Wno-missing-field-initializers)
+            endif()
+        endif()
     endif()
 
     # --- verification tests: tests/adapt/psy_<lib>_test.c is self-checking
@@ -327,7 +355,7 @@ if(TARGET test_psy_video AND PSY_QOI_DIR)
 endif()
 
 # psy_gfx.h's headless presenter loads libEGL with dlopen on POSIX.
-foreach(t test_psy_gfx gfx_bench)
+foreach(t test_psy_gfx gfx_bench gfx_rdk_bench)
     if(TARGET ${t})
         target_link_libraries(${t} PRIVATE ${CMAKE_DL_LIBS})
     endif()

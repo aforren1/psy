@@ -60,7 +60,7 @@ coordinator's conditions are listed with the item each belongs to.
 | Item | State |
 |---|---|
 | 1. Program cache | Done, tested (11 GL cases on 3 renderers, a CPU half with a fake backend). Warm open 11.4 to 35.0 ms on the Iris Xe against 2.3 to 5.3 s without a cache (bar 100 ms: met); a cold open adds 32 to 120 ms of stores (bar 5 %: met). |
-| 1b. Kind-specialized vector programs | Not built: the coordinator asked for the harness numbers first; see "Next". |
+| 1b. Kind-specialized vector programs | Done in v0.7 (see "v0.7: kind-specialized vector programs"): RRECT, dashed CIRCLE and CIRCLE compounds; OKLAB paint not built (it does not close its gap). |
 | 2. Gallery fixes (calibration CRC, straight-alpha sprites, DIST range rule, first, shape_p); the dots' zero-default bug and the no-pixel audit | Done, tested. |
 | 3. Planar YUV, encodings, import, rebind | Done, tested on 3 renderers; D3D11 NV12 import (array slice, shared handles) on the Iris Xe and WARP. Bars: update CPU met (30 to 38 % of RGBA8); GPU 1.0 ms met except DEVICE (1.12 ms); GPU 1.5x RGBA8 missed (1.63 to 1.91). |
 | 4. Instances | Done, tested on 3 renderers. Every bar met: 10000 gabors 177 to 191 us of CPU, 1.26 to 1.33 ms of GPU (5.5 ms one stimulus each). |
@@ -765,8 +765,10 @@ anything else; compounds are for stimuli of a few hundred pixels.
 
 ### Mutations
 
-`mutate03.py` (scratchpad): each fault in a copy of the header, the test
-built against it and run on llvmpipe; a fault must fail the test.
+`mutate03.py`, a script that was not kept: each fault in a copy of the
+header, the test built against it and run on llvmpipe; a fault must fail
+the test. This table is the record; tests/mutate/ does not hold these
+mutants.
 
 | # | Fault | Result |
 |---|---|---|
@@ -1310,9 +1312,12 @@ did not change) as much as the others: the machine, not v0.4.
 
 ## v0.4 mutations
 
-`mutate04.pl` and `mutrun.sh` (scratchpad): each fault in a copy of the
-header, the test built against it (MSVC) and run on the Iris Xe (the CPU
-half alone for the CPU faults); a fault must fail the test.
+[tests/mutate/gfx.toml](../tests/mutate/gfx.toml), run with
+`uv run tests/mutate/mutate.py gfx.toml` ([tests/mutate](../tests/mutate/README.md)):
+each fault in a copy of the header, the test built against it (MSVC) and
+run on the Iris Xe (the CPU half alone for the CPU faults); a fault must
+fail the test. Faults 14 and 24 now edit psy_color.h, where v0.5 moved
+that code.
 
 | # | Fault | Result |
 |---|---|---|
@@ -1362,8 +1367,14 @@ test as C and as C++17, the compile checks, `gfx_bench`, the examples and
 MinGW-w64 gcc 16.1 (winlibs): the test as C99, C11 and C++17, the
 psy_gfx compile checks (C11, C++17) against SDL3, psy_video's C11 compile
 check, `gfx_bench`; the C99 and C++17 tests run on WARP and SwiftShader.
-Not run for v0.4: WSL (gcc, llvmpipe, sanitizers) and emcc. llvmpipe would
-cover the cache's GL half with Mesa's binary format: CI will show it.
+Run on 2026-10-06 against v0.5.0: gcc 13.3 in WSL2 (Ubuntu 24.04), the
+test at -O2 and under ASan and UBSan (`detect_leaks=0`,
+`PSYGFX_TEST_DEVICES=mesa`), on Mesa 25.2 llvmpipe (LLVM 20.1.2): pass.
+The cache's GL half passes on Mesa's binary format (11 cases, wrong 0),
+but a warm open was not faster there: 80 ms against 54 ms cold at -O2.
+The same tree in an Ubuntu 24.04 container with gcc 13.3 and clang 18.1
+(the CI jobs' flags, SDL3 3.4.0): every target builds and ctest passes.
+emcc 6.0.10 under node: the compile check and the test's CPU half pass.
 
 ## v0.4 departures from the design
 
@@ -1396,17 +1407,1564 @@ The CPU form of OKLAB back to RGB (the clip sampling of a gradient) keeps
 Ottosson's printed 10-digit inverse of M2, as the shader does; psy_color.h
 inverts M2 exactly, 2.4e-7 away in linear RGB.
 
+## v0.6 status
+
+The running record of v0.6: curve runs (Slug), the blur pass, the video
+program's chroma. The design is in the session notes of 2026-10-06; the
+coordinator approved it with changes (the names `psygfx_crun`,
+`psygfx_citem` and `psygfx_blur_apply`, int codes from `psygfx_blur_make`,
+format flag bit 2).
+
+| Item | State |
+|---|---|
+| 1. The format, `psygfx_cset_check()`, `psygfx_cset_winding()`, the test vector | Done, in the tree first so the outline builder could test against it. Flag bit 2 (resolved) added on the outline worker's request. |
+| 2. Curve runs | Done, tested on 3 renderers. Rays with the half-plane coverage (V1); the exact area (V3) on resolved glyphs that are not turned. Not built: V2 (a corner rule) and screen-aligned rays (below). |
+| 3. The D3D11 difference of the probe | Cause found: interpolated em coordinates (below). |
+| 4. Blur pass | Done, tested on 3 renderers, 1x and 2x, three formats. The pyramid above sigma 8: not built (Next). |
+| 5. Sampler-filtered chroma | Measured, then deleted: no faster than the hand bilinear (slower). The video bars are met by passing the program's constants as flat inputs. |
+| 6. Bench on AC | Done ("v0.6 cost"). |
+| Mutations | 29 of 29 caught ("v0.6 mutations"). Two survived the first run and showed a bug: a curve that turns back before a ray counted as a crossing (fixed, below). |
+| Build matrix | See "v0.6 builds". |
+| Left | gfx_bench on the outline builder's header (its stopgap `glyf` reader then deleted); Next items 4 to 8. |
+
+## v0.6: curve sets
+
+A curve set is one font or one artwork set in the form of Lengyel's Slug
+algorithm (JCGT 6(2), 2017): quadratic Bezier curves and bands. psy_gfx.h
+draws it; the pack tool's outline builder writes it. This header implements
+the algorithm from the paper. No code comes from the reference shaders.
+
+### Curve sets: the format
+
+Version 1, frozen on 2026-10-06. This section is the contract between the
+outline builder and psy_gfx.h. `psygfx_cset_check()` checks a set against
+it on the CPU, without GL.
+
+**Two arrays.** A set is two flat arrays:
+
+- `texels`: `n_texels` texels of four little-endian IEEE f32 values each.
+- `words`: `n_words` little-endian uint32 values. `n_words` is a multiple
+  of 4.
+
+psy_gfx uploads them as one RGBA32F and one RGBA32UI texture. The texture
+layout is not part of the format. The pack stores the two arrays as they
+are.
+
+**Coordinates.** Glyph coordinates are in em units (font units divided by
+unitsPerEm). Artwork coordinates are in the artwork's own units. y points
+down. The origin is the glyph's origin, the pen position on the baseline,
+so an ascender has negative y. A curve run's `size` converts set units to gfx
+units.
+
+**Words 0 to 7, the set header.**
+
+| Word | Value |
+|---|---|
+| 0 | `0x43595350` ("PSYC" as little-endian bytes) |
+| 1 | the format version, 1 |
+| 2 | G, the number of glyph table entries, below 2^24 |
+| 3 to 7 | 0 (reserved) |
+
+**Words 8 to 8 + G - 1, the glyph table.** `words[8 + g]` is the word offset
+of glyph g's record, or 0 when the set does not hold glyph g. A curve run item
+that names an absent glyph draws nothing.
+
+**A glyph record** starts at a word offset `o` that is a multiple of 4 and
+is past the table:
+
+| Word | Value |
+|---|---|
+| o to o + 3 | the bbox x0, y0, x1, y1 as f32 bits; it contains every control point of the glyph's listed curves |
+| o + 4 | `nh | (nv << 16)`: the horizontal and vertical band counts; both 0 means an empty glyph |
+| o + 5 | flags: bit 0 even-odd fill (else nonzero), bit 1 backward lists, bit 2 resolved (below); the other bits 0 |
+| o + 6 | first: the glyph's first curve texel |
+| o + 7 | n: the number of the glyph's texels, `first` to `first + n - 1` |
+| o + 8 on | band descriptors, 4 words each: the nh horizontal bands, then the nv vertical bands |
+
+A non-empty glyph has `x1 > x0`, `y1 > y0`, `nh >= 1` and `nv >= 1`. A band
+descriptor is `(fwd_offset, fwd_count, bwd_offset, bwd_count)`. Each offset
+is the absolute word index of a list of `count` words. Without flag bit 1,
+`bwd_offset` and `bwd_count` are 0. A list can start at any word, and two
+bands can share a list.
+
+**A list entry** is a curve reference: the index `r` of the curve's first
+texel, with `first <= r` and `r + 2 <= first + n`.
+
+**Curves.** Curve r has the control points `p0 = (T[r].x, T[r].y)`,
+`p1 = (T[r].z, T[r].w)` and `p2 = (T[r + 1].x, T[r + 1].y)`. A contour of k
+curves takes k + 1 consecutive texels, because curve j + 1 starts at the
+texel that holds curve j's p2. The last texel of a contour holds the
+contour's start point again (bit for bit) in x, y, and 0 in z, w. Contours
+must be closed. There is no contour table: bands list curves.
+
+- A line is a quadratic with `p1 = p0`, bit for bit. This is exact in f32,
+  and the shader needs no special case for it.
+- All values are f32. An f16 curve texture failed for Arabic, Devanagari
+  and CFF glyphs (docs/text_probe.md).
+
+**Bands.** Horizontal band k of a glyph, k = 0 to nh - 1, covers y from
+`lo_k = y0 + k h` to `hi_k = lo_k + h`, with `h = (y1 - y0) / nh`, in double.
+A curve is in band k when its y range meets `[lo_k - h / 256, hi_k + h / 256]`.
+Use the range of the three control points, or the curve's exact y extent.
+The margin of h / 256 covers the shader's f32 rounding when it selects a
+band. Vertical bands are the same with x and y interchanged.
+
+**Sort order.** The shader stops at the first curve that cannot cross its
+ray, so the order is part of the format:
+
+- a horizontal band's forward list: descending `max(p0.x, p1.x, p2.x)`;
+- a vertical band's forward list: descending `max(p0.y, p1.y, p2.y)`;
+- backward lists: ascending `min` of the same coordinates;
+- ties: any order.
+
+**Fill rules.** Nonzero or even-odd, per glyph (flag bit 0). Contour
+direction matters for nonzero only, as in SVG. psygfx_cset_winding()
+counts +1 inside a contour that turns clockwise on the screen.
+
+**Resolved glyphs.** Flag bit 2 states that the glyph's contours do not
+overlap and that its winding is 0 or 1 everywhere (+1 inside a contour
+that turns clockwise on the screen). The outline builder sets it after it
+resolves overlaps. The shader can then use a method that is exact only on
+such glyphs. `psygfx_cset_check()` accepts the bit and does not verify it,
+because that needs a sweep of every glyph. A bit set on a glyph that is
+not resolved gives wrong coverage near the overlaps. It cannot make the
+shader read outside the textures or stop.
+
+**Glyphs added at run time.** The builder appends the glyph's texels and
+words, then sets its table entry. `psygfx_cset_add()` uploads what is new.
+The textures get their size at `psygfx_cset_make()` from `cap_texels` and
+`cap_words`.
+
+**What the check refuses.** `psygfx_cset_check()` returns
+`PSYGFX_ERR_FORMAT`, with a message that names the glyph and the word, when:
+
+- the magic, the version or a reserved word is wrong;
+- the table does not fit in the words, or G is 2^24 or more;
+- a texel is not finite;
+- a record offset is not a multiple of 4, is not past the table, or does
+  not fit in the words;
+- the bbox is not finite or not ordered, or the curves pass it;
+- reserved flag bits are set, or only one band count is 0;
+- the texel range does not fit in the texels;
+- a descriptor or a list does not fit in the words, or a backward list has
+  no flag;
+- a reference is outside its glyph's texels;
+- a list is not sorted.
+
+The check does not find contours that are not closed. It takes one pass over
+both arrays.
+
+**Test vector.** A square from 0 to 1 em with a square hole from 0.25 to
+0.75 em, nonzero, 2 x 2 bands. The outer contour turns clockwise on the
+screen, the hole the other way. Texels (x, y, z, w):
+
+```
+0: 0 0 0 0           1: 1 0 1 0           2: 1 1 1 1
+3: 0 1 0 1           4: 0 0 0 0           5: 0.25 0.25 0.25 0.25
+6: 0.25 0.75 0.25 0.75                    7: 0.75 0.75 0.75 0.75
+8: 0.75 0.25 0.75 0.25                    9: 0.25 0.25 0 0
+```
+
+Words (60):
+
+```
+0x43595350 1 1 0 0 0 0 0 12 0 0 0
+0 0 0x3f800000 0x3f800000 0x00020002 0 0 10
+36 6 0 0  42 6 0 0  48 6 0 0  54 6 0 0
+0 1 7 8 5 3   1 2 6 7 5 3   2 3 5 6 8 0   1 2 6 7 8 0
+```
+
+`tests/adapt/psy_gfx_test.c` builds this set with the test builder
+(`tests/adapt/psy_gfx_cset_build.h`) and compares every word.
+
+### Curve runs: what the shader does
+
+One program, made at the first curve set. The vertex shader reads the
+glyph's record from the word texture, builds the item's map from em to
+the pass's GL px (the run's placement, the item's ori and scale about the
+glyph box's center), and emits the turned glyph box grown by 0.75 px (half
+a pixel's diagonal, rounded up). The fragment shader computes the pixel's
+em point from `gl_FragCoord` through that map's inverse, relative to the
+glyph box's center (so a glyph far from the origin keeps every bit near
+the pixel), and then one of two methods:
+
+- **Exact area (V3).** When the glyph is resolved (flag bit 2) and the map
+  is axis-aligned (no turn, or quarter turns), the pixel is a rectangle in
+  em. Its coverage is the area of glyph intersect pixel over the pixel's
+  area: by Green's theorem the sum over curves of the integral of
+  clamp(x, 0, W) d clamp(y, 0, H) in pixel-corner coordinates. Only curves
+  in the bands the pixel's rows meet count, each band integrating its own
+  part of the rows. A curve right of the pixel adds W times its clamped
+  rise (no root); one left of it nothing (the early exit); one over the
+  pixel is cut where it turns in x or y, and on each monotone piece the
+  part inside the rows splits into left (nothing), middle (two Gauss
+  points, exact for the cubic integrand) and right (W times the rise).
+  With backward lists the integral of clamp(x) - W counts the curves left
+  of the pixel instead: a closed contour's rise sums to 0.
+- **Rays (V1, after Lengyel).** Two rays from the pixel center along em +x
+  and +y through their bands. The paper's rule finds the crossings: the
+  signs of the three control values give which roots lie on the curve
+  (above: v > 0, so an endpoint on the ray counts once), and the roots come
+  from the form without cancellation (q / a and c / q). A row where both
+  endpoints are on one side and the control point on the other has two
+  roots, or none when the discriminant is negative (see "A bug the
+  mutations found"). A crossing within 1 px adds the exact box coverage of the
+  half-plane bounded by the curve's tangent there (the CDF of the pixel
+  square's projection on the normal, a trapezoid), so a straight edge at
+  any angle is exact; farther ones add a step. Each ray's weight is the
+  largest `cos x (1 - |d| / half-support)` of its crossings, where cos is
+  between the ray and the edge's normal: a ray counts most where it
+  crosses an edge steeply, and a weight falls to 0 where the coverage
+  saturates. The fill rule maps each ray's fractional winding, and the two
+  mix by weight; below a total weight of 1/64 the mix fades to their mean,
+  where both rays see the same integer winding.
+
+The two rays run as one function called twice. A first form ran them in
+one loop (so that ANGLE's D3D11 compiler would inline the body once, the
+v0.2 lesson): 33 % slower on the Iris Xe (10.2 against 6.9 ms on a 12 px
+page), deleted.
+
+### Curve runs: measured, then deleted or not built
+
+| Choice | Measured | Kept |
+|---|---|---|
+| V0, Lengyel's linear ramp over the window | mean edge error 0.031 to 0.074 at 8 px (worst at 45 degrees), 0.013 to 0.081 at 48 px; 1.0 ms less than V1 on a 12 px page (5.9 against 6.9 ms, one-loop rays) | V1: the error at 45 degrees falls 3 to 24 times |
+| V1, the half-plane per crossing | mean 0.024 to 0.029 at 8 px, 0.0034 to 0.0037 at 48 px, at every rotation | yes |
+| A fade from the half-plane to the ramp within 1 px of a curve's end (to remove the corner's jump) | the jump stayed (0.49): it comes from a ray passing a corner, not from the tangent; mean error up 30 % at 45 degrees; the largest error off the edges 0.25 to 0.078 | deleted |
+| V2, a corner rule | not built: V3 makes corners exact where it applies, and the rotated corners' error is the rays' | Next |
+| V3, exact area | within 1.8e-5 on resolved glyphs; 1.4 times the rays on a 12 px page, faster than them at 200 px | yes, where it applies |
+| Screen-aligned rays | not built (the design's analysis: a 45 degree edge gets a ramp 0.71 px wide against the true 1.41; V1 is exact there for either ray direction; they would need every curve of the glyph) | no |
+| The combination with a 1/65536 floor (the suspected D3D11 cause) | no difference across renderers from the continuous one when em comes from gl_FragCoord | the continuous mix |
+| Band count (8 or 16 against the builder's default, the curve count's square root up to 16) | 12 px page with V3: default 8.4 ms, 8 bands 10.4, 16 bands 24 (the pixel's rows meet more bands); rays: 16 bands 2 % faster | the default |
+| Backward lists | rays 18 to 27 % faster on pages (12 px Latin 6.6 to 5.4 ms, 16 px CJK 9.8 to 7.1); V3 7 % | yes: the builder should write them |
+| Quad margin 1 px against 0.75 | equal within the noise | 0.75 |
+
+### The probe's 0.49 difference between renderers
+
+The probe saw Slug differ between the Iris Xe and the software renderers
+by up to 0.49 on 20 to 50 pixels per turned condition. This implementation
+does not: the Iris Xe, WARP and SwiftShader agree within 6.5e-5 on all
+1.5 million compared pixels but one. To find the cause, the test ran the
+paper's ramp in three forms:
+
+| em point | window | Iris Xe against WARP | Iris Xe against SwiftShader |
+|---|---|---|---|
+| interpolated from the vertices | `fwidth` | max 3.4e-3, 99 pixels above 1e-3 | max 0.478, 26156 pixels above 1e-3 |
+| from `gl_FragCoord` | `fwidth` | max 1.2e-4 | max 5.9e-3, 1731 pixels |
+| interpolated | exact (from the map) | max 3.4e-3, 99 pixels | max 0.478, 25959 pixels |
+| from `gl_FragCoord` | exact | max 1.6e-5 | max 1.6e-5 |
+
+The cause is the interpolated em coordinate: each rasterizer snaps the
+vertices and interpolates differently (v0.1 found the same for local
+coordinates). The weights' floor of 1/65536 was not the cause: the
+continuous combination gave the same differences. psy_gfx computes em from
+`gl_FragCoord` through the item's exact map and takes the window from the
+map.
+
+The one pixel left (0.087 on SwiftShader, both methods' rays): its ray
+passes a glyph's corner within rounding, so it takes the corner's jump on
+one renderer and not on the other. The test allows 3 such pixels.
+
+### Curve runs: pixel tests
+
+`v0.6 text`: the test-local builder (tests/adapt/psy_gfx_cset_build.h)
+makes 12 glyphs from contours: a rect, the square with a hole, a circle of
+8 quadratics with its extrema inside curves (so that a ray near an extremum
+meets one curve twice), two overlapping rects (nonzero and even-odd), a pentagram
+(nonzero and even-odd), thin stems of 0.3 and 0.8 px at 12 px per em, a
+flat ellipse with a slanted bar, a CJK-like grid of overlapping strokes, a
+ring far from the origin (60 em, where f16 holds 0.03 em), and a rect with
+a degenerate curve. The reference is the exact box coverage of each pixel
+in double: scanlines in y by adaptive Gauss-Kronrod 7-15, split at every
+curve end, y extremum and crossing of the pixel's sides; each scanline's
+covered length from the exact roots with the fill rule on its integer
+winding. Conditions: 8, 12, 24 and 48 px per em, rotations 0, 15 and 45
+degrees (each item's ori), two subpixel offsets.
+
+| Check | Iris Xe | WARP | SwiftShader | Tolerance |
+|---|---|---|---|---|
+| exact area, resolved glyphs, rotation 0, largest error | 1.78e-5 | 1.78e-5 | 1.78e-5 | 5e-5 |
+| rays, mean edge error, worst rotation, 8 / 12 / 24 / 48 px | 0.0285 / 0.0192 / 0.0091 / 0.0037 | same | same | 0.035 / 0.024 / 0.012 / 0.005 |
+| with exact area | 0.0275 / 0.0180 / 0.0089 / 0.0036 | same | same | the same |
+| largest edge error (corners, self-intersections) | 0.557 | 0.557 | 0.557 | 0.6 |
+| largest error off the edges (a half-plane past an acute corner) | 0.254 | 0.254 | 0.254 | 0.3 |
+| against the Iris Xe, pixel by pixel | | 6.5e-5 | 1 pixel 0.087, the rest under 1e-3 | 3 pixels above 1e-3 |
+| the rays against their CPU form in double, every glyph at 24 px | 5.0e-5 | 9.1e-6 | 9.1e-6 | 1e-3 |
+| items alone against one run; copied items against a buffer | 0 | 0 | 0 | 0 |
+| a glyph added at run time against one made at make | 0 | 0 | 0 | 0 |
+| a run through an RGBA16F target against the scene | 4.9e-4 | 4.9e-4 | 2.5e-4 | 1e-3 |
+| palette: integer entries (aliased); fractions | 0 wrong; 0 | 0; 0 | 0; 0 | 0; 2e-7 |
+| `psygfx_hit()` against aliased coverage; the topmost item | 0 of 64000; 0 | 0; 0 | 0; 0 | 0 |
+| a 0.005 px move: exact area; rays on a circle (turned 15 and 45) | 0.0079; 0.0375 | same | same | 0.02; 0.05 |
+| a 0.005 px move: rays past a corner (reported) | 0.4385 | 0.4385 | 0.4385 | none |
+| refusals (no set, size 0, an edge profile, a stroke, a glyph id not an integer or past the table, COLOR without a palette, make and add inside a frame, a run as a template, a wrong version, an add past the room) | 12 of 12 | 12 of 12 | 12 of 12 | all |
+
+The CPU half: the test vector bit for bit; 17 faults, each refused with the
+glyph or word named; the CPU winding against a brute-force winding (the
+quadratic formula with half-open intervals, none of the header's
+arithmetic) at 195296 points over 12 glyphs, 4 band counts, with and
+without backward lists: 0 wrong. Of these, 3296 lie on the row of a curve's
+endpoint, where the header's rule (on the ray is not above) must equal the
+winding just past the row.
+
+### A bug the mutations found
+
+The first mutation run left two mutants alive: the shader's root rule
+without its two-root rows (v06-02), and the CPU winding with an endpoint on
+the ray counted as above (v06-03). No test glyph had a curve with an
+extremum inside it, and no test point lay on an endpoint's row. With both
+added (the circle turned by 22.5 degrees; points on every endpoint row),
+the CPU winding was wrong at 69 points: in a row where both endpoints lie
+on one side of the ray and the control point on the other, the curve can
+turn back before it reaches the ray. Then the discriminant is negative.
+Clamping it to 0 gives one double root in the paper's form, (b +- sqrt D) /
+a, but two different roots in the form without cancellation (q / a and
+c / q), and their crossings did not cancel. The shader had the same fault.
+Now a two-root row with a negative discriminant has no crossing, in the
+shader, the CPU winding and the test's CPU form; mutants v06-27 and v06-28
+cover it. Fonts whose curves have their extrema at on-curve points
+(TrueType's recommendation) rarely meet this; CFF conversions and artwork
+do. Its cost, A/B under the lock (rays alone): a 12 px page 5.28 to 5.92
+ms before, 5.54 to 5.80 after; the 16 px CJK page 6.94 to 7.71 before,
+7.20 to 7.60 after: within the spread.
+
+## v0.6: blur
+
+### Pixel tests
+
+`v0.6 blur`: a rect on whole pixels (its point samples are its box
+coverage) drawn into the layer, blurred, read back from the result,
+against the exact blurred rect at pixel centers (a product of erf
+differences).
+
+| Format, source | sigma 0.5 | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|---|
+| RGBA32F, 1x | 0.204 | 0.0313 | 0.0087 | 0.0022 | 5.4e-4 | 1.5e-4 |
+| RGBA32F, 2x | 0.038 | 0.0076 | 0.0021 | 5.4e-4 | 1.4e-4 | 3.8e-5 |
+| RGBA16F and R16F, 1x | 0.203 | 0.0310 | 0.0082 to 0.0087 | 0.0019 to 0.0024 | 8.7e-4 to 9.1e-4 | 5.9e-4 to 7.8e-4 |
+| RGBA16F and R16F, 2x | 0.037 to 0.038 | 0.0071 to 0.0081 | 0.0019 to 0.0022 | 8.1e-4 to 9.8e-4 | 5.3e-4 to 9.6e-4 | 4.5e-4 to 8.6e-4 |
+
+The same on the three renderers to 2 digits (the 16-bit rows vary by
+renderer within the ranges given). They reproduce the probe's table
+(docs/text_probe.md): 1x f32 0.20, 0.040, 0.0089, 0.0017, 6.1e-4, 1.4e-4;
+2x 0.023, 0.010, 0.0034, 5.7e-4, 1.4e-4, 3.1e-5. The tolerances are about
+1.25 times these rows. Also: an R16F result drawn as tinted coverage
+against its own values, 2.4e-8; a rect at the layer's corner, sigma 4,
+against the exact blur on an empty plane, within the interior's error; 9
+refusals of 9 (format RGBA8, supersample 3, apply outside a frame, sigma
+below the box's SD, sigma 40, make inside a frame, apply inside a target
+pass, the 16 passes).
+
+## v0.6: video chroma
+
+
+The video program's NV12 draw cost 1.64 times an RGBA8 image (v0.4). Two
+changes were timed (AC, the lock held, A/B/A/B, GPU over an empty frame at
+1080p):
+
+| Video program | RGBA8 | NV12 | I420 | NV12 / RGBA8 |
+|---|---|---|---|---|
+| v0.5: hand bilinear, constants read per fragment | 0.58 | 0.92 to 0.94 | 0.97 to 0.99 | 1.59 to 1.62 |
+| sampler chroma (one `textureLod` a plane at 1:1), constants per fragment | 0.58 | 0.93 to 0.95 | 0.96 to 1.01 | 1.58 to 1.60 |
+| sampler chroma, constants as flat inputs | 0.57 to 0.61 | 0.69 to 0.75 | 0.77 to 0.83 | 1.22 |
+| hand bilinear, constants as flat inputs | 0.57 to 0.59 | 0.63 to 0.67 | 0.78 to 0.81 | 1.10 to 1.14 |
+
+The sampler gave nothing: the chroma fetches were not the cost. Seven vec4
+constants read per fragment from the dynamically indexed uniform array
+were (v0.4 suspected the same for instances). They now come from the
+vertex shader as flat inputs. The sampler path was deleted; the hand
+bilinear stays the only path, with its float weights at every scale.
+psy_video.h needs no change. Bars: GPU 1.0 ms: met (NV12 0.63 to 0.67, I420
+0.78 to 0.81, TRC_DEVICE 1.00 to 1.03: at the bar); 1.5x RGBA8: met (1.10
+to 1.14).
+
+## v0.6 cost
+
+`gfx_bench --only "v0.6 ..."` on the Iris Xe at 1920 x 1200, RGBA16F
+scene, 2026-10-06 20:11 to 20:20, AC, the lock held, no build or test
+running (checked before the lock was taken). GPU over an empty frame, the
+median of 25 interleaved rounds; each configuration in its own process,
+A/B/A/B. The fonts: Segoe UI (94 printable ASCII glyphs) and Microsoft
+YaHei (7000 glyphs from U+4E00), read from C:/Windows/Fonts by a stopgap
+`glyf` reader in gfx_bench.c (no outline is committed), built by the test
+builder with its default bands and backward lists. The pages are larger
+than the probe's: 26205 against 21763 glyphs, and 7140 against 6783.
+
+| Workload | Exact area where it applies, ms | Rays only, ms | Probe (Slug f32), ms |
+|---|---|---|---|
+| 12 px Latin page, 26205 glyphs | 7.93, 8.16 | 5.82, 5.55 | 3.95 (21763 glyphs) |
+| 48 px Latin, 1612 glyphs | 1.69, 1.75 | 1.86, 1.76 | 1.55 (1439) |
+| 16 px CJK page, 7140 glyphs | 10.00, 10.19 | 7.69, 7.23 | 6.08 (6783) |
+| 200 px CJK, 45 glyphs | 1.13, 1.15 | 1.68, 1.59 | 2.52 |
+| 12 px Latin page, turned 15 degrees (rays) | 6.16, 6.20 | 5.65, 5.43 | |
+| 16 px CJK page, turned 15 degrees (rays) | 6.63, 6.72 | 6.51, 6.20 | |
+| a 40-glyph line at 48 px, items copied each frame | 0.087 ms GPU, 16.8 us CPU | 0.088, 18.1 us | |
+
+Bars: the probe's numbers, scaled to these pages (4.76 ms and 6.38 ms):
+missed by the 12 px page (5.5 to 5.8 rays, 7.9 to 8.2 exact) and the 16
+px CJK page (7.2 to 7.7 rays, 10.0 to 10.2 exact); met at 48 and 200 px.
+The probe's shader is lost, so the gap cannot be broken down further than
+this: the half-plane coverage costs 1.0 ms of a 12 px page (V0 against V1,
+above), and the exact area 2.4 ms more than the rays at 12 px and 0.4 ms
+less at 200 px. The 40-glyph line meets its bar (0.1 ms, 10 us of CPU in
+draw(): the 16.8 us are the whole frame's). A page of 12 px text with
+the exact area fits a 16.7 ms frame with 8 ms left; the knobs for a page
+are the rays alone (no exact area: a run option, not built) and fewer
+glyphs a frame.
+
+`psygfx_cset_make()`: the Latin set with the program's compile 451 ms
+(155 ms when the exact area is compiled out: the larger program is slower
+to compile on ANGLE's D3D11, bar 60 ms missed; the program cache makes a
+warm open load it); 7000 CJK glyphs, 432297 texels and 3.3 million words
+(about 59 MB), 26 ms (bar 250 ms for 30000 glyphs: met).
+
+### Blur
+
+| Workload | sigma 0.5 | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|---|
+| full screen R16F | 1.42 | 1.96 | 3.34 | 5.96 | | | |
+| probe, full screen R16F | 1.21 | 1.86 | 3.37 | 6.26 | | | |
+| 400 x 200 R16F, 1x: the rect drawn, blurred, the image drawn | 0.10 | 0.12 | 0.18 | 0.27 | 0.45 | 0.76 | 1.34 |
+| the same, 2x | 0.17 | 0.24 | 0.38 | 0.66 | 1.18 | 2.21 | 3.92 |
+
+Full screen at sigma 2: R16F 3.32 ms, RGBA16F 3.43, RGBA32F 3.57 (bar:
+RGBA32F at most 2 times RGBA16F, met). The full-screen rows equal the
+probe's within 0.2 ms; a full-screen blur at sigma 2 or less fits a 16.7
+ms frame with 13 ms left, as the user accepted. The word rows include
+drawing the layer and the result (the probe timed the passes alone): 0.27
+ms at sigma 4 misses the 0.2 ms bar; at sigma 2 and below it is met. 2x
+costs 1.7 to 2.4 times 1x on a word; the 0.3 ms bar is met at sigma 1 and
+below (0.38 ms at sigma 2). Weights from the CPU in a uniform array were
+not timed: each tap costs a fetch beside its exp. The knob for a large
+sigma is the pyramid (Next).
+
+### Video, and no regression
+
+| Row | v0.5.0 (git HEAD) | v0.6 |
+|---|---|---|
+| RGBA8 1080p, draw | 0.571, 0.581 | 0.557, 0.588 |
+| NV12, BT1886 | 0.964, 0.975 | 0.642, 0.679 |
+| I420 | 0.990, 1.000 | 0.782, 0.824 |
+| NV12, TRC_DEVICE | 1.098, 1.108 | 1.003, 1.041 |
+| 10000 gabors, instanced | 1.228, 1.154 | 1.290, 1.199 |
+| 1000 stimuli of 4 kinds, reordered | 1.046, 1.297 | 1.136, 1.038 |
+| v0.2 rounded rect; RRECT; a run of 200 MSDF glyphs | 0.413, 0.994, 0.128 | 0.412, 0.992, 0.134 |
+| `psygfx_open()`, no cache, 3 rounds | 2136, 2104, 2108 ms | 2192, 2130, 2095 ms |
+
+Video bars: 1.0 ms met (TRC_DEVICE at it: 1.00 to 1.04); 1.5 times RGBA8
+met (1.15). The other rows moved within their run-to-run spread.
+
+## v0.6 mutations
+
+[tests/mutate/gfx.toml](../tests/mutate/gfx.toml), mutants v06-00 to
+v06-28, run with `uv run tests/mutate/mutate.py gfx.toml --only ...` on
+the Iris Xe (the CPU half alone for the CPU faults). The text part's exact
+references were read from disk (`PSYGFX_TEST_REFDIR`, a development seam
+of the test), so a text mutant takes 7 s, not 4 minutes. v04-18 and v04-22
+were anchored again (their anchors now occur twice: the curve runs' palette
+and offsets copy the instances' code); both still caught.
+
+| # | Fault | Result |
+|---|---|---|
+| 0 | a ray's band one off | caught |
+| 1 | the loop's early exit without the window | caught |
+| 2 | the root rule without the two-root rows | caught (after the test circle was turned, below) |
+| 3 | the CPU winding counts an endpoint on the ray as above | caught (after points on endpoint rows were added) |
+| 4 | even-odd drawn as nonzero | caught |
+| 5 | a backward ray's winding not negated | caught |
+| 6 | the glyph table read one word off | caught |
+| 7 | an item turned the other way | caught |
+| 8 | an item's scale ignored | caught |
+| 9 | a palette fraction ignored | caught |
+| 10 | a run's local y axis without the pass's sign | caught |
+| 11 | the half-plane coverage's corners as a ramp | caught |
+| 12 | the rays' mix without its fade | caught |
+| 13 | aliased coverage with the window | caught |
+| 14 | a glyph added at run time: its table entry not uploaded | caught |
+| 15 | the check skips the range of a band's curve references | caught |
+| 16 | the exact area's backward term dropped | caught |
+| 17 | the exact area's band part from the pixel's bottom | caught |
+| 18 | the blur without the box filter's variance | caught |
+| 19 | taps to 3 SD | caught |
+| 20 | weights not normalized | caught |
+| 21 | both passes horizontal | caught |
+| 22 | the output center half a texel off | caught |
+| 23 | taps past the layer clamped to its edge | caught |
+| 24 | coverage drawn without the tint | caught |
+| 25 | a 2x layer at 1x px per unit | caught |
+| 26 | the video constants read one block off | caught |
+| 27 | a two-root row that misses the ray counted (the fix) | caught |
+| 28 | the same in the CPU winding | caught |
+
+29 of 29. The first run had 25 of 27: 2 and 3 survived, which found the
+bug in "A bug the mutations found".
+
+## v0.6 builds
+
+Warnings as errors. MSVC 19.44 (`cl` alone, /W4 /WX): the test as C and
+as C++17, the full test on the Iris Xe, WARP and SwiftShader. MinGW-w64
+gcc 16.1 (winlibs, -Wall -Wextra -Wpedantic -Wshadow -Werror): the test as
+C99, C11 and C++17, their CPU halves run. CMake (build-slug, MSVC, SDL3
+3.4.0): `test_psy_gfx`, `gfx_bench`, every other gfx and video example,
+the psy_gfx and psy_video compile checks and `test_psy_video` build clean;
+the compile checks, the CPU half and `test_psy_video` pass. Not run for v0.6: WSL (gcc 13.3, ASan, UBSan, llvmpipe) and
+emcc; CI runs the Linux and wasm jobs.
+
+## v0.6 departures from the design
+
+- Names, as the coordinator asked: `psygfx_crun`, `psygfx_crun_desc`,
+  `psygfx_citem`, `psygfx_blur_apply`; `psygfx_blur_make` returns an int
+  code.
+- Format flag bit 2 (resolved) was added after the format froze, on the
+  outline worker's request; the version stays 1 (a set without the bit
+  draws with the rays, as before).
+- V2 and screen-aligned rays were not built (above).
+- Sampler chroma was deleted; the video bars are met by flat inputs, which
+  the design did not have.
+- The text program compiles in 430 to 450 ms, not under 60 ms: the exact
+  area doubles the program. The program cache covers warm opens.
+- gfx_bench.c reads TrueType `glyf` tables itself, a stopgap until the
+  outline builder's header is in the tree; it then moves to that header
+  and the reader is deleted.
+
+## v0.7 status
+
+The running record of v0.7: the coordinator's review of v0.6 (2026-10-06,
+late), seven items in order.
+
+| Item | State |
+|---|---|
+| 1. Test time | Done. The default run takes 42 to 54 s on this laptop (one renderer, 5 of the text part's 24 conditions); `PSYGFX_TEST_FULL=1` runs every renderer and condition in 174 to 264 s (was about 17 minutes). Every measured value equal to the 17-minute run's. All 75 mutants of gfx.toml caught by the default run. WSL ASan + UBSan and emcc runs: below. |
+| 2. Rays-only option | Done: `crun_desc.rays` on a second program; a 12 px page 5.28 to 5.31 ms against 7.43 to 7.50. Static text cached in a target: bit for bit after a change of the text program's coordinates; 0.50 ms. |
+| 3. Gallery page 7 | Done: a staggered word entrance, a glow, artwork layers with the hit test, cached text. |
+| 4. The kinds patch | Applied on v0.6 by hand where needed; `vspec` part 0 values differ on all three renderers; re-timed quiet on AC: all three programs close at least half their gaps; built. |
+| 5. ELLIPSE CPU | Done: the arithmetic-geometric mean; 1000 packs 0.06 ms, were 36 ms; the same floats. |
+| 6. Gaussian NOISE | Done: a quantile table, bit for bit on the GPU and the CPU; 8 % over UNIFORM at 1 px checks. |
+| 7. Gradient noise | Designed, not built (the report; "Next"). |
+| psy_outline.h | gfx_bench builds its sets with it (the stopgap `glyf` reader deleted); the test cross-checks its set of the test glyphs. |
+
+## v0.7: test time
+
+The default `test_psy_gfx` took about 17 minutes on this laptop: three
+renderers of 81 to 103 s each, and 206 s of exact text references. Where
+the time went, per part on the Iris Xe (a timing copy of the test; the
+machine was busy, so the parts ran slower than in the table of results):
+
+| Part | s | Cause |
+|---|---|---|
+| v0.3 kinds | 32 | `psygfx_hit()` at every pixel, which packs the block each call; ELLIPSE's pack ran a 1024-point quadrature (23 to 50 us) |
+| v0.3 truth | 37 | the brute-force distance over 8192 pieces and the inside test over every boundary point at every pixel; the smooth union's 59000 zero-set points at every pixel near it |
+| v0.4 cache | 29 | 8 opens without a cache, 3.7 s each on ANGLE's D3D11 |
+| v0.3 paint, alpha+passes | 10, 7 | opens without the test's program cache |
+| v0.6 text | 206 | 24 exact references, single-threaded |
+
+What changed, none of it in a check's arithmetic:
+
+- ELLIPSE's quarter perimeter by the arithmetic-geometric mean (header,
+  "v0.7: ELLIPSE's perimeter").
+- The hit test runs only where it is checked (hard edges).
+- The CPU references run on threads (`PSYGFX_TEST_THREADS`, default the
+  hardware threads up to 16): a row or a pixel per call, results reduced
+  afterwards in row order, so the results do not depend on the count.
+- The brute-force distance skips boxes of 32 pieces that cannot be nearer
+  than the best so far, and boxes of 32 boundary edges that cannot cross
+  the row; the inside test runs only within reach. The smooth union's zero
+  set sits in 2 px cells: exact within 13 px, the check uses 12.
+- Paint and alpha+passes open with the test's program cache.
+- The cache part's default takes its reference frame from case 0
+  (compiled while storing) instead of a separate open without a cache, and
+  skips the unwritable folder's case.
+- The text part's default runs 5 of its 24 conditions: (8 px, 15 deg,
+  offset 0), (12, 0, 1), (12, 45, 0), (24, 15, 1), (48, 0, 0). The rest is
+  `PSYGFX_TEST_FULL=1`.
+- With no `PSYGFX_TEST_DEVICES`, the default runs the first renderer that
+  opens (hardware, else WARP, else SwiftShader; Mesa on Linux). CI names
+  its renderers, so CI runs as before.
+
+The text references scale poorly with threads (1 thread 35 s, 16 threads
+10 s for the part): items run in turn, and a box of an 8 px glyph has few
+pixels. The Gauss-Kronrod tolerance is not the cost (1e-9, 1e-8, 1e-7: 13,
+14, 12 s).
+
+| Run | Wall time |
+|---|---|
+| default (Iris Xe, 5 text conditions) | 42, 45 s; 54 s with the specialized programs (14 at each cold open) |
+| `PSYGFX_TEST_FULL=1` (Iris Xe, WARP, SwiftShader, 24 conditions) | 174, 178 s; 255, 264 s with the specialized programs |
+| WSL Ubuntu 22.04, gcc 11.4, 8 threads: build -O2 / ASan + UBSan | 7.7 / 20.5 s |
+| the CPU half, -O2 / ASan + UBSan | 0.83 / 0.84 s |
+| llvmpipe GL, default / full / ASan + UBSan default | 24.0 / 58.5 / 38.4 s |
+| emcc 6.0.10 in node 24.19: the compile check built and run; the test built; its CPU half | 2.7 s; 5.4 s; 0.77 s |
+
+All of these pass. The full run's measured values, line for line, equal
+the 17-minute run's. The mutants of tests/mutate/gfx.toml run against the
+default test: 64 of 64 before the v0.7 features, 75 of 75 after.
+
+## v0.7: curve runs
+
+### The rays alone, on a program of their own
+
+`crun_desc.rays` draws a run by the rays even where the exact area applies.
+A flag in the one program saved too little (12 px page, Iris Xe, AC, the
+guard; GPU over an empty frame, three interleaved rounds):
+
+| Program | 12 px Latin page, ms |
+|---|---|
+| exact area where it applies (the default) | 7.48, 7.50, 7.58 |
+| .rays as a flag in that program | 6.01, 6.01, 6.05 |
+| a program compiled without the exact area | 5.30, 5.34, 5.30 |
+
+The exact area's registers stay reserved in a program that has it, so
+`.rays` takes a second program, made at the first `psygfx_crun()` with
+`.rays` (about 150 ms on ANGLE's D3D11; the program cache keeps it). It
+draws the same bits as the program the test compiles without the exact
+area.
+
+Which to pick: the exact area wherever text is read or measured. `.rays`
+saves 2.2 ms (29 %) on a 12 px page, at the rays' error everywhere: a mean
+edge error of 0.029, 0.019, 0.009 and 0.004 at 8, 12, 24 and 48 px per em,
+and up to 0.56 at corners, against 1.8e-5.
+
+### Static text in a target
+
+A reading page is static: draw it once into a target, then composite it
+at 1:1 on whole px. The composite is exact (`texelFetch`, times 1). The
+run in the target was not: a target pass has rows top first, so its
+pixels' em points came from a mirrored `gl_FragCoord`, which rounds
+differently in f32 (8.6e-6 on the Iris Xe, 7.9e-6 on WARP and SwiftShader
+in an RGBA32F target). The text program now works in px with y down: the
+pack writes the run's placement in y-down px (block slots 24 to 27), the
+vertex shader builds the glyph in them and flips only the scene's quad,
+and the fragment shader turns `gl_FragCoord` into y-down px exactly (H - y
+at a pixel center). A target pass and the scene then compute every bit
+alike.
+
+| Cached against drawn, every value | Iris Xe | WARP | SwiftShader |
+|---|---|---|---|
+| RGBA16F target, RGBA16F scene, over black | 0 | 0 | 0 |
+| RGBA32F target, RGBA32F scene | 0 | 0 | 0 |
+| RGBA32F target, RGBA16F scene, over gray | 0 | 0 | 0 |
+| RGBA16F target, RGBA16F scene, over gray | 4.88e-4 (one f16 step) | 0 | 4.88e-4 |
+| before the change: RGBA16F over black; RGBA32F | 4.88e-4; 8.6e-6 | 7.6e-6; 7.9e-6 | 3.1e-5; 7.9e-6 |
+
+Over gray an RGBA16F target has rounded alpha before the blend; the scene's
+own draw blends with f32 alpha. Use an RGBA32F target (36.9 MB at 1920 x
+1200, against 18.4 MB) when the page lies over a non-black field and the
+values must match the drawn run.
+
+| Workload (Iris Xe, AC, the guard) | GPU ms |
+|---|---|
+| 12 px Latin page, 26205 glyphs, exact area | 7.43, 7.50, 7.46 |
+| the same with .rays | 5.29, 5.31, 5.28 |
+| the same drawn once into an RGBA16F target, composited each frame | 0.50, 0.50, 0.51 |
+| 16 px CJK page, 7140 glyphs, exact area | 9.17, 9.24, 9.23 |
+| 12 px and 16 px pages turned 15 deg (the rays, in the exact-area program) | 5.81 to 5.88; 6.33 to 6.40 |
+| 48 px Latin, 1612 glyphs; 200 px CJK, 45 glyphs | 1.55 to 1.58; 1.02 to 1.06 |
+| a 40-glyph line at 48 px, items copied | 0.074 to 0.084 (CPU 14 to 16 us) |
+
+The pass that fills the target must be inside a frame: `begin_target` is
+refused outside `psygfx_begin()` and `psygfx_end()`, so a page goes in at
+an ITI frame. A setup-time render would be cheap to allow: `gfx_bench`
+already calls `psygfx_begin()` with a zeroed `psyscr_frame` and
+`psygfx_end()` outside psy_screen's frames. That works, but `end()` clears
+the scene, runs the output pass into the back buffer and counts a frame. A
+flag that skips those three for a frame with no scene draws is about 15
+lines. Not changed.
+
+### psy_outline.h
+
+gfx_bench builds its sets with `psyol_cset_add_font()` (resolved, backward
+lists); the stopgap `glyf` reader is deleted. Its sets cost the same as
+the test builder's (one session, interleaved: 12 px page 7.44 to 7.95
+against 7.42 to 7.95 ms; 16 px CJK 9.28 to 9.42 against 9.26 to 9.91). The
+7000 CJK glyphs build in 330 to 424 ms (437032 texels, 3.32 million words,
+0.5 % more than the test builder's: the resolve splits some curves).
+`psygfx_cset_make()` with the program 420 to 509 ms; the CJK set 23 to 27
+ms.
+
+The test builds its 12 glyphs with psy_outline.h as well:
+
+| Check | Iris Xe | WARP | SwiftShader |
+|---|---|---|---|
+| `psygfx_cset_check()` on its set | OK | | |
+| its winding 0 or 1, and its fill equal to the brute force's, 24000 points | 0 wrong | | |
+| every glyph (overlaps resolved, so exact area) against the exact coverage, 12 px | 1.15e-5 | 1.14e-5 | 1.14e-5 |
+| against the test builder's set where both are resolved | 5.4e-7 | 4.8e-7 | 4.8e-7 |
+
+## v0.7: kind-specialized vector programs
+
+
+### The idea
+
+The vector program is one program for every kind, compound, dash, paint
+and effect. FXC inlines every kind's function at the call site in the
+fold loop, so each pixel pays for code that its stimulus cannot reach. A
+specialized program is the same text with defines that remove that code.
+It computes the same values for its case, so its pixels are equal to the
+generic program's pixels.
+
+The defines:
+
+| Define | Effect | Default (generic) |
+|---|---|---|
+| `PSY_VK` | the kinds in `psy_prim_()`, bit k for kind k | all |
+| `PSY_ONE` | one kind: no kind test | 0 |
+| `PSY_V1` | one primitive: no fold loop and no operations | not set |
+| `PSY_WS` | the arc length as a constant (0 or 1), not from the flags | not set |
+| `PSY_ALONG` | dashes and trim | 1 |
+| `PSY_PAINT` | paint | 1 |
+| `PSY_FX` | effects | 1 |
+
+A tier is a set of these defines. PLAIN is one primitive with no dashes,
+trim, paint or effects. ALONG is one primitive with dashes or trim, and
+no paint or effects. FOLD is a compound of one kind with no paint.
+
+The kinds worker's design and measurements, sessions A to C, as it wrote
+them; session D re-times them for v0.7.
+
+### Method
+
+A harness (`kinds_bench.c`, scratchpad) builds each variant from the
+vector program's text with its defines, beside the generic program in one
+process. GPU time is `gfx_bench`'s method: blocks of 12 frames between two
+`glFinish()` calls, 25 rounds, the rows of a table in turn. The cost of a
+row is the median of its difference from an empty frame in the same
+round. The workloads are the workloads of the four bars that v0.3
+missed, at 1920 x 1200. The Iris Xe through ANGLE's D3D11 path, the
+measurement lock held for every run.
+
+| Session | Time (2026-10-06) | Power | Load |
+|---|---|---|---|
+| A | 16:44 | AC | another worker's `find` over the home folder ran (CPU load 7 % at the start) |
+| B | 17:13 | battery | none seen (4 %) |
+| C | 17:15 to 17:18 | battery | none seen (4 %); `gfx_bench` built against v0.5.0 and against the patch, fresh processes, A/B/A/B |
+
+Sessions A and B put every row of the four bars in one interleaved
+table. Session C runs the real patch: `gfx_bench --only v0.3`, the
+selection rule in the header, not the harness.
+
+### Result per bar
+
+"Gap closed" is (generic minus specialized) divided by (generic minus
+bar), on the bar's own measure: a ratio for RRECT, dashes and OKLAB, ms
+for the compound. A value of 1 meets the bar.
+
+| Bar | Session | Reference, ms | Generic, ms | Specialized, ms | Generic | Specialized | Gap closed |
+|---|---|---|---|---|---|---|---|
+| RRECT fill, 1.3x the v0.2 rounded rect | A | 0.455 | 0.920 | 0.607 (PLAIN, RRECT) | 2.02x | 1.33x | 0.95 |
+| | B | 0.595 | 1.246 | 0.804 | 2.09x | 1.35x | 0.94 |
+| | C, round 1 | 0.666 / 0.469 | 1.621 | 0.654 | 2.43x | 1.39x | 0.92 |
+| | C, round 2 | 0.480 / 0.619 | 1.147 | 0.901 | 2.39x | 1.46x | 0.86 |
+| dashed circle, 1.2x the v0.2 stroke | A | 0.262 | 0.869 | 0.552 (ALONG, CIRCLE) | 3.32x | 2.11x | 0.57 |
+| | B | 0.371 | 1.272 | 0.815 | 3.43x | 2.20x | 0.55 |
+| | C, round 1 | 0.475 / 0.330 | 1.661 | 0.641 | 3.50x | 1.94x | 0.68 |
+| | C, round 2 | 0.352 / 0.433 | 1.190 | 0.863 | 3.38x | 1.99x | 0.64 |
+| compound of 8 with every effect, 1.0 ms | A | | 1.595 | 1.031 (FOLD, CIRCLE) | | | 0.95 |
+| | B | | 2.187 | 1.286 | | | 0.76 |
+| | C, round 1 | | 1.844 | 1.104 | | | 0.88 |
+| | C, round 2 | | 1.754 | 1.074 | | | 0.90 |
+| OKLAB paint, 1.1x the solid fill | A | 0.920 (solid, generic) | 1.495 | 1.368 (PLAIN + LINEAR OKLAB, RRECT) | 1.63x | 2.25x of the specialized solid; 1.49x of the generic solid | below 0 (-1.20); 0.26 |
+| | B | 1.246 | 2.111 | 1.803 | 1.69x | 2.24x; 1.45x | below 0 (-0.92); 0.42 |
+| | C (OKLAB stays generic in the patch) | 1.621 / 0.654 | 2.673 / 1.856 | | 1.65x | 2.84x | below 0 |
+
+In session C the reference and the generic column come from different
+processes: "0.666 / 0.469" is v0.5.0's reference, then the patch's. The
+ratios use each process's own reference.
+
+The PLAIN RRECT, the ALONG CIRCLE and the FOLD CIRCLE programs close at
+least half of their gaps in every session. They are built.
+
+The OKLAB paint does not. A specialized paint program makes the OKLAB
+RRECT 8 to 17 % faster, but most of the paint's cost is outside the code
+that the defines remove, and the solid fill gets faster too. With the
+RRECT program in place, OKLAB paint costs 2.2 to 2.8 times the solid
+fill, not 1.65 times. No pixel is slower than in v0.5.0: the bar moves
+because its reference moves. The paint bar needs another approach.
+
+The compound bar is an absolute time. In session A (AC) the specialized
+compound took 1.031 ms; on battery 1.07 to 1.29 ms. The generic program
+took 1.59 to 2.19 ms in the same sessions. The bar is met within the
+machine's variation, not with margin.
+
+The same programs also change two rows that have no bar of their own in
+this list (session C, the patch):
+
+| Workload | v0.5.0, ms | Patch, ms |
+|---|---|---|
+| compound of 8 circles, full screen | 3.943, 3.786 | 2.186, 2.097 |
+| compound of 32 circles, full screen | 14.007, 13.389 | 7.691, 7.327 |
+| compound cost per primitive per Mpx: (32 circles minus 1 circle) / 31 / 2.30 Mpx (bar 0.15) | 0.184, 0.176 | 0.099, 0.094 |
+| 100 compounds of 4, 60 x 20 (below the area rule: generic) | 0.591, 0.589 | 0.631, 0.517 |
+
+### Re-timed for v0.7 (session D)
+
+The sessions above ran on battery or beside other work. Session D: the
+patch applied by hand on v0.7 (above the changes below), 2026-10-06 23:02,
+AC, the shared guard (load 8 % at the start, no compiler or test running),
+`gfx_bench --only v0.3` and `--open-only` without the patch (v0.7's other
+changes) and with it, fresh processes, A/B/A/B, three rounds (open: five).
+
+| Bar | Reference, ms | Generic, ms | Specialized, ms | Generic | Specialized | Gap closed |
+|---|---|---|---|---|---|---|
+| RRECT fill, 1.3x the v0.2 rounded rect | 0.397 to 0.414 | 0.951 to 0.958 | 0.557 to 0.589 | 2.40x | 1.40 to 1.43x | 0.88 |
+| dashed circle, 1.2x the v0.2 8 px stroke | 0.258 to 0.273 | 0.915 to 0.946 | 0.498 to 0.530 | 3.4 to 3.6x | 1.9 to 2.0x | 0.70 |
+| compound of 8 with every effect, 1.0 ms | | 1.596 to 1.616 | 0.939 to 0.975 | | | met |
+| OKLAB paint, 1.1x the solid fill | | 1.548 to 1.572 | 1.532 to 1.575 (generic: paint) | | | none |
+
+| Workload | Without, ms | With, ms |
+|---|---|---|
+| compound of 8 circles, full screen | 3.48 to 3.51 | 1.85 to 1.87 |
+| compound of 32 circles, full screen | 12.32 to 12.42 | 6.54 to 6.64 |
+| 100 compounds of 4, 60 x 20 (below the area rule) | 0.457 to 0.495 | 0.461 to 0.484 |
+| `psygfx_open()`, no cache, five rounds | 2113, 2042, 2116, 2107, 2045 | 2203, 2304, 2485, 2237, 2215 |
+
+The three programs close at least half their gaps on a quiet machine:
+built. The compound bar is met with margin now (0.94 to 0.98 ms). Open
+costs 100 to 370 ms more for the three programs (session C could not see
+it through its variation); a warm open from the cache is unchanged.
+
+Applying the patch to v0.6: two hunks by hand (the backend's pipeline
+count, now `+ PSYGFX__N_VSPEC` on v0.6's `2 * PSYGFX__N_BUILTIN + 8`, and
+the test's part list), the rest with offsets. The patch's preprocessor
+lines took three pieces of the vector program past C99's 4095-character
+literal (gcc -Wpedantic): `psygfx__glsl_vec0`, `_vec3` and `_vec4` are now
+split in two each (`_vec0b` and so on); the program's text is unchanged.
+The test's `kinds` stats were renamed (`statsk`, `SK`: v0.6 had a
+`stats8`), and the part is named `vspec`, so that a `PSYGFX_TEST_PARTS`
+filter of "v0.3 kinds" does not run it. The worker's five mutants are in
+gfx.toml as v07-00 to v07-04, run on the Iris Xe: all caught.
+
+### Measured, then deleted
+
+Exploration sessions on 2026-10-06 between 16:11 and 16:16 (AC; another
+worker's `find` ran during the second). GPU time over an empty frame, ms;
+each row against the generic program in the same table.
+
+| Variant | Workload | Generic | Variant | Kept |
+|---|---|---|---|---|
+| PLAIN, every kind | RRECT | 1.174 | 1.099 | no: the kinds, not the features, make the cost |
+| ALONG, every kind | dashed circle | 0.987 | 1.184 (slower) | no |
+| FOLD + effects, every kind and operation | compound + effects | 1.911 | 1.627 | no |
+| FOLD, every kind, SMOOTH_UNION only | compound + effects | 2.576 | 1.784 | no |
+| RRECT only, every feature kept | RRECT | 1.410 | 1.117 | no: PLAIN RRECT 0.871 in the same table |
+| CIRCLE only, every feature kept | dashed circle | 1.409 | 0.856 | no: ALONG CIRCLE 0.742 |
+| FOLD CIRCLE, SMOOTH_UNION only | compound + effects | 2.576 | 1.308 | no: 6 % over FOLD CIRCLE with every operation (1.397), and one program per set of operations |
+| the edge profile as a constant (COSINE) | RRECT; dashed; compound | 0.715; 0.620; 1.012 | 0.679; 0.548; 0.997 | no: 1 to 12 %, three times the programs |
+| the dash loop of 3 as a constant | dashed circle | 0.620 (ALONG CIRCLE) | 0.557 | not yet: one session only; free (no new program) |
+| no exact rect blur | compound + effects | 1.012 | 0.967 | no: 4 % |
+| PLAIN + every paint, every kind | OKLAB RRECT | 1.871 | 1.835 | no |
+| PLAIN STAR | STAR fill | 1.314 | 0.874 | no bar; a candidate |
+| PLAIN ELLIPSE | ELLIPSE fill | 1.854 | 1.017 | no bar; a candidate |
+
+### Program switches and the area rule
+
+A program switch through ANGLE costs CPU time. When kinds split across
+programs, the batches split too. Measured with the harness's pick seam
+(each kind to its own program), 16:36 and 16:42, AC, CPU load 12 and
+16 % at the start; a build was seen at the end of the first run:
+
+| Workload | One program: wall ms, CPU us, draws | One program per kind: wall ms, CPU us, draws |
+|---|---|---|
+| 1000 small stimuli (RRECT, dashed circle, STAR in turn), grid, reordered | 2.642, 1413, 63 | 3.595, 2198, 71 (71 switches) |
+| the same, call order | 2.250, 1180, 63 | 23.474, 16694, 1000 |
+| the same at random places (overlapping), reordered | 2.459, 1300, 63 | 8.645, 6568, 326 |
+| RRECT and STAR in turn, overlapping, 256 of 32 px | 0.451, 189, 16 | 1.010, 623, 51 |
+| 256 of 64 px | 0.895, 208, 16 | 1.161, 559, 50 |
+| 256 of 128 px | 2.468, 257, 16 | 2.460, 952, 42 |
+| 128 of 256 px | 4.785, 253, 8 | 3.614, 824, 29 |
+| 64 of 512 px | 9.140, 224, 4 | 5.827, 499, 18 |
+
+The 1000-stimulus rows are CPU-bound, so their wall time is CPU time. An
+extra program switch, with the draw that it splits off a batch, costs 7
+to 24 us of CPU. GPU time breaks even at 128 x 128 px stimuli and wins
+at 256 x 256 px.
+
+So the rule: a draw takes a specialized program only when its quad
+covers 65536 px or more (256 x 256). A smaller stimulus keeps the
+generic program and batches as in v0.5.0. Thus the 1000-stimulus scenes
+above do not change. An element array (instances) always keeps the
+generic program: its instanced program comes from the generic one.
+
+Per frame, the extra switches are at most one into each specialized
+program per run of large stimuli of that case. A typical trial screen
+with a few large shapes adds 0 to 3 switches.
+
+### Compile time and open time
+
+Each program alone, compiled and linked with a comment that defeats
+ANGLE's memory cache (16:19, AC, the `find` running), three times; then
+loaded from its binary three times:
+
+| Program | Compile and link, ms | Binary, KB | Load, ms |
+|---|---|---|---|
+| generic vector program | 11658, 15112, 15084 | 110 | 2.1, 1.0, 0.9 |
+| PLAIN RRECT | 294, 268, 299 | 23 | 0.5, 0.4, 0.4 |
+| ALONG CIRCLE | 445, 424, 452 | 28 | 0.6, 0.6, 0.5 |
+| FOLD CIRCLE | 713, 683, 768 | 32 | 0.4, 0.4, 0.3 |
+
+Started together, as `psygfx_open()` starts its programs (16:39, AC):
+
+| Programs | Wall time, ms (three runs) |
+|---|---|
+| generic alone | 10524, 5856, 6983 |
+| the three specialized | 1305, 1119, 1470 |
+| generic and the three specialized | 7506, 7455, 6632 |
+
+The generic program is the long pole. The three others compile beside
+it. `psygfx_open()` in fresh processes, five rounds, v0.5.0 and the
+patch in turn (17:08 to 17:10, AC, no other load seen):
+
+| Header | No cache, ms | Cold file cache, ms | Warm file cache, ms | Stores, ms |
+|---|---|---|---|---|
+| v0.5.0 (11 programs) | 3858, 5731, 4352, 4681, 8681 | 3907, 6283, 3618, 3955, 6912 | 23.9, 15.0, 22.1, 27.6, 43.6 | 70 to 105 |
+| patch (14 programs) | 3807, 5050, 3705, 5099, 7364 | 3937, 4455, 3619, 9278, 6460 | 28.8, 32.8, 28.7, 48.9, 19.7 | 88 to 155 |
+
+No change in the open without a cache can be seen through the
+variation between rounds. A warm open stays under the 100 ms bar. The
+stores stay under 5 % of a cold open.
+
+The program cache needs no change: its key hashes the full program text,
+and the defines are in the text. Each specialized program has its own
+entry.
+
+### Tests
+
+`kinds` (GL, each renderer; named `vspec` in v0.7): 117 stimuli, each drawn alone twice. The
+first draw keeps the generic program (the area rule set out of reach),
+and the second takes the program that the rule picks (the rule set to
+0). The RGBA32F scenes are compared bit for bit, and the program that
+each draw took is compared with the program that its case expects. The
+stimuli, for each of three edges (COSINE, GAUSSIAN, HARD): RRECT fill,
+the three stroke alignments, offset, opacity and gate, in a turned and
+scaled group, zero radii; a dashed or trimmed CIRCLE with snap, offset,
+the three caps, in a group; compounds of CIRCLEs with every operation,
+an onion primitive, a desc onion, an offset, a stroke and every effect;
+the cases that must stay generic (paint, effects on one primitive, a
+dashed RRECT, a compound with an RRECT in it, every other vector kind
+filled and dashed). Then the area rule (a 40 x 30 RRECT stays generic, a
+140 x 90 one does not, with the rule at 10000 px) and an element array.
+
+| Check | Iris Xe | WARP | SwiftShader | Tolerance |
+|---|---|---|---|---|
+| values that differ between the generic and the picked program | 0 | 0 | 0 | 0 |
+| draws on the wrong program | 0 | 0 | 0 | 0 |
+| draws on each specialized program (RRECT, dashed CIRCLE, compound) | 15, 15, 12 | 15, 15, 12 | 15, 15, 12 | each above 0 |
+| area rule, element array | 0, 0 wrong | 0, 0 | 0, 0 | 0 |
+
+The whole test passes on the three renderers with the patch (MSVC
+19.44, C). The C++17 build passes the `kinds` part on WARP. The CPU
+cache test counts 14 programs.
+
+Mutations, each in a copy of the patched header, the `kinds` part run on
+WARP:
+
+| # | Fault | Result |
+|---|---|---|
+| 0 | the dashed CIRCLE program without the arc length | caught |
+| 1 | the pick does not check paint | caught |
+| 2 | the pick does not check a compound's kinds | caught |
+| 3 | the area rule inverted | caught |
+| 4 | the pick does not check effects on one primitive | caught |
+
+### Found on the way
+
+An ELLIPSE costs 23 us of CPU per draw: 1000 ELLIPSEs took 23.3 ms of
+CPU per frame against 0.35 to 0.59 ms for 1000 RRECTs, dashed circles
+or STARs (16:31, AC; the `find` ran). `psygfx__vkind()` calls
+`psygfx__ell_quarter()`, a quadrature of 1024 points with a `sin`, a
+`cos` and a `sqrt` each, at every pack. The quarter perimeter depends
+only on w, h and the scale, so a cache in the stimulus or a shorter
+quadrature would remove it. Not changed here. (Fixed in v0.7 by the
+arithmetic-geometric mean: "v0.7: ELLIPSE's perimeter".)
+
+## v0.7: ELLIPSE's perimeter
+
+ELLIPSE's pack computed its quarter perimeter (for dashes, trim and snap)
+by a 1024-point Gauss-Legendre quadrature with a `sin`, a `cos` and a
+`sqrt` per point: 23 us a draw (MSVC; the kinds worker's harness) to 36 us
+(gcc -O2). It is now a E(e) by the arithmetic-geometric mean, pi / (2
+M(a, b)) (a^2 - sum 2^(n-1) c_n^2), which converges quadratically: five
+steps reach double precision up to 20:1.
+
+| Check | Result |
+|---|---|
+| against a 2-million-panel Simpson rule in long double, aspects 1 to 20, scales 0.5 to 1000 | within 8.8e-16 (relative); the quadrature 6.0e-15 |
+| the float the pack stores, against the quadrature's, the same 40 cases | equal in all 40 |
+| the test's check, against a 20000-panel Simpson rule in double | 7.6e-15 (tolerance 1e-12) |
+| every value of the full test (kinds, truth, dashes on ELLIPSE) | equal to v0.6.0's |
+| 1000 ELLIPSE packs (gcc -O2, the guard, three rounds) | 35.6 to 38.1 ms before; 0.053 to 0.071 ms after |
+
+The value no longer needs a cache: 0.02 us a call.
+
+## v0.7: Gaussian noise
+
+NOISE takes `dist = PSYGFX_GAUSSIAN`. The GPU computes no transcendental:
+the check's hash (the same as UNIFORM's) picks, by its top 16 bits, one of
+65536 equally likely values, a table made on the CPU at open:
+
+- the standard normal's quantiles at the centers of 65536 equal-probability
+  bins, Phi^-1((i + 0.5) / 65536), by Acklam's rational approximation
+  (relative error under 1.15e-9);
+- scaled in double so that the 65536 values have variance 1, then rounded
+  to float; the upper half is the lower half negated, bit for bit, so the
+  mean is 0;
+- a 256 x 256 R32F texture (256 KB); 0.3 ms to build (gcc -O2).
+
+`psygfx_noise_value(..., PSYGFX_GAUSSIAN)` reads the same table: the CPU
+twin is exact. What is not exact is the table's relation to the true
+normal: the quantiles are within 1.15e-9 of Phi^-1 before rounding, and
+the distribution is discrete (65536 levels) and ends at 4.33 SD (P(|z| >
+4.33) = 1.5e-5 for the true normal). A C library whose `log` differs in
+the last bit could change a table entry; the test pins the table's hash
+(MinGW gcc C99 and C11, g++, MSVC C and C++, glibc in WSL and emcc all give
+`19ac94b1`).
+
+| Check | Result |
+|---|---|
+| the table against quantiles found by bisection on `erfc` (the test's own, scaled the same way) | 6.0e-8 (relative; float rounding) |
+| order, symmetry, variance | strictly increasing, symmetric bit for bit, 1.000000000 |
+| 10^6 checks: mean, SD, beyond 3 SD | -0.0002, 0.9987, 0.00262 (normal: 0.00270) |
+| Kolmogorov-Smirnov against Phi, 10^6 checks | D = 0.00095 (1 % critical value 0.00163) |
+| GPU against `psygfx_noise_value()`, every check, Iris Xe, WARP, SwiftShader | 0 wrong |
+
+| Full screen 1920 x 1200, contrast 0.2 (Iris Xe, AC, the guard, three rounds) | GPU ms |
+|---|---|
+| UNIFORM, 1 px checks | 0.372, 0.382, 0.392 |
+| BINARY, 1 px checks | 0.383, 0.384, 0.381 |
+| GAUSSIAN, 1 px checks | 0.414, 0.419, 0.421 |
+| UNIFORM, BINARY, GAUSSIAN, 4 px checks | 0.391 to 0.420, all three |
+
+contrast is the noise's SD. A Gaussian field leaves the gamut where
+contrast times the value passes the background's room; the per-draw
+gamut check counts those draws. `psygfx_noise_gauss()` (CPU only,
+Box-Muller) stays, and is not what NOISE draws.
+
+## v0.7 mutations
+
+[tests/mutate/gfx.toml](../tests/mutate/gfx.toml) against the default test
+(one renderer, the 5 text conditions), the Iris Xe:
+
+| # | Fault | Result |
+|---|---|---|
+| v06-29 | a .rays run on the program with the exact area | caught |
+| v06-30 | the scene's y down by another rounding path (`H * 1.0000002 - y`) | caught. A first form, `(H + 0.37) - (y + 0.37)`, survived: the shader compiler folds it to `H - y` |
+| v06-31 | the ellipse's perimeter series off by half a term | caught (by the CPU check against Simpson; the GPU and its CPU form share the value) |
+| v07-00 | the dashed CIRCLE program without the arc length | caught |
+| v07-01 | paint not checked by the pick | caught |
+| v07-02 | a compound's kinds not checked by the pick | caught |
+| v07-03 | the area threshold inverted | caught |
+| v07-04 | fx not checked for one primitive | caught |
+| v07-05 | the Gaussian table's row and column swapped | caught |
+| v07-06 | the Gaussian table not scaled to unit variance | caught |
+| v07-07 | GAUSSIAN drawn as UNIFORM | caught |
+
+v06-10 was anchored again: the text vertex shader no longer reads the
+pass's axes; the fault now flips the quad in the wrong pass. The whole
+list: 75 of 75 (767 s of mutants, 1009 s with the waits for other workers' timing).
+
+## v0.7 builds
+
+Warnings as errors. MSVC 19.44 (`cl`, /W4 /WX): the test as C and C++17,
+the full test on the Iris Xe, WARP and SwiftShader. MinGW-w64 gcc 16.1
+(-Wall -Wextra -Wpedantic -Wshadow -Werror): the test as C99, C11 and
+C++17, their CPU halves run. CMake (build-slug, MSVC, SDL3 3.4.0):
+`test_psy_gfx`, `gfx_bench`, `gfx_gallery` (and its `--sim` run), the
+compile checks. WSL (Ubuntu 22.04, gcc 11.4): -O2 and ASan + UBSan, the CPU
+half and llvmpipe. emcc 6.0.10: the compile check and the test's CPU half
+in node. Times in "v0.7: test time".
+
+## v0.7 departures
+
+- The default test runs one renderer; `PSYGFX_TEST_FULL=1` runs them all.
+  Asked for: a default under about a minute.
+- The text program's coordinates changed (y down) to make the cached page
+  exact; not asked for, found while checking the coordinator's claim
+  that the composite would be bit for bit (it was not, by up to one f16
+  step, before).
+- `.rays` takes a second program, not a flag: the flag saved 1.5 ms of
+  the 2.2 a program saves.
+- Gaussian noise is a table, not a formula: the only way found to a CPU
+  twin with the same bits.
+- The gallery's page 7 builds its font as a curve set with psy_outline.h
+  from the 5 x 7 bitmap (each pixel a square, merged), so it needs no font
+  file on any platform.
+
+## v0.8: setup passes and the automatic rays program
+
+Two items the user approved after v0.7 (Next 9 and 5).
+
+### Setup passes
+
+`psygfx_begin_setup()` and `psygfx_end_setup()` run target passes outside a
+screen frame, so a page of text, artwork or a blur layer is rendered at
+setup instead of in an ITI frame. Of the two designs (a flag on
+`psygfx_begin()`, or a pair of calls) the pair was the cleaner API: it
+needs no `psyscr_frame` and cannot be confused with a frame's `end()`.
+
+- `begin_setup()` makes the GL context current (as `psyscr_begin()` would),
+  then runs `begin()`'s bookkeeping with a frame of time 0 and index 0;
+  the frame block is written as in a frame, so a pass sees the same
+  uniforms layout.
+- Inside: target passes (16, not nested: the frame's rules and code),
+  draws into them, `psygfx_blur_apply()`.
+- Refused (`PSYGFX_ERR_ORDER`): a draw into the scene, `psygfx_end()`,
+  `psygfx_begin()`, a second `begin_setup()`, `begin_setup()` inside a
+  frame, `end_setup()` without one.
+- `end_setup()` is `end()` without the scene's segments, the output stage,
+  the present, the frame count and the clipped event (the clipped count
+  still adds to `psygfx_clipped()`). It uploads the uniforms into the next
+  ring slot, as a frame does; a ring slot is rewritten in full by every
+  frame, so the next frame cannot see it. Nothing is allocated.
+
+| Check (each renderer) | Iris Xe | WARP | SwiftShader |
+|---|---|---|---|
+| a page (12 test glyphs at 12 px) in a setup pass against in a frame: the RGBA32F targets | equal | equal | equal |
+| the two targets composited 1:1 into the scene | equal | equal | equal |
+| a blur (RGBA16F, sigma 2.5) applied in a setup pass against in a frame: the results | equal | equal | equal |
+| the frame after a setup pass against the same frame before it: scene; output codes | 0; equal | 0; equal | 0; equal |
+| frames counted by setup passes | 0 | 0 | 0 |
+| refusals | 9 of 9 | 9 of 9 | 9 of 9 |
+
+The gallery's page 7 renders its cached page and its glow layer in setup
+passes.
+
+### The rays program for turned runs
+
+v0.7's `.rays` program draws the same bits as the exact-area program
+wherever the exact area does not apply. v0.8 picks it by itself for such
+runs. The rule, at draw:
+
+- the run is aliased; or
+- the run has no `PSYGFX_I_ORI`, and its turn (with its group's) is 0.01
+  degrees or more from a quarter turn; or
+- the run has `PSYGFX_I_ORI`, its items on the CPU, and every item's turn
+  plus the run's is 0.01 degrees or more from a quarter turn.
+
+The shader takes the exact area only within about 6e-5 degrees of a quarter
+turn (its test is 1e-6, relative), so the margin of 0.01 degrees keeps
+every item that could take it on the exact-area program. Items in a buffer
+are on the GPU only, so a buffer run with `PSYGFX_I_ORI` stays there. The
+rays program is made at `psygfx_crun()` for runs that are turned, aliased,
+grouped, have `PSYGFX_I_ORI` or ask for `.rays`; a run made before it
+exists stays on the exact-area program, which draws the same bits. The
+check costs one `fmod` per item, in the loop that already validates each
+item's glyph.
+
+| Against the exact-area program (test seam `psygfx__text_auto = 0`) | Iris Xe | WARP | SwiftShader |
+|---|---|---|---|
+| run turned 15 degrees | 0 (rays program) | 0 | 0 |
+| items turned 7 to 128 degrees (`PSYGFX_I_ORI`) | 0 (rays program) | 0 | 0 |
+| one item on 90 degrees, the others turned | 0 (exact-area program) | 0 | 0 |
+| aliased, not turned | 0 (rays program) | 0 | 0 |
+| turned items in a buffer | 0 (exact-area program) | 0 | 0 |
+| draws on the program the rule does not name | 0 | 0 | 0 |
+
+| Turned pages (Iris Xe, AC, the guard, interleaved; rounds 2 and 3 of 3) | v0.7 (seam off), ms | v0.8, ms |
+|---|---|---|
+| 12 px Latin, 26205 glyphs, turned 15 degrees | 5.83, 6.03 (5.86 in round 1) | 5.09, 5.10 |
+| 16 px CJK, 7140 glyphs, turned 15 degrees | 6.39, 6.61 (6.39) | 5.94, 5.92 |
+| not turned: 12 px Latin; 16 px CJK (no change expected) | 7.48, 7.58; 9.30, 9.31 | 7.45, 7.43; 9.23, 9.19 |
+
+The saving holds: 0.7 to 0.9 ms (13 %) on the Latin page, 0.45 to 0.7 ms
+on the CJK page. The turned Latin page is now a little faster than the `.rays` page not
+turned (5.24 to 5.28 ms in the same rounds).
+
+### v0.8 mutations and builds
+
+| # | Fault | Result |
+|---|---|---|
+| v08-00 | a setup pass draws into the scene | caught |
+| v08-01 | end_setup runs the output stage and counts a frame | caught |
+| v08-02 | end() accepted in a setup pass | caught |
+| v08-03 | the automatic rays ignore the items' own turns | caught |
+| v08-04 | the automatic rays for items in a buffer | caught |
+
+v06-29 was anchored again (the program choice is now a condition). The
+whole list: 80 of 80 against the default test (1062 s).
+
+A setup pass that clears the scene (the scene's segment run with its
+clear) was not made a mutant: it changes nothing a frame can see, since
+every frame clears the scene first.
+
+Builds: MSVC 19.44 C and C++17, MinGW gcc 16.1 C99, C11 and C++17, -Werror
+and /W4 /WX; the CMake targets and `gfx_gallery --sim`. The full test on
+the three renderers passes in 199 s; the default in 42 s.
+
+## v0.9: the noise hash
+
+NOISE, the noise dither and the Gaussian table's index all draw from one
+integer hash. Through v0.8 that was `pcg_hash` (Jarzynski and Olano 2020),
+nested for 2D: `hash(x ^ hash(y ^ hash(seed)))`. The user pointed at XQO
+(skeeto/hash-prospector issue 23, Unlicense) and the coordinator at the
+best-known `lowbias32` constants (issue 19). The candidates were measured
+on a single hash, on the 2D constructions the stimuli use, and on the GPU;
+v0.9 changes the construction, which was the weak part, and the hash.
+
+### Candidates
+
+| Name | Source | Operations |
+|---|---|---|
+| pcg_hash | Jarzynski and Olano 2020 (v0.8's) | 2 multiplies, a data-dependent shift |
+| XQO | hash-prospector issue 23 | 2 multiplies (one a square), 3 shifts |
+| triple32 | hash-prospector README (Chris Wellons, public domain) | 3 multiplies, 4 shifts |
+| lowbias32 | hash-prospector README, the first constants `[16 7feb352d 15 846ca68b 16]` | 2 multiplies, 3 shifts |
+| lowbias32, best | issue 19, comment 1120105785 (TheIronBorn, 2022-05-07): `[16 21f0aaad 15 735a2d97 15]`, bias 0.10704, the best in the thread (the `d35a2d97` and `f35a2d97` variants score 0.1133 and 0.1073) | 2 multiplies, 3 shifts |
+
+Excluded: the CRC32C-based functions of January 2026 in issue 19 (bias
+0.021 to 0.051). They need a hardware CRC32 instruction; GLSL ES 3.0 has
+none, and a software CRC would cost more than these hashes and complicate
+the CPU twin.
+
+### A single hash: avalanche
+
+Reynolds' method over all 2^32 inputs: for each input bit and output bit,
+the count of inputs where flipping the input bit flips the output bit,
+against 2^31 (WSL, gcc -O3, 8 threads, 2 minutes a hash).
+
+| Hash | Linf | RMS |
+|---|---|---|
+| pcg_hash | 331871348 | 16645540.6 |
+| XQO | 836260 | 121867.6 |
+| triple32 | 167788 | 44857.9 |
+| lowbias32 (first constants) | 2023972 | 372660.5 |
+| lowbias32 (best constants) | 1211488 | 229873.3 |
+
+The pcg_hash, XQO and triple32 rows reproduce the numbers quoted in issue
+23 exactly. pcg_hash's worst bit pair flips 15 % away from even. Over all
+2^32 inputs the sampling floor of the RMS is about 2^15 (32768): triple32
+sits near it. Issue 19's scores (0.107 for the best lowbias32) are
+hash-prospector's own bias estimate, which was not recomputed here; by the
+exhaustive counts the best lowbias32 lies between XQO and the first
+lowbias32.
+
+### The constructions, as streams
+
+PractRand 0.96 (CC0; built and run locally in WSL, not in the
+repository), `RNG_test stdin32 -tlfail`, to 16 GB or the first FAIL. The
+streams are what a stimulus draws:
+
+- frames: the 32-bit key of every check of a 1920 x 1200 field, row by
+  row, frame after frame with the seed 0, 1, 2, ... (a new noise frame
+  each trial);
+- seeds: for each check in turn, its key under 256 consecutive seeds (one
+  check's values across trials);
+- dither: the dither's key of every pixel, frame after frame (the frame
+  index changes, the seed is 99);
+- counter: the hash of 0, 1, 2, ... (the hash alone).
+
+The constructions: the nest, v0.8's `hash(cx ^ hash(cy ^ hash(seed)))`;
+"lin1" and "lin2", `hash(cx A + cy B + seed C)` with odd constants, one or
+two rounds; "xor-mul", `hash(cx A ^ cy B ^ hash(seed))`; and "index",
+v0.9's: `k = hash(seed)`, `m = hash(k ^ 0x9E3779B9)`,
+`hash((cx + (cy << 16)) (k | 1) ^ m)`.
+
+| Hash | Counter | Nest: frames, seeds, dither | lin1 | lin2 | xor-mul: frames, seeds, dither | Index: frames, seeds, dither |
+|---|---|---|---|---|---|---|
+| pcg_hash | 128 MB (Gap-16) | 256 MB (BDayS), 16 GB, 512 MB (BDayS) | 128 MB (Gap-16) | 1 GB (FPF, too even) | 16 GB, 1 GB (BDayS), 16 GB | 16 GB, 16 GB, 16 GB: no failure |
+| XQO | 1 GB (FPF, too even) | 256 MB, 16 GB, 512 MB | 1 GB (FPF) | 1 GB (FPF) | 8 GB, 1 GB, 8 GB | 16 GB, 16 GB, 16 GB: no failure |
+| triple32 | 1 GB (FPF, too even) | 256 MB, 16 GB, 512 MB | 1 GB (FPF) | 1 GB (FPF) | 16 GB, 1 GB, 8 GB | 16 GB, 16 GB, 16 GB: no failure |
+| lowbias32, first | 256 MB (Gap-16, BRank) | 64 MB, 1 GB, 256 MB | 1 GB (FPF) | 1 GB (FPF) | not run | not run |
+| lowbias32, best | 256 MB (Gap-16, BRank) | 256 MB, 256 MB, 256 MB | 1 GB (FPF) | 1 GB (FPF) | 8 GB, 1 GB, 8 GB | not run (out: the counter) |
+
+Lengths are where the first FAIL came (16 GB: none). The "FPF, too even"
+failures at 1 GB are a bijection's: distinct inputs through a permutation
+never repeat, and at 2^28 words the missing birthday repeats show. They
+say nothing about the hash; the constructions whose inputs can repeat do
+not show them. Both lowbias32 variants fail a plain counter at 256 MB
+(Gap-16, BRank), despite their low avalanche bias: bryc's point in issue
+19, that the best single score need not combine best, holds here.
+
+### The weak part was the nesting
+
+Every hash failed the nest at 256 MB in the frames stream (BDayS, too many
+repeats). The cause is the construction: row cy of a frame is
+`hash(cx ^ K)` with `K = hash(cy ^ hash(seed))`. Two rows whose K agree
+above bit 10 hold the same 2048 values, in another order (cx XOR the two
+keys' difference). With 1200 rows that happens in a frame with
+probability 1 - exp(-1200^2 / 2 / 2^21) = 29 %. Counted over 10000 seeds:
+
+| Hash | Frames with two rows that are copies | The same, a frame or the pair of consecutive frames |
+|---|---|---|
+| pcg_hash | 28.3 % | 73.7 % |
+| triple32 | 29.2 % | 74.5 % |
+
+A copy XORs the column index by a number below 2048: by 1, it swaps
+neighbors. The dither's nest has the same flaw.
+
+xor-mul removes the row copies, but `cx A ^ cy B` is not injective: 896
+pixel pairs of a 1920 x 1200 field share it and so are equal in every
+frame (a random 32-bit key gives 618 equal pairs per frame, each pair
+different every frame), and two frames whose seed keys differ by `cx A ^
+cx' A` share a whole column. The seeds stream fails at 1 GB for every hash.
+
+The index construction is injective over any 65536 x 65536 window (the
+index cx + 65536 cy), and the seed enters as an odd multiplier and an
+offset, so no two seeds' frames are shifts or copies of each other. It
+passes every stream to 16 GB, with each of the three hashes, pcg_hash
+included.
+
+### Spatial checks
+
+Over 64 frames of 1920 x 1200 (uniform values; expected 0 within 1 /
+sqrt(n) = 8.2e-5 for the lags, 1.4e-3 across seeds):
+
+| Hash, construction | x lag 1 | y lag 1 | diagonal | consecutive seeds |
+|---|---|---|---|---|
+| pcg_hash, nest (v0.8) | -7.8e-5 | -7.3e-5 | +1.0e-4 | -1.2e-4 |
+| pcg_hash, index | -1.8e-5 | +2.4e-4 | -1.0e-5 | -2.5e-3 |
+| XQO, index | +2.2e-5 | +2.6e-5 | -5.7e-6 | +2.2e-3 |
+| triple32, index (v0.9) | -6.5e-5 | +9.4e-5 | +8.2e-5 | -1.4e-5 |
+
+The 2D power spectrum of 1024 x 1024 fields, 8 seeds averaged, white
+normalized to 1: the largest deviation of a radial bin (32 bins; the
+expected scatter of one bin is 0.0126), the mean of the axis rows, the
+largest single frequency (of 2^20; for an average of 8 periodograms about
+3.5 is expected):
+
+| Hash, construction | largest bin deviation | axes | largest frequency |
+|---|---|---|---|
+| pcg_hash, nest (v0.8) | 0.010 | 0.971 | 3.85 |
+| pcg_hash, lin1 | 0.043 | 1.005 | 16.9 (a spike: the lattice of the linear form) |
+| pcg_hash, index | 0.007 | 0.976 | 3.62 |
+| XQO, index | 0.015 | 1.011 | 3.72 |
+| triple32, index (v0.9) | 0.010 | 0.991 | 3.48 |
+
+All flat but pcg_hash under lin1. Only pcg_hash under the index shows a
+lag above 3 SD (y, +2.4e-4); triple32 shows none.
+
+### GPU cost
+
+Full-screen NOISE at 1 px checks and the noise dither (an empty frame
+with the CLUT), the Iris Xe, AC, the guard, three interleaved rounds, GPU
+ms over an empty frame (dither: the whole frame):
+
+| Hash, construction | UNIFORM | GAUSSIAN | noise dither frame |
+|---|---|---|---|
+| pcg_hash, nest (v0.8) | 0.418 to 0.453 | 0.470 to 0.495 | 0.660 to 0.680 |
+| XQO, nest | 0.454 to 0.489 | 0.506 to 0.554 | 0.638 to 0.670 |
+| triple32, nest | 0.393 to 0.437 | 0.445 to 0.486 | 0.658 to 0.701 |
+| pcg_hash, index | 0.448 to 0.467 | 0.500 to 0.515 | 0.666 to 0.704 |
+| XQO, index | 0.455 to 0.538 | 0.494 to 0.575 | 0.655 to 0.714 |
+| triple32, index | 0.444 to 0.464 | 0.482 to 0.512 | 0.644 to 0.828 |
+
+No hash or construction is distinguishable from another through the
+spread: the fragment cost is not the hash's arithmetic on this GPU. The
+index form computes its two seed keys per fragment (they are uniform; a
+compiler may hoist them).
+
+### The decision
+
+The construction changes to the index form: it is the only one that
+passes every stream, and it costs the same. The hash changes to triple32:
+with the index form all three pass, so the single hash decides, and
+triple32 has the lowest avalanche bias (Linf 5 times XQO's, 2000 times
+pcg_hash's) and passes a counter to the bijection limit, where pcg_hash
+fails at 128 MB. XQO was as good on every stimulus test; triple32 wins on
+the single hash alone.
+
+What changed for a user: every NOISE pattern and the noise dither's
+pattern (v0.9 is a version step for that), `psygfx_noise_gauss()`'s values
+(the same construction), and a user shader's `psy_hash()`. New:
+`psygfx_hash2()` and the shaders' `psy_hash2()`. `psygfx_noise_value()`
+and the GPU still agree at every check on the three renderers. The test's
+pinned digests changed (uniform `5f8bf9f7`, Gaussian draws `30886f1e`; the
+Gaussian table `19ac94b1` does not depend on the hash); all five builds give
+them. The noise dither's mean check had a tolerance of 2 SD (0.005 of a
+code over 32768 draws); with the new pattern it read -0.0029, so it is 4
+SD (0.01) now.
+
+### v0.9 mutations and builds
+
+| # | Fault | Result |
+|---|---|---|
+| v09-00 | the shaders' key without the odd multiplier | caught (GPU against the CPU twin) |
+| v09-01 | the CPU twin's key nested as before v0.9 | caught (pinned digests) |
+| v09-02 | the hash a step short | caught (pinned digests) |
+
+The list before them: 80 of 80 against the default v0.9 test (1180 s).
+Builds: MSVC 19.44 C and C++17, MinGW gcc 16.1 C99, C11 and C++17: the
+pinned digests equal in all five; the full test on the Iris Xe, WARP and
+SwiftShader passes (229 s).
+
+## v0.10: gradient noise (SIMPLEX)
+
+NOISE takes `dist = PSYGFX_SIMPLEX`: 3D simplex noise summed over octaves
+(fBm), with the feature scale in units (px or deg), octaves, lacunarity,
+gain, a seed, and a third coordinate z to bind for evolution. Simplex
+noise's patent (US 6867776) expired in 2022.
+
+### Design
+
+- The lattice: Perlin's simplex in 3D (skew 1/3, unskew 1/6, four
+  corners, radial falloff (0.6 - d^2)^4, the sum times 32).
+- Gradients: the 12 cube edges in 16 slots, picked by a corner's key's top
+  4 bits.
+- Keys: v0.9's construction. A z layer gets `k = hash(cz ^ S)`,
+  `m = hash(k ^ 0x9E3779B9)`; a corner's key is
+  `hash((cx + cy 2^16) (k | 1) ^ m)`; S is the seed's hash plus the octave.
+  Two hashes per z layer (two layers a pixel) and one per corner.
+- fBm: octave k has cells of scale / lacunarity^k and weight gain^k; the
+  weights sum to 1.
+
+### Integer or float: the harness first
+
+The same simplex as two user shaders on the Iris Xe (AC, the guard, three
+interleaved rounds; GPU ms over an empty frame, 1920 x 1200, cell 32 px):
+
+| Octaves | f32 simplex | integer simplex | integer / f32 |
+|---|---|---|---|
+| 1 | 1.475, 1.480, 1.481 | 1.968, 1.969, 1.974 | 1.33 |
+| 2 | 2.672, 2.675, 2.681 | 3.573, 3.582, 3.583 | 1.34 |
+| 4 | 4.954, 4.975 | 6.819, 6.843 | 1.37 |
+| 8 | 9.713, 9.755 | 13.331, 13.400 | 1.37 |
+
+The integer form costs at most 1.37 times f32 per octave, under the 1.5
+the user set, so it ships, with an exact CPU twin.
+
+### The integer form
+
+Lattice coordinates are Q14 (1/16384 of a cell), from the pixel's index:
+`((2 i + 1) r) >> 1` with r the octave's Q14 cells per px, an integer the
+CPU computes (round(16384 lacunarity^k / scale px)). Every quantity is
+unsigned with a bias of 2^28 (so floor division and shifts are those of
+non-negative numbers), and every product stays below 2^31. The falloff
+runs in Q16 (t >> 12, then two squarings >> 16), the sum in Q30. An
+octave's value in Q12 (`sum >> 13`, a floor) times its Q12 weight is
+summed; the field is that sum over 2^24, exact in a float. z comes from
+the CPU in Q14 (modulo 2^30) in two 16-bit halves, so it is exact in the
+block's floats. The block: p[0..7] each octave's r, p[8..23] its z, p[24..31]
+its weight, misc.w the octave count.
+
+`psygfx_simplex_value(g, s, ix, iy)` runs the same integers on the CPU.
+
+| Check | Iris Xe | WARP | SwiftShader |
+|---|---|---|---|
+| GPU against `psygfx_simplex_value()`: 6 fields, 227000 pixels (1 to 8 octaves; lacunarity 1, 1.7, 2, 3; gain 0.4 to 1; z 0, 3.37, -2.25; cells 2 to 200 px) | 0 wrong | 0 wrong | 0 wrong |
+| a turned field (30 degrees, 3 octaves): largest value; mean | 0.853; 0.0061 | the same | the same |
+| refusals (scale 0, 9 octaves, lacunarity 9, gain 1.5, a POLYGON aperture, a cell below 1/32 px) | 6 of 6 | 6 of 6 | 6 of 6 |
+
+The integer form against the same noise in double (the same lattice,
+keys and gradients, real arithmetic) at 262144 lattice points, one
+octave: within 1.4e-3 of full scale. That is the CPU twin's distance from
+an ideal f32/f64 simplex; the twin itself is exact. Q12 coordinates and a
+Q12 falloff gave 2.2e-2 (the falloff's fourth power lost the most), Q12
+coordinates with a Q16 falloff 2.4e-3.
+
+### What the field is
+
+From `psygfx_simplex_value()`, 1024 x 1024 fields, cell 32 px, lacunarity
+2, gain 0.5:
+
+| Octaves | SD | min, max |
+|---|---|---|
+| 1 | 0.425 | -0.978, 0.978 |
+| 2 | 0.317 | -0.947, 0.946 |
+| 3 | 0.278 | -0.929, 0.913 |
+| 4 | 0.261 | -0.868, 0.909 |
+| 6 | 0.249 | -0.839, 0.862 |
+| 8 | 0.246 | -0.826, 0.855 |
+
+The mean is 0 within 1e-4. contrast scales the field: for an SD of c, set
+contrast to c / SD.
+
+Radial power spectrum, power per octave band of frequency (4 seeds; the
+peak band = 1):
+
+| Band, cycles/px (lattice 1/32 = 0.031) | 1 octave | 4 octaves |
+|---|---|---|
+| 0.002 to 0.004 | 0.013 | 0.013 |
+| 0.004 to 0.008 | 0.054 | 0.052 |
+| 0.008 to 0.016 | 0.276 | 0.267 |
+| 0.016 to 0.031 | 1 | 1 |
+| 0.031 to 0.063 | 0.732 | 0.929 |
+| 0.063 to 0.125 | 0.0077 | 0.237 |
+| 0.125 to 0.25 | 0.0022 | 0.059 |
+| 0.25 to 0.5 | 0.0015 | 0.012 |
+
+One octave peaks at 0.020 cycles/px (0.64 of the lattice frequency) and
+spreads over about four octaves of frequency: gradient noise is not
+band-limited, and the fBm sum widens it. A stimulus that needs a stated
+band takes filtered noise or gratings.
+
+Isotropy: the power of 12 angle sectors of the ring 0.5/32 to 2/32
+cycles/px is 0.926 to 1.105 of their mean (4 octaves: 0.935 to 1.091);
+the axes 1.05, the diagonals 1.02. The cube-edge gradients make the field
+slightly anisotropic, as 3D simplex noise with these gradients is.
+
+Correlation with distance (one octave, cell 32 px): 0.57 at 8 px, 0.02 at
+16 px, 0 beyond, in x and y alike. With z (evolution): 0.98 at 0.05
+cells, 0.92 at 0.1, 0.60 at 0.25, 0.07 at 0.5, 0 at 1.
+
+### Cost
+
+`gfx_bench --only "v0.10 simplex"`, Iris Xe, AC, the guard, three rounds,
+GPU ms over an empty frame, 1920 x 1200:
+
+| Workload | ms |
+|---|---|
+| SIMPLEX, 1 octave, cell 32 px | 1.834, 1.829, 1.847 |
+| 2 octaves | 3.396, 3.419, 3.440 |
+| 3 octaves | 5.014, 4.956, 4.991 |
+| 4 octaves | 6.554, 6.593, 6.535 |
+| 8 octaves | 13.07, 12.98, 12.91 |
+| UNIFORM, 1 px checks (reference) | 0.408, 0.390, 0.412 |
+
+About 1.6 ms per octave full screen; a smaller box costs in proportion
+to its pixels (not measured). A static field belongs in a target,
+rendered once in a setup pass (v0.8); an evolving one costs this every
+frame. Of a pixel's eight hashes per octave, four make the two z layers'
+keys; the layer depends on the skewed coordinate, so they cannot move to
+the CPU.
+
+### Mutations and builds
+
+| # | Fault | Result |
+|---|---|---|
+| v10-00 | the GPU's second simplex corner a unit off | caught (GPU against the CPU twin) |
+| v10-01 | the GPU's z layer ignored | caught |
+| v10-02 | the octave weights not normalized | caught (the SD by octaves, CPU) |
+| v10-03 | the integer falloff at lower precision | caught (against double, CPU) |
+| v10-04 | a POLYGON aperture accepted under SIMPLEX | caught (refusals) |
+
+The whole list: 88 of 88 against the default test (1293 s). Builds: MSVC 19.44 C and C++17, MinGW gcc 16.1
+C99, C11 and C++17 (warnings as errors); the full test on the three
+renderers passes (278 s); the default run takes 61 s.
+
+The WSL and emcc runs on v0.10 (with other work running, so slower than
+v0.7's): gcc 11.4 -O2 and ASan + UBSan, the CPU half and llvmpipe (SIMPLEX
+bit for bit there as well), default 41 s, full 86 s, sanitized 46 s; the
+pinned digests equal; emcc 6.0.10, the CPU half 1.1 s. All pass.
+
 ## Next
 
-1. **Kind-specialized vector programs**, designed in the session notes of
-   2026-10-06 (defines per kind, a kinds mask for compounds, dash, paint
-   and space): compile time and GPU time of each variant in the harness
-   first; build one only where it closes at least half of its bar's gap
-   (RRECT 2.3x, dashes 3.3x, OKLAB 1.65x, compound of 8 with effects 1.6
-   ms). The program cache makes the extra programs cheap at open.
-2. **Sampler-filtered chroma** for the video program's 1.0 ms and 1.5x
-   bars (exact weights at 1:1).
-3. WSL, llvmpipe, sanitizer and emcc runs of v0.4.
+1. Done 2026-10-06 for v0.7.0: kind-specialized vector programs (three
+   built). Left from them: **paint cost** (OKLAB and RGB paint add 0.5 to
+   0.9 ms to a full-screen RRECT, outside what specialization removes:
+   measure the paint's uniform reads and the stop loop first); **PLAIN
+   STAR and PLAIN ELLIPSE** programs (measured 33 and 45 % faster; no
+   bar); **the dash loop as a constant** (measured once).
+2. Done 2026-10-06 for v0.6.0: sampler-filtered chroma, measured and
+   deleted (see "v0.6: video chroma").
+3. Done 2026-10-06 for v0.5.0: WSL, llvmpipe, sanitizer and emcc runs
+   (see the v0.4 build notes).
+4. **Blur pyramid** above sigma 8, opt-in: the probe measured under 1 ms
+   full screen at every sigma with an error of about 0.012
+   ([text_probe.md](text_probe.md)), against 5.96 ms at sigma 4 for the
+   direct taps. Build it when a stimulus needs a large sigma on a large
+   layer.
+5. Done for v0.7.0 and v0.8.0: `crun_desc.rays`, and the rays program
+   picked by itself for turned and aliased runs ("v0.8").
+6. **V2, a corner rule** for turned glyphs, where the rays' largest error
+   (0.56) and the corner jump (0.44) are; the harness first.
+7. **Blur weights from the CPU** (a uniform array instead of an `exp` per
+   tap), and bilinear tap pairing re-timed on the Iris Xe: not timed in
+   v0.6.
+8. Done for v0.7.0: gfx_bench on psy_outline.h; the test cross-checks the
+   two builders' sets by pixels (they differ in words where the resolve
+   splits curves).
+9. Done for v0.8.0: setup passes (`psygfx_begin_setup()`,
+   `psygfx_end_setup()`).
+10. Done for v0.10.0: gradient noise (NOISE SIMPLEX), integer, with an
+   exact CPU twin. Left: its cost (1.6 ms per octave full screen).
 
 ## CI
 
@@ -1432,7 +2990,7 @@ with GL on, everything passed under ASan and UBSan apart from that leak.
 
 - Light. A CLUT, a dither, a calibration: all checked as arithmetic, none
   against a photometer.
-- 10-bit output, Mono++, Color++, stereo, text, GPU filtered noise.
+- 10-bit output, Mono++, Color++, stereo, text layout, GPU filtered noise.
 - Fullscreen. gfx changes what is drawn, not how it is presented; the
   swap path's numbers are psy_screen.md's.
 - Any GPU but the Iris Xe for timing; any OS but Windows 11 for timing.
@@ -1450,8 +3008,9 @@ with GL on, everything passed under ASan and UBSan apart from that leak.
 - v0.3 costs on renderers other than the Iris Xe, and on battery.
 - ELLIPSE's distance error above an aspect of 9:1 (the test stops there;
   20:1 is allowed).
-- v0.4 on WSL (gcc, llvmpipe, ASan, UBSan) and emcc; the cache's GL half
-  on Mesa's binary format.
+- Why a warm open from the program cache is slower than a cold one on
+  llvmpipe (80 ms against 54 ms at -O2, 101 against 92 ms under ASan; one
+  run each).
 - `gfx_load` with dots that draw (the v0.1 window run drew none).
 - D3D11 import on another GPU or driver; what leaving out the keyed
   mutex does (the test's producer finishes long before ANGLE samples).
@@ -1459,3 +3018,11 @@ with GL on, everything passed under ASan and UBSan apart from that leak.
   instances, video or the reorder (none allocates in the frame by design).
 - v0.4 costs on renderers other than the Iris Xe, and on battery (the
   battery rows above are named).
+- v0.6 text and blur: costs on any renderer but the Iris Xe; pixels on
+  Mesa llvmpipe (CI runs it); a window run and an allocation count with
+  curve runs and blurs (neither allocates in the frame by design).
+- v0.7: the Gaussian table's hash on macOS (clang, Apple's libm) and MSVC
+  ARM64; CI's macOS job runs the pinned check. The specialized vector
+  programs' GPU time on renderers other than the Iris Xe.
+- Curve runs on real fonts against an exact reference: the pixel tests use
+  the test builder's glyphs; the probe's font tables are not repeated.

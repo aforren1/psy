@@ -99,6 +99,13 @@ jobs:
           # The color example on its nominal display; color_bench is built, not run.
           expect 0 "$bin/color_convert"
           expect 2 "$bin/color_convert" a b    # usage
+          # The RDK bench in its short form: it runs, it does not time anything.
+          expect 0 "$bin/rdk_bench" --quick
+          expect 2 "$bin/rdk_bench" --bogus
+          # The outline examples need a font file: without one, usage and
+          # "no font here" exits (the bench is built, not timed).
+          expect 2 "$bin/outline_font"
+          expect 3 "$bin/outline_bench" 1 no-such-font-directory
           # The audio example on miniaudio's null device: no sound hardware.
           expect 0 "$bin/audio_tone" --null
           expect 2 "$bin/audio_tone" --bogus
@@ -245,6 +252,9 @@ jobs:
         shell: bash
         run: |
           set -eu
+          # set -e ignores a failure on the left of &&, so `emcc ... && node`
+          # passed when emcc failed. An explicit exit is never ignored.
+          emcc() { command emcc "$@" || exit $?; }
           # The handles are large and the tests keep them on the stack, so
           # give wasm a real stack, and an initial memory that holds it;
           # growth covers the arenas. With -pthread emcc turns its growth
@@ -259,7 +269,7 @@ jobs:
           emcc $W $T -o rt_test.js tests/adapt/psy_rt_test.c && node rt_test.js
           emcc $W $T -o rt_pump.js examples/rt_pump.c && node rt_pump.js 40
           emcc $W $T -o rt_ring_csv.js examples/rt_ring_csv.c && node rt_ring_csv.js 30 > /dev/null
-          for h in stair quest gp trials timeline color; do
+          for h in stair quest gp table trials timeline color; do
             emcc $W -o "compile_$h.js" "tests/compile/psy_$h.c" && node "compile_$h.js"
             emcc $W -o "test_$h.js" "tests/adapt/psy_${h}_test.c" && node "test_$h.js"
           done
@@ -297,7 +307,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        package: [psy_parallel, psy_serial, psy_stair, psy_quest, psy_gp, psy_trials, psy_color]
+        package: [psy_parallel, psy_serial, psy_stair, psy_quest, psy_gp, psy_trials, psy_color, psy_rdk]
         exclude:
           - os: macos-latest      # psy_parallel.h #errors on macOS
             package: psy_parallel
@@ -308,11 +318,12 @@ jobs:
       # cibuildwheel builds from the package directory alone, so every header
       # the extension compiles must sit next to setup.py: the package's header
       # and psy_rt.h, which the transport headers include and the adaptive
-      # headers' async layers include. psy_stair gets a psy_rt.h it never
-      # reads; staging it unconditionally keeps this step one line.
+      # headers' async layers include, and psy_table.h, which psy_trials.h
+      # includes. A package gets the ones it never reads; staging them
+      # unconditionally keeps this step one line.
       - name: Stage headers into the package (isolated build needs them locally)
         shell: bash
-        run: cp ${{ matrix.package }}.h psy_rt.h bindings/python/${{ matrix.package }}/
+        run: cp ${{ matrix.package }}.h psy_rt.h psy_table.h bindings/python/${{ matrix.package }}/
 
       - name: Build & test wheels
         uses: pypa/cibuildwheel@v4.1.0
@@ -619,8 +630,11 @@ jobs:
         shell: bash
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_PL_MPEG=ON
 
+      # The Headers job has no SDL3, so a screen, gfx or video program left
+      # out of this list is compiled nowhere on CI. ctest below runs every
+      # test that matches its pattern, built or not.
       - name: Build
-        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input screen_abort psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery compile_psy_video_c compile_psy_video_cxx compile_psy_video_com test_psy_video video_play video_bench
+        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_rdk gfx_rdk_bench compile_psy_video_c compile_psy_video_cxx compile_psy_video_com test_psy_video video_play video_bench video_check
 
       # psy_gfx.h's pixel checks must run where software GL exists; macOS has
       # no EGL, so its test runs the CPU checks only.
@@ -652,8 +666,16 @@ jobs:
           expect 0 "$bin/gfx_calib"                 # no args: the synthetic display
           expect 0 "$bin/gfx_gallery" --sim         # each page once; 1 if a tile's draw is refused
           expect 2 "$bin/gfx_gallery" --page 9
+          # Slug text: system fonts where the runner has them, else the bitmap font; 1 if a draw or setup step is refused.
+          expect 0 "$bin/gfx_text" --sim
+          expect 0 "$bin/gfx_text" --sim --font no-such-font.ttf --cjk no-such-font.ttc
+          expect 2 "$bin/gfx_text" --page 9
           expect 2 "$bin/gfx_hello" --bogus
           expect 2 "$bin/gfx_bench" --device bogus
+          # psy_rdk.h through psy_gfx.h: each page, two trials replayed from their logs (1 if a digest differs).
+          expect 0 "$bin/gfx_rdk" --sim
+          expect 2 "$bin/gfx_rdk" --bogus
+          expect 2 "$bin/gfx_rdk_bench" --device bogus
           # psy_video.h: a generated frame sequence, plain, QOI and I420.
           expect 0 "$bin/video_play" --sim
           expect 0 "$bin/video_play" --sim --qoi --frames 20
@@ -677,9 +699,11 @@ jobs:
           g++ -std=c++17 $W -o mingw_gfx_cxx.exe tests/compile/psy_gfx.cpp -L"$SDL3_MINGW/lib" -lSDL3
           gcc -std=c11 $W -o mingw_gfx_test.exe tests/adapt/psy_gfx_test.c
           cp "$SDL3_MINGW/bin/SDL3.dll" .
-          ./mingw_c.exe && ./mingw_cxx.exe && ./mingw_test.exe && ./mingw_com.exe
-          ./mingw_gfx_c.exe && ./mingw_gfx_cxx.exe && PSYGFX_TEST_REQUIRE_GL=1 ./mingw_gfx_test.exe
+          # `;`, not `&&`: set -e ignores a failure on the left of &&.
+          ./mingw_c.exe; ./mingw_cxx.exe; ./mingw_test.exe; ./mingw_com.exe
+          ./mingw_gfx_c.exe; ./mingw_gfx_cxx.exe; PSYGFX_TEST_REQUIRE_GL=1 ./mingw_gfx_test.exe
           gcc -std=c11 $W -DPSYVID_NO_PL_MPEG -o mingw_video_c.exe tests/compile/psy_video.c -L"$SDL3_MINGW/lib" -lSDL3
           g++ -std=c++17 $W -DPSYVID_NO_PL_MPEG -o mingw_video_cxx.exe tests/compile/psy_video.cpp -L"$SDL3_MINGW/lib" -lSDL3
           gcc -std=c11 $W -o mingw_video_test.exe tests/adapt/psy_video_test.c
-          ./mingw_video_c.exe && ./mingw_video_cxx.exe && ./mingw_video_test.exe
+          g++ -std=c++17 $W -o mingw_video_com.exe tests/compile/psy_video_com.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          ./mingw_video_c.exe; ./mingw_video_cxx.exe; ./mingw_video_test.exe; ./mingw_video_com.exe

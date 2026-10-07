@@ -1,0 +1,228 @@
+# psy_table.h mutants: the number parser, the CSV scanner, type inference,
+# interning and the block view. docs/psy_table.md lists the results.
+header = "psy_table.h"
+
+[test.table]
+source = "tests/adapt/psy_table_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 300
+env = { PSYTB_TEST_NUMBERS = "100000" }
+
+# --- numbers ---------------------------------------------------------------------
+
+[[mutant]]
+id = "n-01"
+name = "fast path up to 2^54"
+test = "table"
+why = "A mantissa above 2^53 is not exact as a double: one multiply rounds twice."
+find = 'if (m <= ((uint64_t)1 << 53) && e >= -22 && e <= 22) {'
+replace = 'if (m <= ((uint64_t)1 << 54) && e >= -22 && e <= 22) {'
+
+[[mutant]]
+id = "n-02"
+name = "fast path up to 10^23"
+test = "table"
+why = "10^23 is not exact as a double, so the fast path rounds twice."
+find = 'if (m <= ((uint64_t)1 << 53) && e >= -22 && e <= 22) {'
+replace = 'if (m <= ((uint64_t)1 << 53) && e >= -23 && e <= 23) {'
+
+[[mutant]]
+id = "n-03"
+name = "ties round up"
+test = "table"
+why = "IEEE rounds ties to even; 9007199254740993 must give 2^53."
+find = 'if (half && (sticky || (mant & 1u))) mant++;'
+replace = 'if (half) mant++;'
+
+[[mutant]]
+id = "n-04"
+name = "sticky bits dropped"
+test = "table"
+why = "A value just above a tie must round up; without the sticky bits it reads as the tie."
+find = 'if (shift >= 2 && (q & ((((uint64_t)1) << (shift - 1)) - 1u))) sticky = true;'
+replace = ''
+count = 2
+
+[[mutant]]
+id = "n-05"
+name = "subnormals one bit too fine"
+test = "table"
+why = "The smallest subnormal is 2^-1074; a unit of 2^-1075 rounds subnormals wrongly."
+find = 'if (u < -1074) u = -1074;'
+replace = 'if (u < -1075) u = -1075;'
+count = 2
+
+[[mutant]]
+id = "n-06"
+name = "19-digit limit off by one"
+test = "table"
+why = "19 significant digits are accepted, 20 are not (they no longer fit a uint64)."
+find = 'if (++nd > PSYTB_MAX_DIGITS) return PSYTB_NUM_DIGITS;'
+replace = 'if (++nd >= PSYTB_MAX_DIGITS) return PSYTB_NUM_DIGITS;'
+count = 2
+
+[[mutant]]
+id = "n-07"
+name = "-0 loses its sign"
+test = "table"
+why = "strtod and the stated syntax keep -0."
+find = '*out = neg ? -0.0 : 0.0;'
+replace = '*out = 0.0;'
+
+[[mutant]]
+id = "n-08"
+name = "middle path off for |E| = 27"
+test = "table"
+why = "Moves 27 to the big-integer path; the results must not change."
+expect = "survived"
+note = "Equivalent: both paths are exact, so the bound only chooses the faster one."
+find = 'if (e >= -27 && e <= 27) {'
+replace = 'if (e >= -26 && e <= 26) {'
+
+[[mutant]]
+id = "n-09"
+name = "quotient one bit short"
+test = "table"
+why = "With 2^54 < q the rounding still has guard bits; with fewer it does not."
+find = 's = 56 - psytb__bits64(m) + bd;'
+replace = 's = 53 - psytb__bits64(m) + bd;'
+
+# --- CSV -------------------------------------------------------------------------
+
+[[mutant]]
+id = "c-01"
+name = "a doubled quote is not undoubled"
+test = "table"
+why = "\"\" inside a quoted field is one quote (RFC 4180)."
+find = '''if (p[i] == '"') i++;'''
+replace = ''
+
+[[mutant]]
+id = "c-02"
+name = "CRLF leaves the LF in the input"
+test = "table"
+why = "A CRLF record end must consume both bytes."
+find = '''    if (i + 1 < sc->n && p[i + 1] == '\n') { sc->pos = i + 2; sc->line++; return PSYTB__END_RECORD; }
+    *why = "a CR that is not followed by LF (records end with CRLF or LF)";'''
+replace = '''    if (i + 1 < sc->n && p[i + 1] == '\n') { sc->pos = i + 1; sc->line++; return PSYTB__END_RECORD; }
+    *why = "a CR that is not followed by LF (records end with CRLF or LF)";'''
+
+[[mutant]]
+id = "c-03"
+name = "a lone CR ends a record"
+test = "table"
+why = "A lone CR outside quotes is an error, not a record end."
+find = '''    *why = "a CR that is not followed by LF (records end with CRLF or LF)";
+    *why_line = sc->line;
+    return -1;'''
+replace = '''    sc->pos = i + 1;
+    return PSYTB__END_RECORD;'''
+
+[[mutant]]
+id = "c-04"
+name = "the BOM is kept"
+test = "table"
+why = "A BOM would become part of the first column's name, which then is not a name."
+find = '''    if (n >= 3 && in[0] == 0xEF && in[1] == 0xBB && in[2] == 0xBF) sc.pos = 3;
+    if (sc.pos >= n) return psytb__fail_at'''
+replace = '''    if (sc.pos >= n) return psytb__fail_at'''
+
+[[mutant]]
+id = "c-05"
+name = "a quote inside an unquoted field is accepted"
+test = "table"
+why = "RFC 4180: a quote only in a quoted field; a stray one is usually a broken export."
+find = '''if (c == '"') {'''
+replace = '''if (false) {'''
+
+[[mutant]]
+id = "c-06"
+name = "short rows accepted"
+test = "table"
+why = "A row with fewer fields than the header shifts every later column."
+find = '} else if (field != nc) {'
+replace = '} else if (field > nc) {'
+
+[[mutant]]
+id = "c-07"
+name = "all-empty rows kept"
+test = "table"
+why = "Spreadsheets write ,,,, rows; they are skipped and counted."
+find = '} else if (rec_empty) {'
+replace = '} else if (false) {'
+
+[[mutant]]
+id = "c-08"
+name = "overlong and surrogate UTF-8 accepted"
+test = "table"
+why = "C0 80 and ED A0 80 are not UTF-8."
+find = 'if (k == 1 ? (b < lo || b > hi) : (b < 0x80 || b > 0xBF)) return i;'
+replace = 'if (b < 0x80 || b > 0xBF) return i;'
+
+[[mutant]]
+id = "c-09"
+name = "a 4096-byte field refused"
+test = "table"
+why = "PSYTB_MAX_FIELD bytes fit; one more does not."
+find = 'if (ulen > PSYTB_MAX_FIELD)'
+replace = 'if (ulen >= PSYTB_MAX_FIELD)'
+
+[[mutant]]
+id = "c-10"
+name = "allow_empty keeps an integer column"
+test = "table"
+why = "An empty cell is NaN, which an integer column cannot hold."
+find = 'if (co->type == PSYTB_INTEGER && co->empty && d->allow_empty) co->type = PSYTB_NUMBER;'
+replace = ''
+
+[[mutant]]
+id = "c-11"
+name = "integers inferred as numbers"
+test = "table"
+why = "An all-integer column is INTEGER (psytb_int works on it)."
+find = 'else if (co->any && (co->kinds & 1)) co->type = PSYTB_INTEGER;'
+replace = 'else if (false) co->type = PSYTB_INTEGER;'
+
+[[mutant]]
+id = "c-12"
+name = "NaN cells are separate levels"
+test = "table"
+why = "Empty numeric cells (NaN) are one level, text \"\"."
+find = 'if (lvv == v || (lvv != lvv && v != v)) { lv = (int)h - 1; break; }'
+replace = 'if (lvv == v) { lv = (int)h - 1; break; }'
+
+# --- view ------------------------------------------------------------------------
+
+[[mutant]]
+id = "v-01"
+name = "a row level equal to n_levels accepted"
+test = "table"
+why = "Levels are numbered below n_levels; equal reads past the level table."
+find = 'if (lv >= nlev)'
+replace = 'if (lv > nlev)'
+
+[[mutant]]
+id = "v-02"
+name = "the hash is not checked"
+test = "table"
+why = "A flipped bit in a pack must be refused."
+find = 'if (psytb__block_hash(b, (size_t)size) != psytb__rd64(b + 32))'
+replace = 'if (0)'
+
+[[mutant]]
+id = "v-03"
+name = "a text without its NUL accepted"
+test = "table"
+why = "Texts are C strings in place; a missing NUL reads past the text."
+find = 'if (toff < pool || toff + tlen + 1u > size || b[toff + tlen] != 0)'
+replace = 'if (toff < pool || toff + tlen + 1u > size)'
+
+[[mutant]]
+id = "v-04"
+name = "the pool is not checked as UTF-8"
+test = "table"
+why = "A block's text must be UTF-8 like a parse's."
+find = 'if (psytb__utf8_ex(b + pool, (size_t)(size - pool), true) != size - pool)'
+replace = 'if (0)'

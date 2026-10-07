@@ -2,9 +2,11 @@
 
 This note records two probes that decided the text plan in
 [rig_spec.md](rig_spec.md) section 5.2 (Font row). The probe code was in
-a session scratchpad and is lost; the numbers below are the record. When
-Slug glyph runs and the blur pass go into `psy_gfx.h`, their tables move
-to [psy_gfx.md](psy_gfx.md) and are measured again.
+a session scratchpad and is lost; the numbers below are the record.
+`psy_gfx.h` v0.6.0 has Slug curve runs and the blur pass. Their pixel
+errors and GPU times were measured again in [psy_gfx.md](psy_gfx.md)
+("v0.6" sections), which is now the current record. The cause of the
+D3D11 difference below is there: interpolated em coordinates.
 
 Conditions for every number: Windows 11 laptop, Intel Iris Xe, ANGLE
 2.1.23876 (Docker Desktop's Electron copy) on D3D11, AC power, the

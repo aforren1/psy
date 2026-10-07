@@ -1,11 +1,13 @@
 /* gfx_gallery.c - a visual tour of psy_gfx.h: one labeled tile per feature.
  *
- * Six pages of up to twelve tiles in a 1200 x 760 window: gratings,
+ * Seven pages of up to twelve tiles in a 1200 x 760 window: gratings,
  * gabors, noise and dots; shapes, strokes and joins; dashes, trim,
  * compounds and effects; paint, color spaces and blend modes; images,
  * masks, groups, render targets and glyph runs; v0.4's instances (with a
  * hit test under the mouse), a planar NV12 picture, premultiplied alpha,
- * shared glyph buffers and the program cache. Each tile is one function
+ * shared glyph buffers and the program cache; v0.6's curve runs (a word
+ * whose letters enter one after another, artwork layers with a hit test)
+ * and the blur pass (a glow). Each tile is one function
  * that makes its stimuli at setup and draws them in the frame, so a tile
  * is also the shortest code for its feature. Some tiles move through
  * psy_timeline.h bindings: a rotation and a dash offset on repeating keyed
@@ -28,10 +30,10 @@
  * Usage: gfx_gallery [--sim] [--page N] [--frames N] [--composition]
  *                    [--topmost] [--shots PREFIX] [--cache DIR]
  *   Right, Down, Space, Page Down: next page; Left, Up, Page Up: previous;
- *   1 to 6: that page; Shift+Esc or closing the window: quit.
+ *   1 to 7: that page; Shift+Esc or closing the window: quit.
  *   --sim          the simulated display and the null backend, for CI:
  *                  draws each page once and exits
- *   --page N       start on page N (1 to 6)
+ *   --page N       start on page N (1 to 7)
  *   --frames N     stop after N frames
  *   --composition  the composition swapchain (Windows)
  *   --topmost      keep the window on top and take the foreground (Windows)
@@ -50,6 +52,8 @@
 #include "psy_gfx.h"
 #define PSY_TIMELINE_IMPLEMENTATION
 #include "psy_timeline.h"
+#define PSY_OUTLINE_IMPLEMENTATION
+#include "psy_outline.h"   /* page 7: the curve sets */
 
 #include <math.h>
 #include <stdio.h>
@@ -100,10 +104,11 @@ static const float VIOLET[3] = { 0.32f, 0.10f, 0.50f };
 
 /* --- timeline channels and bindings ---------------------------------------- */
 
-enum { CH_ROT, CH_MARCH, CH_TRIM, CH_CONTRAST, CH_MERGE, CH_TILT, CH_PULSE, N_CH };
+enum { CH_ROT, CH_MARCH, CH_TRIM, CH_CONTRAST, CH_MERGE, CH_TILT, CH_PULSE, CH_SIGMA,
+       CH_LETTER_Y, CH_LETTER_G = CH_LETTER_Y + 7, N_CH = CH_LETTER_G + 7 };
 enum { PAGE_BASE = 1 };
 
-static psygfx_bind binds[32];
+static psygfx_bind binds[64];
 static int n_binds;
 static int64_t page_t0;
 
@@ -141,6 +146,8 @@ static int yoyo(int ch, float from, float to, double seconds) {
 static const psytl_key rot_keys[2]   = { { 0, 0.0f, PSYTL_EASE_LINEAR, 0, 0 }, { 10 * S_NS, 360.0f, PSYTL_EASE_LINEAR, 0, 0 } };
 static const psytl_key march_keys[2] = { { 0, 0.0f, PSYTL_EASE_LINEAR, 0, 0 }, { S_NS, 22.0f, PSYTL_EASE_LINEAR, 0, 0 } };
 
+static int stagger_tracks(void);   /* page 7 */
+
 static int timeline_setup(void) {
     static const float initial[N_CH] = { 0, 0, 1, 0.3f, 60, 0, 1 };
     psytl_desc td;
@@ -159,6 +166,8 @@ static int timeline_setup(void) {
     rc |= yoyo(CH_MERGE, 95.0f, 10.0f, 2.5);
     rc |= yoyo(CH_TILT, -12.0f, 12.0f, 3.0);
     rc |= yoyo(CH_PULSE, 0.8f, 1.15f, 2.0);
+    rc |= yoyo(CH_SIGMA, 1.5f, 6.0f, 2.5);
+    rc |= stagger_tracks();
     if (rc < 0) { fprintf(stderr, "gfx_gallery: a track or tween was refused\n"); return -1; }
     return 0;
 }
@@ -1731,6 +1740,270 @@ static void t_grating_annulus(float x, float y, const psyscr_frame* f) {
     put(&g);
 }
 
+/* --- page 7: v0.6: curve runs, the blur pass --------------------------------- */
+
+/* The 5 x 7 font as a curve set: each lit pixel a unit square, the squares
+ * of a letter merged by psy_outline.h (overlaps removed), so every glyph is
+ * resolved and drawn by exact area. Glyph ids are the characters from ' ';
+ * units are font pixels, y down, the pen on the baseline. */
+static psygfx_cset font_set;
+static psyol_ctx ol_cx;
+
+static int font_cset_setup(void) {
+    static int done;
+    psyol_cset s;
+    psyol_cset_desc od;
+    psyol_path p;
+    psygfx_cset_desc d;
+    int g, r, c, rc = 0;
+    if (done) return font_set.id ? 0 : -1;
+    done = 1;
+    if (psyol_init(&ol_cx, NULL) != PSYOL_OK) return -1;
+    memset(&od, 0, sizeof od);
+    od.n_glyphs = FONT_N; od.backward = true;   /* backward lists: the rays are faster */
+    if (psyol_cset_init(&s, &ol_cx, &od) != PSYOL_OK) return -1;
+    psyol_path_init(&p, &ol_cx);
+    for (g = 1; g < FONT_N && rc == 0; g++) {
+        psyol_path_clear(&p);
+        for (r = 0; r < 7; r++)
+            for (c = 0; c < 5; c++)
+                if (font5x7[g][r] & (0x10 >> c)) psyol_rect(&p, c, r - 7, 1, 1, 0, 0);
+        if (psyol_path_end(&p) != PSYOL_OK || psyol_cset_add(&s, (uint32_t)g, &p) != PSYOL_OK) rc = -1;
+    }
+    psyol_path_free(&p);
+    if (rc == 0) {
+        memset(&d, 0, sizeof d);
+        d.texels = s.texels; d.n_texels = s.n_texels; d.words = s.words; d.n_words = s.n_words;
+        font_set = psygfx_cset_make(&gfx, &d);
+    }
+    psyol_cset_free(&s);
+    return font_set.id ? 0 : -1;
+}
+
+/* Items for text in the font set at px screen pixels per font pixel: pen
+ * positions (in px: items are in the run's units) 6 font pixels apart. */
+static int font_items(psygfx_citem* it, int cap, const char* s, float px) {
+    int n = 0;
+    float pen = 0;
+    for (; *s && n < cap; s++, pen += 6 * px) {
+        int c = (unsigned char)*s;
+        if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
+        if (c <= FONT_FIRST || c >= FONT_FIRST + FONT_N) continue;
+        memset(&it[n], 0, sizeof it[n]);
+        it[n].x = pen; it[n].glyph = (float)(c - FONT_FIRST); it[n].gate = 1;
+        n++;
+    }
+    return n;
+}
+
+static psygfx_crun_desc font_run_desc(psygfx_citem* it, int n, float px, float x, float y, const float* color) {
+    psygfx_crun_desc d;
+    memset(&d, 0, sizeof d);
+    d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_CENTER; d.x = x; d.y = y;
+    d.set = font_set; d.items = it; d.n = n; d.size = px;
+    rgb(d.color, color);
+    return d;
+}
+
+/* GSAP's gsap.from(chars, { y: 30, opacity: 0, stagger: 0.08 }): each
+ * letter's y and gate on its own channel, keyed tracks that repeat every 4 s */
+#define WORD_N 7
+static psygfx_citem word_it[WORD_N];
+static psytl_key word_y[WORD_N][4], word_g[WORD_N][4];
+
+static void t_stagger(float x, float y, const psyscr_frame* f) {
+    static psygfx_stim word;
+    if (!f) {
+        psygfx_crun_desc d;
+        int n, k;
+        if (font_cset_setup() < 0) { refused++; return; }
+        n = font_items(word_it, WORD_N, "STAGGER", 5);
+        d = font_run_desc(word_it, n, 5, x, y, LIGHT);
+        d.fields = PSYGFX_I_GATE;
+        word = psygfx_crun(&gfx, &d);
+        for (k = 0; k < n; k++) {
+            bind_field(&word_it[k].y, CH_LETTER_Y + k);
+            bind_field(&word_it[k].gate, CH_LETTER_G + k);
+        }
+        return;
+    }
+    put(&word);
+}
+
+static int stagger_tracks(void) {
+    psytl_track tr;
+    int k, rc = 0;
+    memset(&tr, 0, sizeof tr);
+    tr.n_keys = 4; tr.period = 4 * S_NS;
+    for (k = 0; k < WORD_N; k++) {
+        int64_t t0 = (int64_t)k * 80000000;   /* 0.08 s apart */
+        psytl_key* a = word_y[k];
+        psytl_key* b = word_g[k];
+        memset(a, 0, sizeof word_y[k]);
+        memset(b, 0, sizeof word_g[k]);
+        a[0].time = t0;            a[0].value = 30; a[0].ease = PSYTL_EASE_QUAD_OUT;   /* px below */
+        a[1].time = t0 + 700000000; a[1].value = 0;
+        a[2].time = 3200000000;    a[2].value = 0;  a[2].ease = PSYTL_EASE_COSINE;
+        a[3].time = 3700000000;    a[3].value = 0;
+        b[0].time = t0;            b[0].value = 0;  b[0].ease = PSYTL_EASE_QUAD_OUT;
+        b[1].time = t0 + 700000000; b[1].value = 1;
+        b[2].time = 3200000000;    b[2].value = 1;  b[2].ease = PSYTL_EASE_COSINE;
+        b[3].time = 3700000000;    b[3].value = 0;
+        tr.keys = a;
+        rc |= psytl_set_track(&tl, CH_LETTER_Y + k, PAGE_BASE, &tr);
+        tr.keys = b;
+        rc |= psytl_set_track(&tl, CH_LETTER_G + k, PAGE_BASE, &tr);
+    }
+    return rc;
+}
+
+/* CSS's text-shadow: 0 0 Npx gold: the word drawn white into an R16F layer
+ * once, blurred each frame with sigma on a tween, drawn tinted under the
+ * sharp word. */
+static psygfx_blur glow;
+
+static void t_glow(float x, float y, const psyscr_frame* f) {
+    static psygfx_stim white, word, img;
+    static psygfx_citem it[8];
+    static const float zero[4] = { 0, 0, 0, 0 };
+    if (!f) {
+        psygfx_blur_desc bd;
+        psygfx_crun_desc d;
+        int n;
+        if (font_cset_setup() < 0) { refused++; return; }
+        n = font_items(it, 8, "GLOW", 9);
+        memset(&bd, 0, sizeof bd);
+        bd.w = 260; bd.h = 140; bd.format = PSYGFX_R16F; bd.sigma = 3;
+        if (psygfx_blur_make(&gfx, &glow, &bd) != PSYGFX_OK) { refused++; return; }
+        d = font_run_desc(it, n, 9, 0, 0, LIGHT);
+        d.place = PSYGFX_CENTER;               /* at the layer's center */
+        d.color[0] = d.color[1] = d.color[2] = 1;
+        white = psygfx_crun(&gfx, &d);
+        d = font_run_desc(it, n, 9, x, y, DARK);
+        word = psygfx_crun(&gfx, &d);
+        bind_field(&glow.sigma, CH_SIGMA);
+        /* the layer keeps the sharp word: drawn once, in a setup pass */
+        if (psygfx_begin_setup(&gfx) != PSYGFX_OK || psygfx_begin_target(&gfx, glow.layer, zero) != PSYGFX_OK) { refused++; return; }
+        put(&white);
+        psygfx_end_target(&gfx);
+        if (psygfx_end_setup(&gfx) != PSYGFX_OK) refused++;
+        return;
+    }
+    if (psygfx_blur_apply(&gfx, &glow) != PSYGFX_OK) refused++;
+    img = glow.image;
+    img.place = PSYGFX_TOP_LEFT; img.ax = img.ay = 0.5f; img.x = x; img.y = y;
+    rgb(img.tint, AMBER);
+    put(&img);
+    put(&word);
+}
+
+/* Artwork: three layers of one set, one run, a palette color each; the
+ * layer under the pointer (psygfx_hit_index: the set kept on the CPU) is
+ * drawn again, light, over the others. */
+static psygfx_cset art_set;
+static psyol_cset art_src;   /* .keep: the hit test reads these arrays until exit */
+static psygfx_citem art_it[3], art_hl[1];
+static const float art_pal[9] = { 0.05f, 0.38f, 0.40f, 0.60f, 0.32f, 0.04f, 0.32f, 0.10f, 0.50f };
+
+static void t_artwork(float x, float y, const psyscr_frame* f) {
+    static psygfx_stim art, hl;
+    float hx, hy;
+    int k;
+    if (!f) {
+        psyol_cset* s = &art_src;
+        psyol_cset_desc od;
+        psyol_path p;
+        psygfx_cset_desc d;
+        psygfx_crun_desc rd;
+        if (font_cset_setup() < 0) { refused++; return; }   /* makes ol_cx */
+        memset(&od, 0, sizeof od);
+        od.n_glyphs = 3;
+        if (psyol_cset_init(s, &ol_cx, &od) != PSYOL_OK) { refused++; return; }
+        psyol_path_init(&p, &ol_cx);
+        psyol_ellipse(&p, 0, 0, 78, 50);                         /* layer 0: a body */
+        psyol_path_end(&p);
+        psyol_cset_add(s, 0, &p);
+        psyol_path_clear(&p);
+        for (k = 0; k < 14; k++) {                               /* layer 1: a star of 7 */
+            double a = 3.14159265358979 * k / 7.0, r = k % 2 ? 18 : 42;
+            if (k == 0) psyol_move(&p, r * sin(a), -r * cos(a)); else psyol_line(&p, r * sin(a), -r * cos(a));
+        }
+        psyol_close(&p);
+        psyol_path_end(&p);
+        psyol_cset_add(s, 1, &p);
+        psyol_path_clear(&p);
+        psyol_ellipse(&p, 0, 0, 11, 11);                         /* layer 2: an eye */
+        psyol_path_end(&p);
+        psyol_cset_add(s, 2, &p);
+        psyol_path_free(&p);
+        memset(&d, 0, sizeof d);
+        d.texels = s->texels; d.n_texels = s->n_texels; d.words = s->words; d.n_words = s->n_words; d.keep = true;
+        art_set = psygfx_cset_make(&gfx, &d);
+        if (!art_set.id) { refused++; return; }
+        memset(art_it, 0, sizeof art_it);
+        for (k = 0; k < 3; k++) { art_it[k].x = 90; art_it[k].y = 60; art_it[k].glyph = (float)k; art_it[k].color = (float)k; }
+        memset(&rd, 0, sizeof rd);
+        rd.place = PSYGFX_TOP_LEFT; rd.anchor = PSYGFX_CENTER; rd.x = x; rd.y = y; rd.w = 180; rd.h = 120;
+        rd.set = art_set; rd.items = art_it; rd.n = 3; rd.size = 1; rd.fields = PSYGFX_I_COLOR;
+        rd.palette = art_pal; rd.n_palette = 3;
+        art = psygfx_crun(&gfx, &rd);
+        art_hl[0] = art_it[0];
+        rd.items = art_hl; rd.n = 1; rd.fields = 0; rd.palette = NULL; rd.n_palette = 0;
+        rgb(rd.color, LIGHT); rd.opacity = 0.45f;
+        hl = psygfx_crun(&gfx, &rd);
+        return;
+    }
+    put(&art);
+    if (mouse_x >= x - 140 && mouse_x < x + 140 && mouse_y >= y - 100 && mouse_y < y + 100) { hx = mouse_x; hy = mouse_y; }
+    else {
+        double t = page_seconds(f) * 0.2;
+        hx = x + (float)(70.0 * cos(6.28318530718 * t)); hy = y + (float)(40.0 * sin(6.28318530718 * t));
+    }
+    k = psygfx_hit_index(&gfx, &art, hx, hy);
+    if (k >= 0) { art_hl[0].glyph = art_it[k].glyph; put(&hl); }
+}
+
+/* A reading page: static text belongs in a target, rendered once in a
+ * setup pass and composited at 1:1 on whole px (the same coverage, bit for
+ * bit); a run is drawn directly only when it moves, turns, scales or
+ * animates. */
+static void t_cached(float x, float y, const psyscr_frame* f) {
+    static psygfx_tex page;
+    static psygfx_stim text, img;
+    static psygfx_citem it[160];
+    static const float zero[4] = { 0, 0, 0, 0 };
+    if (!f) {
+        static const char* lines[4] = { "RENDERED AT SETUP", "INTO AN RGBA16F", "TARGET, COMPOSITED", "EACH FRAME AT 1:1" };
+        psygfx_target_desc td;
+        psygfx_image_desc id;
+        psygfx_crun_desc d;
+        int n = 0, l, k, m;
+        if (font_cset_setup() < 0) { refused++; return; }
+        for (l = 0; l < 4; l++) {
+            m = font_items(it + n, 160 - n, lines[l], 2);
+            for (k = n; k < n + m; k++) it[k].y = (float)(l * 20);
+            n += m;
+        }
+        memset(&td, 0, sizeof td);
+        td.w = 240; td.h = 120; td.format = PSYGFX_RGBA16F;
+        page = psygfx_target(&gfx, &td);
+        d = font_run_desc(it, n, 2, 0, 0, LIGHT);
+        d.place = PSYGFX_CENTER;
+        text = psygfx_crun(&gfx, &d);
+        memset(&id, 0, sizeof id);
+        id.tex = page; id.place = PSYGFX_TOP_LEFT; id.anchor = PSYGFX_CENTER;
+        id.x = floorf(x); id.y = floorf(y);   /* whole px: the texels land on pixels */
+        img = psygfx_image(&gfx, &id);
+        /* rendered once, at setup: no frame needed */
+        if (psygfx_begin_setup(&gfx) != PSYGFX_OK || psygfx_begin_target(&gfx, page, zero) != PSYGFX_OK) { refused++; return; }
+        put(&text);
+        psygfx_end_target(&gfx);
+        if (psygfx_end_setup(&gfx) != PSYGFX_OK) refused++;
+        return;
+    }
+    put(&img);
+}
+
 /* =========================================================================== *
  * Pages and layout
  * =========================================================================== */
@@ -1817,6 +2090,12 @@ static const gallery_tile page6[] = {
     { "PROGRAM CACHE: OPEN\nAND SETUP", t_cache },
     { "GRATING DESC SHAPE_P:\nANNULUS APERTURE", t_grating_annulus },
 };
+static const gallery_tile page7[] = {
+    { "STAGGERED ENTRANCE:\nY AND GATE PER LETTER", t_stagger },
+    { "GLOW: R16F BLUR, SIGMA\nON A TWEEN", t_glow },
+    { "ARTWORK: 3 LAYERS, A\nPALETTE; HIT_INDEX", t_artwork },
+    { "STATIC TEXT IN A TARGET,\nRENDERED AT SETUP", t_cached },
+};
 static const gallery_page pages[] = {
     { "GRATINGS, GABORS, NOISE, DOTS", page1, COUNT(page1) },
     { "SHAPES, STROKES AND JOINS", page2, COUNT(page2) },
@@ -1824,6 +2103,7 @@ static const gallery_page pages[] = {
     { "PAINT, COLOR SPACES, BLEND MODES", page4, COUNT(page4) },
     { "IMAGES, MASKS, GROUPS, TARGETS, TEXT", page5, COUNT(page5) },
     { "V0.4: CACHE, VIDEO, INSTANCES", page6, COUNT(page6) },
+    { "V0.6: CURVE RUNS, BLUR", page7, COUNT(page7) },
 };
 #define N_PAGES COUNT(pages)
 
@@ -1856,7 +2136,7 @@ static void tile_center(int i, float* x, float* y) {
 
 /* One glyph run per page: its title, the keys and every tile's label. */
 static int page_text_setup(int p) {
-    static const char* keys = "ARROWS, SPACE OR 1-6: PAGE   SHIFT+ESC: QUIT";
+    static const char* keys = "ARROWS, SPACE OR 1-7: PAGE   SHIFT+ESC: QUIT";
     char head[160];
     float x0, y0, w, h;
     psygfx_buf b;
@@ -2071,6 +2351,8 @@ int main(int argc, char** argv) {
     if (psygfx_clipped(&gfx)) printf("%llu draws may have left the gamut\n", (unsigned long long)psygfx_clipped(&gfx));
     free(shot_px);
     psygfx_close(&gfx);
+    if (art_src.words) psyol_cset_free(&art_src);
+    psyol_free(&ol_cx);
     psyscr_close(&scr);
     if (refused) { fprintf(stderr, "gfx_gallery: %ld refused draws or setup errors\n", refused); return 1; }
     return 0;

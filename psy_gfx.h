@@ -1,4 +1,4 @@
-/* psy_gfx.h - v0.5.0 - public domain single-header stimulus graphics library
+/* psy_gfx.h - v0.10.0 - public domain single-header stimulus graphics library
  *   (with MIT-licensed parts: see below)
  *
  *   Stimuli on GL ES 3.0, on top of psy_screen.h: signed-distance shapes
@@ -11,8 +11,11 @@
  *   parameter table. Vector shapes from closed-form distance functions
  *   (v0.3): rounded and partial shapes, paths of up to 224 points,
  *   compounds, effects, dashes, gradients, blend modes, MSDF atlases and
- *   glyph runs. No compute stage, no path rasterizer, no SVG: artwork goes
- *   through the pack tool.
+ *   glyph runs. Text and artwork from glyph outlines (v0.6): curve sets of
+ *   quadratic curves and bands (Lengyel's Slug algorithm), drawn as curve
+ *   runs with box-filter coverage; a separable Gaussian blur pass. No
+ *   compute stage, no SVG: the pack tool's outline builder makes the curve
+ *   sets (psy_outline.h).
  *
  *   REQUIRES psy_screen.h, psy_rt.h and psy_color.h beside it, and what
  *   psy_screen.h needs (SDL3 to link; ANGLE's DLLs at run time on
@@ -26,7 +29,7 @@
  *   MIT-LICENSED PARTS: the vector program's distance functions follow
  *   Inigo Quilez's (box, rounded box, uneven capsule, arc, pie, star,
  *   smooth minimum) and 0xfaded's ellipse. They are in psygfx__glsl_vec0,
- *   psygfx__glsl_vec1 and their CPU forms (psygfx__vp_*, psygfx__vsmin).
+ *   _vec0b, _vec1 and their CPU forms (psygfx__vp_*, psygfx__vsmin).
  *   Each such function names its source in a comment; the MIT notices are
  *   in the license block at the end of the file. The rest is public domain
  *   / MIT-0.
@@ -34,6 +37,68 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.10.0 - NOISE: dist PSYGFX_SIMPLEX, 3D simplex gradient noise as fBm
+ *          (noise_desc.scale, z, octaves, lacunarity, gain; stimulus fields
+ *          gn_*; parameters PSYGFX_P_NOISE_SCALE, _Z, _LACUNARITY, _GAIN,
+ *          appended), in 32-bit integers on the GPU, so that
+ *          psygfx_simplex_value() gives the same bits on the CPU. Not
+ *          band-limited (NOISE). Breaking: psygfx_stim grew; the noise
+ *          program's cache key changed.
+ *   v0.9.0 - NOISE, the noise dither and psygfx_noise_gauss() draw new
+ *          patterns. The hash is triple32 (Chris Wellons, hash-prospector,
+ *          public domain), not pcg_hash; the key of a point is its index
+ *          times an odd key of the seed, XOR a second key, through one hash
+ *          (psygfx_hash2(), psy_hash2()), not three nested hashes. The
+ *          nested form, hash(x ^ hash(y ^ hash(seed))), made 29 % of
+ *          full-screen frames hold two rows that were copies of each other
+ *          (each 2048-value block permuted), whatever the hash; PractRand
+ *          failed it at 256 MB. The new form passes 16 GB, frame by frame
+ *          and seed by seed (docs/psy_gfx.md, v0.9). The same GPU cost.
+ *          Breaking: every noise pattern, the dither pattern, and a user
+ *          shader's psy_hash() values; psygfx_noise_value() and the GPU
+ *          still agree bit for bit.
+ *   v0.8.0 - SETUP PASSES: psygfx_begin_setup() and psygfx_end_setup()
+ *          run target passes outside a screen frame: a page of text, a
+ *          blur layer, artwork rendered at setup. CURVE RUNS: a run whose
+ *          items are all turned off the quarter turns, or an aliased run,
+ *          takes the rays program by itself (the same bits, 0.5 to 0.8 ms
+ *          less on a turned page); the rays program is made at
+ *          psygfx_crun() for turned, aliased, grouped and PSYGFX_I_ORI
+ *          runs. Breaking: none (a turned run's cache key set gains the
+ *          rays program).
+ *   v0.7.0 - CURVE RUNS: crun_desc.rays (PSYGFX_STIM_RAYS, appended) draws
+ *          a run by the rays even where the exact area applies, on a second
+ *          text program made at the first such run: a 12 px page 5.3 ms
+ *          against 7.5. The text program works in px with y down, so a run
+ *          drawn once into a target and composited at 1:1 on whole px has
+ *          the run's coverage bit for bit. NOISE: dist PSYGFX_GAUSSIAN, a
+ *          table of 65536 normal quantiles (256 KB, made at open), the same
+ *          bits on the GPU and from psygfx_noise_value(). VECTOR: three
+ *          specialized copies of the vector program for large RRECTs,
+ *          dashed CIRCLEs and CIRCLE compounds (14 programs at open; the
+ *          kinds worker's design, docs/psy_gfx.md). ELLIPSE's quarter
+ *          perimeter by the arithmetic-geometric mean: a pack 0.06 us, was
+ *          36 us (1000 ELLIPSEs 0.06 ms of CPU, was 36 ms); the same floats.
+ *          Fixed: none. Breaking: psygfx_crun_desc grew (rays); the text and
+ *          noise programs' cache keys changed.
+ *   v0.6.0 - CURVE SETS: psygfx_cset_make(), psygfx_cset_add(),
+ *          psygfx_cset_free(), and with no gfx psygfx_cset_check() and
+ *          psygfx_cset_winding(): one font or artwork set as two arrays
+ *          (texels, words), the format of docs/psy_gfx.md "Curve sets: the
+ *          format" (version 1), uploaded as one RGBA32F and one RGBA32UI
+ *          texture. CURVE RUNS: psygfx_crun() and psygfx_crun_desc, items
+ *          psygfx_citem (psygfx_inst's layout with glyph in phase's place),
+ *          kind PSYGFX_TEXT (until now not implemented), PSYGFX_P_SIZE,
+ *          PSYGFX_STIM_ALIASED; psygfx_hit() and psygfx_hit_index() on a
+ *          run. BLUR: psygfx_blur, psygfx_blur_desc, psygfx_blur_make(),
+ *          psygfx_blur_apply(), psygfx_blur_free(); targets in R16F and
+ *          RGBA32F; image_desc.coverage (PSYGFX_STIM_COVERAGE). The video
+ *          program reads its constants as flat inputs: NV12 at 1080p costs
+ *          1.10 to 1.16 times an RGBA8 image (was 1.64). Backend: the
+ *          format PSYGFX_RGBA32UI, caps.max_texture (appended; 0 = 2048),
+ *          a sampler in the vertex shader; version 3 still. Breaking:
+ *          psygfx_stim grew (set, items, size); every program's cache key
+ *          changed (the vertex text), so a cache compiles once again.
  *   v0.5.0 - COLOR: the calibration is psy_color.h's. psygfx_cal and its
  *          calls are psycol_cal and psycol_cal_* (init, add, set_spectra,
  *          derive, check, save, load, nominal, lms, dir_cone, dkl_matrix,
@@ -136,7 +201,82 @@
  *          source rectangle, not the sampler's.
  *   v0.1.0 - first release.
  *
- *   STATUS: v0.5.0. The calibration moved to psy_color.h with the same
+ *   STATUS: v0.10.0 (docs/psy_gfx.md "v0.10"): SIMPLEX on the GPU equals
+ *   psygfx_simplex_value() at every pixel of 6 fields (227000 pixels; 1 to
+ *   8 octaves, lacunarity 1 to 3, z negative and fractional) on the Iris
+ *   Xe, WARP and SwiftShader. The integer form is within 1.4e-3 of the same
+ *   noise in double. Full screen on the Iris Xe: 1.83 ms for one octave,
+ *   6.56 ms for four, 12.96 ms for eight (UNIFORM 0.40).
+ *   v0.9.0 (docs/psy_gfx.md "v0.9" has the hash's evaluation):
+ *   NOISE on the GPU equals psygfx_noise_value() at every check, for
+ *   UNIFORM, BINARY and GAUSSIAN, on the Iris Xe, WARP and SwiftShader.
+ *   v0.8.0 (docs/psy_gfx.md "v0.8"). A page rendered in a setup
+ *   pass equals the page rendered in a frame, target and composite, bit for
+ *   bit; a blur applied in a setup pass equals one applied in a frame; the
+ *   frame after a setup pass equals one with none before it, scene and
+ *   output codes (Iris Xe, WARP, SwiftShader). Turned, aliased and
+ *   item-turned runs on the rays program equal the exact-area program's
+ *   pixels, bit for bit, on all three; a run with one item on a quarter
+ *   turn, or with its items in a buffer, stays on the exact-area program.
+ *   A 12 px page turned 15 degrees: 5.09 to 5.10 ms, was 5.83 to 6.03; a
+ *   16 px CJK page turned: 5.92 to 5.94 ms, was 6.39 to 6.61.
+ *   v0.7.0 (docs/psy_gfx.md "v0.7" has the tables). A run with
+ *   .rays draws what the program without the exact area draws, bit for bit;
+ *   a run cached in an RGBA16F or RGBA32F target and composited at 1:1
+ *   equals the run drawn, bit for bit, over black (Iris Xe, WARP,
+ *   SwiftShader); over a gray background an RGBA16F target differs by one
+ *   f16 step (its alpha was rounded before the blend), an RGBA32F one not
+ *   at all. psy_outline.h's set of the test glyphs, overlaps resolved:
+ *   every glyph within 1.15e-5 of the exact coverage. NOISE GAUSSIAN: the
+ *   table within 6e-8 (relative) of quantiles found by bisection on erfc,
+ *   variance 1, symmetric bit for bit; 10^6 checks pass Kolmogorov-Smirnov
+ *   at 1 % (D 0.00095); the GPU equals psygfx_noise_value() at every check
+ *   on all three renderers. The specialized vector programs: 117 stimuli
+ *   drawn by each and by the generic program, 0 values differ. Cost (Iris
+ *   Xe, AC, the shared guard): a 12 px page (psy_outline.h's set) 7.43 to
+ *   7.50 ms exact, 5.28 to 5.31 ms with .rays, 0.50 ms composited from a
+ *   target; GAUSSIAN noise full screen 0.41 to 0.42 ms against UNIFORM's
+ *   0.37 to 0.39; RRECT fill 0.56 to 0.59 ms (was 0.95), a dashed circle
+ *   0.50 to 0.53 (was 0.92 to 0.95), a compound of 8 with every effect 0.94
+ *   to 0.98 (was 1.60 to 1.62); psygfx_open() 2.20 to 2.49 s, was 2.04 to
+ *   2.12 (three more programs).
+ *   v0.6.0 (docs/psy_gfx.md "v0.6" has the tables). Curve runs
+ *   against the exact box coverage of each pixel in double (scanlines,
+ *   Gauss-Kronrod in y, the fill rule per scanline): on resolved glyphs
+ *   not turned, the exact area is within 1.8e-5 of it; elsewhere the rays'
+ *   mean error on edge pixels is 0.029, 0.019, 0.009 and 0.004 at 8, 12, 24
+ *   and 48 px per em, the same at 0, 15 and 45 degrees (Lengyel's ramp
+ *   alone: 0.031 to 0.074 at 8 px, the turned ones worst), and the largest
+ *   error 0.56, at corners and self-intersections. Iris Xe, WARP and
+ *   SwiftShader agree pixel by pixel within 6.5e-5 but for one SwiftShader
+ *   pixel (0.087, where a ray passes a corner). The probe's 0.49
+ *   difference between renderers came from interpolated em coordinates:
+ *   with them, SwiftShader moved 26156 pixels by more than 1e-3 (up to
+ *   0.48) from the Iris Xe; from gl_FragCoord, none. A curve run equals
+ *   its items drawn alone and a buffer copied items, bit for bit; a glyph
+ *   added at run time draws as one made at open; psygfx_hit() agrees with
+ *   aliased coverage at all 64000 pixels. The blur against the exact blur
+ *   of a rect (erf products): 0.20, 0.031, 0.0087, 0.0022, 5.4e-4 and
+ *   1.5e-4 at sigma 0.5, 1, 2, 4, 8 and 16 (RGBA32F); a 2x source 0.038,
+ *   0.0076, 0.0021, 5.4e-4, 1.4e-4 and 3.8e-5; 16-bit targets level off at
+ *   about 8e-4. 29 deliberate faults in v0.6, each caught (docs/psy_gfx.md);
+ *   two first survived and led to a fix (a curve that turns back before a
+ *   ray counted as crossing it).
+ *   Cost on the Iris Xe at 1920 x 1200 (AC, the lock held, interleaved; GPU
+ *   over an empty frame; backward lists): a 12 px Latin page of 26205
+ *   glyphs 7.9 to 8.2 ms with the exact area, 5.5 to 5.8 ms by the rays
+ *   alone; a 16 px CJK page of 7140 glyphs 10.0 to 10.2 and 7.2 to 7.7 ms;
+ *   1612 glyphs at 48 px 1.7 ms; 45 glyphs at 200 px 1.1 ms (rays 1.6); a
+ *   40-glyph line with its items copied each frame 0.09 ms of GPU and 17 us
+ *   of CPU. The text program compiles in 430 ms (140 ms without the exact
+ *   area) on ANGLE's D3D11; the program cache loads it after. The blur, full
+ *   screen R16F: 1.42, 1.96, 3.34 and 5.96 ms at sigma 0.5, 1, 2 and 4;
+ *   RGBA32F at sigma 2 3.57 ms; a 400 x 200 layer drawn, blurred and drawn
+ *   0.10 to 0.27 ms at sigma 0.5 to 4 (1x), 0.17 to 0.66 ms (2x). Video
+ *   1080p: NV12 0.64 to 0.68 ms, RGBA8 0.56 to 0.59 ms (v0.5: NV12 0.96).
+ *   psygfx_open() and every v0.3 and v0.4 row: unchanged (interleaved
+ *   against v0.5.0).
+ *   v0.5.0: the calibration moved to psy_color.h with the same
  *   bits: every scene and output readback of the test, hashed, is the same
  *   as v0.4's on the Iris Xe, WARP and SwiftShader, and v0.4's calibration
  *   code and psy_color.h's agreed bit for bit before the move (52
@@ -241,9 +381,10 @@
  *   RGBA8 back buffers, this panel's link is 8 bits per color, and no
  *   device was there to verify); stereo (refused); text layout (a glyph
  *   run draws placed glyphs; there is no atlas tool yet); cubic Beziers;
- *   filtered noise on the GPU; fullscreen runs; kind-specialized vector
- *   programs; any other GPU, macOS, X11 or Wayland (psy_screen.h's stubs),
- *   WebGL; v0.4 on WSL, llvmpipe and emcc.
+ *   filtered noise on the GPU; fullscreen runs; specialized vector programs
+ *   past the three that met their bars (docs/psy_gfx.md); any other GPU,
+ *   macOS, X11 or Wayland (psy_screen.h's stubs), WebGL; v0.4 on WSL,
+ *   llvmpipe and emcc.
  *   v0.4 (docs/psy_gfx.md has the tables; Iris Xe, WARP, SwiftShader):
  *   the program cache: every frame drawn from cached programs equals the
  *   same frame compiled, bit for bit, and a damaged, truncated, colliding
@@ -476,8 +617,10 @@
  *   ---------------------------------------------------------------------
  *   TARGETS
  *   ---------------------------------------------------------------------
- *   psygfx_target() makes a render target at setup (RGBA16F, or RGBA8),
- *   cleared to transparent black. Between psygfx_begin() and psygfx_end(),
+ *   psygfx_target() makes a render target at setup (RGBA16F, RGBA8, R16F,
+ *   or RGBA32F where the renderer has EXT_float_blend),
+ *   cleared to transparent black. Between psygfx_begin() and psygfx_end()
+ *   (or in a setup pass, below),
  *   psygfx_begin_target(t, clear) and psygfx_end_target() draw into it with
  *   the normal calls (clear NULL keeps what it holds, so "draw once, sample
  *   every frame" works); then psygfx_image() draws it like any texture. The
@@ -501,6 +644,21 @@
  *       frame: call order decides;
  *     at most PSYGFX_MAX_PASSES (16) target passes per frame, not nested;
  *       nothing is allocated for them in the frame loop.
+ *   SETUP PASSES (v0.8): psygfx_begin_setup() .. psygfx_end_setup() fills
+ *   targets outside a screen frame, at setup or between trials:
+ *       psygfx_begin_setup(&gfx);
+ *       psygfx_begin_target(&gfx, page, (const float[4]){ 0, 0, 0, 0 });
+ *       psygfx_draw(&gfx, &text);
+ *       psygfx_end_target(&gfx);
+ *       psygfx_end_setup(&gfx);
+ *   Inside one: target passes (16, not nested, as in a frame), draws into
+ *   them and psygfx_blur_apply(). Refused (PSYGFX_ERR_ORDER): a draw into
+ *   the scene, psygfx_end(), psygfx_begin(), a second begin_setup, and
+ *   begin_setup inside a frame. end_setup() runs the passes and touches
+ *   neither the scene, the output stage, the present nor the frame count;
+ *   the next frame is the same, bit for bit, as one with no setup pass
+ *   before it (tested). The passes see a frame of time 0 and index 0. It
+ *   makes the GL context current and allocates nothing.
  *
  *   ---------------------------------------------------------------------
  *   STIMULI
@@ -546,12 +704,48 @@
  *            the increment by tint.rgb and tint.a. 16-bit planes are R16UI,
  *            read as k / 65535. Values are linear: an 8-bit sRGB photograph
  *            is the pack tool's to linearize.
- *   NOISE    per check of `check` px from the box's top-left corner:
- *            uniform in (-1, 1) or binary +-1 from an integer hash of the
- *            check and seed, bit for bit what psygfx_noise_value() gives.
+ *   NOISE    per check of `check` px from the box's top-left corner (its
+ *            key psygfx_hash2(cx, cy, seed): independent checks, no row or
+ *            frame a copy of another; v0.9):
+ *            uniform in (-1, 1), binary +-1, or (v0.7) GAUSSIAN, N(0, 1)
+ *            as one of 65536 equally likely values (the normal quantiles
+ *            at the bins' centers, scaled to variance 1, largest 4.33),
+ *            from an integer hash of the check and seed, bit for bit what
+ *            psygfx_noise_value() gives. contrast is the SD for GAUSSIAN;
+ *            values past 1 / contrast leave the gamut, which the per-draw
+ *            check counts. GAUSSIAN costs 8 % more than UNIFORM at 1 px
+ *            checks (a texelFetch).
+ *            SIMPLEX (v0.10): 3D simplex gradient noise, summed over
+ *            octaves (fBm): octave k has lattice cells of scale / lacunarity^k
+ *            units and weight gain^k, the weights summing to 1. scale is
+ *            the lattice cell (deg or px, as other units); z the third
+ *            coordinate in cells: bind it (noise_z) to make the field
+ *            evolve; the field decorrelates over half a cell of z (r 0.92
+ *            at 0.1 cells, 0.60 at 0.25, 0.07 at 0.5). The seed changes
+ *            every octave's lattice keys. Values in [-1, 1]; the SD is
+ *            0.425 for one octave and 0.317, 0.278, 0.261, 0.249, 0.246 for
+ *            2, 3, 4, 6, 8 octaves (lacunarity 2, gain 0.5): contrast scales
+ *            it. NOT BAND-LIMITED: one octave's power spreads from about
+ *            1/8 to 2 times the lattice frequency (peak at 0.64 of it) with
+ *            tails, and the cube-edge gradients make it anisotropic (the
+ *            power of 12 angle sectors 0.93 to 1.10 of their mean,
+ *            measured). For a stated band,
+ *            use filtered noise (an IMAGE of noise filtered on the CPU) or
+ *            gratings. Exact: psygfx_simplex_value(g, s, ix, iy) gives the
+ *            GPU's value, bit for bit, at pixel (ix, iy) of a box not
+ *            turned and on whole px (any ori: the same noise, sampled at
+ *            turned points). The lattice repeats every 65536 cells in x and
+ *            y, and z is used modulo 65536 cells. Refused: scale <= 0, a
+ *            cell finer than 1/32 px at the last octave or above 32768 px,
+ *            octaves outside 1..8, lacunarity outside 1..8, gain outside
+ *            (0, 1], a POLYGON aperture (its vertices and the octaves share
+ *            the block; MASK_TEX does that shape). Cost per octave about
+ *            1.6 ms full screen at 1920 x 1200 (Iris Xe; STATUS): size the
+ *            box, and render a static field once in a setup pass.
  *   USER     a pipeline from psygfx_pipeline() (SHADER CONTRACT).
- *   TEXT     no layout here: a glyph run (GLYPH RUNS) draws glyphs that
- *            the caller placed; the atlas comes from the pack tool.
+ *   TEXT     a curve run (CURVE RUNS): glyphs or paths of a curve set at
+ *            the caller's pen positions; layout is the pack tool's or
+ *            Skribidi's. The MSDF glyph run (GLYPH RUNS) stays.
  *   MASK_TEX (any kind's shape) the signed-distance texture `mask` (R16F
  *            or R32F, distance in texels, negative inside, with padding),
  *            fitted to the box: px per texel = box width / texture width.
@@ -642,6 +836,15 @@
  *   one instanced draw of its own; a vector stimulus with one block batches
  *   with its neighbors. desc.max_draws counts blocks, not draws.
  *   psygfx_hit(), _bounds() and _local() use the same field on the CPU.
+ *   Three specialized copies of the vector program draw three large cases
+ *   in less GPU time: an RRECT with no dashes, trim, paint or fx; a CIRCLE
+ *   with dashes or trim and no paint or fx; a compound of CIRCLEs only, with
+ *   no paint. Each is the same text with what its case cannot reach left
+ *   out, so its pixels equal the generic program's (tested bit for bit). A
+ *   draw takes one only when its quad covers 65536 px or more (256 x 256):
+ *   below that, the program switch costs more CPU than the stimulus saves.
+ *   They compile at open with the others (14 programs); desc.cache keeps
+ *   them. An element array (INSTANCES) keeps the generic program.
  *
  *   COMPOUNDS
  *   psygfx_compound() makes a SHAPE of kind COMPOUND from an array of
@@ -737,6 +940,8 @@
  *   rectangle's aspect ratio: px per texel = box width / rectangle width.
  *
  *   GLYPH RUNS
+ *   (The pack no longer makes MSDF atlases: its text is curve sets, CURVE
+ *   RUNS. This path stays for atlases made elsewhere.)
  *   psygfx_glyphs() draws count glyphs from one atlas in one instanced
  *   draw. The buffer holds psygfx_glyph records (32 bytes): x, y, the
  *   glyph box's top-left in units from the run's box top-left, and sx, sy,
@@ -784,6 +989,163 @@
  *   0.083 at 90 degrees (not measured separately). A non-smooth fold of
  *   exact fields already has a unit gradient, so dividing by it changes
  *   nothing there.
+ *
+ *   ---------------------------------------------------------------------
+ *   CURVE SETS (v0.6)
+ *   ---------------------------------------------------------------------
+ *   A curve set is one font or one artwork set as quadratic Bezier curves
+ *   and bands, the form of Lengyel's Slug algorithm (JCGT 6(2), 2017),
+ *   implemented here from the paper. The pack tool's outline builder writes
+ *   it; docs/psy_gfx.md "Curve sets: the format" is the contract (version
+ *   1). It is two arrays: texels (4 floats each: the curves) and words
+ *   (uint32: a header, a glyph table, per glyph a record, band descriptors
+ *   and sorted curve lists). psygfx_cset_make() checks them, uploads them as
+ *   one RGBA32F and one RGBA32UI texture and, the first time, makes the text
+ *   program (an open without text compiles nothing more):
+ *       psygfx_cset font = psygfx_cset_make(&gfx, &(psygfx_cset_desc){
+ *           .texels = pk.texels, .n_texels = pk.n_texels,
+ *           .words = pk.words, .n_words = pk.n_words });
+ *   Coordinates are em units (or the artwork's), y down, the origin at the
+ *   glyph's origin (the pen position on the baseline). Glyph ids are the
+ *   set's table indices: font glyph ids, or path indices for artwork.
+ *   psygfx_cset_add() uploads glyphs the builder appended at run time,
+ *   within cap_texels and cap_words given at make, between frames.
+ *   psygfx_cset_check() and psygfx_cset_winding() need no gfx: the builder's
+ *   own tests use them. Nonzero and even-odd fills are per glyph. The format
+ *   holds no metrics: advances and line spacing are the layout's. Backward
+ *   lists (flag bit 1) make the rays 18 to 27 % faster on a page (measured):
+ *   the builder should write them.
+ *
+ *   ---------------------------------------------------------------------
+ *   CURVE RUNS (v0.6)
+ *   ---------------------------------------------------------------------
+ *   psygfx_crun() makes a TEXT stimulus: n psygfx_citem records, each a
+ *   glyph or path of a set at a pen position, drawn in one instanced draw.
+ *   A word laid out by the pack tool or Skribidi:
+ *       static psygfx_citem hello[5];          // .x, .glyph from the layout
+ *       psygfx_stim word = psygfx_crun(&gfx, &(psygfx_crun_desc){
+ *           .set = font, .items = hello, .n = 5, .size = 48,
+ *           .color = { 1, 1, 1 }, .fields = PSYGFX_I_GATE });
+ *   size is units per set unit: the font size per em, in px or deg. The
+ *   run's box is w x h, or, when both are 0, the items' extent at make
+ *   (from the glyph boxes the set keeps on the CPU; shape_p[0..1] then hold
+ *   its top-left in item units), so CENTER centers the ink. psygfx_citem has
+ *   psygfx_inst's layout with glyph in phase's place (INSTANCES): x, y and
+ *   glyph are always read; ori and scale (about the glyph box's center, as
+ *   GSAP's transformOrigin "50% 50%"), contrast (opacity), gate and color
+ *   (a palette position) when their PSYGFX_I_* bit is in fields. Every
+ *   field is a float, so a letter's y or gate binds to a timeline channel
+ *   with psygfx_bind.field: a staggered entrance, GSAP's gsap.from(chars,
+ *   { y: 40, opacity: 0, stagger: 0.05 }), is one channel per letter field.
+ *   Items given by .items are copied at each draw into INSTANCES' element
+ *   buffers (desc.max_instances a frame); a page of text goes in a
+ *   psygfx_buffer once (.buf, .first) and costs no copy. Artwork is the same
+ *   call, one item per layer at (0, 0) with a palette color: layers stack
+ *   in item order, as GL blends one draw in order.
+ *   Coverage is the pixel's box filter, in linear light (text looks thinner
+ *   than text blended in sRGB; nothing corrects it):
+ *     exact     where the glyph is resolved (format flag bit 2: no contours
+ *               overlap) and the item is not turned, or turned by quarter
+ *               turns: the area of glyph intersect pixel by Green's theorem
+ *               over the bands the pixel's rows meet; within 1.8e-5 of the
+ *               exact coverage (measured). A false resolved bit gives wrong
+ *               coverage near the overlaps, nothing worse
+ *     otherwise two rays from the pixel center through the glyph's bands
+ *               (Lengyel). A crossing near the pixel adds the exact box
+ *               coverage of the half-plane bounded by the curve's tangent
+ *               there, so a straight edge at any angle is exact; corners,
+ *               curvature tighter than a pixel and self-intersections are
+ *               not. The rays mix by how steeply and how near each one
+ *               crosses. Measured mean edge error 0.029, 0.019, 0.009 and
+ *               0.004 at 8, 12, 24 and 48 px per em, the same at every
+ *               rotation; the largest 0.56, at corners. Where a ray passes a
+ *               corner, a pixel's value jumps (up to 0.44 between positions
+ *               0.005 px apart, measured); on a smooth outline by at most
+ *               0.038
+ *   The exact area costs 1.4 times the rays on a page of 12 px text and
+ *   less than them at 200 px (STATUS). Which to pick: the exact area (the
+ *   default) wherever text is read or measured; .rays (crun_desc.rays) for
+ *   a page whose glyphs are 8 px per em or more and whose frame needs the
+ *   2 ms: it costs the rays' error everywhere, a mean of 0.029, 0.019,
+ *   0.009 and 0.004 on edge pixels at 8, 12, 24 and 48 px per em and up
+ *   to 0.56 at corners, against 1.8e-5. The first .rays run compiles the
+ *   rays program (about 150 ms): make it at setup. Turned runs take the
+ *   rays program by themselves (v0.8): a run draws on it, with the same
+ *   bits as on the exact-area program, when no item can take the exact
+ *   area there: the run is aliased, or its turn (with a group's) is 0.01
+ *   degrees or more from a quarter turn and it has no PSYGFX_I_ORI, or it
+ *   has PSYGFX_I_ORI, its items on the CPU, and every item's turn plus the
+ *   run's is 0.01 degrees or more from one. Items in a buffer with
+ *   PSYGFX_I_ORI stay on the exact-area program (their turns are on the
+ *   GPU only), as does a run made before the rays program existed. Static
+ *   text (a reading page) belongs in a target, drawn once, in a setup pass
+ *   (SETUP PASSES): an RGBA16F target of the
+ *   screen's size (18.4 MB at 1920 x 1200; RGBA32F 36.9 MB) drawn as an
+ *   image at 1:1 on whole px costs 0.5 ms against 7.5 ms and has the run's
+ *   coverage bit for bit (the text program computes each pixel's em point
+ *   in px with y down, the same in a target as in the scene). Draw a run
+ *   directly only when it moves, turns, scales or animates per letter: a
+ *   cached texture drawn off the pixel grid or scaled is interpolated and
+ *   no longer the exact coverage. A page rendered in a setup pass equals
+ *   one rendered in a frame, bit for bit. The fill rule maps each ray's
+ *   fractional winding to coverage: exact while a pixel sees one
+ *   transition. .aliased gives 0 or 1 from the winding at the pixel center.
+ *   Edge profiles, strokes, offsets, dashes, fx and paint are refused on a
+ *   run: the outline builder expands outlines and bold into fills; soft
+ *   edges, glow and shadow come from BLUR. A hard shadow is a second draw
+ *   of the same run, offset and recolored. Blend OVER, ADD or MULTIPLY, as
+ *   color stimuli. psygfx_hit() on a run is the winding at the pixel center
+ *   from the set's arrays when the set was made with .keep (it agrees with
+ *   aliased coverage), else the glyph boxes; psygfx_hit_index() gives the
+ *   topmost item (artwork: the layer); items in a buffer are on the GPU
+ *   only, so neither sees them. In the reorder a run's bounds are the whole
+ *   pass.
+ *
+ *   ---------------------------------------------------------------------
+ *   BLUR (v0.6)
+ *   ---------------------------------------------------------------------
+ *   A separable Gaussian blur of a layer, a target you draw into, into a
+ *   result you draw as an image: soft shadows, glow, blurred-letter
+ *   stimuli. CSS's text-shadow: 0 0 3px gold:
+ *       static psygfx_blur glow;                              // setup
+ *       psygfx_blur_make(&gfx, &glow, &(psygfx_blur_desc){ .w = 800, .h = 240,
+ *                        .format = PSYGFX_R16F, .sigma = 3 });
+ *       psygfx_begin_target(&gfx, glow.layer, NULL);          // in a frame
+ *       psygfx_draw(&gfx, &word_white);                       // at the layer's center
+ *       psygfx_end_target(&gfx);
+ *       psygfx_blur_apply(&gfx, &glow);
+ *       glow.image.tint[0] = 1; glow.image.tint[1] = 0.8f; glow.image.tint[2] = 0.2f;
+ *       psygfx_draw(&gfx, &glow.image);                       // the glow
+ *       psygfx_draw(&gfx, &word);                             // the sharp word on top
+ *   The layer keeps the sharp content: draw it once and apply the blur each
+ *   frame with a sigma bound to a channel (psygfx_bind.field = &glow.sigma),
+ *   and only the two passes cost. Place the word at the layer's center and
+ *   the image where the word is. The rules:
+ *     two passes, horizontal into a scratch target, vertical into the
+ *       result, in call order; they count as 2 of the 16 passes;
+ *     direct taps within 5 SD, weights exp(-x^2 / 2 s^2) normalized in f32;
+ *       a BOX source (the default: curve runs, antialiased edges) has the
+ *       box filter's variance, 1/12 px^2, taken out of sigma; POINT sources
+ *       (gratings) do not;
+ *     outside the layer is empty: content within 5 sigma of its edge loses
+ *       the mass that falls outside, as on an empty screen;
+ *     formats: R16F (a coverage mask: draw white into it; the image is
+ *       tint.rgb with coverage times tint.a), RGBA16F (premultiplied
+ *       color), RGBA32F (needs EXT_float_blend for the draws into the
+ *       layer; ANGLE on D3D11 hardware, WARP and SwiftShader and Mesa
+ *       llvmpipe have it, and EXT_color_buffer_float, which open requires);
+ *     supersample 2 (opt-in): the layer is 2w x 2h and draws into it see
+ *       twice the px per unit (fields in px are layer px); the passes take
+ *       taps on the 2x grid at each result pixel's center. The error at
+ *       sigma 0.5 to 2 falls 4 to 5 times (measured), at a cost given in
+ *       STATUS;
+ *     sigma above the box's own SD (0.29 px; POINT: above 0) and at most
+ *       32 px of the result. The error is the 1x sampling's: 0.20 at sigma
+ *       0.5, 0.031 at 1, 0.0087 at 2, 0.0022 at 4 (RGBA32F, against the
+ *       exact blur of a rect; docs/psy_gfx.md);
+ *     the cost grows with the layer's pixels and sigma: size the layer to
+ *       the stimulus, not the screen.
+ *   A blur is of linear light: the physical blur of the displayed pattern.
  *
  *   ---------------------------------------------------------------------
  *   PROGRAM CACHE (v0.4)
@@ -958,7 +1320,8 @@
  *       psy_time        onset s since open (float: 0.24 ms steps at 1 h),
  *                       period s, frame index, 0
  *       psy_seed        uvec4: frame index low, high, desc.seed, vblank
- *       psy_hash(uint)  the integer hash of NOISE
+ *       psy_hash(uint)  the integer hash of NOISE (triple32 from v0.9)
+ *       psy_hash2(uvec2, uint)  NOISE's key of a point under a seed (v0.9)
  *       psy_tex0..2, psy_utex0 (unsigned), psy_PI, psy_sdf, psy_sdf_at,
  *       psy_coverage, psy_aperture, psy_bilinear (four texelFetch,
  *       clamped to a rectangle)
@@ -1038,7 +1401,17 @@
  *   buffers of that size on the GPU; the first encoded texture compiles the
  *   video program; a user pipeline keeps a copy of its body for its
  *   instanced program. The frame loop still allocates nothing.
- *   The handle is about 11.5 KB. A target pass takes no memory of its own;
+ *   v0.6: psygfx_cset_make() allocates the set's box table (16 bytes a
+ *   glyph) and makes its two textures, and the first one compiles the text
+ *   program; psygfx_crun() with items allocates INSTANCES' element staging
+ *   when it is not there; psygfx_blur_make() makes three targets (layer,
+ *   scratch, result) and the first one compiles the blur program. A frame
+ *   with runs and blurs allocates nothing.
+ *   v0.7: open makes NOISE GAUSSIAN's table texture (256 x 256 R32F, 256
+ *   KB) from a static table of the same size, built once per process with
+ *   256 KB of static scratch; a run made with .rays compiles the rays
+ *   program once.
+ *   The handle is about 23 KB on 64-bit targets. A target pass takes no memory of its own;
  *   psygfx_target() makes its texture and framebuffer at setup. One thread
  *   calls everything, the thread that owns the screen's context. Textures,
  *   buffers and pipelines are made and updated between frames, never
@@ -1063,9 +1436,9 @@
 #define PSY_GFX_H_INCLUDED
 
 #define PSYGFX_VERSION_MAJOR 0
-#define PSYGFX_VERSION_MINOR 5
+#define PSYGFX_VERSION_MINOR 10
 #define PSYGFX_VERSION_PATCH 0
-#define PSYGFX_VERSION_STRING "0.5.0"
+#define PSYGFX_VERSION_STRING "0.10.0"
 
 #include "psy_screen.h"
 #include "psy_color.h"
@@ -1118,6 +1491,7 @@ extern "C" {
 typedef struct psygfx_tex  { uint32_t id; } psygfx_tex;    /* 0 = none          */
 typedef struct psygfx_buf  { uint32_t id; } psygfx_buf;    /* 0 = none          */
 typedef struct psygfx_pipe { uint32_t id; } psygfx_pipe;   /* 0 = none          */
+typedef struct psygfx_cset { uint32_t id; } psygfx_cset;   /* 0 = none (v0.6)   */
 
 typedef enum psygfx_format {
     PSYGFX_FORMAT_NONE = 0,
@@ -1133,6 +1507,7 @@ typedef enum psygfx_format {
      * (VIDEO); one texture, two or three planes */
     PSYGFX_NV12,     /* Y R8, then CbCr interleaved RG8                         */
     PSYGFX_I420,     /* Y, Cb, Cr: three R8 planes                              */
+    PSYGFX_RGBA32UI, /* v0.6: uint32_t x 4 (a curve set's words)                */
     PSYGFX_FORMAT_COUNT
 } psygfx_format;
 
@@ -1335,7 +1710,7 @@ typedef enum psygfx_kind {
     PSYGFX_DOTS,         /* SDF dots at positions from a buffer                 */
     PSYGFX_IMAGE,        /* a texture, color or modulation                      */
     PSYGFX_NOISE,        /* hash noise per check, modulation                    */
-    PSYGFX_TEXT,         /* not implemented in v0.1                             */
+    PSYGFX_TEXT,         /* v0.6: a run of glyphs or paths from a curve set     */
     PSYGFX_USER,         /* a pipeline from psygfx_pipeline()                   */
     PSYGFX_KIND_COUNT
 } psygfx_kind;
@@ -1481,6 +1856,21 @@ typedef struct psygfx_glyph {
     float reserved[2];
 } psygfx_glyph;
 
+/* v0.6: one glyph or path placed in a run (RUNS): psygfx_inst's layout with
+ * glyph in phase's place, all float, so psygfx_bind.field binds any of them.
+ * x, y and glyph are always read; the rest when its bit is in the run's
+ * fields. */
+typedef struct psygfx_citem {
+    float x, y;             /* the glyph's origin (pen position), units from the
+                             * run box's top-left (PSYGFX_I_XY: always)        */
+    float ori;              /* degrees about the glyph box's center (PSYGFX_I_ORI) */
+    float glyph;            /* the glyph or path id in the set: an integer      */
+    float contrast;         /* multiplies the run's opacity (PSYGFX_I_CONTRAST) */
+    float scale;            /* about the glyph box's center (PSYGFX_I_SCALE)    */
+    float gate;             /* multiplies gate (PSYGFX_I_GATE)                   */
+    float color;            /* a palette position, as INSTANCES (PSYGFX_I_COLOR) */
+} psygfx_citem;
+
 /* One element of an instanced stimulus (INSTANCES): 32 bytes, all float, so
  * psygfx_bind.field binds any of them. Only the fields in the stimulus's
  * inst_fields mask are read. */
@@ -1515,7 +1905,8 @@ typedef enum psygfx_edge {
     PSYGFX_EDGE_GAUSSIAN     /* hard edge blurred by a Gaussian, SD edge_width  */
 } psygfx_edge;
 
-typedef enum psygfx_noise_dist { PSYGFX_UNIFORM = 0, PSYGFX_BINARY = 1 } psygfx_noise_dist;
+typedef enum psygfx_noise_dist { PSYGFX_UNIFORM = 0, PSYGFX_BINARY = 1, PSYGFX_GAUSSIAN = 2,
+                                 PSYGFX_SIMPLEX = 3   /* v0.10: gradient noise, fBm */ } psygfx_noise_dist;
 
 /* One stimulus. A plain value: copy it, keep arrays of it, set fields
  * directly. The float fields are the parameter table's (psygfx_params) and
@@ -1591,7 +1982,45 @@ typedef struct psygfx_stim {
     const float* palette;     /* rgb triples: color (color stimuli) or dir
                                * (modulation) by PSYGFX_I_COLOR                  */
     uint32_t    n_palette;    /* 1..PSYGFX_MAX_PALETTE                           */
+    /* v0.6 */
+    psygfx_cset set;          /* TEXT: the curve set                             */
+    const psygfx_citem* items; /* TEXT: count items copied at each draw; NULL = count
+                               * items in buf from first                         */
+    float       size;         /* TEXT: units per set unit (the font size per em)  */
+    /* v0.10: NOISE SIMPLEX */
+    float       gn_scale;     /* units per lattice cell (the feature size)       */
+    float       gn_z;         /* the third coordinate, cells: bind it to evolve  */
+    float       gn_lacunarity, gn_gain;   /* per octave: frequency, amplitude  */
+    int32_t     gn_octaves;   /* 1..8                                            */
 } psygfx_stim;
+
+/* v0.6, BLUR: a separable Gaussian blur of a target (the layer) into
+ * another (the result). */
+typedef enum psygfx_blur_source {
+    PSYGFX_BLUR_BOX = 0,      /* the layer holds box-filtered coverage (curve runs,
+                               * antialiased edges): the box's variance comes
+                               * out of sigma                                 */
+    PSYGFX_BLUR_POINT         /* the layer holds point samples (gratings)        */
+} psygfx_blur_source;
+
+typedef struct psygfx_blur_desc {
+    int32_t w, h;             /* the result, px; required                        */
+    psygfx_format format;     /* 0 = RGBA16F; R16F (a coverage mask), RGBA32F    */
+    int32_t supersample;      /* 0, 1: none; 2: the layer is 2w x 2h (opt-in)    */
+    psygfx_blur_source source;
+    float   sigma;            /* the first sigma, px of the result              */
+} psygfx_blur_desc;
+
+/* A plain value the caller keeps. layer is a target to draw into; image
+ * draws result (premultiplied; an R16F result is coverage tinted by
+ * image.tint); sigma (px of the result) may be bound with psygfx_bind.field. */
+typedef struct psygfx_blur {
+    psygfx_tex  layer, result;
+    psygfx_stim image;
+    float       sigma;
+    psygfx_tex  scratch_;     /* private from here                               */
+    int32_t     w_, h_, ss_, src_;
+} psygfx_blur;
 
 /* psygfx_instances(): the elements and what they set. fields 0 = PSYGFX_I_XY. */
 typedef struct psygfx_instances_desc {
@@ -1608,6 +2037,11 @@ typedef struct psygfx_instances_desc {
                                          * increments, from a target)           */
 #define PSYGFX_STIM_PREMULTIPLIED 0x8u  /* IMAGE: rgb already times alpha (set
                                          * for a target by psygfx_image)        */
+#define PSYGFX_STIM_ALIASED      0x10u  /* TEXT: coverage 0 or 1 at the pixel
+                                         * center (v0.6)                        */
+#define PSYGFX_STIM_COVERAGE     0x20u  /* IMAGE: red is coverage, tint the color
+                                         * (v0.6)                               */
+#define PSYGFX_STIM_RAYS         0x40u  /* TEXT: the rays everywhere (v0.7)   */
 
 /* A flat group (GROUPS): place, anchor and box on the screen; its members'
  * place, x, y and ori are in its frame. One level: a group has no group. */
@@ -1677,6 +2111,46 @@ typedef struct psygfx_glyphs_desc {
     uint32_t first;                                            /* v0.4: the first record in buf */
 } psygfx_glyphs_desc;
 
+/* v0.6, CURVE SETS: one font or artwork set as two flat arrays, the format
+ * of docs/psy_gfx.md "Curve sets: the format" (version 1). */
+#define PSYGFX_CSET_MAGIC    0x43595350u   /* "PSYC" in little-endian bytes   */
+#define PSYGFX_CSET_VERSION  1u
+#define PSYGFX_CSET_EVENODD  0x1u          /* glyph flags: even-odd fill      */
+#define PSYGFX_CSET_BACKWARD 0x2u          /* glyph flags: backward lists     */
+#define PSYGFX_CSET_RESOLVED 0x4u          /* glyph flags: no contours overlap,
+                                            * the winding is 0 or 1 everywhere   */
+
+typedef struct psygfx_cset_desc {
+    const float*    texels;   uint32_t n_texels;   /* 4 floats each               */
+    const uint32_t* words;    uint32_t n_words;    /* a multiple of 4             */
+    uint32_t        cap_texels, cap_words;         /* growth room; 0 = no growth  */
+    bool            keep;     /* the arrays outlive the set and psy_gfx may read
+                               * them: exact hit tests, and psygfx_cset_add()
+                               * reads the new glyphs from them              */
+} psygfx_cset_desc;
+
+/* A run (RUNS): glyphs or paths of a curve set, one instanced draw. */
+typedef struct psygfx_crun_desc {
+    psygfx_align place, anchor;                                /* 0 = CENTER */
+    psygfx_cset set;                                           /* required */
+    const psygfx_citem* items; int n;                           /* copied at each draw */
+    psygfx_buf buf; uint32_t first;                            /* or n items in buf from
+                                                                * first, uploaded once */
+    uint32_t fields;                                           /* PSYGFX_I_*; 0 = x, y, glyph */
+    const float* palette; int n_palette;                       /* PSYGFX_I_COLOR */
+    float size;                                                /* units per set unit; required */
+    float x, y, w, h, ori;                                     /* the run's box; w, h 0 =
+                                                                * the items' extent */
+    float color[3]; float opacity;                             /* 0 = 1 */
+    psygfx_blend_mode blend;
+    bool aliased;                                              /* coverage 0 or 1 at the
+                                                                * pixel center */
+    bool rays;                                                 /* v0.7: the rays even
+                                                                * where the exact area
+                                                                * applies (RUNS) */
+    const psygfx_group* group;
+} psygfx_crun_desc;
+
 typedef struct psygfx_grating_desc {
     psygfx_align place, anchor;                                /* 0 = CENTER */
     float x, y, w, h, ori, sf, phase; float contrast;          /* 0 = 1 */
@@ -1720,6 +2194,9 @@ typedef struct psygfx_image_desc {
     /* v0.4 */
     bool premultiplied;            /* the texture holds rgb x alpha (PSYGFX_STIM_PREMULTIPLIED);
                                     * default straight alpha. A target sets it */
+    /* v0.6 */
+    bool coverage;                 /* a 1-channel texture's red is coverage: rgb =
+                                    * tint.rgb, alpha = red x tint.a            */
 } psygfx_image_desc;
 
 typedef struct psygfx_noise_desc {
@@ -1729,6 +2206,11 @@ typedef struct psygfx_noise_desc {
     psygfx_shape_kind aperture; psygfx_edge edge; float edge_width; float dir[3];
     float stroke; psygfx_stroke_align stroke_align; psygfx_tex mask; const psygfx_group* group;
     float shape_p[4];                                          /* v0.4: the aperture's */
+    /* v0.10, SIMPLEX: gradient noise (NOISE) */
+    float scale;                   /* units per lattice cell; required          */
+    float z;                       /* cells                                     */
+    int   octaves;                 /* 0 = 1; at most 8                          */
+    float lacunarity, gain;        /* 0 = 2 and 0.5                             */
 } psygfx_noise_desc;
 
 typedef struct psygfx_user_desc {
@@ -1777,6 +2259,10 @@ enum {
     /* v0.3 */
     PSYGFX_P_OFFSET, PSYGFX_P_DASH, PSYGFX_P_GAP, PSYGFX_P_DASH_OFFSET,
     PSYGFX_P_TRIM_START, PSYGFX_P_TRIM_END,
+    /* v0.6 */
+    PSYGFX_P_SIZE,
+    /* v0.10 */
+    PSYGFX_P_NOISE_SCALE, PSYGFX_P_NOISE_Z, PSYGFX_P_NOISE_LACUNARITY, PSYGFX_P_NOISE_GAIN,
     PSYGFX_P_COUNT
 };
 
@@ -1827,6 +2313,7 @@ typedef struct psygfx_backend_caps {
     char     glsl[128];
     uint32_t binary_format;
     uint32_t features;             /* PSYGFX_FEAT_IMPORT_*                       */
+    int32_t  max_texture;          /* v0.6: GL_MAX_TEXTURE_SIZE; 0 = 2048         */
 } psygfx_backend_caps;
 
 #define PSYGFX_BLEND_NONE  0
@@ -1924,6 +2411,7 @@ typedef struct psygfx_backend {
 #define PSYGFX_MAX_PIPELINES 32
 #endif
 #define PSYGFX__N_BUILTIN     10
+#define PSYGFX__N_VSPEC       3           /* specialized vector programs (KINDS) */
 #define PSYGFX__BACKEND_WORDS 1280
 #define PSYGFX__UBO_RING      3
 #ifndef PSYGFX_MAX_PASSES
@@ -1947,6 +2435,7 @@ typedef struct psygfx__res {
     uint32_t plane_bid[2];         /* NV12: CbCr; I420: Cb, Cr                    */
     psygfx_encoding enc;
     int32_t  view;                 /* the slot whose texels it shows + 1; 0 = own  */
+    int32_t  ss;                   /* a 2x blur layer: 2                           */
 } psygfx__res;
 
 typedef struct psygfx__cmd {
@@ -1960,6 +2449,19 @@ typedef struct psygfx__cmd {
     int32_t  blend;                /* PSYGFX_BLEND_*, 0 = the pipeline's          */
 } psygfx__cmd;
 
+#ifndef PSYGFX_MAX_CSETS
+#define PSYGFX_MAX_CSETS     8           /* curve sets (v0.6)                      */
+#endif
+
+/* A curve set's texture pair and what the CPU keeps of it. */
+typedef struct psygfx__cs {
+    uint32_t used, tex_t, tex_w;   /* backend ids: texels RGBA32F, words RGBA32UI */
+    uint32_t n_texels, n_words, cap_t, cap_w, G;
+    int32_t  lt;                   /* log2 of both textures' width in texels      */
+    float*   bbox;                 /* G x 4, each glyph's box: runs' extents       */
+    psygfx_cset_desc keep;         /* the caller's arrays, when desc.keep          */
+} psygfx__cs;
+
 /* A batch being gathered by the reorder (DRAW ORDER). */
 typedef struct psygfx__rbatch { int32_t head, tail, count, pad_; float box[4]; } psygfx__rbatch;
 
@@ -1967,6 +2469,7 @@ typedef struct psygfx__rbatch { int32_t head, tail, count, pad_; float box[4]; }
 typedef struct psygfx_gfx {
     int                    open;
     int                    in_frame;
+    int                    in_setup;                /* begin_setup .. end_setup  */
     const psygfx_backend*  be;
     void*                  bctx;
     psyscr_screen*         screen;
@@ -1982,6 +2485,7 @@ typedef struct psygfx_gfx {
     uint32_t               cal_crc;
     uint32_t               scene, lut;              /* backend texture ids       */
     uint32_t               builtin[PSYGFX__N_BUILTIN];
+    uint32_t               vspec[PSYGFX__N_VSPEC];  /* 0 when not built          */
     uint32_t               output_pipe;
     uint32_t               ubo[PSYGFX__UBO_RING];
     int                    ubo_i;
@@ -2022,6 +2526,8 @@ typedef struct psygfx_gfx {
                                                      * encoded texture           */
     uint32_t               eotf;                    /* the display's transfer: 256 x 3
                                                      * R32F, the inverse of the CLUT */
+    uint32_t               gauss;                   /* NOISE GAUSSIAN's quantiles:
+                                                     * 256 x 256 R32F (v0.7)      */
     int32_t                has_xyz;                 /* the calibration has xy     */
     /* v0.5: psy_color.h's context from the calibration (COLOR) */
     int32_t                has_color;
@@ -2036,6 +2542,13 @@ typedef struct psygfx_gfx {
     uint32_t               inst_pipe[PSYGFX__N_BUILTIN + 1];   /* + the video program */
     uint32_t               pipe_inst[PSYGFX_MAX_PIPELINES];   /* users' */
     char*                  pipe_body[PSYGFX_MAX_PIPELINES];   /* kept for them */
+    /* v0.6: curve sets and the text program, made at the first set */
+    psygfx__cs             cset[PSYGFX_MAX_CSETS];
+    uint32_t               text_pipe;
+    uint32_t               text_rays_pipe;          /* without the exact area, at
+                                                     * the first .rays run      */
+    uint32_t               blur_pipe;               /* BLUR, at the first blur   */
+    float                  ppu_keep;                /* px per unit outside a 2x layer */
     char                   error[512];
     uint64_t               backend_mem[PSYGFX__BACKEND_WORDS];
 } psygfx_gfx;
@@ -2092,6 +2605,24 @@ PSYGFX_API psygfx_stim psygfx_user(const psygfx_user_desc* d);
  * A glyph run: a SHAPE with MASK_TEX on the atlas and buf, count glyphs. */
 PSYGFX_API psygfx_stim psygfx_compound(const psygfx_compound_desc* d);
 PSYGFX_API psygfx_stim psygfx_glyphs(const psygfx_glyphs_desc* d);
+/* v0.6, CURVE SETS. A set from its two arrays (setup: validates them,
+ * uploads them, and makes the text program the first time). On failure id
+ * 0 and psygfx_error() says why. */
+PSYGFX_API psygfx_cset psygfx_cset_make(psygfx_gfx* g, const psygfx_cset_desc* d);
+/* now: the arrays after the builder appended the glyphs named in glyphs[0 ..
+ * n - 1] and set their table entries; uploads what is new. Between frames. */
+PSYGFX_API int  psygfx_cset_add(psygfx_gfx* g, psygfx_cset s, const psygfx_cset_desc* now, const uint32_t* glyphs, int n);
+PSYGFX_API void psygfx_cset_free(psygfx_gfx* g, psygfx_cset s);
+/* v0.6, RUNS: a TEXT stimulus of a curve set's glyphs or paths. */
+PSYGFX_API psygfx_stim psygfx_crun(psygfx_gfx* g, const psygfx_crun_desc* d);
+/* v0.6, BLUR. psygfx_blur_make() at setup: the layer, a scratch target and
+ * the result, and the blur program the first time; PSYGFX_OK or a code with
+ * psygfx_error() saying why. psygfx_blur_apply() in a frame, outside a target
+ * pass: two passes (of the 16) that blur the layer into the result by
+ * b->sigma. psygfx_blur_free() frees the three targets. */
+PSYGFX_API int  psygfx_blur_make(psygfx_gfx* g, psygfx_blur* b, const psygfx_blur_desc* d);
+PSYGFX_API int  psygfx_blur_apply(psygfx_gfx* g, psygfx_blur* b);
+PSYGFX_API void psygfx_blur_free(psygfx_gfx* g, psygfx_blur* b);
 /* v0.4, INSTANCES. A copy of tmpl that draws d->n elements in one call. It
  * makes the instanced program now (setup; through desc.cache), so the first
  * draw compiles nothing. Keep d->inst and d->palette alive: the stimulus
@@ -2122,6 +2653,13 @@ PSYGFX_API int  psygfx_begin(psygfx_gfx* g, const psyscr_frame* f);
 PSYGFX_API int  psygfx_draw(psygfx_gfx* g, const psygfx_stim* s);
 PSYGFX_API int  psygfx_draw_n(psygfx_gfx* g, const psygfx_stim* s, int n);
 PSYGFX_API int  psygfx_end(psygfx_gfx* g);
+/* v0.8, SETUP PASSES: target passes outside a screen frame (static text,
+ * artwork, a blur layer), at setup or between frames. Between the two,
+ * begin_target/end_target, draws into the target and psygfx_blur_apply();
+ * a draw into the scene is refused. end_setup() runs the passes and touches
+ * neither the scene, the output stage nor the frame count. */
+PSYGFX_API int  psygfx_begin_setup(psygfx_gfx* g);
+PSYGFX_API int  psygfx_end_setup(psygfx_gfx* g);
 /* After your own GL calls between frames: forget the cached GL state. */
 PSYGFX_API void psygfx_reset_state(psygfx_gfx* g);
 /* Draws that may have left 0..1 since open (a CPU bound per draw). */
@@ -2223,12 +2761,31 @@ PSYGFX_API const psyscr_param* psygfx_desc_params(int* n);
 
 /* Noise, bit for bit what the NOISE stimulus draws for check (cx, cy) from
  * its top-left corner. psygfx_noise_fill() writes w x h checks, rows top
- * first. psygfx_noise_gauss() is CPU only: N(0, 1) by Box-Muller from the
- * same hash; reproducible for one compiler and C library. */
+ * first. GAUSSIAN reads a 65536-entry table built at the first psygfx_open()
+ * or GAUSSIAN call (0.3 ms; call one before using it from threads).
+ * psygfx_noise_gauss() is CPU only and not what NOISE draws: N(0, 1) by
+ * Box-Muller from the same hash; reproducible for one compiler and C
+ * library. */
 PSYGFX_API float psygfx_noise_value(int32_t cx, int32_t cy, uint32_t seed, psygfx_noise_dist dist);
 PSYGFX_API void  psygfx_noise_fill(float* out, int w, int h, uint32_t seed, psygfx_noise_dist dist);
 PSYGFX_API void  psygfx_noise_gauss(float* out, int w, int h, uint32_t seed);
-PSYGFX_API uint32_t psygfx_hash(uint32_t v);   /* pcg_hash, Jarzynski and Olano 2020 */
+PSYGFX_API uint32_t psygfx_hash(uint32_t v);   /* triple32 (v0.9; pcg_hash before) */
+/* NOISE's and the dither's key of point (cx, cy) under seed: the shaders'
+ * psy_hash2(), bit for bit (v0.9). */
+PSYGFX_API uint32_t psygfx_hash2(int32_t cx, int32_t cy, uint32_t seed);
+/* NOISE SIMPLEX at pixel (ix, iy) of the stimulus's box, from its top-left
+ * corner: what the GPU draws there, bit for bit, when the box is not turned
+ * and sits on whole px (before contrast and aperture; v0.10). */
+PSYGFX_API float psygfx_simplex_value(const psygfx_gfx* g, const psygfx_stim* s, int32_t ix, int32_t iy);
+
+/* v0.6, CURVE SETS, CPU only (no gfx): the format's check (PSYGFX_OK, or
+ * PSYGFX_ERR_FORMAT with msg naming the glyph and the word), and the winding
+ * number of glyph `glyph` at the point x, y in set units, by the band rays the
+ * shader casts, in double: +1 inside a contour that turns clockwise on the
+ * screen. For a set that passed the check; it reads nothing outside the
+ * arrays whatever they hold, and gives 0 for an absent glyph. */
+PSYGFX_API int psygfx_cset_check(const psygfx_cset_desc* d, char* msg, size_t cap);
+PSYGFX_API int psygfx_cset_winding(const psygfx_cset_desc* d, uint32_t glyph, double x, double y);
 
 
 #ifdef __cplusplus
@@ -2279,9 +2836,17 @@ static void psygfx__set_error(char* buf, size_t cap, const char* fmt, ...) {
 
 /* v0.3: the vector program's packing and CPU form, further down */
 static int psygfx__is_vector(const psygfx_stim* s);
+static const float* psygfx__gauss_table(void);   /* NOISE GAUSSIAN, further down */
+/* NOISE SIMPLEX's per-octave integers (further down) */
+typedef struct psygfx__gn { uint32_t r[8], z[8]; int32_t w[8]; int n; } psygfx__gn;
+static const char* psygfx__gn_setup(const psygfx_gfx* g, const psygfx_stim* s, psygfx__gn* out);
+static uint32_t psygfx__vspec_pick(const psygfx_gfx* g, const float* b, uint32_t pipe);
 static int psygfx__vpack(const psygfx_gfx* g, const psygfx_stim* s, float* b, double ext[2], int* clipped, const char** err);
 static int psygfx__vhard(const float* b, double px, double py);
 static double psygfx__edge_reach(const psygfx_stim* s);
+/* v0.6: a run's packing, with the curve sets further down */
+struct psygfx__cmd;
+static uint32_t psygfx__text_pack(psygfx_gfx* g, const psygfx_stim* s, float* b, struct psygfx__cmd* cmd, int* why);
 
 PSYGFX_API const char* psygfx_version(void) { return PSYGFX_VERSION_STRING; }
 
@@ -2314,6 +2879,7 @@ static int psygfx__texel_bytes(psygfx_format f) {
     case PSYGFX_R16UI:   return 2;
     case PSYGFX_NV12:    return 1;     /* the Y plane */
     case PSYGFX_I420:    return 1;
+    case PSYGFX_RGBA32UI: return 16;
     default:             return 0;
     }
 }
@@ -2463,6 +3029,10 @@ typedef struct psygfx__glf { PSYGFX__GL_FUNCS(PSYGFX__GL_FIELD) } psygfx__glf;
 #define PSYGFX__GL_R32F                 0x822E
 #define PSYGFX__GL_RGBA32F              0x8814
 #define PSYGFX__GL_R16UI                0x8234
+#define PSYGFX__GL_RGBA32UI             0x8D70
+#define PSYGFX__GL_RGBA_INTEGER         0x8D99
+#define PSYGFX__GL_UNSIGNED_INT         0x1405
+#define PSYGFX__GL_MAX_TEXTURE_SIZE     0x0D33
 #define PSYGFX__GL_ARRAY_BUFFER         0x8892
 #define PSYGFX__GL_UNIFORM_BUFFER       0x8A11
 #define PSYGFX__GL_DYNAMIC_DRAW         0x88E8
@@ -2478,9 +3048,9 @@ typedef struct psygfx__gltex {
 typedef struct psygfx__glbuf { psygfx__GLuint buf; psygfx__GLenum target; uint32_t bytes; } psygfx__glbuf;
 typedef struct psygfx__glpipe { psygfx__GLuint prog, vao, vs, fs; int32_t blend, inst, pending; } psygfx__glpipe;
 
-#define PSYGFX__GL_TEX  (3 * PSYGFX_MAX_TEXTURES + 8)   /* three planes a texture */
+#define PSYGFX__GL_TEX  (3 * PSYGFX_MAX_TEXTURES + 9)   /* three planes a texture */
 #define PSYGFX__GL_BUF  (PSYGFX_MAX_BUFFERS + PSYGFX__UBO_RING + 1)
-#define PSYGFX__GL_PIPE (PSYGFX_MAX_PIPELINES + PSYGFX__N_BUILTIN + 2)
+#define PSYGFX__GL_PIPE (PSYGFX_MAX_PIPELINES + 2 * PSYGFX__N_BUILTIN + PSYGFX__N_VSPEC + 8)
 
 /* Program binaries: ES 3.0 has them, WebGL 2 does not, so they are loaded
  * apart from the required table and may be NULL. */
@@ -2553,6 +3123,7 @@ static int psygfx__gl_open(void* c, const psygfx_backend_open* in, psygfx_backen
     caps->float_linear = psygfx__gl_ext(gl, "GL_OES_texture_float_linear") != 0;
     gl->f.GetIntegerv(PSYGFX__GL_UBO_ALIGN, &caps->ubo_align);
     gl->f.GetIntegerv(PSYGFX__GL_MAX_UBO_SIZE, &caps->max_ubo);
+    gl->f.GetIntegerv(PSYGFX__GL_MAX_TEXTURE_SIZE, &caps->max_texture);
     r = gl->f.GetString(PSYGFX__GL_RENDERER);
     snprintf(caps->renderer, sizeof caps->renderer, "%s", r ? (const char*)r : "?");
     r = gl->f.GetString(PSYGFX__GL_VENDOR);
@@ -2769,6 +3340,7 @@ static void psygfx__gl_fmt(psygfx_format f, psygfx__GLenum* ifmt, psygfx__GLenum
     case PSYGFX_R32F:    *ifmt = PSYGFX__GL_R32F;    *fmt = PSYGFX__GL_RED;  *type = PSYGFX__GL_FLOAT; break;
     case PSYGFX_RGBA32F: *ifmt = PSYGFX__GL_RGBA32F; *fmt = PSYGFX__GL_RGBA; *type = PSYGFX__GL_FLOAT; break;
     case PSYGFX_R16UI:   *ifmt = PSYGFX__GL_R16UI;   *fmt = PSYGFX__GL_RED_INTEGER; *type = PSYGFX__GL_UNSIGNED_SHORT; break;
+    case PSYGFX_RGBA32UI: *ifmt = PSYGFX__GL_RGBA32UI; *fmt = PSYGFX__GL_RGBA_INTEGER; *type = PSYGFX__GL_UNSIGNED_INT; break;
     default:             *ifmt = *fmt = *type = 0; break;
     }
 }
@@ -3055,6 +3627,7 @@ static int psygfx__null_open(void* c, const psygfx_backend_open* in, psygfx_back
     caps->color_buffer_float = caps->float_blend = caps->float_linear = true;
     caps->ubo_align = 256;
     caps->max_ubo = 65536;
+    caps->max_texture = 16384;
     snprintf(caps->renderer, sizeof caps->renderer, "null (nothing is drawn)");
     return PSYGFX_OK;
 }
@@ -3165,6 +3738,20 @@ static const char psygfx__glsl_access[] =
     "#endif\n"
     "#define psy_param(k) (psy_v[psy_i * 16 + 8 + (k) / 4][(k) % 4])\n";
 
+/* Cosine and sine of degrees: reduced to a quarter turn's eighth, then
+ * Taylor polynomials, as D3D's sin and cos are coarse (VECTOR SHAPES).
+ * Instances and runs both turn their elements by it. */
+#define PSYGFX__GLSL_CSD \
+    "vec2 psy_csd_(float deg) {\n" \
+    "    float t = deg / 360.0;\n" \
+    "    t -= floor(t + 0.5);\n" \
+    "    float q = floor(t * 4.0 + 0.5), r = (t - 0.25 * q) * 6.28318530717959, r2 = r * r;\n" \
+    "    float s = r * (1.0 + r2 * (-0.166666666666667 + r2 * (0.00833333333333333 + r2 * (-0.000198412698412698 + r2 * 2.75573192239859e-6))));\n" \
+    "    float c = 1.0 + r2 * (-0.5 + r2 * (0.0416666666666667 + r2 * (-0.00138888888888889 + r2 * 2.48015873015873e-5)));\n" \
+    "    int qi = int(q) & 3;\n" \
+    "    return qi == 0 ? vec2(c, s) : (qi == 1 ? vec2(-s, c) : (qi == 2 ? vec2(-c, -s) : vec2(s, -c)));\n" \
+    "}\n"
+
 /* Quads: one stimulus per instance, from the range bound at its first block.
  * Dots: one dot per instance, the stimulus is block 0 of the range. The
  * fragment shader gets the center, not interpolated coordinates: a
@@ -3173,6 +3760,9 @@ static const char psygfx__glsl_access[] =
 static const char psygfx__glsl_vs_body[] =
     "flat out vec2 psy_c;\n"
     "flat out int psy_i;\n"
+    "#ifdef PSY_VIDEO\n"
+    "flat out vec4 psy_vk[7];\n"
+    "#endif\n"
     "#ifdef PSY_GLYPHS\n"
     "layout(location = 0) in vec4 psy_g0;\n"     /* x, y units; atlas x, y */
     "layout(location = 1) in vec4 psy_g1;\n"     /* atlas w, h            */
@@ -3184,17 +3774,7 @@ static const char psygfx__glsl_vs_body[] =
     "layout(location = 1) in vec4 psy_a1;\n"     /* contrast, scale, gate, color */
     "flat out vec4 psy_ixf, psy_ilook, psy_icolor, psy_idir, psy_imisc, psy_isize;\n"
     "flat out float psy_k;\n"
-    /* cosine and sine of degrees: reduced to a quarter turn's eighth, then
-     * Taylor polynomials, as D3D's sin and cos are coarse (VECTOR SHAPES) */
-    "vec2 psy_csd_(float deg) {\n"
-    "    float t = deg / 360.0;\n"
-    "    t -= floor(t + 0.5);\n"
-    "    float q = floor(t * 4.0 + 0.5), r = (t - 0.25 * q) * 6.28318530717959, r2 = r * r;\n"
-    "    float s = r * (1.0 + r2 * (-0.166666666666667 + r2 * (0.00833333333333333 + r2 * (-0.000198412698412698 + r2 * 2.75573192239859e-6))));\n"
-    "    float c = 1.0 + r2 * (-0.5 + r2 * (0.0416666666666667 + r2 * (-0.00138888888888889 + r2 * 2.48015873015873e-5)));\n"
-    "    int qi = int(q) & 3;\n"
-    "    return qi == 0 ? vec2(c, s) : (qi == 1 ? vec2(-s, c) : (qi == 2 ? vec2(-c, -s) : vec2(s, -c)));\n"
-    "}\n"
+    PSYGFX__GLSL_CSD
     "#endif\n"
     "#ifdef PSY_DOTS\n"
     "layout(location = 0) in vec2 psy_dot;\n"
@@ -3280,6 +3860,11 @@ static const char psygfx__glsl_vs_body[] =
     "    vec2 w = psy_c + local.x * ax + local.y * ay;\n"
     "    gl_Position = vec4(w * psy_target.zw * 2.0 - 1.0, 0.0, 1.0);\n"
     "    psy_i = i;\n"
+    /* the video program's constants once a vertex: indexed per fragment from
+     * the uniform array, they cost 0.25 ms of 0.94 at 1080p (measured) */
+    "#ifdef PSY_VIDEO\n"
+    "    for (int k = 0; k < 7; k++) psy_vk[k] = psy_v[i * 16 + 8 + k];\n"
+    "#endif\n"
     "}\n";
 
 /* The fragment library: hash, SDFs, strokes, edge profiles, the aperture. */
@@ -3290,6 +3875,9 @@ static const char psygfx__glsl_fs_lib[] =
     "uniform usampler2D psy_utex0;\n"
     "flat in vec2 psy_c;\n"
     "flat in int psy_i;\n"
+    "#ifdef PSY_VIDEO\n"
+    "flat in vec4 psy_vk[7];\n"
+    "#endif\n"
     "#ifdef PSY_GLYPHS\n"
     "flat in vec2 psy_gh;\n"
     "flat in vec4 psy_gr;\n"
@@ -3297,10 +3885,22 @@ static const char psygfx__glsl_fs_lib[] =
     "out vec4 psy_out;\n"
     "vec2 psy_p;\n"
     "const float psy_PI = 3.14159265358979;\n"
-    "uint psy_hash(uint v) {\n"
-    "    uint s = v * 747796405u + 2891336453u;\n"
-    "    uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;\n"
-    "    return (w >> 22u) ^ w;\n"
+    /* triple32 (Chris Wellons, hash-prospector, public domain): the
+     * psygfx_hash() of the CPU, step for step (docs/psy_gfx.md, v0.9) */
+    "uint psy_hash(uint x) {\n"
+    "    x ^= x >> 17u; x *= 0xed5ad4bbu;\n"
+    "    x ^= x >> 11u; x *= 0xac4c1b51u;\n"
+    "    x ^= x >> 15u; x *= 0x31848babu;\n"
+    "    x ^= x >> 14u;\n"
+    "    return x;\n"
+    "}\n"
+    /* A 2D key: the point's index times an odd key of the seed, XOR a second
+     * key, through one hash. Injective over any 65536 x 65536 window, and a
+     * point's value is unrelated across seeds (docs/psy_gfx.md, v0.9: the
+     * nested form gave rows that were copies of each other) */
+    "uint psy_hash2(uvec2 c, uint seed) {\n"
+    "    uint k = psy_hash(seed), m = psy_hash(k ^ 0x9E3779B9u);\n"
+    "    return psy_hash((c.x + (c.y << 16u)) * (k | 1u) ^ m);\n"
     "}\n"
     /* Bilinear by hand from four texelFetch, the indices clamped to the
      * rectangle sr (texels): no texel outside it can contribute, and the
@@ -3511,11 +4111,67 @@ static const char psygfx__body_gabor[] =
     "    float ay = psy_misc.w * p.y;\n"
     "    return cos(2.0 * psy_PI * x) * exp(-(p.x * p.x + ay * ay) / (2.0 * psy_misc.z * psy_misc.z));\n"
     "}\n";
+/* SIMPLEX (v0.10): 3D simplex noise in integers, so that the CPU's
+ * psygfx_simplex_value() gives the same bits. Lattice coordinates are Q14
+ * (1/16384 of a cell), biased by 2^28 so that every quantity is unsigned,
+ * and every product stays below 2^31; the integer form costs 1.33 to 1.37
+ * times f32 simplex per octave (docs/psy_gfx.md, v0.10). Gradients: the 12
+ * cube edges in 16 slots, by the corner's key's top 4 bits. */
 static const char psygfx__body_noise[] =
+    "const ivec3 psy_gn_g_[16] = ivec3[16](ivec3(1,1,0),ivec3(-1,1,0),ivec3(1,-1,0),ivec3(-1,-1,0),ivec3(1,0,1),\n"
+    "    ivec3(-1,0,1),ivec3(1,0,-1),ivec3(-1,0,-1),ivec3(0,1,1),ivec3(0,-1,1),ivec3(0,1,-1),ivec3(0,-1,-1),\n"
+    "    ivec3(1,1,0),ivec3(-1,1,0),ivec3(0,-1,1),ivec3(0,-1,-1));\n"
+    "uvec2 psy_gn_layer_(uint z, uint S) { uint k = psy_hash(z ^ S); return uvec2(k | 1u, psy_hash(k ^ 0x9E3779B9u)); }\n"
+    "int psy_gn_(uvec3 v, uint S) {\n"
+    "    uint sq = (v.x + v.y + v.z) / 3u;\n"
+    "    uvec3 cell = (v + sq) >> 14u;\n"
+    "    uint g3 = ((cell.x + cell.y + cell.z) << 14u) / 6u;\n"
+    "    ivec3 x0 = ivec3(v - (cell << 14u) + g3);\n"
+    "    ivec3 e = ivec3(greaterThanEqual(x0, x0.yzx));\n"
+    "    ivec3 i1 = e * (1 - e.zxy), i2 = 1 - e.zxy * (1 - e);\n"
+    "    uvec2 L0 = psy_gn_layer_(cell.z, S), L1 = psy_gn_layer_(cell.z + 1u, S);\n"
+    "    ivec3 x[4], o[4];\n"
+    "    x[0] = x0; x[1] = x0 - i1 * 16384 + 2731; x[2] = x0 - i2 * 16384 + 5461; x[3] = x0 - 8192;\n"
+    "    o[0] = ivec3(0); o[1] = i1; o[2] = i2; o[3] = ivec3(1);\n"
+    "    int sum = 0;\n"
+    "    for (int k = 0; k < 4; k++) {\n"
+    "        int t = 161061274 - (x[k].x * x[k].x + x[k].y * x[k].y + x[k].z * x[k].z);\n"
+    "        if (t > 0) {\n"
+    "            uvec3 cc = cell + uvec3(o[k]);\n"
+    "            uvec2 L = o[k].z != 0 ? L1 : L0;\n"
+    "            ivec3 gr = psy_gn_g_[psy_hash((cc.x + (cc.y << 16u)) * L.x ^ L.y) >> 28u];\n"
+    "            t >>= 12; t = (t * t) >> 16; t = (t * t) >> 16;\n"
+    "            sum += t * (gr.x * x[k].x + gr.y * x[k].y + gr.z * x[k].z);\n"
+    "        }\n"
+    "    }\n"
+    "    return sum;\n"
+    "}\n"
+    /* block: p[0..7] each octave's Q14 lattice units per px, p[8..15] and
+     * p[16..23] its z (Q14, mod 2^30) in two 16-bit halves, p[24..31] its
+     * weight (sum 4096); misc.w the octaves. psy_gn_() is the octave's
+     * value times 2^25 (Q30 over 32) */
+    "float psy_gnoise_(vec2 p) {\n"
+    "    uvec2 pi = uvec2(ivec2(floor(p + psy_size.xy)));\n"
+    "    uint S = psy_hash(uint(psy_misc.y));\n"
+    "    int oc = int(psy_misc.w), n = 0;\n"
+    "    for (int o = 0; o < 8; o++) {\n"
+    "        if (o >= oc) break;\n"
+    "        uint r = uint(psy_param(o));\n"
+    "        uint z = (uint(psy_param(8 + o)) << 16u) + uint(psy_param(16 + o));\n"
+    "        uvec3 v = uvec3(((2u * pi.x + 1u) * r) >> 1u, ((2u * pi.y + 1u) * r) >> 1u, z) + 0x10000000u;\n"
+    "        n += (psy_gn_(v, psy_hash(S + uint(o))) >> 13) * int(psy_param(24 + o));\n"
+    "    }\n"
+    "    return clamp(float(clamp(n, -16777215, 16777215)) * (1.0 / 16777216.0), -1.0, 1.0);\n"
+    "}\n"
     "float psy_main(vec2 p) {\n"
+    "    if (psy_misc.z > 2.5) return psy_gnoise_(p);\n"
     "    vec2 q = vec2(p.x + psy_size.x, psy_size.y + p.y) / psy_misc.x;\n"
     "    uvec2 c = uvec2(ivec2(floor(q)));\n"
-    "    uint h = psy_hash(c.x ^ psy_hash(c.y ^ psy_hash(uint(psy_misc.y))));\n"
+    "    uint h = psy_hash2(c, uint(psy_misc.y));\n"
+    /* GAUSSIAN: the hash's top 16 bits pick one of 65536 equally likely
+     * quantiles, a table the CPU computed: no transcendental on the GPU, so
+     * psygfx_noise_value() gives the same bits */
+    "    if (psy_misc.z > 1.5) return texelFetch(psy_tex0, ivec2(int((h >> 16u) & 255u), int(h >> 24u)), 0).r;\n"
     "    if (psy_misc.z > 0.5) return (h & 0x80000000u) != 0u ? 1.0 : -1.0;\n"
     "    return float(int(((h >> 9u) << 1u) + 1u) - 8388608) * (1.0 / 8388608.0);\n"
     "}\n";
@@ -3559,6 +4215,9 @@ static const char psygfx__body_image_fetch[] =
 static const char psygfx__body_image_color[] =
     "vec4 psy_main(vec2 p) {\n"
     "    vec4 c = psy_texel_(p);\n"
+    "#ifndef PSY_VIDEO\n"
+    "    if (psy_misc.w > 0.5) { float a = c.r * psy_color.a; return psy_misc.z > 0.5 ? vec4(psy_color.rgb * a, a) : vec4(psy_color.rgb, a); }\n"
+    "#endif\n"
     "    return psy_misc.z > 0.5 ? c * vec4(psy_color.rgb * psy_color.a, psy_color.a)\n"
     "                            : vec4(c.rgb * psy_color.rgb, c.a * psy_color.a);\n"
     "}\n";
@@ -3578,6 +4237,14 @@ static const char psygfx__body_dots[] =
  * 0xfaded's ellipse (MIT): the notices are at the end of the file. */
 
 static const char psygfx__glsl_vec0[] =
+    /* A specialized program's switches (psygfx__vspecs); none set is the
+     * generic program. PSY_VK: the kinds, bit k for kind k; PSY_ONE: one
+     * kind, so no test; PSY_V1: one primitive, no fold. */
+    "#ifndef PSY_VK\n#define PSY_VK 0x1FFFF\n#endif\n"
+    "#ifndef PSY_ONE\n#define PSY_ONE 0\n#endif\n"
+    "#ifndef PSY_ALONG\n#define PSY_ALONG 1\n#endif\n"
+    "#ifndef PSY_PAINT\n#define PSY_PAINT 1\n#endif\n"
+    "#ifndef PSY_FX\n#define PSY_FX 1\n#endif\n"
     "vec4 psy_vd_(int k) { return psy_v[psy_i * 16 + 9 + k]; }\n"
     "const float psy_TAU = 6.28318530717959;\n"
     "float psy_ang_(vec2 q) { if (q.x == 0.0 && q.y == 0.0) return 0.0; float a = atan(q.y, q.x); return a < 0.0 ? a + psy_TAU : a; }\n"
@@ -3613,7 +4280,8 @@ static const char psygfx__glsl_vec0[] =
     "    if (ws) {\n"
     "        float h = 1.5707963267949, lt = 2.0 * b.x - r.x - r.y, lr = 2.0 * b.y - r.y - r.z;\n"
     "        float lb = 2.0 * b.x - r.z - r.w, ll = 2.0 * b.y - r.w - r.x;\n"
-    "        float sR = lt + h * r.y, sB = sR + lr + h * r.z, sL = sB + lb + h * r.w;\n"
+    "        float sR = lt + h * r.y, sB = sR + lr + h * r.z, sL = sB + lb + h * r.w;\n";
+static const char psygfx__glsl_vec0b[] =   /* C99 caps a literal at 4095 characters */
     "        if (cn) {\n"
     "            if (rt && !bt) e.w = lt + rr * atan(w.x, w.y);\n"
     "            else if (rt) e.w = sR + lr + rr * atan(w.y, w.x);\n"
@@ -3850,24 +4518,47 @@ static const char psygfx__glsl_vec3[] =
     "            vec4 E = psy_vd_(g0 + (k == 0 ? 0 : n - 1));\n"
     "            vec2 v = p - E.xy;\n"
     "            float l = length(v);\n"
-    "            if (l - hw < best.x) best = vec4(l - hw, psy_nrm_(v, vec2(1.0, 0.0)), E.z);\n"
+    "            if (l - hw < best.x) best = vec4(l - hw, psy_nrm_(v, vec2(1.0, 0.0)), E.z);\n";
+static const char psygfx__glsl_vec3b[] =   /* C99 caps a literal at 4095 characters */
     "        }\n"
     "    if (!ws) best.w = 0.0;\n"
     "    return best;\n"
     "}\n"
     "vec4 psy_prim_(vec2 q, vec4 B, vec4 C, vec4 D, bool ws) {\n"
     "    int k = int(B.x);\n"
-    "    if (k == 1) return psy_p_circle_(q, C.x, ws);\n"
-    "    if (k == 2) return psy_p_annulus_(q, C.x, C.z, ws);\n"
-    "    if (k == 8) return psy_p_rrect_(q, C.xy, vec4(C.zw, D.xy), ws);\n"
-    "    if (k == 11) return psy_p_capsule_(q, C.x, C.z, C.w, ws);\n"
-    "    if (k == 9) return psy_p_arc_(q, C.xy, C.z, C.w, D.x, D.zw, ws);\n"
-    "    if (k == 10) return psy_p_pie_(q, C.x, C.yz, D.x, D.zw, ws);\n"
-    "    if (k == 13) return psy_p_star_(q, C, D, ws);\n"
-    "    if (k == 14) return psy_p_ellipse_(q, C.xy, C.z, C.w, ws);\n"
-    "    if (k == 5) { vec4 a = psy_box_(q, vec2(C.x, 0.5 * C.z)), b = psy_box_(q, vec2(0.5 * C.z, C.y)); return a.x < b.x ? a : b; }\n"
-    "    if (k == 4) return psy_p_polygon_(q, int(D.z), int(D.w), ws);\n"
-    "    if (k == 16) return psy_p_polyline_(q, int(D.z), int(D.w), C.z, int(C.w), D.x, int(D.y), ws);\n"
+    "#if (PSY_VK & 0x2) != 0\n"
+    "    if (PSY_ONE != 0 || k == 1) return psy_p_circle_(q, C.x, ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x4) != 0\n"
+    "    if (PSY_ONE != 0 || k == 2) return psy_p_annulus_(q, C.x, C.z, ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x100) != 0\n"
+    "    if (PSY_ONE != 0 || k == 8) return psy_p_rrect_(q, C.xy, vec4(C.zw, D.xy), ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x800) != 0\n"
+    "    if (PSY_ONE != 0 || k == 11) return psy_p_capsule_(q, C.x, C.z, C.w, ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x200) != 0\n"
+    "    if (PSY_ONE != 0 || k == 9) return psy_p_arc_(q, C.xy, C.z, C.w, D.x, D.zw, ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x400) != 0\n"
+    "    if (PSY_ONE != 0 || k == 10) return psy_p_pie_(q, C.x, C.yz, D.x, D.zw, ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x2000) != 0\n"
+    "    if (PSY_ONE != 0 || k == 13) return psy_p_star_(q, C, D, ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x4000) != 0\n"
+    "    if (PSY_ONE != 0 || k == 14) return psy_p_ellipse_(q, C.xy, C.z, C.w, ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x20) != 0\n"
+    "    if (PSY_ONE != 0 || k == 5) { vec4 a = psy_box_(q, vec2(C.x, 0.5 * C.z)), b = psy_box_(q, vec2(0.5 * C.z, C.y)); return a.x < b.x ? a : b; }\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x10) != 0\n"
+    "    if (PSY_ONE != 0 || k == 4) return psy_p_polygon_(q, int(D.z), int(D.w), ws);\n"
+    "#endif\n"
+    "#if (PSY_VK & 0x10000) != 0\n"
+    "    if (PSY_ONE != 0 || k == 16) return psy_p_polyline_(q, int(D.z), int(D.w), C.z, int(C.w), D.x, int(D.y), ws);\n"
+    "#endif\n"
     "    return vec4(1e30, 1.0, 0.0, 0.0);\n"
     "}\n"
     /* Inigo Quilez, the quadratic polynomial smooth minimum
@@ -3895,6 +4586,16 @@ static const char psygfx__glsl_vec4[] =
     "    vec4 acc = vec4(1e30, 1.0, 0.0, 0.0);\n"
     "    f0 = acc;\n"
     "    f1 = acc;\n"
+    "#ifdef PSY_V1\n"   /* one primitive, block 0 (no onion): what the fold gives for n = 1 */
+    "    vec4 A = psy_vd_(0), B = psy_vd_(1), C = psy_vd_(2), D = psy_vd_(3);\n"
+    "    vec2 ax = A.zw, ay = vec2(-A.w, A.z);\n"
+    "    for (int t = 0; t < npts; t++) {\n"
+    "        vec2 r = (t == 0 ? p : p1) - A.xy;\n"
+    "        vec4 e = psy_prim_(vec2(dot(r, ax), dot(r, ay)), B, C, D, ws);\n"
+    "        e.yz = e.y * ax + e.z * ay;\n"
+    "        if (t == 0) f0 = e; else f1 = e;\n"
+    "    }\n"
+    "#else\n"
     "    for (int t = 0; t < n * npts; t++) {\n"
     "        int i = t < n ? t : t - n;\n"
     "        vec4 A = psy_vd_(4 * i), B = psy_vd_(4 * i + 1), C = psy_vd_(4 * i + 2), D = psy_vd_(4 * i + 3);\n"
@@ -3906,6 +4607,7 @@ static const char psygfx__glsl_vec4[] =
     "        if (t == n - 1) f0 = acc;\n"
     "        if (t == 2 * n - 1) f1 = acc;\n"
     "    }\n"
+    "#endif\n"
     "    if (npts < 2) f1 = f0;\n"
     "}\n"
     "/* Coverage and Gaussians four at a time: D3D inlines each call site, so\n"
@@ -3926,7 +4628,8 @@ static const char psygfx__glsl_vec4[] =
     "    }\n"
     "    return 0.5 * psy_erfc4_(d / (w * 1.4142135623731));\n"
     "}\n"
-    "vec4 psy_gauss4_(vec4 x, vec4 sg) {\n"
+    "vec4 psy_gauss4_(vec4 x, vec4 sg) {\n";
+static const char psygfx__glsl_vec4b[] =   /* C99 caps a literal at 4095 characters */
     "    vec4 g = 0.5 * psy_erfc4_(x / (max(sg, vec4(1e-30)) * 1.4142135623731));\n"
     "    return mix(g, mix(vec4(0.0), vec4(1.0), lessThanEqual(x, vec4(0.0))), lessThanEqual(sg, vec4(0.0)));\n"
     "}\n"
@@ -4011,7 +4714,11 @@ static const char psygfx__glsl_vec5[] =
     "#else\n"
     "    const float ki = 1.0;\n"
     "#endif\n"
+    "#ifdef PSY_WS\n"   /* the arc length: a constant in a specialized program */
+    "    psy_field_(psy_p / ki, (psy_p - V7.xy) / ki, int(V7.w), PSY_WS != 0, f0, f1);\n"
+    "#else\n"
     "    psy_field_(psy_p / ki, (psy_p - V7.xy) / ki, int(V7.w), (fl & 8) != 0, f0, f1);\n"
+    "#endif\n"
     "    f0.x *= ki;\n"
     "    f1.x *= ki;\n"
     "    if ((fl & 4) != 0) { f0.x /= max(length(f0.yz), 1e-3); f1.x /= max(length(f1.yz), 1e-3); }\n"
@@ -4019,8 +4726,15 @@ static const char psygfx__glsl_vec5[] =
     "    float d = f0.x - V2.z, d1 = f1.x - V2.z, hw = V3.w;\n"
     "    vec4 c0 = psy_cov4_(vec4(d - V2.w - hw, d - V2.w + hw, d, 0.0));\n"
     "    float cm = hw > 0.0 ? c0.x - c0.y : c0.z;\n"
+    "#if PSY_ALONG != 0\n"
     "    if ((fl & 3) != 0) cm = psy_along_(cm, hw > 0.0 ? d - V2.w : d + V8.w, hw > 0.0 ? hw : V8.w, f0.w);\n"
+    "#endif\n"
+    "#if PSY_PAINT != 0\n"
     "    vec4 acc = vec4((fl & 16) != 0 ? psy_paint_(psy_p / ki, f0, d / ki) : V3.rgb, 1.0) * cm;\n"
+    "#else\n"
+    "    vec4 acc = vec4(V3.rgb, 1.0) * cm;\n"
+    "#endif\n"
+    "#if PSY_FX != 0\n"
     "    if ((fl & 32) != 0) {\n"
     "        int o = int(V8.x);\n"
     "        vec4 Dp = psy_vd_(o), Gp = psy_vd_(o + 2), Ip = psy_vd_(o + 4), B0 = psy_vd_(o + 6), B1 = psy_vd_(o + 8);\n"
@@ -4039,19 +4753,320 @@ static const char psygfx__glsl_vec5[] =
     "        r = psy_over_(vec4(psy_vd_(o + 9).rgb, 1.0) * ((bd.z - bd.w) * B1.z), r);\n"
     "        acc = r;\n"
     "    }\n"
+    "#endif\n"
     "    psy_out = acc * (V2.x * V2.y);\n"
     "}\n";
 
-static const char* const psygfx__glsl_vec[] = { psygfx__glsl_vec0, psygfx__glsl_vec1, psygfx__glsl_vec2, psygfx__glsl_vec3, psygfx__glsl_vec4, psygfx__glsl_vec5 };
+static const char* const psygfx__glsl_vec[] = { psygfx__glsl_vec0, psygfx__glsl_vec0b, psygfx__glsl_vec1, psygfx__glsl_vec2, psygfx__glsl_vec3, psygfx__glsl_vec3b, psygfx__glsl_vec4, psygfx__glsl_vec4b, psygfx__glsl_vec5 };
+
+/* The text program (v0.6, RUNS): one glyph or path per instance, from a
+ * curve set's two textures (CURVE SETS). The vertex shader finds the glyph's
+ * record, builds the item's map from em to the pass's GL px and emits the
+ * turned glyph box grown by 1 px. The fragment shader casts two rays from
+ * the pixel center through the glyph's bands (Lengyel 2017). Block 0:
+ * placement; (half box px, px per unit, px per em); (opacity, gate, fields,
+ * aliased); (rgb, palette length); (log2 texture width, quad margin px, G, rays); (cap
+ * px, e, the box's top-left in item units); the palette from vec4 32. */
+static const char psygfx__glsl_text_vs[] =
+    "uniform usampler2D psy_utex0;\n"
+    "layout(location = 0) in vec4 psy_a0;\n"     /* x, y units; ori deg; glyph */
+    "layout(location = 1) in vec4 psy_a1;\n"     /* contrast, scale, gate, palette position */
+    "flat out vec4 psy_tq;\n"                    /* the glyph box's center: px, y down; em */
+    "flat out vec4 psy_tj;\n"                    /* the em axes in px, y down, over px per em */
+    "flat out vec4 psy_tb;\n"                    /* the bbox, em */
+    "flat out uvec4 psy_th;\n"                   /* record word, band counts, flags */
+    "flat out vec4 psy_tc;\n"                    /* rgb, alpha */
+    PSYGFX__GLSL_CSD
+    "uvec4 psy_w4_(int t, int L) { return texelFetch(psy_utex0, ivec2(t & ((1 << L) - 1), t >> L), 0); }\n"
+    "void main() {\n"
+    "    vec4 B0 = psy_v[0], B1 = psy_v[1], B2 = psy_v[2], B3 = psy_v[3], B4 = psy_v[4];\n"
+    "    int m = int(B2.z), L = int(B4.x);\n"
+    "    vec2 c = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2.0 - 1.0;\n"
+    "    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
+    "    psy_tq = vec4(0.0); psy_tj = vec4(0.0); psy_tb = vec4(0.0); psy_th = uvec4(0u); psy_tc = vec4(0.0);\n"
+    "    float gid = psy_a0.w, k = (m & 16) != 0 ? psy_a1.y : 1.0;\n"
+    "    float a = B2.x * B2.y * ((m & 8) != 0 ? psy_a1.x : 1.0) * ((m & 32) != 0 ? psy_a1.z : 1.0);\n"
+    "    if (!(gid >= 0.0 && gid < B4.z && gid == floor(gid)) || !(k > 0.0) || a == 0.0) return;\n"
+    "    int ti = 8 + int(gid);\n"
+    "    uint o = psy_w4_(ti >> 2, L)[ti & 3];\n"
+    "    if (o == 0u) return;\n"
+    "    uvec4 h1 = psy_w4_(int(o >> 2u) + 1, L);\n"
+    "    if ((h1.x & 0xFFFFu) == 0u) return;\n"
+    "    vec4 bb = uintBitsToFloat(psy_w4_(int(o >> 2u), L));\n"
+    /* the item's em axes: its ori about the glyph box's center, from the
+     * run's turned axes; px per em times its scale. In px with y down (the
+     * pack's, psy_v[6]), not the pass's GL px: a target pass (rows top
+     * first) and the scene then compute a pixel's em point from the same
+     * bits, so a run cached in a target at 1:1 has the scene's coverage */
+    "    vec4 B6 = psy_v[6];\n"
+    "    vec2 ax = B6.zw, ay = vec2(-B6.w, B6.z);\n"
+    "    vec2 cs = (m & 2) != 0 ? psy_csd_(psy_a0.z) : vec2(1.0, 0.0);\n"
+    "    vec2 ex = cs.x * ax + cs.y * ay, ey = cs.x * ay - cs.y * ax;\n"
+    "    float sp = B1.w * k;\n"
+    "    vec2 ce = 0.5 * (bb.xy + bb.zw), hb = 0.5 * (bb.zw - bb.xy);\n"
+    "    vec2 lc = (psy_a0.xy - psy_v[5].zw) * B1.z - B1.xy + B1.w * ce;\n"
+    "    vec2 Q = B6.xy + lc.x * ax + lc.y * ay;\n"
+    /* grown by what a pixel can reach past the outline: half its diagonal */
+    "    vec2 w = Q + (c.x * (sp * hb.x + B4.y)) * ex + (c.y * (sp * hb.y + B4.y)) * ey;\n"
+    "    if (psy_axes.x < 0.0) w.y = psy_target.y - w.y;\n"
+    "    gl_Position = vec4(w * psy_target.zw * 2.0 - 1.0, 0.0, 1.0);\n"
+    "    vec3 pc = B3.rgb;\n"
+    "    if ((m & 64) != 0) {\n"
+    "        int n = int(B3.w);\n"
+    "        float u = clamp(psy_a1.w, 0.0, float(n - 1));\n"
+    "        int i0 = int(floor(u));\n"
+    "        float f = u - float(i0);\n"
+    "        pc = f > 0.0 ? mix(psy_v[32 + i0].rgb, psy_v[32 + min(i0 + 1, n - 1)].rgb, f) : psy_v[32 + i0].rgb;\n"
+    "    }\n"
+    "    psy_tq = vec4(Q, ce); psy_tj = vec4(ex, ey) / sp; psy_tb = bb;\n"
+    "    psy_th = uvec4(o, h1.x, h1.y, 0u); psy_tc = vec4(pc, a);\n"
+
+    "}\n";
+
+static const char psygfx__glsl_text_fs0[] =
+    "uniform sampler2D psy_tex0;\n"
+    "uniform usampler2D psy_utex0;\n"
+    "flat in vec4 psy_tq, psy_tj, psy_tb;\n"
+    "flat in uvec4 psy_th;\n"
+    "flat in vec4 psy_tc;\n"
+    "out vec4 psy_out;\n"
+    "int psy_L;\n"
+    "float psy_sp, psy_cap;\n"
+    "bool psy_alias;\n"
+    "vec4 psy_t4_(int i) { return texelFetch(psy_tex0, ivec2(i & ((1 << psy_L) - 1), i >> psy_L), 0); }\n"
+    "uvec4 psy_w4_(int t) { return texelFetch(psy_utex0, ivec2(t & ((1 << psy_L) - 1), t >> psy_L), 0); }\n"
+    /* The fraction of the unit pixel square where n . q < z, for a unit
+     * normal n with |n.x| = a, |n.y| = b: the CDF of the square's projection
+     * on n, a trapezoid of support a + b and plateau |a - b|. */
+    "float psy_hp_(float z, float a, float b) {\n"
+    "    float w0 = min(a, b), w1 = max(a, b), u = z + 0.5 * (a + b);\n"
+    "    if (u <= 0.0) return 0.0;\n"
+    "    if (u >= a + b) return 1.0;\n"
+    "    if (w0 < 1e-6) return clamp(u / w1, 0.0, 1.0);\n"
+    "    if (u < w0) return u * u / (2.0 * w0 * w1);\n"
+    "    if (u <= w1) return (u - 0.5 * w0) / w1;\n"
+    "    float r = a + b - u;\n"
+    "    return 1.0 - r * r / (2.0 * w0 * w1);\n"
+    "}\n"
+    /* the fill rule on a fractional winding: exact while the window sees one
+     * transition */
+    "float psy_fill_(float w, bool eo) { float x = abs(w); return eo ? 1.0 - abs(1.0 - mod(x, 2.0)) : min(x, 1.0); }\n"
+    /* One crossing: s its direction, up its distance along the ray (px), T
+     * the curve's tangent there (GL px), es the ray's direction (GL px). A
+     * crossing near the pixel adds the exact box coverage of the half-plane
+     * bounded by the tangent line (exact on any straight edge); its weight is
+     * how steeply and how near the ray crosses, 0 where the coverage
+     * saturates, so the mix of the two rays is continuous. */
+    "void psy_root_(float s, float up, vec2 Ts, vec2 es, inout float c, inout float wg) {\n"
+    "    float tl = dot(Ts, Ts);\n"
+    "    if (psy_alias || abs(up) > psy_cap || !(tl > 0.0)) { c += up > 0.0 ? s : 0.0; return; }\n"
+    "    vec2 n = vec2(-Ts.y, Ts.x) * inversesqrt(tl);\n"
+    "    float ce = abs(dot(n, es)), a = abs(n.x), b = abs(n.y), z = up * ce;\n"
+    "    c += s * psy_hp_(z, a, b);\n"
+    "    wg = max(wg, ce * clamp(1.0 - abs(z) / (0.5 * (a + b)), 0.0, 1.0));\n"
+    "}\n";
+
+/* V3: exact area where the pixel's footprint in em is an axis-aligned
+ * rectangle (no turn but quarter turns) and the glyph is resolved. The
+ * area of shape intersect pixel is the sum over curves of the integral of
+ * clamp(x, 0, W) d clamp(y, 0, H) in pixel-corner coordinates (Green's
+ * theorem): a curve right of the pixel adds W times its clamped rise, one
+ * left of it nothing, and one over it is cut into pieces monotone in x and
+ * y, whose middle part is a cubic in t (two Gauss points are exact). */
+static const char psygfx__glsl_text_slab[] =
+    "float psy_qv_(vec3 k, float t) { return (k.x * t + k.y) * t + k.z; }\n"
+    /* the t in [s, e] where the monotone k(t) takes the value v */
+    "float psy_tat_(vec3 k, float v, float s, float e) {\n"
+    "    float C = k.z - v, t;\n"
+    "    if (abs(k.x) * (e - s) <= 1e-6 * abs(k.y)) t = -C / k.y;\n"
+    "    else {\n"
+    "        float D = sqrt(max(k.y * k.y - 4.0 * k.x * C, 0.0)), q = -0.5 * (k.y + (k.y >= 0.0 ? D : -D));\n"
+    "        float t1 = q / k.x, t2 = q != 0.0 ? C / q : t1, m = 0.5 * (s + e);\n"
+    "        t = abs(t1 - m) < abs(t2 - m) ? t1 : t2;\n"
+    "    }\n"
+    "    return clamp(t, s, e);\n"
+    "}\n"
+    "float psy_mid_(vec3 kx, vec3 ky, float a, float b) {\n"
+    "    float h = 0.5 * (b - a), m = 0.5 * (a + b), g = 0.577350269189626 * h;\n"
+    "    float t0 = m - g, t1 = m + g;\n"
+    "    return h * (psy_qv_(kx, t0) * (2.0 * ky.x * t0 + ky.y) + psy_qv_(kx, t1) * (2.0 * ky.x * t1 + ky.y));\n"
+    "}\n"
+    "float psy_slab_(vec2 q0, vec2 q1, vec2 q2, float W, float H) {\n"
+    "    float y0 = min(min(q0.y, q1.y), q2.y), y1 = max(max(q0.y, q1.y), q2.y);\n"
+    "    if (y1 <= 0.0 || y0 >= H) return 0.0;\n"
+    "    if (min(min(q0.x, q1.x), q2.x) >= W) return W * (clamp(q2.y, 0.0, H) - clamp(q0.y, 0.0, H));\n"
+    "    vec3 kx = vec3(q0.x - 2.0 * q1.x + q2.x, 2.0 * (q1.x - q0.x), q0.x);\n"
+    "    vec3 ky = vec3(q0.y - 2.0 * q1.y + q2.y, 2.0 * (q1.y - q0.y), q0.y);\n"
+    "    float ex = kx.x != 0.0 ? clamp(-kx.y / (2.0 * kx.x), 0.0, 1.0) : 1.0;\n"
+    "    float ey = ky.x != 0.0 ? clamp(-ky.y / (2.0 * ky.x), 0.0, 1.0) : 1.0;\n"
+    "    vec4 sp = vec4(0.0, min(ex, ey), max(ex, ey), 1.0);\n"
+    "    float acc = 0.0;\n"
+    "    for (int i = 0; i < 3; i++) {\n"
+    "        float s = sp[i], e = sp[i + 1];\n"
+    "        if (!(e > s)) continue;\n"
+    "        float ys = psy_qv_(ky, s), ye = psy_qv_(ky, e);\n"
+    "        if (max(ys, ye) <= 0.0 || min(ys, ye) >= H) continue;\n"
+    "        float va = clamp(ys, 0.0, H), vb = clamp(ye, 0.0, H);\n"
+    "        float ta = va == ys ? s : psy_tat_(ky, va, s, e), tb = vb == ye ? e : psy_tat_(ky, vb, s, e);\n"
+    "        float xs = psy_qv_(kx, ta), xe = psy_qv_(kx, tb);\n"
+    "        if (max(xs, xe) <= 0.0) continue;\n"
+    "        if (min(xs, xe) >= W) { acc += W * (vb - va); continue; }\n"
+    "        bool up = xs <= xe;\n"
+    "        float u0 = (xs < 0.0) != (xe < 0.0) ? psy_tat_(kx, 0.0, ta, tb) : (up ? ta : tb);\n"
+    "        float uw = (xs > W) != (xe > W) ? psy_tat_(kx, W, ta, tb) : (up ? tb : ta);\n"
+    "        if (up) {\n"   /* x rises: left, middle, right */
+    "            acc += psy_mid_(kx, ky, u0, max(uw, u0));\n"
+    "            if (uw < tb) acc += W * (vb - psy_qv_(ky, uw));\n"
+    "        } else {\n"          /* x falls: right, middle, left */
+    "            if (uw > ta) acc += W * (psy_qv_(ky, uw) - va);\n"
+    "            acc += psy_mid_(kx, ky, uw, max(u0, uw));\n"
+    "        }\n"
+    "    }\n"
+    "    return acc;\n"
+    "}\n"
+    ;
+
+/* One ray along em +x (hz) or +y through its band: the fractional winding
+ * and the weight. The band's list is sorted by the largest coordinate along
+ * the ray, so the loop ends at the first curve wholly behind the window. */
+static const char psygfx__glsl_text_ray[] =
+    "vec2 psy_ray_(vec2 p, vec2 pr, int rec, int nh, int nv, uint fl, vec2 ex, vec2 ey, bool hz) {\n"
+    "    int nb = hz ? nh : nv;\n"
+    "    float ac = hz ? p.y : p.x, lo = hz ? psy_tb.y : psy_tb.x, hi = hz ? psy_tb.w : psy_tb.z;\n"
+    "    float al = hz ? p.x : p.y, alo = hz ? psy_tb.x : psy_tb.y, ahi = hz ? psy_tb.z : psy_tb.w;\n"
+    "    int kb = clamp(int(floor((ac - lo) * float(nb) / (hi - lo))), 0, nb - 1);\n"
+    "    uvec4 D = psy_w4_(rec + 2 + (hz ? kb : nh + kb));\n"
+    /* a backward list casts the ray the other way, from the nearer side */
+    "    bool bw = (fl & 2u) != 0u && al < 0.5 * (alo + ahi);\n"
+    "    int j = int(bw ? D.z : D.x), end = j + int(bw ? D.w : D.y);\n"
+    "    vec2 E = hz ? vec2(1.0, 0.0) : vec2(0.0, 1.0), F = hz ? vec2(0.0, 1.0) : vec2(-1.0, 0.0);\n"
+    "    float sg = bw ? -1.0 : 1.0;\n"
+    "    E *= sg;\n"
+    "    vec2 es = normalize(E.x * ex + E.y * ey);\n"
+    "    float cut = psy_alias ? 0.0 : -psy_cap / psy_sp, c = 0.0, wg = 0.0;\n"
+    "    uvec4 R4 = psy_w4_(j >> 2);\n"
+    "    for (; j < end; j++) {\n"
+    "        if ((j & 3) == 0) R4 = psy_w4_(j >> 2);\n"
+    "        int r = int(R4[j & 3]);\n"
+    "        vec4 T0 = psy_t4_(r) - psy_tq.zwzw, T1 = psy_t4_(r + 1) - psy_tq.zwzw;\n"
+    "        vec2 q0 = T0.xy - pr, q1 = T0.zw - pr, q2 = T1.xy - pr;\n"
+    "        vec3 u = vec3(dot(q0, E), dot(q1, E), dot(q2, E));\n"
+    "        if (max(max(u.x, u.y), u.z) < cut) break;\n"
+    "        vec3 v = vec3(dot(q0, F), dot(q1, F), dot(q2, F));\n"
+    /* the root rule (CURVE SETS): the signs of the three control values
+     * give which roots lie on the curve; the root formula gives each one's
+     * direction */
+    "        bool s1 = v.x > 0.0, s2 = v.y > 0.0, s3 = v.z > 0.0;\n"
+    "        bool two = s1 == s3 && s2 != s1;\n"
+    "        bool fall = (s1 && !s3) || two, rise = (!s1 && s3) || two;\n"
+    "        if (!fall && !rise) continue;\n"
+    "        float a = v.x - 2.0 * v.y + v.z, b = v.x - v.y, D = b * b - a * v.x;\n"
+    /* in a two-root row the curve may turn back before the ray: D < 0
+     * then means no crossing, where clamping D would give two roots that
+     * do not cancel. Elsewhere one root is certain and D < 0 is rounding */
+    "        if (two && D < 0.0) continue;\n"
+    "        float sD = sqrt(max(D, 0.0));\n"
+    "        float q = b + (b >= 0.0 ? sD : -sD);\n"
+    "        float tr = 0.0, tf = 0.0;\n"
+    "        if (q != 0.0) { if (b >= 0.0) { tr = q / a; tf = v.x / q; } else { tf = q / a; tr = v.x / q; } }\n"
+    "        float au = u.x - 2.0 * u.y + u.z, bu = u.x - u.y;\n"
+    "        vec2 A2 = q0 - 2.0 * q1 + q2, B2 = q0 - q1;\n"
+    /* a line has p1 = p0: no tangent at its start, so its direction */
+    "        bool ln = dot(B2, B2) == 0.0;\n"
+    "        vec2 Tr = ln ? A2 : A2 * tr - B2, Tf = ln ? A2 : A2 * tf - B2;\n"
+    "        if (rise) psy_root_(1.0, ((au * tr - 2.0 * bu) * tr + u.x) * psy_sp, Tr.x * ex + Tr.y * ey, es, c, wg);\n"
+    "        if (fall) psy_root_(-1.0, ((au * tf - 2.0 * bu) * tf + u.x) * psy_sp, Tf.x * ex + Tf.y * ey, es, c, wg);\n"
+    "    }\n"
+    "    return vec2(sg * c, wg);\n"
+    "}\n";
+
+/* V3: the pixel's rows are a slab [p.y - hw.y, p.y + hw.y] in em; each band
+ * they meet integrates its own part of them. */
+static const char psygfx__glsl_text_main[] =
+    "float psy_area_(vec2 p, vec2 pr, vec2 hw, int rec, int nh, uint fl) {\n"
+    "    float bh = (psy_tb.w - psy_tb.y) / float(nh), area = 0.0, W = 2.0 * hw.x;\n"
+    /* from the nearer side: a closed contour's rise sums to 0, so the
+     * integral of clamp(x) - W counts the curves left of the pixel instead */
+    "    bool bw = (fl & 2u) != 0u && p.x < 0.5 * (psy_tb.x + psy_tb.z);\n"
+    "    int k0 = clamp(int(floor((p.y - hw.y - psy_tb.y) / bh)), 0, nh - 1);\n"
+    "    int k1 = clamp(int(floor((p.y + hw.y - psy_tb.y) / bh)), 0, nh - 1);\n"
+    "    for (int k = k0; k <= k1; k++) {\n"
+    "        uvec4 D = psy_w4_(rec + 2 + k);\n"
+    "        float ya = k == 0 ? 0.0 : clamp(psy_tb.y + float(k) * bh - (p.y - hw.y), 0.0, 2.0 * hw.y);\n"
+    "        float yb = k == nh - 1 ? 2.0 * hw.y : clamp(psy_tb.y + float(k + 1) * bh - (p.y - hw.y), 0.0, 2.0 * hw.y);\n"
+    "        vec2 o = hw - pr - vec2(0.0, ya);\n"
+    "        int j = int(bw ? D.z : D.x), end = j + int(bw ? D.w : D.y);\n"
+    "        uvec4 R4 = psy_w4_(j >> 2);\n"
+    "        for (; j < end; j++) {\n"
+    "            if ((j & 3) == 0) R4 = psy_w4_(j >> 2);\n"
+    "            int r = int(R4[j & 3]);\n"
+    "            vec4 T0 = psy_t4_(r) - psy_tq.zwzw, T1 = psy_t4_(r + 1) - psy_tq.zwzw;\n"
+    "            vec2 q0 = T0.xy + o, q1 = T0.zw + o, q2 = T1.xy + o;\n"
+    /* sorted by the largest (smallest) x: nothing further reaches the pixel */
+    "            if (bw ? min(min(q0.x, q1.x), q2.x) >= W : max(max(q0.x, q1.x), q2.x) <= 0.0) break;\n"
+    "            area += psy_slab_(q0, q1, q2, W, yb - ya) - (bw ? W * (clamp(q2.y, 0.0, yb - ya) - clamp(q0.y, 0.0, yb - ya)) : 0.0);\n"
+    "        }\n"
+    "    }\n"
+    "    return area;\n"
+    "}\n"
+    "void main() {\n"
+    "    psy_L = int(psy_v[4].x);\n"
+    /* y down: H - y is exact at pixel centers */
+    "    vec2 d = vec2(gl_FragCoord.x, psy_axes.x < 0.0 ? psy_target.y - gl_FragCoord.y : gl_FragCoord.y) - psy_tq.xy;\n"
+    /* curves from the glyph box's center: the two values are near each
+     * other, so their difference is exact, and the pixel's offset small: a
+     * glyph far from the origin (CFF units) keeps every bit near the pixel */
+    "    vec2 pr = vec2(dot(psy_tj.xy, d), dot(psy_tj.zw, d)), p = psy_tq.zw + pr;\n"
+    "    vec2 ex = psy_tj.xy, ey = psy_tj.zw;\n"
+    "    psy_sp = inversesqrt(dot(ex, ex));\n"
+    "    vec2 hw = 0.5 * vec2(abs(ex.x) + abs(ex.y), abs(ey.x) + abs(ey.y));\n"
+    "    psy_cap = psy_v[5].x;\n"
+    "    psy_alias = psy_v[2].w > 0.5;\n"
+    "    uint fl = psy_th.z;\n"
+    "    bool eo = (fl & 1u) != 0u;\n"
+    "    int rec = int(psy_th.x >> 2u), nh = int(psy_th.y & 0xFFFFu), nv = int(psy_th.y >> 16u);\n"
+    "    float cov;\n"
+    /* exact area where the pixel is an axis-aligned rectangle in em (no turn
+     * but quarter turns) and the glyph is resolved (CURVE SETS, flag bit 2) */
+    "    if (PSY_TEXT_V3 != 0 && (fl & 4u) != 0u && !psy_alias && (abs(ex.y) + abs(ey.x) <= 1e-6 * (abs(ex.x) + abs(ey.y)) ||\n"
+    "                                          abs(ex.x) + abs(ey.y) <= 1e-6 * (abs(ex.y) + abs(ey.x)))) {\n"
+    "        cov = clamp(abs(psy_area_(p, pr, hw, rec, nh, fl)) / (4.0 * hw.x * hw.y), 0.0, 1.0);\n"
+    "    } else {\n"
+    "        vec2 rx = psy_ray_(p, pr, rec, nh, nv, fl, ex, ey, true);\n"
+    "        float fx = psy_fill_(rx.x, eo);\n"
+    "        if (psy_alias) cov = fx;\n"
+    "        else {\n"
+    /* the weighted mean is a convex mix of the two rays, bounded whatever
+     * the weights; below e of total weight it fades to their mean, where
+     * both rays see the same integer winding */
+    "            vec2 ry = psy_ray_(p, pr, rec, nh, nv, fl, ex, ey, false);\n"
+    "            float fy = psy_fill_(ry.x, eo), sw = rx.y + ry.y, t = clamp(sw / psy_v[5].y, 0.0, 1.0);\n"
+    "            cov = mix(0.5 * (fx + fy), sw > 0.0 ? (fx * rx.y + fy * ry.y) / sw : 0.0, t);\n"
+    "        }\n"
+    "    }\n"
+    "    psy_out = vec4(psy_tc.rgb * (cov * psy_tc.a), cov * psy_tc.a);\n"
+    "}\n";
 
 static const char psygfx__glsl_output[] =
     "uniform sampler2D psy_tex0;\n"   /* the scene                          */
     "uniform sampler2D psy_tex1;\n"   /* the CLUT, n x 3                    */
     "out vec4 psy_out;\n"
-    "uint psy_hash(uint v) {\n"
-    "    uint s = v * 747796405u + 2891336453u;\n"
-    "    uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;\n"
-    "    return (w >> 22u) ^ w;\n"
+    /* triple32 (Chris Wellons, hash-prospector, public domain): the
+     * psygfx_hash() of the CPU, step for step (docs/psy_gfx.md, v0.9) */
+    "uint psy_hash(uint x) {\n"
+    "    x ^= x >> 17u; x *= 0xed5ad4bbu;\n"
+    "    x ^= x >> 11u; x *= 0xac4c1b51u;\n"
+    "    x ^= x >> 15u; x *= 0x31848babu;\n"
+    "    x ^= x >> 14u;\n"
+    "    return x;\n"
+    "}\n"
+    /* A 2D key: the point's index times an odd key of the seed, XOR a second
+     * key, through one hash. Injective over any 65536 x 65536 window, and a
+     * point's value is unrelated across seeds (docs/psy_gfx.md, v0.9: the
+     * nested form gave rows that were copies of each other) */
+    "uint psy_hash2(uvec2 c, uint seed) {\n"
+    "    uint k = psy_hash(seed), m = psy_hash(k ^ 0x9E3779B9u);\n"
+    "    return psy_hash((c.x + (c.y << 16u)) * (k | 1u) ^ m);\n"
     "}\n"
     "void main() {\n"
     "    ivec2 q = ivec2(gl_FragCoord.xy);\n"
@@ -4073,7 +5088,7 @@ static const char psygfx__glsl_output[] =
     "        int b = ((z & 1) << 5) | ((x & 1) << 4) | ((z & 2) << 2) | ((x & 2) << 1) | ((z & 4) >> 1) | ((x & 4) >> 2);\n"
     "        t = (float(b) + 0.5) / 64.0;\n"
     "    } else if (psy_outp.z == 2) {\n"
-    "        uint h = psy_hash(uint(q.x) ^ psy_hash(uint(q.y) ^ psy_hash(psy_seed.x ^ psy_hash(psy_seed.z))));\n"
+    "        uint h = psy_hash2(uvec2(q), psy_seed.x ^ psy_hash(psy_seed.z));\n"
     "        t = (float(h >> 8u) + 0.5) * (1.0 / 16777216.0);\n"
     "    }\n"
     "    vec3 code = clamp(floor(d * mx + t), 0.0, mx);\n"
@@ -4404,10 +5419,37 @@ static const struct psygfx__builtin_def {
     { "#define PSY_GLYPHS 1\n#define PSY_OFFSET 1\n", psygfx__body_shape, PSYGFX_COLOR, 2, "glyphs" },
 };
 
+/* Specialized vector programs (KINDS): the vector program's text with
+ * defines that remove what one case cannot reach, so each computes what the
+ * generic program computes for that case (the test compares them bit for
+ * bit). Built only where one closed at least half of a cost bar's gap
+ * (docs/psy_gfx.md, "Kind-specialized vector programs"). kind is the
+ * shader's primitive kind (psygfx__vkind()); tier: PLAIN one primitive, no
+ * dash, trim, paint or fx; ALONG one primitive with dashes or trim, no paint
+ * or fx; FOLD a compound of that kind only, no paint. */
+enum { PSYGFX__VS_PLAIN, PSYGFX__VS_ALONG, PSYGFX__VS_FOLD };
+#define PSYGFX__VS_ONE "#define PSY_VECTOR 1\n#define PSY_ONE 1\n#define PSY_PAINT 0\n"
+static const struct psygfx__vspec_def {
+    int kind, tier; const char* defs; const char* name;
+} psygfx__vspecs[PSYGFX__N_VSPEC] = {
+    { 8, PSYGFX__VS_PLAIN, PSYGFX__VS_ONE "#define PSY_VK 0x100\n#define PSY_V1 1\n#define PSY_WS 0\n#define PSY_ALONG 0\n#define PSY_FX 0\n",
+      "vector RRECT" },
+    { 1, PSYGFX__VS_ALONG, PSYGFX__VS_ONE "#define PSY_VK 0x2\n#define PSY_V1 1\n#define PSY_WS 1\n#define PSY_FX 0\n",
+      "vector CIRCLE, dashes" },
+    { 1, PSYGFX__VS_FOLD,  PSYGFX__VS_ONE "#define PSY_VK 0x2\n#define PSY_WS 0\n#define PSY_ALONG 0\n",
+      "vector CIRCLE compound" },
+};
+/* A draw takes a specialized program only when its quad covers this many
+ * px. A program switch, with the draw it splits off a batch, cost 7 to 24
+ * us of CPU through ANGLE's D3D11 path; GPU time broke even at 128 x 128 px
+ * stimuli and won at 256 x 256 (measured, docs/psy_gfx.md). A test seam,
+ * not API: the pixel test sets 0 or a huge value. */
+static double psygfx__vspec_area = 65536.0;
+
 /* A built-in program's body, allocated (the vector program is in pieces, the
  * image ones a fetch and a main); NULL when out of memory. */
 static char* psygfx__builtin_body(int i) {
-    const char* parts[8];
+    const char* parts[12];
     int np = 0, k;
     size_t n = 1;
     char* out;
@@ -4433,7 +5475,7 @@ PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
     psygfx_texture_src ts;
     int rc, i;
     int64_t t_start = (int64_t)psyrt_now_ns();
-    psygfx__prec prec[PSYGFX__N_BUILTIN + 1];
+    psygfx__prec prec[PSYGFX__N_BUILTIN + 1], vprec[PSYGFX__N_VSPEC];
     static const float identity[6] = { 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f };
     if (!g) return false;
     if (g->open) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: already open"); return false; }
@@ -4576,6 +5618,13 @@ PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
         psygfx__set_error(g->error, sizeof g->error, "psy_gfx: transfer table texture");
         goto fail;
     }
+    memset(&ts, 0, sizeof ts);
+    ts.w = 256; ts.h = 256; ts.format = PSYGFX_R32F;
+    if (g->be->texture_make(g->bctx, &ts, &g->gauss) < 0 ||
+        g->be->texture_update(g->bctx, g->gauss, 0, 0, 256, 256, psygfx__gauss_table(), 256 * sizeof(float)) < 0) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: Gaussian noise table");
+        goto fail;
+    }
     if (d->cal) {
         int n = d->cal->lut_n ? d->cal->lut_n : PSYCOL_CAL_MAX_LUT, c;
         float* tmp = (float*)malloc((size_t)n * 3 * sizeof(float));
@@ -4620,6 +5669,14 @@ PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
         free(src);
         if (rc < 0) goto fail;
     }
+    {   /* the specialized vector programs, compiled beside the others */
+        char* src = psygfx__builtin_body(PSYGFX__B_VECTOR);
+        if (!src) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory"); goto fail; }
+        for (i = 0; i < PSYGFX__N_VSPEC && rc >= 0; i++)
+            rc = psygfx__make_pipe(g, psygfx__vspecs[i].defs, src, -1, 0, 1, &g->vspec[i], psygfx__vspecs[i].name, &vprec[i]);
+        free(src);
+        if (rc < 0) goto fail;
+    }
     if (psygfx__make_output(g, &prec[PSYGFX__N_BUILTIN]) < 0) goto fail;
     if (g->be->pipeline_finish) {   /* the statuses, once every program is under way */
         for (i = 0; i < PSYGFX__N_BUILTIN; i++) {
@@ -4631,8 +5688,18 @@ PSYGFX_API bool psygfx_open(psygfx_gfx* g, const psygfx_desc* d) {
                 goto fail;
             }
         }
+        for (i = 0; i < PSYGFX__N_VSPEC; i++) {
+            if (g->be->pipeline_finish(g->bctx, g->vspec[i], g->error, sizeof g->error) < 0) {
+                char tmp[sizeof g->error];
+                g->vspec[i] = 0;
+                memcpy(tmp, g->error, sizeof tmp);
+                psygfx__set_error(g->error, sizeof g->error, "%s (%s)", tmp, psygfx__vspecs[i].name);
+                goto fail;
+            }
+        }
         if (g->be->pipeline_finish(g->bctx, g->output_pipe, g->error, sizeof g->error) < 0) { g->output_pipe = 0; goto fail; }
     }
+    for (i = 0; i < PSYGFX__N_VSPEC; i++) psygfx__prog_store(g, g->vspec[i], &vprec[i]);
     for (i = 0; i < PSYGFX__N_BUILTIN; i++) psygfx__prog_store(g, g->builtin[i], &prec[i]);
     psygfx__prog_store(g, g->output_pipe, &prec[PSYGFX__N_BUILTIN]);
     g->be->reset(g->bctx);
@@ -4677,6 +5744,7 @@ PSYGFX_API void psygfx_close(psygfx_gfx* g) {
     {
         int i;
         for (i = 0; i < PSYGFX_MAX_PIPELINES; i++) free(g->pipe_body[i]);
+        for (i = 0; i < PSYGFX_MAX_CSETS; i++) free(g->cset[i].bbox);
     }
     {
         char keep[sizeof g->error];
@@ -4996,6 +6064,7 @@ PSYGFX_API psygfx_stim psygfx_image(const psygfx_gfx* g, const psygfx_image_desc
     if (d->add) s.flags |= PSYGFX_STIM_ADD;
     if (d->premultiplied) s.flags |= PSYGFX_STIM_PREMULTIPLIED;
     if (d->linear) s.flags |= PSYGFX_STIM_LINEAR;
+    if (d->coverage) s.flags |= PSYGFX_STIM_COVERAGE;
     if (d->contrast != 0.0f) s.contrast = d->contrast;
     if (d->opacity != 0.0f) s.opacity = d->opacity;
     psygfx__copy3(s.dir, d->dir);
@@ -5012,6 +6081,10 @@ PSYGFX_API psygfx_stim psygfx_noise(const psygfx_noise_desc* d) {
     s.check = d->check > 0 ? d->check : 1.0f;
     s.seed = (float)(d->seed & 0xFFFFFFu);
     s.wave = (uint16_t)d->dist;
+    s.gn_scale = d->scale; s.gn_z = d->z;
+    s.gn_octaves = d->octaves > 0 ? d->octaves : 1;
+    s.gn_lacunarity = d->lacunarity != 0.0f ? d->lacunarity : 2.0f;
+    s.gn_gain = d->gain != 0.0f ? d->gain : 0.5f;
     if (d->contrast != 0.0f) s.contrast = d->contrast;
     s.shape = (uint16_t)d->aperture; s.edge = (uint16_t)d->edge; s.edge_width = d->edge_width;
     psygfx__copy3(s.dir, d->dir);
@@ -5474,11 +6547,14 @@ static int psygfx__is_glyphs(const psygfx_stim* s) {
     return s->kind == PSYGFX_SHAPE && s->shape == PSYGFX_MASK_TEX && s->buf.id != 0 && s->count > 0;
 }
 
+static int psygfx__crun_hit(const psygfx_gfx* g, const psygfx_stim* s, float px, float py);
+
 PSYGFX_API bool psygfx_hit(const psygfx_gfx* g, const psygfx_stim* s, float px, float py) {
     float lx, ly, hx, hy, sp[3], ml;
     int shape;
     if (!g || !g->open || !s || !(s->visible >= 0.5f)) return false;
     if (s->group && !(s->group->visible >= 0.5f)) return false;
+    if (s->kind == PSYGFX_TEXT) return psygfx__crun_hit(g, s, px, py) >= 0;
     if (s->kind != PSYGFX_SHAPE && s->kind != PSYGFX_GRATING && s->kind != PSYGFX_GABOR &&
         s->kind != PSYGFX_IMAGE && s->kind != PSYGFX_NOISE && s->kind != PSYGFX_USER) return false;
     psygfx_local(g, s, px, py, &lx, &ly);
@@ -5585,6 +6661,7 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
     if (s->edge == PSYGFX_EDGE_HARD || ew < 0) ew = 0;
     cmd->blend = psygfx__blend_of(s);
     if (cmd->blend < 0) return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "blend is not a psygfx_blend_mode");
+    if (s->kind == PSYGFX_TEXT) return psygfx__text_pack(g, s, b, cmd, why);
     if (s->kind != PSYGFX_SHAPE && (s->offset != 0.0f || s->dash[0] > 0.0f || psygfx__trimmed(s) || s->fx || s->paint || s->prims))
         return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "offset, dashes, trim, fx, paint and prims are SHAPE fields");
     if (psygfx__is_vector(s)) {   /* the vector program: its own block layout */
@@ -5625,7 +6702,16 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
         pipe = g->builtin[PSYGFX__B_GABOR];
         mod = 1;
         break;
-    case PSYGFX_NOISE:   pipe = g->builtin[PSYGFX__B_NOISE]; mod = 1; break;
+    case PSYGFX_NOISE:
+        if (s->wave > PSYGFX_SIMPLEX) return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "noise dist is UNIFORM, BINARY, GAUSSIAN or SIMPLEX");
+        if (s->wave == PSYGFX_SIMPLEX) {
+            const char* e = psygfx__gn_setup(g, s, NULL);
+            if (e) return psygfx__refuse(g, why, PSYGFX_ERR_ARG, e);
+        }
+        pipe = g->builtin[PSYGFX__B_NOISE];
+        mod = 1;
+        if (s->wave == PSYGFX_GAUSSIAN) cmd->tex[0] = g->gauss;
+        break;
     case PSYGFX_IMAGE: {
         const psygfx__res* r;
         float sx, sy, sw, sh;
@@ -5649,6 +6735,11 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
                  r->format == PSYGFX_R16UI) ? 1.0f : (r->format == PSYGFX_RG8 ? 2.0f : 4.0f);
         b[29] = r->format == PSYGFX_R16UI ? 2.0f : ((s->flags & PSYGFX_STIM_LINEAR) ? 1.0f : 0.0f);
         b[30] = (s->flags & PSYGFX_STIM_PREMULTIPLIED) ? 1.0f : 0.0f;
+        if (s->flags & PSYGFX_STIM_COVERAGE) {
+            if (b[28] != 1.0f || mod || (s->flags & PSYGFX_STIM_ADD) || r->enc.matrix)
+                return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "coverage is the red channel of a 1-channel texture drawn as a color image");
+            b[31] = 1.0f;
+        }
         /* the source rectangle, whole texels inside the texture */
         sx = s->src[0]; sy = s->src[1]; sw = s->src[2]; sh = s->src[3];
         if (!(sw > 0.0f && sh > 0.0f)) { sx = 0; sy = 0; sw = (float)r->w; sh = (float)r->h; }
@@ -5807,7 +6898,16 @@ static uint32_t psygfx__pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psyg
     } else if (s->kind == PSYGFX_NOISE) {
         b[28] = s->check > 0 ? s->check : 1.0f; b[29] = s->seed; b[30] = (float)s->wave;
     }
-    if (s->kind != PSYGFX_IMAGE) {
+    if (s->kind == PSYGFX_NOISE && s->wave == PSYGFX_SIMPLEX) {
+        psygfx__gn g8;
+        psygfx__gn_setup(g, s, &g8);
+        for (i = 0; i < 8; i++) {
+            b[32 + i] = (float)g8.r[i];
+            b[40 + i] = (float)(g8.z[i] >> 16); b[48 + i] = (float)(g8.z[i] & 0xFFFFu);
+            b[56 + i] = (float)g8.w[i];
+        }
+        b[31] = (float)g8.n;
+    } else if (s->kind != PSYGFX_IMAGE) {
         if (shape == PSYGFX_POLYGON && s->kind != PSYGFX_USER) {
             for (i = 0; i < 32; i++) b[32 + i] = s->p[i] * ppu;
         } else {
@@ -5861,8 +6961,7 @@ static const char psygfx__body_image_video[] =
      * the transfer; the primaries */
     "vec4 psy_texel_(vec2 p) {\n"
     "    vec2 r = vec2(p.x + psy_size.x, psy_size.y + p.y) / (2.0 * psy_size.xy);\n"
-    "    vec4 sr = psy_v[psy_i * 16 + 8], K = psy_v[psy_i * 16 + 9], C = psy_v[psy_i * 16 + 10];\n"
-    "    vec4 F = psy_v[psy_i * 16 + 11], M0 = psy_v[psy_i * 16 + 12], M1 = psy_v[psy_i * 16 + 13], M2 = psy_v[psy_i * 16 + 14];\n"
+    "    vec4 sr = psy_vk[0], K = psy_vk[1], C = psy_vk[2], F = psy_vk[3], M0 = psy_vk[4], M1 = psy_vk[5], M2 = psy_vk[6];\n"
     "    bool lin = psy_misc.y > 0.5;\n"
     "    vec2 L = sr.xy + r * sr.zw;\n"
     "    ivec2 t = ivec2(sr.xy) + clamp(ivec2(floor(r * sr.zw)), ivec2(0), ivec2(sr.zw) - 1);\n"
@@ -6080,6 +7179,8 @@ static void psygfx__inst_elem(const psygfx_gfx* g, const psygfx_stim* s, int i, 
 
 PSYGFX_API int psygfx_hit_index(const psygfx_gfx* g, const psygfx_stim* s, float px, float py) {
     int i;
+    if (g && g->open && s && s->kind == PSYGFX_TEXT)
+        return s->visible >= 0.5f && (!s->group || s->group->visible >= 0.5f) ? psygfx__crun_hit(g, s, px, py) : -1;
     if (!g || !g->open || !s || !s->inst || !(s->visible >= 0.5f)) return -1;
     for (i = (int)s->n_inst - 1; i >= 0; i--) {
         psygfx_stim e;
@@ -6148,10 +7249,15 @@ PSYGFX_API int psygfx_draw(psygfx_gfx* g, const psygfx_stim* s) {
     if (!g || !g->open) { PSYRT_ZONE_END(z); return PSYGFX_ERR_CLOSED; }
     if (!g->in_frame) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ORDER; }
     if (!s) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ARG; }
+    if (g->in_setup && !g->in_target) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a setup pass draws into targets only (the scene is a frame's)");
+        PSYRT_ZONE_END(z);
+        return PSYGFX_ERR_ORDER;
+    }
     if (!(s->visible >= 0.5f) || (s->group && !(s->group->visible >= 0.5f))) { PSYRT_ZONE_END(z); return PSYGFX_OK; }
     /* an empty dot field, glyph run or element array is legal and draws
      * nothing (a refused psygfx_instances() gives one) */
-    if (((s->kind == PSYGFX_DOTS || psygfx__is_glyphs(s)) && s->count == 0) || (s->inst && s->n_inst == 0)) {
+    if (((s->kind == PSYGFX_DOTS || s->kind == PSYGFX_TEXT || psygfx__is_glyphs(s)) && s->count == 0) || (s->inst && s->n_inst == 0)) {
         PSYRT_ZONE_END(z);
         return PSYGFX_OK;
     }
@@ -6162,9 +7268,11 @@ PSYGFX_API int psygfx_draw(psygfx_gfx* g, const psygfx_stim* s) {
     pipe = psygfx__pack(g, s, (float*)(g->staging + PSYGFX__FRAME_BYTES + (size_t)g->n_blocks * PSYGFX__BLOCK), cmd, &why);
     if (pipe && s->inst && s->n_inst)
         pipe = psygfx__inst_draw(g, s, (float*)(g->staging + PSYGFX__FRAME_BYTES + (size_t)g->n_blocks * PSYGFX__BLOCK), cmd, pipe, &why);
+    else if (pipe && pipe == g->builtin[PSYGFX__B_VECTOR])   /* an element array keeps the generic program */
+        pipe = psygfx__vspec_pick(g, (const float*)(g->staging + PSYGFX__FRAME_BYTES + (size_t)g->n_blocks * PSYGFX__BLOCK), pipe);
     if (!pipe) {
         PSYRT_ZONE_END(z);
-        return s->kind == PSYGFX_TEXT ? PSYGFX_ERR_NOT_IMPLEMENTED : why;
+        return why;
     }
     if (g->n_blocks + (int32_t)cmd->nblk > g->max_draws) { PSYRT_ZONE_END(z); return PSYGFX_ERR_FULL; }
     cmd->pipe = pipe;
@@ -6213,6 +7321,8 @@ PSYGFX_API int psygfx_begin_target(psygfx_gfx* g, psygfx_tex t, const float* cle
     g->in_target = 1;
     g->cur_target_tex = t.id;
     g->cur_w = r->w; g->cur_h = r->h; g->cur_top = 1;
+    /* a 2x blur layer: what is in units comes out twice the px */
+    if (r->ss > 1) { g->ppu_keep = g->ppu; g->ppu *= (float)r->ss; }
     psygfx__frame_block(g, g->n_targets, r->w, r->h, 1);
     psygfx__seg_next(g, r->bid, r->w, r->h, 1, g->n_targets, clear);
     return PSYGFX_OK;
@@ -6224,6 +7334,7 @@ PSYGFX_API int psygfx_end_target(psygfx_gfx* g) {
     g->in_target = 0;
     g->cur_target_tex = 0;
     g->cur_w = g->w; g->cur_h = g->h; g->cur_top = 0;
+    if (g->ppu_keep > 0.0f) { g->ppu = g->ppu_keep; g->ppu_keep = 0.0f; }
     psygfx__seg_next(g, 0, g->w, g->h, 0, 0, NULL);
     return PSYGFX_OK;
 }
@@ -6312,7 +7423,47 @@ static void psygfx__reorder(psygfx_gfx* g) {
     }
 }
 
+/* A setup pass: the frame's bookkeeping with a frame of time 0 (frame
+ * block 0 is written, as begin() does, so the target passes see the same
+ * layout), and the GL context made current, as psyscr_begin() would. */
+PSYGFX_API int psygfx_begin_setup(psygfx_gfx* g) {
+    psyscr_frame f;
+    int rc;
+    if (!g || !g->open) return PSYGFX_ERR_CLOSED;
+    if (g->in_frame) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: begin_setup inside a frame or a setup pass");
+        return PSYGFX_ERR_ORDER;
+    }
+    if (g->screen) psyscr_bind(g->screen);
+    memset(&f, 0, sizeof f);
+    f.onset = g->t_open;   /* the shaders' time 0 */
+    rc = psygfx_begin(g, &f);
+    if (rc == PSYGFX_OK) g->in_setup = 1;
+    return rc;
+}
+
+static int psygfx__end(psygfx_gfx* g, int setup);
+PSYGFX_API int psygfx_end_setup(psygfx_gfx* g) {
+    if (!g || !g->open) return PSYGFX_ERR_CLOSED;
+    if (!g->in_frame || !g->in_setup) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: end_setup without begin_setup");
+        return PSYGFX_ERR_ORDER;
+    }
+    return psygfx__end(g, 1);
+}
+
 PSYGFX_API int psygfx_end(psygfx_gfx* g) {
+    if (g && g->open && g->in_setup) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a setup pass ends with end_setup");
+        return PSYGFX_ERR_ORDER;
+    }
+    return psygfx__end(g, 0);
+}
+
+/* setup 1: the target passes only; the scene's segments (empty: draws
+ * there are refused), the output stage, the present, the frame count and
+ * the clipped event belong to frames. */
+static int psygfx__end(psygfx_gfx* g, int setup) {
     psygfx_bindings bd;
     uint32_t ubo;
     float clear[4];
@@ -6321,6 +7472,7 @@ PSYGFX_API int psygfx_end(psygfx_gfx* g) {
     if (!g || !g->open) { PSYRT_ZONE_END(z); return PSYGFX_ERR_CLOSED; }
     if (!g->in_frame) { PSYRT_ZONE_END(z); return PSYGFX_ERR_ORDER; }
     if (g->in_target) psygfx_end_target(g);
+    g->in_setup = 0;
     g->in_frame = 0;
     g->segs[g->n_segs - 1].end = g->n_cmds;
     if (psygfx__sync(g) < 0) { PSYRT_ZONE_END(z); return PSYGFX_ERR_LOST; }
@@ -6344,6 +7496,7 @@ PSYGFX_API int psygfx_end(psygfx_gfx* g) {
     for (k = 0; k < g->n_segs; k++) {
         const psygfx__seg* sg = &g->segs[k];
         if (sg->target == 0) {
+            if (setup) continue;
             if (sg->first == sg->end && scene_cleared) continue;
             g->be->pass_begin(g->bctx, g->scene, g->w, g->h, scene_cleared ? NULL : clear);
             scene_cleared = 1;
@@ -6365,6 +7518,11 @@ PSYGFX_API int psygfx_end(psygfx_gfx* g) {
             g->draws++;
         }
         g->be->pass_end(g->bctx);
+    }
+    if (setup) {
+        g->clipped_total += g->clipped;
+        PSYRT_ZONE_END(z);
+        return PSYGFX_OK;
     }
     {
         PSYRT_ZONE(zo, "psygfx.output");
@@ -6832,8 +7990,13 @@ PSYGFX_API psygfx_tex psygfx_target(psygfx_gfx* g, const psygfx_target_desc* d) 
     if (!g || !g->open || !d) return t;
     if (g->in_frame) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a target made inside begin..end"); return t; }
     fmt = d->format ? d->format : PSYGFX_RGBA16F;
-    if (d->w <= 0 || d->h <= 0 || (fmt != PSYGFX_RGBA16F && fmt != PSYGFX_RGBA8)) {
-        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a target is RGBA16F or RGBA8, with a size");
+    if (d->w <= 0 || d->h <= 0 || (fmt != PSYGFX_RGBA16F && fmt != PSYGFX_RGBA8 && fmt != PSYGFX_R16F && fmt != PSYGFX_RGBA32F)) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a target is RGBA16F, RGBA8, R16F or RGBA32F, with a size");
+        return t;
+    }
+    /* draws into a target blend; blending into 32-bit float needs EXT_float_blend */
+    if (fmt == PSYGFX_RGBA32F && !g->caps.float_blend) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: an RGBA32F target needs EXT_float_blend, which this renderer lacks");
         return t;
     }
     slot = psygfx__slot(g->tex, PSYGFX_MAX_TEXTURES);
@@ -6883,18 +8046,884 @@ PSYGFX_API int psygfx_read_target(psygfx_gfx* g, psygfx_tex t, int x, int y, int
     return rc;
 }
 
+/* --- curve sets: the format (CURVE SETS) ------------------------------------- */
+
+static float psygfx__u2f(uint32_t u) { float f; memcpy(&f, &u, sizeof f); return f; }
+
+static int psygfx__cset_fail(char* msg, size_t cap, const char* fmt, ...) {
+    va_list ap;
+    if (msg && cap) {
+        int n = snprintf(msg, cap, "psy_gfx: curve set: ");
+        if (n > 0 && (size_t)n < cap) {
+            va_start(ap, fmt);
+            vsnprintf(msg + n, cap - (size_t)n, fmt, ap);
+            va_end(ap);
+        }
+    }
+    return PSYGFX_ERR_FORMAT;
+}
+
+/* A list's sort key: the largest (forward) or smallest (backward) control
+ * coordinate along the ray's axis; the shader's early exit depends on it. */
+static float psygfx__cset_key(const float* t, int axis, int bwd) {
+    float a = t[axis], b = t[2 + axis], c = t[4 + axis];
+    if (bwd) return a < b ? (a < c ? a : c) : (b < c ? b : c);
+    return a > b ? (a > c ? a : c) : (b > c ? b : c);
+}
+
+/* The set header: the words, the magic, the version, the table. */
+static int psygfx__cset_head(const psygfx_cset_desc* d, char* msg, size_t cap) {
+    const uint32_t* w;
+    uint32_t nw, i;
+    if (!d || !d->words) return psygfx__cset_fail(msg, cap, "no words");
+    w = d->words;
+    nw = d->n_words;
+    if (nw < 8 || nw % 4) return psygfx__cset_fail(msg, cap, "n_words %u: at least 8 and a multiple of 4", nw);
+    if (d->n_texels && !d->texels) return psygfx__cset_fail(msg, cap, "n_texels %u with no texels", d->n_texels);
+    if (w[0] != PSYGFX_CSET_MAGIC) return psygfx__cset_fail(msg, cap, "word 0 is 0x%08x, not the magic 0x43595350", w[0]);
+    if (w[1] != PSYGFX_CSET_VERSION) return psygfx__cset_fail(msg, cap, "format version %u; this psy_gfx reads version 1", w[1]);
+    for (i = 3; i < 8; i++)
+        if (w[i]) return psygfx__cset_fail(msg, cap, "word %u is reserved and must be 0", i);
+    if (w[2] >= (1u << 24) || (uint64_t)8 + w[2] > nw)
+        return psygfx__cset_fail(msg, cap, "the glyph table (G = %u, word 2) passes the words or 2^24", w[2]);
+    return PSYGFX_OK;
+}
+
+static int psygfx__cset_texels(const psygfx_cset_desc* d, uint32_t a, uint32_t b, char* msg, size_t cap) {
+    uint32_t i;
+    for (i = 4 * a; i < 4 * b; i++)
+        if (!isfinite(d->texels[i])) return psygfx__cset_fail(msg, cap, "texel %u holds a value that is not finite", i / 4);
+    return PSYGFX_OK;
+}
+
+/* One glyph's record, descriptors and lists, after the header's check. */
+static int psygfx__cset_glyph(const psygfx_cset_desc* d, uint32_t g, char* msg, size_t cap) {
+    const uint32_t* w = d->words;
+    uint32_t nw = d->n_words, G = w[2], o = w[8 + g], nh, nv, fl, first, n, k;
+    float bb[4];
+    if (!o) return PSYGFX_OK;
+    if (o % 4 || o < 8 + G || (uint64_t)o + 8 > nw)
+        return psygfx__cset_fail(msg, cap, "glyph %u: its record offset %u (word %u) is not a multiple of 4 past the table "
+                                 "and inside the words", g, o, 8 + g);
+    for (k = 0; k < 4; k++) {
+        bb[k] = psygfx__u2f(w[o + k]);
+        if (!isfinite(bb[k])) return psygfx__cset_fail(msg, cap, "glyph %u: bbox word %u is not finite", g, o + k);
+    }
+    nh = w[o + 4] & 0xFFFFu; nv = w[o + 4] >> 16; fl = w[o + 5]; first = w[o + 6]; n = w[o + 7];
+    if (fl & ~(PSYGFX_CSET_EVENODD | PSYGFX_CSET_BACKWARD | PSYGFX_CSET_RESOLVED))
+        return psygfx__cset_fail(msg, cap, "glyph %u: flags 0x%x (word %u) set reserved bits", g, fl, o + 5);
+    if (nh == 0 && nv == 0) return PSYGFX_OK;   /* an empty glyph */
+    if (nh == 0 || nv == 0)
+        return psygfx__cset_fail(msg, cap, "glyph %u: one band count is 0 (word %u): both are, or neither", g, o + 4);
+    if (!(bb[2] > bb[0] && bb[3] > bb[1]))
+        return psygfx__cset_fail(msg, cap, "glyph %u: bbox %g, %g, %g, %g is not x1 > x0, y1 > y0", g, bb[0], bb[1], bb[2], bb[3]);
+    if (n < 2 || (uint64_t)first + n > d->n_texels)
+        return psygfx__cset_fail(msg, cap, "glyph %u: texels %u + %u (words %u, %u) are not inside the %u texels",
+                                 g, first, n, o + 6, o + 7, d->n_texels);
+    if ((uint64_t)o + 8 + 4 * ((uint64_t)nh + nv) > nw)
+        return psygfx__cset_fail(msg, cap, "glyph %u: %u + %u band descriptors pass the words", g, nh, nv);
+    for (k = 0; k < nh + nv; k++) {
+        uint32_t dw = o + 8 + 4 * k, half, j;
+        int axis = k < nh ? 0 : 1;
+        for (half = 0; half < 2; half++) {
+            uint32_t off = w[dw + 2 * half], cnt = w[dw + 2 * half + 1];
+            float prev = 0.0f;
+            if (half && !(fl & PSYGFX_CSET_BACKWARD) && (off || cnt))
+                return psygfx__cset_fail(msg, cap, "glyph %u: band %u has a backward list (word %u) without the flag", g, k, dw + 2);
+            if ((uint64_t)off + cnt > nw)
+                return psygfx__cset_fail(msg, cap, "glyph %u: band %u's list (word %u) passes the words", g, k, dw + 2 * half);
+            for (j = 0; j < cnt; j++) {
+                uint32_t r = w[off + j], m;
+                const float* t;
+                float key;
+                if (r < first || (uint64_t)r + 2 > (uint64_t)first + n)
+                    return psygfx__cset_fail(msg, cap, "glyph %u: band %u: reference %u (word %u) is not a curve in its texels %u..%u",
+                                             g, k, r, off + j, first, first + n - 1);
+                t = d->texels + 4 * (size_t)r;
+                for (m = 0; m < 3; m++)
+                    if (t[2 * m] < bb[0] || t[2 * m] > bb[2] || t[2 * m + 1] < bb[1] || t[2 * m + 1] > bb[3])
+                        return psygfx__cset_fail(msg, cap, "glyph %u: curve %u (word %u) passes its bbox", g, r, off + j);
+                key = psygfx__cset_key(t, axis, (int)half);
+                if (j && (half ? key < prev : key > prev))
+                    return psygfx__cset_fail(msg, cap, "glyph %u: band %u's %s list is not sorted at word %u", g, k,
+                                             half ? "backward" : "forward", off + j);
+                prev = key;
+            }
+        }
+    }
+    return PSYGFX_OK;
+}
+
+PSYGFX_API int psygfx_cset_check(const psygfx_cset_desc* d, char* msg, size_t cap) {
+    uint32_t g;
+    int rc;
+    if (msg && cap) msg[0] = '\0';
+    rc = psygfx__cset_head(d, msg, cap);
+    if (rc == PSYGFX_OK) rc = psygfx__cset_texels(d, 0, d->n_texels, msg, cap);
+    for (g = 0; rc == PSYGFX_OK && g < d->words[2]; g++) rc = psygfx__cset_glyph(d, g, msg, cap);
+    return rc;
+}
+
+/* The crossings of one curve with the ray from the origin along +u, the
+ * curve given across the ray (v) and along it (u), relative to the ray's
+ * origin. y(t) = a t^2 - 2 b t + c has its falling root at (b - sqrt D) / a
+ * and its rising root at (b + sqrt D) / a whatever the sign of a, and which
+ * of them lie in [0, 1] follows from the signs of the three control values
+ * alone (above: v > 0). So no t is compared with 0 or 1, and an endpoint on
+ * the ray, shared by two curves, counts once. Rising counts +1. */
+static int psygfx__cset_cross(const double v[3], const double u[3]) {
+    int s1 = v[0] > 0.0, s2 = v[1] > 0.0, s3 = v[2] > 0.0, n = 0;
+    int fall = (s1 && !s3) || (s1 && !s2 && s3) || (!s1 && s2 && !s3);
+    int rise = (!s1 && s3) || (s1 && !s2 && s3) || (!s1 && s2 && !s3);
+    double a, b, c, D, q, tr, tf, au, bu;
+    if (!fall && !rise) return 0;
+    a = v[0] - 2.0 * v[1] + v[2]; b = v[0] - v[1]; c = v[0];
+    D = b * b - a * c;
+    if (D < 0.0) {   /* no crossing in a two-root row (the shader's rule); else rounding */
+        if (fall && rise) return 0;
+        D = 0.0;
+    }
+    q = b + (b >= 0.0 ? sqrt(D) : -sqrt(D));
+    /* the root that cancels nothing is q / a; its partner c / q */
+    if (q == 0.0) { tr = tf = 0.0; }
+    else if (b >= 0.0) { tr = q / a; tf = c / q; }
+    else { tf = q / a; tr = c / q; }
+    au = u[0] - 2.0 * u[1] + u[2]; bu = u[0] - u[1];
+    if (rise && (au * tr - 2.0 * bu) * tr + u[0] > 0.0) n++;
+    if (fall && (au * tf - 2.0 * bu) * tf + u[0] > 0.0) n--;
+    return n;
+}
+
+PSYGFX_API int psygfx_cset_winding(const psygfx_cset_desc* d, uint32_t glyph, double x, double y) {
+    const uint32_t* w;
+    uint32_t o, nh, off, cnt, j;
+    double y0, y1;
+    int k, wsum = 0;
+    if (!d || !d->words || !d->texels || d->n_words < 8) return 0;
+    w = d->words;
+    if (glyph >= w[2] || (uint64_t)8 + glyph >= d->n_words) return 0;
+    o = w[8 + glyph];
+    if (!o || (uint64_t)o + 8 > d->n_words) return 0;
+    nh = w[o + 4] & 0xFFFFu;
+    if (nh == 0) return 0;
+    y0 = psygfx__u2f(w[o + 1]); y1 = psygfx__u2f(w[o + 3]);
+    if (!(y >= y0 && y <= y1 && x <= psygfx__u2f(w[o + 2]))) return 0;
+    k = (int)floor((y - y0) * (double)nh / (y1 - y0));
+    if (k < 0) k = 0;
+    if (k > (int)nh - 1) k = (int)nh - 1;
+    if ((uint64_t)o + 8 + 4 * (uint64_t)k + 2 > d->n_words) return 0;
+    off = w[o + 8 + 4 * (uint32_t)k]; cnt = w[o + 9 + 4 * (uint32_t)k];
+    for (j = 0; j < cnt && (uint64_t)off + j < d->n_words; j++) {
+        uint32_t r = w[off + j];
+        const float* t;
+        double u[3], v[3];
+        if ((uint64_t)r + 2 > d->n_texels) break;
+        t = d->texels + 4 * (size_t)r;
+        u[0] = t[0] - x; v[0] = t[1] - y; u[1] = t[2] - x; v[1] = t[3] - y; u[2] = t[4] - x; v[2] = t[5] - y;
+        /* sorted by descending largest x: nothing further holds a crossing to the right */
+        if (u[0] <= 0.0 && u[1] <= 0.0 && u[2] <= 0.0) break;
+        wsum += psygfx__cset_cross(v, u);
+    }
+    return wsum;
+}
+
+/* --- curve sets on the GPU, runs (CURVE SETS, RUNS) ------------------------------- */
+
+/* Test seams, not API: 0 takes the rays where the exact area applies (to
+ * measure the rays on resolved glyphs); the cap (px) of the half-plane
+ * coverage along a ray; the rays' mix's e (docs/psy_gfx.md, v0.6). */
+static int   psygfx__text_v3 = 1;
+/* Test seam: 0 keeps turned and aliased runs on the exact-area program */
+static int   psygfx__text_auto = 1;
+static float psygfx__text_cap = 1.0f, psygfx__text_e = 1.0f / 64.0f;
+
+/* rays 1: the program without the exact area, for .rays runs. A flag in the
+ * one program cost 0.7 ms more on a 12 px page than a program without the
+ * code (6.0 against 5.3 ms, Iris Xe): the exact area's registers stay
+ * reserved (docs/psy_gfx.md, v0.7). */
+static int psygfx__text_program(psygfx_gfx* g, int rays) {
+    char defs[80];
+    size_t nv, nf;
+    char* vs;
+    psygfx__prec r;
+    int rc;
+    uint32_t* pipe = rays ? &g->text_rays_pipe : &g->text_pipe;
+    if (*pipe) return PSYGFX_OK;
+    snprintf(defs, sizeof defs, "#define PSY_TEXT 1\n#define PSY_TEXT_V3 %d\n", rays ? 0 : psygfx__text_v3);
+    nv = strlen(psygfx__glsl_common) + strlen(defs) + strlen(psygfx__glsl_text_vs) + 1;
+    nf = strlen(psygfx__glsl_common) + strlen(defs) + strlen(psygfx__glsl_text_fs0) + strlen(psygfx__glsl_text_slab) +
+         strlen(psygfx__glsl_text_ray) + strlen(psygfx__glsl_text_main) + 1;
+    vs = (char*)malloc(nv + nf);
+    if (!vs) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory"); return PSYGFX_ERR_FULL; }
+    snprintf(vs, nv, "%s%s%s", psygfx__glsl_common, defs, psygfx__glsl_text_vs);
+    snprintf(vs + nv, nf, "%s%s%s%s%s%s", psygfx__glsl_common, defs, psygfx__glsl_text_fs0, psygfx__glsl_text_slab,
+             psygfx__glsl_text_ray, psygfx__glsl_text_main);
+    rc = psygfx__build(g, vs, vs + nv, PSYGFX_BLEND_OVER, 2, 0, pipe, &r);
+    free(vs);
+    g->be->reset(g->bctx);
+    if (rc < 0) {
+        char tmp[sizeof g->error];
+        memcpy(tmp, g->error, sizeof tmp);
+        psygfx__set_error(g->error, sizeof g->error, "%s (text%s)", tmp, rays ? ", rays" : "");
+        *pipe = 0;
+        return rc;
+    }
+    return PSYGFX_OK;
+}
+
+/* Texels a .. b - 1 of a linear array into a texture 2^L texels wide: a
+ * partial first row, whole rows in one call, a partial last row. */
+static int psygfx__cs_upload(psygfx_gfx* g, uint32_t id, int L, const void* data, uint32_t a, uint32_t b) {
+    const uint32_t tw = 1u << L;
+    const unsigned char* p = (const unsigned char*)data;
+    int rc = PSYGFX_OK;
+    while (a < b && rc >= 0) {
+        uint32_t x = a & (tw - 1), n;
+        if (x == 0 && b - a >= tw) {
+            n = ((b - a) >> L) << L;
+            rc = g->be->texture_update(g->bctx, id, 0, (int)(a >> L), (int)tw, (int)(n >> L), p + 16 * (size_t)a, 0);
+        } else {
+            n = tw - x < b - a ? tw - x : b - a;
+            rc = g->be->texture_update(g->bctx, id, (int)x, (int)(a >> L), (int)n, 1, p + 16 * (size_t)a, 0);
+        }
+        a += n;
+    }
+    return rc;
+}
+
+/* Glyph g's box (set units) into the CPU's table; 0s for an absent or empty glyph. */
+static void psygfx__cs_box(psygfx__cs* c, const uint32_t* w, uint32_t g) {
+    float* b = c->bbox + 4 * (size_t)g;
+    uint32_t o = w[8 + g], k;
+    for (k = 0; k < 4; k++) b[k] = o && (w[o + 4] & 0xFFFFu) ? psygfx__u2f(w[o + k]) : 0.0f;
+}
+
+PSYGFX_API psygfx_cset psygfx_cset_make(psygfx_gfx* g, const psygfx_cset_desc* d) {
+    psygfx_cset out;
+    psygfx_texture_src ts;
+    psygfx__cs* c;
+    char msg[300];
+    uint32_t ct, cw, rows_t, rows_w, k;
+    int slot, L, maxt;
+    out.id = 0;
+    if (!g || !g->open) return out;
+    if (!d) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: no curve set desc"); return out; }
+    if (g->in_frame) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a curve set made inside begin..end"); return out; }
+    if (psygfx_cset_check(d, msg, sizeof msg) != PSYGFX_OK) { psygfx__set_error(g->error, sizeof g->error, "%s", msg); return out; }
+    for (slot = 0; slot < PSYGFX_MAX_CSETS && g->cset[slot].used; slot++) {}
+    if (slot == PSYGFX_MAX_CSETS) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: %d curve sets in use (PSYGFX_MAX_CSETS)", PSYGFX_MAX_CSETS);
+        return out;
+    }
+    ct = d->cap_texels > d->n_texels ? d->cap_texels : d->n_texels;
+    if (ct < 2) ct = 2;
+    cw = ((d->cap_words > d->n_words ? d->cap_words : d->n_words) + 3) / 4;
+    maxt = g->caps.max_texture > 0 ? g->caps.max_texture : 2048;
+    for (L = 12; L > 0 && (1 << L) > maxt; L--) {}
+    rows_t = (ct + (1u << L) - 1) >> L;
+    rows_w = (cw + (1u << L) - 1) >> L;
+    if (rows_t > (uint32_t)maxt || rows_w > (uint32_t)maxt) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a curve set of %u texels and %u words passes this renderer's "
+                          "%d x %d textures", ct, 4 * cw, maxt, maxt);
+        return out;
+    }
+    if (psygfx__sync(g) < 0) return out;
+    if (psygfx__text_program(g, 0) < 0) return out;
+    c = &g->cset[slot];
+    memset(c, 0, sizeof *c);
+    c->G = d->words[2];
+    c->bbox = (float*)malloc(16u * (size_t)(c->G ? c->G : 1));
+    if (!c->bbox) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory"); return out; }
+    memset(&ts, 0, sizeof ts);
+    ts.w = 1 << L; ts.h = (int32_t)rows_t; ts.format = PSYGFX_RGBA32F;
+    if (g->be->texture_make(g->bctx, &ts, &c->tex_t) < 0) {
+        free(c->bbox); memset(c, 0, sizeof *c);
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: the curve texture (RGBA32F %d x %u)", 1 << L, rows_t);
+        return out;
+    }
+    ts.h = (int32_t)rows_w; ts.format = PSYGFX_RGBA32UI;
+    if (g->be->texture_make(g->bctx, &ts, &c->tex_w) < 0) {
+        g->be->texture_free(g->bctx, c->tex_t);
+        free(c->bbox); memset(c, 0, sizeof *c);
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: the word texture (RGBA32UI %d x %u): the backend has no RGBA32UI",
+                          1 << L, rows_w);
+        return out;
+    }
+    if (psygfx__cs_upload(g, c->tex_t, L, d->texels, 0, d->n_texels) < 0 ||
+        psygfx__cs_upload(g, c->tex_w, L, d->words, 0, d->n_words / 4) < 0) {
+        g->be->texture_free(g->bctx, c->tex_t); g->be->texture_free(g->bctx, c->tex_w);
+        free(c->bbox); memset(c, 0, sizeof *c);
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a curve set's upload failed");
+        g->be->reset(g->bctx);
+        return out;
+    }
+    g->be->reset(g->bctx);
+    for (k = 0; k < c->G; k++) psygfx__cs_box(c, d->words, k);
+    c->used = 1;
+    c->n_texels = d->n_texels; c->n_words = d->n_words;
+    c->cap_t = rows_t << L; c->cap_w = (rows_w << L) * 4u;
+    c->lt = L;
+    if (d->keep) c->keep = *d;
+    out.id = (uint32_t)slot + 1;
+    return out;
+}
+
+PSYGFX_API int psygfx_cset_add(psygfx_gfx* g, psygfx_cset s, const psygfx_cset_desc* now, const uint32_t* glyphs, int n) {
+    psygfx__cs* c;
+    char msg[300];
+    int i, rc;
+    if (!g || !g->open) return PSYGFX_ERR_CLOSED;
+    if (g->in_frame) return PSYGFX_ERR_ORDER;
+    if (s.id < 1 || s.id > PSYGFX_MAX_CSETS || !g->cset[s.id - 1].used || !now || n < 0 || (n > 0 && !glyphs)) return PSYGFX_ERR_ARG;
+    c = &g->cset[s.id - 1];
+    rc = psygfx__cset_head(now, msg, sizeof msg);
+    if (rc == PSYGFX_OK && (now->words[2] != c->G || now->n_texels < c->n_texels || now->n_words < c->n_words))
+        rc = psygfx__cset_fail(msg, sizeof msg, "the arrays may only grow, with the same glyph table");
+    if (rc == PSYGFX_OK && (now->n_texels > c->cap_t || now->n_words > c->cap_w)) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: curve set: %u texels and %u words pass its room (%u, %u: cap_texels, "
+                          "cap_words)", now->n_texels, now->n_words, c->cap_t, c->cap_w);
+        return PSYGFX_ERR_FULL;
+    }
+    if (rc == PSYGFX_OK) rc = psygfx__cset_texels(now, c->n_texels, now->n_texels, msg, sizeof msg);
+    for (i = 0; rc == PSYGFX_OK && i < n; i++) {
+        if (glyphs[i] >= c->G) rc = psygfx__cset_fail(msg, sizeof msg, "glyph %u is past the table (G = %u)", glyphs[i], c->G);
+        else rc = psygfx__cset_glyph(now, glyphs[i], msg, sizeof msg);
+    }
+    if (rc != PSYGFX_OK) { psygfx__set_error(g->error, sizeof g->error, "%s", msg); return rc; }
+    if (psygfx__sync(g) < 0) return PSYGFX_ERR_LOST;
+    rc = psygfx__cs_upload(g, c->tex_t, c->lt, now->texels, c->n_texels, now->n_texels);
+    if (rc >= 0) rc = psygfx__cs_upload(g, c->tex_w, c->lt, now->words, c->n_words / 4, now->n_words / 4);
+    for (i = 0; rc >= 0 && i < n; i++) {
+        uint32_t t = (8 + glyphs[i]) / 4;
+        rc = psygfx__cs_upload(g, c->tex_w, c->lt, now->words, t, t + 1);
+        psygfx__cs_box(c, now->words, glyphs[i]);
+    }
+    g->be->reset(g->bctx);
+    if (rc < 0) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a curve set's upload failed"); return PSYGFX_ERR_GL; }
+    c->n_texels = now->n_texels; c->n_words = now->n_words;
+    if (c->keep.words) { c->keep = *now; c->keep.keep = true; }
+    return PSYGFX_OK;
+}
+
+PSYGFX_API void psygfx_cset_free(psygfx_gfx* g, psygfx_cset s) {
+    psygfx__cs* c;
+    if (!g || !g->open || s.id < 1 || s.id > PSYGFX_MAX_CSETS || !g->cset[s.id - 1].used) return;
+    c = &g->cset[s.id - 1];
+    if (psygfx__sync(g) >= 0) {
+        g->be->texture_free(g->bctx, c->tex_t);
+        g->be->texture_free(g->bctx, c->tex_w);
+    }
+    free(c->bbox);
+    memset(c, 0, sizeof *c);
+}
+
+PSYGFX_API psygfx_stim psygfx_crun(psygfx_gfx* g, const psygfx_crun_desc* d) {
+    psygfx_stim s;
+    psygfx__stim_defaults(&s, PSYGFX_TEXT);
+    if (!d) return s;
+    psygfx__align(&s, d->place, d->anchor);
+    s.set = d->set; s.items = d->items; s.count = d->n > 0 ? (uint32_t)d->n : 0u;
+    s.buf = d->buf; s.first = d->first;
+    s.inst_fields = d->fields | PSYGFX_I_XY;
+    s.palette = d->palette; s.n_palette = d->n_palette > 0 ? (uint32_t)d->n_palette : 0u;
+    s.size = d->size;
+    s.x = d->x; s.y = d->y; s.w = d->w; s.h = d->h; s.ori = d->ori;
+    psygfx__copy3(s.color, d->color);
+    if (d->opacity != 0.0f) s.opacity = d->opacity;
+    s.blend = (uint8_t)d->blend; s.group = d->group;
+    if (d->aliased) s.flags |= PSYGFX_STIM_ALIASED;
+    if (d->rays) s.flags |= PSYGFX_STIM_RAYS;
+    if (!g || !g->open) return s;
+    if (d->items && s.count) psygfx__inst_memory(g);   /* setup: the items' frame buffers */
+    /* setup: the rays program, for .rays and for the runs that may take it
+     * automatically (turned, aliased, grouped); without it a turned run
+     * stays on the exact-area program, which draws the same bits */
+    if (d->rays || d->aliased || d->group || (d->fields & PSYGFX_I_ORI) || fmodf(fabsf(d->ori), 90.0f) != 0.0f)
+        psygfx__text_program(g, 1);
+    /* no box: the items' extent, its top-left kept in shape_p[0..1] (item units) */
+    if (d->w == 0.0f && d->h == 0.0f && d->items && s.count && d->set.id >= 1 && d->set.id <= PSYGFX_MAX_CSETS &&
+        g->cset[d->set.id - 1].used) {
+        const psygfx__cs* c = &g->cset[d->set.id - 1];
+        double lo[2] = { 1e300, 1e300 }, hi[2] = { -1e300, -1e300 };
+        uint32_t i;
+        for (i = 0; i < s.count; i++) {
+            const psygfx_citem* it = &d->items[i];
+            const float* b;
+            int k;
+            if (!(it->glyph >= 0.0f && it->glyph < (float)c->G && it->glyph == floorf(it->glyph))) continue;
+            b = c->bbox + 4 * (size_t)it->glyph;
+            if (!(b[2] > b[0])) continue;
+            for (k = 0; k < 2; k++) {
+                double p0 = (double)(k ? it->y : it->x) + (double)d->size * b[k], p1 = (double)(k ? it->y : it->x) + (double)d->size * b[2 + k];
+                if (p0 < lo[k]) lo[k] = p0;
+                if (p1 > hi[k]) hi[k] = p1;
+            }
+        }
+        if (hi[0] > lo[0] && hi[1] > lo[1]) {
+            s.w = (float)(hi[0] - lo[0]); s.h = (float)(hi[1] - lo[1]);
+            s.shape_p[0] = (float)lo[0]; s.shape_p[1] = (float)lo[1];
+        }
+    }
+    return s;
+}
+
+/* The topmost item of a curve run that holds the screen pixel: by the
+ * winding at the pixel center from the set's own arrays when the set keeps
+ * them, else by the glyph boxes; -1 for none. Items in a buffer are on the
+ * GPU only: -1. */
+static int psygfx__crun_hit(const psygfx_gfx* g, const psygfx_stim* s, float px, float py) {
+    const psygfx__cs* c;
+    const uint32_t f = s->inst_fields | PSYGFX_I_XY;
+    float lx, ly, hx, hy, sp3[3];
+    double X, Y, ppu;
+    int i;
+    if (!s->items || s->set.id < 1 || s->set.id > PSYGFX_MAX_CSETS || !g->cset[s->set.id - 1].used || !(s->size > 0.0f)) return -1;
+    c = &g->cset[s->set.id - 1];
+    psygfx_local(g, s, px, py, &lx, &ly);
+    psygfx__geom(g, s, &hx, &hy, sp3);
+    ppu = (double)g->ppu * psygfx__scale(s);
+    X = (double)lx + hx; Y = (double)ly + hy;   /* box px from its top-left */
+    for (i = (int)s->count - 1; i >= 0; i--) {
+        const psygfx_citem* it = &s->items[i];
+        const float* b;
+        double k = (f & PSYGFX_I_SCALE) ? it->scale : 1.0, sp, cx, cy, dx, dy, cs = 1.0, sn = 0.0, ex, ey;
+        uint32_t gid;
+        if ((f & PSYGFX_I_GATE) && !(it->gate != 0.0f)) continue;
+        if (!(it->glyph >= 0.0f && it->glyph < (float)c->G && it->glyph == floorf(it->glyph)) || !(k > 0.0)) continue;
+        gid = (uint32_t)it->glyph;
+        b = c->bbox + 4 * (size_t)gid;
+        if (!(b[2] > b[0])) continue;
+        sp = (double)s->size * ppu;
+        cx = 0.5 * ((double)b[0] + b[2]); cy = 0.5 * ((double)b[1] + b[3]);
+        /* the glyph box's center in box px, then the pixel in em about it */
+        dx = X - (((double)it->x - s->shape_p[0]) * ppu + sp * cx);
+        dy = Y - (((double)it->y - s->shape_p[1]) * ppu + sp * cy);
+        if (f & PSYGFX_I_ORI) { double r = (double)it->ori * 0.017453292519943295; cs = cos(r); sn = sin(r); }
+        ex = cx + (dx * cs + dy * sn) / (sp * k);
+        ey = cy + (-dx * sn + dy * cs) / (sp * k);
+        if (c->keep.words) {
+            int w = psygfx_cset_winding(&c->keep, gid, ex, ey);
+            const uint32_t o = c->keep.words[8 + gid];
+            if ((o && (c->keep.words[o + 5] & PSYGFX_CSET_EVENODD)) ? (w & 1) : w != 0) return i;
+        } else if (ex >= b[0] && ex <= b[2] && ey >= b[1] && ey <= b[3]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* A run's block (RUNS) and its items into the frame's element buffer. */
+static uint32_t psygfx__text_pack(psygfx_gfx* g, const psygfx_stim* s, float* b, psygfx__cmd* cmd, int* why) {
+    const psygfx__cs* c;
+    const uint32_t f = s->inst_fields | PSYGFX_I_XY;
+    float hx, hy, sp[3], ppu;
+    uint32_t k;
+    double run_deg;
+    int turned;
+    if (s->set.id < 1 || s->set.id > PSYGFX_MAX_CSETS || !g->cset[s->set.id - 1].used)
+        return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a run needs a curve set of this gfx (set)");
+    c = &g->cset[s->set.id - 1];
+    if (!(s->size > 0.0f)) return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a run needs size > 0 (units per set unit); it would cover no pixel");
+    if (s->edge != PSYGFX_EDGE_HARD || s->edge_width != 0.0f || s->stroke > 0.0f || s->offset != 0.0f || s->dash[0] > 0.0f ||
+        psygfx__trimmed(s) || s->fx || s->paint || s->prims)
+        return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a run's edge is the pixel's box filter: edge, stroke, offset, dashes, trim, fx "
+                              "and paint are refused (the outline builder expands outlines; the blur pass makes soft edges)");
+    if (s->inst) return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a run is instanced already: it cannot be an instances template");
+    if ((f & PSYGFX_I_COLOR) && (!s->palette || s->n_palette < 1 || s->n_palette > PSYGFX_MAX_PALETTE))
+        return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "PSYGFX_I_COLOR needs a palette of 1 to 16 rgb entries");
+    psygfx__place(g, s, b);
+    psygfx__geom(g, s, &hx, &hy, sp);
+    ppu = g->ppu * psygfx__scale(s);
+    b[4] = hx; b[5] = hy; b[6] = ppu; b[7] = s->size * ppu;
+    b[8] = s->opacity; b[9] = s->gate * (s->group ? s->group->opacity : 1.0f); b[10] = (float)f;
+    b[11] = (s->flags & PSYGFX_STIM_ALIASED) ? 1.0f : 0.0f;
+    psygfx__copy3(b + 12, s->color);
+    b[15] = (float)s->n_palette;
+    b[16] = (float)c->lt; b[17] = 0.75f; b[18] = (float)c->G; b[19] = 0.0f;
+    b[20] = psygfx__text_cap; b[21] = psygfx__text_e;
+    b[22] = s->shape_p[0]; b[23] = s->shape_p[1];   /* the box's top-left in item units */
+    {   /* the placement in px with y down, the same in every pass (the text program) */
+        double a[2], m[2], cs, sn;
+        psygfx__frame_px(g, s, (double)g->cur_w, (double)g->cur_h, a, m, &cs, &sn);
+        b[24] = (float)m[0]; b[25] = (float)m[1]; b[26] = (float)cs; b[27] = (float)sn;
+    }
+    memset(b + 64, 0, 2 * PSYGFX__BLOCK);
+    for (k = 0; k < 3; k++)
+        if (s->color[k] < 0.0f || s->color[k] > 1.0f) { g->clipped++; break; }
+    if ((f & PSYGFX_I_COLOR) && s->palette)
+        for (k = 0; k < s->n_palette; k++) {
+            int q;
+            for (q = 0; q < 3; q++) b[128 + 4 * k + (uint32_t)q] = s->palette[3 * k + (uint32_t)q];
+        }
+    /* Rays automatically (RUNS): where no item can take the exact area
+     * (every item turned off the quarter turns, or the run aliased), the
+     * rays program draws the same bits faster. turned: the run's own turn
+     * is 0.01 degrees or more from a quarter turn, or with PSYGFX_I_ORI
+     * every item's turn plus the run's is; items in a buffer are on the GPU
+     * only, so such a run is turned only without PSYGFX_I_ORI. */
+    run_deg = atan2((double)b[27], (double)b[26]) * 57.29577951308232;
+    {
+        double t = fmod(fabs(run_deg), 90.0);
+        turned = (f & PSYGFX_I_ORI) ? (s->items != NULL) : (t > 0.01 && t < 89.99);
+    }
+    if (s->items) {
+        size_t bytes = (size_t)s->count * sizeof(psygfx_citem);
+        if (!g->inst_staging)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ORDER, "psygfx_crun() makes the items' buffers: make the run with it, with its items");
+        if ((size_t)g->inst_used + bytes > (size_t)g->inst_cap * sizeof(psygfx_inst))
+            return psygfx__refuse(g, why, PSYGFX_ERR_FULL, "the frame's items and elements pass desc.max_instances: none of this run is drawn");
+        for (k = 0; k < s->count; k++) {
+            float gid = s->items[k].glyph;
+            if (!(gid >= 0.0f && gid < (float)c->G && gid == floorf(gid))) {
+                char msg[160];
+                snprintf(msg, sizeof msg, "item %u's glyph %g is not an integer in 0 .. %u (the set's glyph table)", k, (double)gid, c->G - 1);
+                return psygfx__refuse(g, why, PSYGFX_ERR_ARG, msg);
+            }
+            if (turned && (f & PSYGFX_I_ORI)) {   /* the item's turn adds to the run's */
+                double t = fmod(fabs(run_deg + (double)s->items[k].ori), 90.0);
+                if (!(t > 0.01 && t < 89.99)) turned = 0;
+            }
+        }
+        memcpy(g->inst_staging + g->inst_used, s->items, bytes);
+        cmd->inst = g->inst_buf[g->ubo_i];
+        cmd->inst_off = (uint32_t)g->inst_used;
+        g->inst_used += (int32_t)bytes;
+    } else {
+        if (s->buf.id < 1 || s->buf.id > PSYGFX_MAX_BUFFERS || !g->buf[s->buf.id - 1].used ||
+            ((size_t)s->first + s->count) * sizeof(psygfx_citem) > (size_t)g->buf[s->buf.id - 1].w)
+            return psygfx__refuse(g, why, PSYGFX_ERR_ARG, "a run without items needs a buffer that holds first + n items (buf)");
+        cmd->inst = g->buf[s->buf.id - 1].bid;
+        cmd->inst_off = s->first * (uint32_t)sizeof(psygfx_citem);
+    }
+    cmd->count = s->count;
+    cmd->nblk = 3;
+    cmd->tex[0] = c->tex_t;
+    cmd->tex[3] = c->tex_w;
+    if ((s->flags & PSYGFX_STIM_RAYS) && !g->text_rays_pipe)
+        return psygfx__refuse(g, why, PSYGFX_ERR_GL, "the rays program was not built: make the run with psygfx_crun(.rays)");
+    *why = PSYGFX_OK;
+    if ((s->flags & PSYGFX_STIM_RAYS) ||
+        (psygfx__text_auto && g->text_rays_pipe && (turned || (s->flags & PSYGFX_STIM_ALIASED))))
+        return g->text_rays_pipe;
+    return g->text_pipe;
+}
+
+/* --- the blur pass (BLUR) --------------------------------------------------------- */
+
+/* Two passes of direct taps: the output texel's center in input texels is
+ * r (i + 0.5) along the pass's axis (r = 2 from a 2x layer), the taps are the
+ * input texel centers within 5 s', weighted exp(-x^2 / 2 s'^2) and
+ * normalized in f32; taps outside the input count 0. Block vec4 8: axis,
+ * r, s' (input texels); 9: input w, h, reach (input texels). */
+static const char psygfx__glsl_blur_vs[] =
+    "void main() {\n"
+    "    vec2 c = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2.0 - 1.0;\n"
+    "    gl_Position = vec4(c, 0.0, 1.0);\n"
+    "}\n";
+static const char psygfx__glsl_blur_fs[] =
+    "uniform sampler2D psy_tex0;\n"
+    "out vec4 psy_out;\n"
+    "void main() {\n"
+    "    vec4 P = psy_v[8], Q = psy_v[9];\n"
+    "    bool hz = P.x > 0.5;\n"
+    "    ivec2 o = ivec2(gl_FragCoord.xy);\n"
+    "    float c = P.z * (hz ? gl_FragCoord.x : gl_FragCoord.y);\n"
+    "    int n = int(hz ? Q.x : Q.y), j0 = max(int(ceil(c - 0.5 - Q.z)), 0), j1 = min(int(floor(c - 0.5 + Q.z)), n - 1);\n"
+    "    int jl = int(ceil(c - 0.5 - Q.z)), jh = int(floor(c - 0.5 + Q.z));\n"
+    "    float k = -0.5 / (P.w * P.w), ws = 0.0;\n"
+    "    vec4 acc = vec4(0.0);\n"
+    /* the weights' sum over every tap, inside or not: outside is 0, not missing */
+    "    for (int j = jl; j <= jh; j++) {\n"
+    "        float x = float(j) + 0.5 - c, w = exp(k * x * x);\n"
+    "        ws += w;\n"
+    "        if (j >= j0 && j <= j1) acc += w * texelFetch(psy_tex0, hz ? ivec2(j, o.y) : ivec2(o.x, j), 0);\n"
+    "    }\n"
+    "    psy_out = acc / ws;\n"
+    "}\n";
+
+static int psygfx__blur_program(psygfx_gfx* g) {
+    size_t nv, nf;
+    char* vs;
+    psygfx__prec r;
+    int rc;
+    if (g->blur_pipe) return PSYGFX_OK;
+    nv = strlen(psygfx__glsl_common) + strlen(psygfx__glsl_blur_vs) + 1;
+    nf = strlen(psygfx__glsl_common) + strlen(psygfx__glsl_blur_fs) + 1;
+    vs = (char*)malloc(nv + nf);
+    if (!vs) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: out of memory"); return PSYGFX_ERR_FULL; }
+    snprintf(vs, nv, "%s%s", psygfx__glsl_common, psygfx__glsl_blur_vs);
+    snprintf(vs + nv, nf, "%s%s", psygfx__glsl_common, psygfx__glsl_blur_fs);
+    rc = psygfx__build(g, vs, vs + nv, PSYGFX_BLEND_NONE, 0, 0, &g->blur_pipe, &r);
+    free(vs);
+    g->be->reset(g->bctx);
+    if (rc < 0) { g->blur_pipe = 0; return rc; }
+    return PSYGFX_OK;
+}
+
+PSYGFX_API int psygfx_blur_make(psygfx_gfx* g, psygfx_blur* b, const psygfx_blur_desc* d) {
+    psygfx_target_desc td;
+    psygfx_image_desc id;
+    psygfx_format f;
+    int ss, rc;
+    if (!g || !g->open) return PSYGFX_ERR_CLOSED;
+    if (!b || !d) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: psygfx_blur_make needs a blur and a desc"); return PSYGFX_ERR_ARG; }
+    memset(b, 0, sizeof *b);
+    f = d->format ? d->format : PSYGFX_RGBA16F;
+    ss = d->supersample > 1 ? d->supersample : 1;
+    if (d->w <= 0 || d->h <= 0 || (d->supersample != 0 && d->supersample != 1 && d->supersample != 2) ||
+        (f != PSYGFX_R16F && f != PSYGFX_RGBA16F && f != PSYGFX_RGBA32F) ||
+        (d->source != PSYGFX_BLUR_BOX && d->source != PSYGFX_BLUR_POINT)) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a blur needs w, h > 0, format R16F, RGBA16F or RGBA32F, supersample 0, 1 "
+                          "or 2 and a psygfx_blur_source");
+        return PSYGFX_ERR_ARG;
+    }
+    if (g->in_frame) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a blur made inside begin..end"); return PSYGFX_ERR_ORDER; }
+    rc = psygfx__blur_program(g);
+    if (rc < 0) return rc;
+    memset(&td, 0, sizeof td);
+    td.format = f;
+    td.w = d->w * ss; td.h = d->h * ss;
+    b->layer = psygfx_target(g, &td);
+    td.w = d->w; td.h = d->h * ss;
+    if (b->layer.id) b->scratch_ = psygfx_target(g, &td);
+    td.h = d->h;
+    if (b->scratch_.id) b->result = psygfx_target(g, &td);
+    if (!b->result.id) {
+        char tmp[sizeof g->error];
+        memcpy(tmp, g->error, sizeof tmp);
+        psygfx_texture_free(g, b->layer); psygfx_texture_free(g, b->scratch_);
+        memset(b, 0, sizeof *b);
+        psygfx__set_error(g->error, sizeof g->error, "%s (the blur's targets)", tmp);
+        return f == PSYGFX_RGBA32F && !g->caps.float_blend ? PSYGFX_ERR_REFUSED : PSYGFX_ERR_GL;
+    }
+    g->tex[b->layer.id - 1].ss = ss;
+    memset(&id, 0, sizeof id);
+    id.tex = b->result;
+    id.coverage = f == PSYGFX_R16F;
+    b->image = psygfx_image(g, &id);
+    b->sigma = d->sigma;
+    b->w_ = d->w; b->h_ = d->h; b->ss_ = ss; b->src_ = (int32_t)d->source;
+    return PSYGFX_OK;
+}
+
+PSYGFX_API int psygfx_blur_apply(psygfx_gfx* g, psygfx_blur* b) {
+    double r, var, sp;
+    int pass;
+    if (!g || !g->open) return PSYGFX_ERR_CLOSED;
+    if (!g->in_frame || g->in_target) { psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a blur runs in a frame, outside a target pass"); return PSYGFX_ERR_ORDER; }
+    if (!b || !b->w_ || !b->result.id) return PSYGFX_ERR_ARG;
+    if (g->n_targets + 2 > PSYGFX_MAX_PASSES) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: a blur takes 2 of the frame's %d passes", PSYGFX_MAX_PASSES);
+        return PSYGFX_ERR_ORDER;
+    }
+    r = (double)b->ss_;
+    /* a box-filtered source has the box's variance already: 1/12 of its
+     * texel squared, a texel being 1 / r result px */
+    var = (double)b->sigma * b->sigma - (b->src_ == PSYGFX_BLUR_BOX ? 1.0 / (12.0 * r * r) : 0.0);
+    if (!(b->sigma > 0.0f && b->sigma <= 32.0f && var > 1e-6)) {
+        psygfx__set_error(g->error, sizeof g->error, "psy_gfx: blur sigma %g px: it is 32 or less and, for a BOX source, above %.3f "
+                          "(the box's own SD)", (double)b->sigma, sqrt(1.0 / (12.0 * r * r)));
+        return PSYGFX_ERR_ARG;
+    }
+    sp = r * sqrt(var);
+    if (g->n_cmds + 2 > g->max_draws || g->n_blocks + 2 > g->max_draws) return PSYGFX_ERR_FULL;
+    for (pass = 0; pass < 2; pass++) {
+        const psygfx__res* in = &g->tex[(pass ? b->scratch_.id : b->layer.id) - 1];
+        const psygfx__res* out = &g->tex[(pass ? b->result.id : b->scratch_.id) - 1];
+        psygfx__cmd* cmd = &g->cmds[g->n_cmds];
+        float* k = (float*)(g->staging + PSYGFX__FRAME_BYTES + (size_t)g->n_blocks * PSYGFX__BLOCK);
+        g->n_targets++;
+        psygfx__frame_block(g, g->n_targets, out->w, out->h, 1);
+        psygfx__seg_next(g, out->bid, out->w, out->h, 1, g->n_targets, NULL);
+        memset(cmd, 0, sizeof *cmd);
+        memset(k, 0, PSYGFX__BLOCK);
+        /* the whole pass, for the reorder's bounds */
+        k[0] = 0.5f * (float)out->w; k[1] = 0.5f * (float)out->h; k[2] = 1.0f;
+        k[4] = 0.5f * (float)out->w; k[5] = 0.5f * (float)out->h;
+        k[32] = pass ? 0.0f : 1.0f; k[33] = pass ? 1.0f : 0.0f; k[34] = (float)r; k[35] = (float)sp;
+        k[36] = (float)in->w; k[37] = (float)in->h; k[38] = (float)(5.0 * sp);
+        cmd->pipe = g->blur_pipe;
+        cmd->tex[0] = in->bid;
+        cmd->block = (uint32_t)g->n_blocks;
+        cmd->nblk = 1;
+        g->n_blocks++;
+        g->n_cmds++;
+    }
+    psygfx__seg_next(g, 0, g->w, g->h, 0, 0, NULL);
+    return PSYGFX_OK;
+}
+
+PSYGFX_API void psygfx_blur_free(psygfx_gfx* g, psygfx_blur* b) {
+    if (!g || !b) return;
+    psygfx_texture_free(g, b->layer);
+    psygfx_texture_free(g, b->scratch_);
+    psygfx_texture_free(g, b->result);
+    memset(b, 0, sizeof *b);
+}
+
 /* --- noise ------------------------------------------------------------------- */
 
-PSYGFX_API uint32_t psygfx_hash(uint32_t v) {
-    uint32_t s = v * 747796405u + 2891336453u;
-    uint32_t w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
-    return (w >> 22u) ^ w;
+/* triple32, from Chris Wellons's hash-prospector (public domain): the best
+ * measured avalanche of the 32-bit candidates (docs/psy_gfx.md, v0.9). */
+PSYGFX_API uint32_t psygfx_hash(uint32_t x) {
+    x ^= x >> 17; x *= 0xed5ad4bbu;
+    x ^= x >> 11; x *= 0xac4c1b51u;
+    x ^= x >> 15; x *= 0x31848babu;
+    x ^= x >> 14;
+    return x;
+}
+
+PSYGFX_API uint32_t psygfx_hash2(int32_t cx, int32_t cy, uint32_t seed) {
+    uint32_t k = psygfx_hash(seed), m = psygfx_hash(k ^ 0x9E3779B9u);
+    return psygfx_hash(((uint32_t)cx + ((uint32_t)cy << 16)) * (k | 1u) ^ m);
+}
+
+/* NOISE SIMPLEX on the CPU: psy_gn_() and psy_gnoise_() of the shader,
+ * operation for operation in 32-bit integers (unsigned wraps as GLSL's
+ * uint; a signed right shift is a floor, as GLSL's). */
+static int32_t psygfx__asr13(int32_t x) { return x >= 0 ? x >> 13 : -(int32_t)(((uint32_t)-x + 8191u) >> 13); }
+
+static int32_t psygfx__gn_i(uint32_t vx, uint32_t vy, uint32_t vz, uint32_t S) {
+    static const int8_t G[16][3] = { { 1, 1, 0 }, { -1, 1, 0 }, { 1, -1, 0 }, { -1, -1, 0 }, { 1, 0, 1 }, { -1, 0, 1 }, { 1, 0, -1 },
+                                     { -1, 0, -1 }, { 0, 1, 1 }, { 0, -1, 1 }, { 0, 1, -1 }, { 0, -1, -1 }, { 1, 1, 0 }, { -1, 1, 0 },
+                                     { 0, -1, 1 }, { 0, -1, -1 } };
+    uint32_t sq = (vx + vy + vz) / 3u, cx = (vx + sq) >> 14, cy = (vy + sq) >> 14, cz = (vz + sq) >> 14;
+    uint32_t g3 = ((cx + cy + cz) << 14) / 6u, L[2][2];
+    int32_t x0[3], e[3], i1[3], i2[3], x[4][3], o[4][3], sum = 0;
+    int k, j;
+    x0[0] = (int32_t)(vx - (cx << 14) + g3); x0[1] = (int32_t)(vy - (cy << 14) + g3); x0[2] = (int32_t)(vz - (cz << 14) + g3);
+    for (j = 0; j < 3; j++) e[j] = x0[j] >= x0[(j + 1) % 3];
+    for (j = 0; j < 3; j++) {   /* e.zxy is e[(j + 2) % 3] */
+        i1[j] = e[j] * (1 - e[(j + 2) % 3]);
+        i2[j] = 1 - e[(j + 2) % 3] * (1 - e[j]);
+    }
+    for (k = 0; k < 2; k++) {
+        uint32_t kk = psygfx_hash((cz + (uint32_t)k) ^ S);
+        L[k][0] = kk | 1u; L[k][1] = psygfx_hash(kk ^ 0x9E3779B9u);
+    }
+    for (j = 0; j < 3; j++) {
+        x[0][j] = x0[j]; x[1][j] = x0[j] - i1[j] * 16384 + 2731; x[2][j] = x0[j] - i2[j] * 16384 + 5461; x[3][j] = x0[j] - 8192;
+        o[0][j] = 0; o[1][j] = i1[j]; o[2][j] = i2[j]; o[3][j] = 1;
+    }
+    for (k = 0; k < 4; k++) {
+        int32_t t = 161061274 - (x[k][0] * x[k][0] + x[k][1] * x[k][1] + x[k][2] * x[k][2]);
+        if (t > 0) {
+            uint32_t ccx = cx + (uint32_t)o[k][0], ccy = cy + (uint32_t)o[k][1];
+            const uint32_t* Lk = L[o[k][2] != 0];
+            const int8_t* gr = G[psygfx_hash((ccx + (ccy << 16)) * Lk[0] ^ Lk[1]) >> 28];
+            t >>= 12; t = (t * t) >> 16; t = (t * t) >> 16;
+            sum += t * (gr[0] * x[k][0] + gr[1] * x[k][1] + gr[2] * x[k][2]);
+        }
+    }
+    return sum;
+}
+
+/* Each octave's Q14 lattice units per px (r), its z in Q14 mod 2^30 (z),
+ * and its weight (w, the weights summing to about 4096: an octave's value
+ * in Q12 times its weight, summed, is the field in Q24, exact in a float);
+ * NULL out: only the checks. */
+static const char* psygfx__gn_setup(const psygfx_gfx* g, const psygfx_stim* s, psygfx__gn* out) {
+    const double px = (double)s->gn_scale * g->ppu * psygfx__scale(s), lac = s->gn_lacunarity, gain = s->gn_gain;
+    const double ext = (s->w > s->h ? s->w : s->h) * g->ppu * psygfx__scale(s) + 4.0;
+    double tot = 0.0, a = 1.0, f = 1.0;
+    int n = s->gn_octaves, o;
+    if (!(px > 0.0)) return "SIMPLEX needs scale > 0 (units per lattice cell)";
+    if (n < 1 || n > 8) return "SIMPLEX takes 1 to 8 octaves";
+    if (!(lac >= 1.0 && lac <= 8.0)) return "SIMPLEX takes a lacunarity of 1 to 8";
+    if (!(gain > 0.0 && gain <= 1.0)) return "SIMPLEX takes a gain above 0 and at most 1";
+    if (s->shape == PSYGFX_POLYGON) return "SIMPLEX keeps its octaves where a POLYGON aperture keeps its vertices: use MASK_TEX";
+    if (!(s->gn_z > -1e6f && s->gn_z < 1e6f)) return "SIMPLEX z is a number of cells below 1e6 (used modulo 65536)";
+    for (o = 0; o < n; o++) { tot += a; a *= gain; }
+    for (o = 0, a = 1.0, f = 1.0; o < n; o++, a *= gain, f *= lac) {
+        double r = floor(16384.0 * f / px + 0.5), z = floor((double)s->gn_z * 16384.0 * f + 0.5);
+        if (r < 1.0) return "SIMPLEX scale: a lattice cell is at most 32768 px";
+        if (r * (2.0 * ext + 1.0) >= 1073741824.0) return "SIMPLEX scale: a cell at the finest octave is at least 1/32 px across this box";
+        if (out) {
+            out->r[o] = (uint32_t)r;
+            out->z[o] = (uint32_t)((int64_t)z & 0x3FFFFFFF);
+            out->w[o] = (int32_t)floor(4096.0 * a / tot + 0.5);
+        }
+    }
+    if (out) {
+        for (; o < 8; o++) { out->r[o] = 0; out->z[o] = 0; out->w[o] = 0; }
+        out->n = n;
+    }
+    return NULL;
+}
+
+PSYGFX_API float psygfx_simplex_value(const psygfx_gfx* g, const psygfx_stim* s, int32_t ix, int32_t iy) {
+    psygfx__gn q;
+    uint32_t S;
+    int32_t n = 0;
+    int o;
+    if (!g || !s || psygfx__gn_setup(g, s, &q)) return 0.0f;
+    S = psygfx_hash((uint32_t)s->seed);
+    for (o = 0; o < q.n; o++) {
+        uint32_t vx = ((2u * (uint32_t)ix + 1u) * q.r[o]) >> 1, vy = ((2u * (uint32_t)iy + 1u) * q.r[o]) >> 1;
+        n += psygfx__asr13(psygfx__gn_i(vx + 0x10000000u, vy + 0x10000000u, q.z[o] + 0x10000000u, psygfx_hash(S + (uint32_t)o))) * q.w[o];
+    }
+    {
+        float v;
+        n = n < -16777215 ? -16777215 : (n > 16777215 ? 16777215 : n);
+        v = (float)n * (1.0f / 16777216.0f);
+        return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
+    }
+}
+
+/* NOISE GAUSSIAN's table: the standard normal's quantiles at the centers of
+ * 65536 equally likely bins, Phi^-1((i + 0.5) / 65536), by Acklam's
+ * rational approximation (relative error below 1.15e-9), scaled so that
+ * the 65536 values have variance 1 exactly in double, then rounded to
+ * float. Symmetric bit for bit (the upper half is the lower half negated),
+ * so the mean is 0. The largest value is 4.33. Built once, at the first
+ * psygfx_open() or GAUSSIAN psygfx_noise_value(); not thread-safe before
+ * that first call. */
+static float psygfx__gauss_tab[65536];
+static int   psygfx__gauss_ready;
+
+static double psygfx__probit(double p) {
+    static const double a[6] = { -3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+                                 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00 };
+    static const double b[5] = { -5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+                                 6.680131188771972e+01, -1.328068155288572e+01 };
+    static const double c[6] = { -7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+                                 -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00 };
+    static const double d[4] = { 7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+                                 3.754408661907416e+00 };
+    double q, r;
+    if (p < 0.02425) {
+        q = sqrt(-2.0 * log(p));
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0);
+    }
+    q = p - 0.5; r = q * q;
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+           (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0);
+}
+
+static const float* psygfx__gauss_table(void) {
+    static double x[32768];
+    double ss = 0.0, k;
+    int i;
+    if (psygfx__gauss_ready) return psygfx__gauss_tab;
+    for (i = 0; i < 32768; i++) {   /* the lower half, every p below 0.5 */
+        x[i] = psygfx__probit(((double)i + 0.5) / 65536.0);
+        ss += x[i] * x[i];
+    }
+    k = 1.0 / sqrt(ss / 32768.0);   /* the upper half has the same squares */
+    for (i = 0; i < 32768; i++) {
+        psygfx__gauss_tab[i] = (float)(x[i] * k);
+        psygfx__gauss_tab[65535 - i] = -psygfx__gauss_tab[i];
+    }
+    psygfx__gauss_ready = 1;
+    return psygfx__gauss_tab;
 }
 
 /* The NOISE body's arithmetic, step for step: an odd 24-bit integer over
  * 2^23 is exact in a float, so the GPU and the CPU agree to the bit. */
 PSYGFX_API float psygfx_noise_value(int32_t cx, int32_t cy, uint32_t seed, psygfx_noise_dist dist) {
-    uint32_t h = psygfx_hash((uint32_t)cx ^ psygfx_hash((uint32_t)cy ^ psygfx_hash(seed & 0xFFFFFFu)));
+    uint32_t h = psygfx_hash2(cx, cy, seed & 0xFFFFFFu);
+    if (dist == PSYGFX_GAUSSIAN) return psygfx__gauss_table()[h >> 16];
     if (dist == PSYGFX_BINARY) return (h & 0x80000000u) ? 1.0f : -1.0f;
     return (float)((int32_t)(((h >> 9) << 1) + 1u) - 8388608) * (1.0f / 8388608.0f);
 }
@@ -6910,10 +8939,10 @@ PSYGFX_API void psygfx_noise_gauss(float* out, int w, int h, uint32_t seed) {
     size_t n = (size_t)w * (size_t)h, i;
     uint32_t s1, s2;
     if (!out || w <= 0 || h <= 0) return;
-    s1 = psygfx_hash(seed);
-    s2 = psygfx_hash(seed ^ 0x9E3779B9u);
+    s1 = psygfx_hash(seed) | 1u;   /* the index times an odd key, as psygfx_hash2() */
+    s2 = psygfx_hash(s1 ^ 0x9E3779B9u);
     for (i = 0; i < n; i += 2) {
-        uint32_t a = psygfx_hash((uint32_t)i ^ s1), b = psygfx_hash((uint32_t)i ^ s2);
+        uint32_t a = psygfx_hash((uint32_t)i * s1 ^ s2), b = psygfx_hash((uint32_t)(i + 1) * s1 ^ s2);
         double u1 = ((double)(a >> 8) + 0.5) / 16777216.0, u2 = ((double)(b >> 8) + 0.5) / 16777216.0;
         double r = sqrt(-2.0 * log(u1)), t = 6.283185307179586 * u2;
         out[i] = (float)(r * cos(t));
@@ -7031,6 +9060,24 @@ static void psygfx__mul3(const double* m, const double* v, double* out) {
 #define PSYGFX__VF_RBLUR  64
 #define PSYGFX__PI  3.14159265358979323846
 #define PSYGFX__TAU 6.28318530717958647692
+
+/* The specialized program for a vector stimulus packed at b, or pipe. */
+static uint32_t psygfx__vspec_pick(const psygfx_gfx* g, const float* b, uint32_t pipe) {
+    const float* vd = b + 36;
+    int fl = (int)b[23], np = (int)b[27], kind = (int)vd[4], tier, i;
+    double ex = (double)b[4] + b[7], ey = (double)b[5] + b[7];
+    if (4.0 * ex * ey < psygfx__vspec_area || (fl & PSYGFX__VF_PAINT)) return pipe;
+    if ((int)b[20] == PSYGFX_COMPOUND) {
+        for (i = 1; i < np; i++) if ((int)vd[16 * i + 4] != kind) return pipe;
+        tier = PSYGFX__VS_FOLD;
+    } else {
+        if (fl & PSYGFX__VF_FX) return pipe;
+        tier = (fl & (PSYGFX__VF_DASH | PSYGFX__VF_TRIM)) ? PSYGFX__VS_ALONG : PSYGFX__VS_PLAIN;
+    }
+    for (i = 0; i < PSYGFX__N_VSPEC; i++)
+        if (psygfx__vspecs[i].kind == kind && psygfx__vspecs[i].tier == tier && g->vspec[i]) return g->vspec[i];
+    return pipe;
+}
 
 /* The quadrature of the shader's arc lengths: 16-point Gauss-Legendre. */
 static const double psygfx__glx[8] = { 0.0950125098376374, 0.2816035507792589, 0.4580167776572274, 0.6178762444026438,
@@ -7243,19 +9290,24 @@ static void psygfx__vp_ellipse(double qx, double qy, double a, double b, int it,
     }
 }
 
-/* The quarter of an ellipse's perimeter, in double. */
+/* The quarter of an ellipse's perimeter, in double: a E(e) by the
+ * arithmetic-geometric mean, pi / (2 M(a, b)) (a^2 - sum 2^(n-1) c_n^2).
+ * It converges quadratically: 5 steps reach double precision up to 20:1.
+ * Within 9e-16 (relative) of a long-double Simpson reference, and the same
+ * float as v0.6.0's 1024-point quadrature at every aspect tested, at 0.02
+ * us a call against 23 to 50 us (docs/psy_gfx.md, v0.7). */
 static double psygfx__ell_quarter(double a, double b) {
-    int k, i, j;
-    double s = 0.0;
-    for (k = 0; k < 64; k++) {
-        double t0 = k * (0.5 * PSYGFX__PI) / 64.0, h = 0.5 * (0.5 * PSYGFX__PI) / 64.0;
-        for (i = 0; i < 8; i++)
-            for (j = 0; j < 2; j++) {
-                double u = t0 + h * (1.0 + (j == 0 ? psygfx__glx[i] : -psygfx__glx[i]));
-                s += h * psygfx__glw[i] * sqrt(a * a * sin(u) * sin(u) + b * b * cos(u) * cos(u));
-            }
+    double big = a > b ? a : b, an = big, gn = a > b ? b : a, p2 = 0.5, sum;
+    int i;
+    sum = 0.5 * (an * an - gn * gn);
+    for (i = 0; i < 8; i++) {
+        double c = 0.5 * (an - gn), g = sqrt(an * gn);
+        an = 0.5 * (an + gn); gn = g;
+        p2 *= 2.0;
+        sum += p2 * c * c;
+        if (c == 0.0) break;
     }
-    return s;
+    return PSYGFX__PI / (2.0 * an) * (big * big - sum);
 }
 
 /* The data region as floats: vec4 k at vd + 4 k. */
@@ -8067,7 +10119,7 @@ static int psygfx__vpack(const psygfx_gfx* g, const psygfx_stim* s, float* b, do
 #define PSYGFX__ALL  0x1FEu
 #define PSYGFX__MOD  (PSYGFX__K(PSYGFX_GRATING) | PSYGFX__K(PSYGFX_GABOR) | PSYGFX__K(PSYGFX_NOISE) | \
                       PSYGFX__K(PSYGFX_IMAGE) | PSYGFX__K(PSYGFX_USER))
-#define PSYGFX__COL  (PSYGFX__K(PSYGFX_SHAPE) | PSYGFX__K(PSYGFX_DOTS) | PSYGFX__K(PSYGFX_IMAGE) | PSYGFX__K(PSYGFX_USER))
+#define PSYGFX__COL  (PSYGFX__K(PSYGFX_SHAPE) | PSYGFX__K(PSYGFX_DOTS) | PSYGFX__K(PSYGFX_IMAGE) | PSYGFX__K(PSYGFX_USER) |                       PSYGFX__K(PSYGFX_TEXT))
 #define PSYGFX__APT  (PSYGFX__K(PSYGFX_SHAPE) | PSYGFX__K(PSYGFX_GRATING) | PSYGFX__K(PSYGFX_NOISE) | \
                       PSYGFX__K(PSYGFX_USER) | PSYGFX__K(PSYGFX_DOTS))
 #define PSYGFX__F(name, field, lo, hi, def, unit, doc, kinds) \
@@ -8125,6 +10177,11 @@ static const psygfx_param psygfx__params[PSYGFX_P_COUNT] = {
     PSYGFX__F("dash_offset", dash_offset, -1e9, 1e9, 0, "px", "dash pattern shift along the boundary", PSYGFX__K(PSYGFX_SHAPE)),
     PSYGFX__F("trim_start", trim[0], 0, 1, 0, "", "drawn from this fraction of the length", PSYGFX__K(PSYGFX_SHAPE)),
     PSYGFX__F("trim_end", trim[1], 0, 1, 0, "", "drawn to this fraction; 0, 0 = all", PSYGFX__K(PSYGFX_SHAPE)),
+    PSYGFX__F("size", size, 0, 1e6, 0, "u", "units per set unit: the font size per em", PSYGFX__K(PSYGFX_TEXT)),
+    PSYGFX__F("noise_scale", gn_scale, 0, 1e6, 0, "u", "SIMPLEX: units per lattice cell", PSYGFX__K(PSYGFX_NOISE)),
+    PSYGFX__F("noise_z", gn_z, -1e6, 1e6, 0, "cells", "SIMPLEX: the third coordinate; bind it to evolve the field", PSYGFX__K(PSYGFX_NOISE)),
+    PSYGFX__F("noise_lacunarity", gn_lacunarity, 1, 8, 2, "", "SIMPLEX: frequency ratio of successive octaves", PSYGFX__K(PSYGFX_NOISE)),
+    PSYGFX__F("noise_gain", gn_gain, 0, 1, 0.5, "", "SIMPLEX: amplitude ratio of successive octaves", PSYGFX__K(PSYGFX_NOISE)),
 };
 
 #define PSYGFX__GF(name, field, lo, hi, def, unit, doc) \
@@ -8314,7 +10371,7 @@ PSYGFX_API const psyscr_param* psygfx_desc_params(int* n) {
  * AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY.
  * ------------------------------------------------------------------------
  * Parts under the MIT license: the vector program's distance functions
- * (psygfx__glsl_vec0 and _vec1) and their CPU forms (psygfx__vp_*,
+ * (psygfx__glsl_vec0, _vec0b and _vec1) and their CPU forms (psygfx__vp_*,
  * psygfx__vsmin). Each such function names its source in a comment.
  *
  *   Inigo Quilez, 2D distance functions and the smooth minimum

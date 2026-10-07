@@ -205,15 +205,16 @@ static int64_t g_up_frame;         /* the index coded in the last RGBA8 upload *
 static uint64_t g_up_hash;
 static size_t g_up_bytes;          /* w x h x bpp of the texture, set by the case */
 static uint8_t g_up_copy[64 * 64 * 16];
-static const uint8_t* g_up_ptr;    /* the last upload, valid until the next decode */
-static size_t g_up_stride;
-static int g_up_w;
 /* A planar upload is one call per plane, Y first: each frame's planes are
  * collected in order from g_planes_off = 0, and the Y plane is kept. */
 static uint8_t g_planes[1 << 20];
 static size_t g_planes_off;
+#if PSYVID__MF
+/* Only the Media Foundation cases read these; elsewhere clang's
+ * -Wunused-but-set-global (emcc 6) fails the build. */
+static int g_up_w;
 static const uint8_t* g_up_y;
-static size_t g_up_ys;
+#endif
 static int g_plane_i;     /* planes uploaded since the frame began */
 static uint8_t g_up_row32[8192];   /* the Y plane's row 32, copied at upload: the
                                     * slot goes back to the decoder after it */
@@ -223,9 +224,11 @@ static int rec_update(void* c, uint32_t id, int x, int y, int w, int h, const vo
     int k;
     (void)c; (void)id; (void)x; (void)y; (void)w; (void)h; (void)stride;
     g_up_n++;
-    g_up_ptr = p; g_up_stride = stride; g_up_w = w;
+#if PSYVID__MF
+    g_up_w = w;
+    if (g_plane_i == 0) g_up_y = p;
+#endif
     if (g_plane_i++ == 0) {
-        g_up_y = p; g_up_ys = stride;
         if (h > 32 && stride <= sizeof g_up_row32) memcpy(g_up_row32, p + (size_t)32 * stride, stride);
     }
     if (stride > 0 && g_planes_off + (size_t)h * stride <= sizeof g_planes) {
@@ -2125,6 +2128,8 @@ static void test_snd_controls(void) {
     int64_t pause_id;
     const psyrt_event* ev;
     g_case = "soundtrack controls";
+    /* A failed psyvid_result() leaves pr unwritten; the checks still read it. */
+    memset(&pr, 0, sizeof pr);
     if (!snd_setup(&d, 37.0, 300, false)) return;
     for (k = 0; k < SND_WARM; k++) snd_frame(&d, &f);
     psyvid_play_at(&g_mv, PSYVID_ASAP);
@@ -2426,6 +2431,7 @@ static void test_rates(void) {
         int64_t k, pause_id;
         psyrt_event pr;
         g_case = "rate 1/2: cadence, pause, record due";
+        memset(&pr, 0, sizeof pr);   /* read even when psyvid_result() fails */
         rec_reset();
         tl_open();
         sd_default(&g_sd, 30, 1, 1000, 1);
@@ -2466,6 +2472,7 @@ static void test_rates(void) {
             {
                 int64_t pid = psyvid_play_at(&g_mv, PSYVID_ASAP);
                 psyrt_event pl;
+                memset(&pl, 0, sizeof pl);
                 for (k = 0; k < 20; k++) { disp_next(&d, &f); psyvid_update(&g_mv, &f); }
                 CHECK_I(psyvid_result(&g_mv, pid, &pl), PSYVID_OK);
                 CHECK_I(pl.u.i64[0], pr.u.i64[0] + d.P_report / 2);

@@ -20,8 +20,9 @@ never reused, so a handle kept past its `close` always raises
 The two transport headers build on the shared [psy_rt.h](../../psy_rt.h), so
 both MEX functions compile it too. `psy_quest.c` and `psy_gp.c` define
 `PSYQ_ASYNC` and `PSYGP_ASYNC`, so they also compile `psy_rt.h`, for the
-async inference thread. `psy_stair.c` and `psy_trials.c` compile nothing but
-their header. The four adaptive-method sources also include
+async inference thread. `psy_stair.c` compiles nothing but its header, and
+`psy_trials.c` compiles psy_trials.h and the [psy_table.h](../../psy_table.h)
+it requires. The four adaptive-method sources also include
 `psy_mex_util.h`, a binding-internal header with the handle table and the
 argument helpers; a copy of one of those sources needs that file beside it.
 
@@ -580,7 +581,34 @@ or an n x 2 cell), `reps`, `cond_reps`, `order` (`'sequential'`,
 `tracks`, `track_weights`, `interleave` (`'random'`, `'round_robin'`),
 `track_rate`, `block_size`, `constraints_span_blocks`, `n_practice`,
 `n_warmup`, `warmup_conditions` (1-based), `requeue_gap`, `rng`,
-`record_size`.
+`record_size`, and from v0.2: `table`, `order_list` (1-based), `draws`,
+`weights`, `subset`, `groups`, `rules` and `participant`. `order` also
+takes `'list'` and `'with_replacement'`.
+
+**Tables and rules (v0.2).** `desc.table` is CSV text, or
+`struct('csv', text, 'types', struct('n', 'integer'), 'delimiter', ';',
+'allow_empty', true)`. Its rows are the conditions and its columns the
+factors, so a constraint names a column and a level by its value:
+
+```matlab
+csv = fileread('conditions.csv');          % psy_table.h reads no files here
+d = struct('table', csv, 'participant', 7, 'rng', uint64(20261007));
+d.rules = sprintf(['order constrained\nreps 4\nwhere list=@participant\n' ...
+                   'max_run target 3\nfollowed_by cue valid probe\n']);
+h = psy_trials('open', d);
+ti = psy_trials('next', h);
+row = psy_trials('values', h, ti.condition);  % struct: one field per column
+```
+
+`desc.rules` is the header's rules text (psy_trials.h, GRAMMAR), applied
+after the other fields. `desc.participant` is the participant number for
+`@participant`, `latin` and `balanced_latin`. `desc.groups` is
+`struct('factor', 'block', 'mode', 'blocked', 'order', 'balanced_latin')`;
+`mode` is `'blocked'` or `'alternate'`, `order` is `'sequential'`,
+`'random'`, `'latin'`, `'balanced_latin'` or `'list'` (then `list` holds
+1-based levels or a cell of values). MATLAB holds text as UTF-16, and the
+binding converts it to UTF-8 before the parse; Octave's text is UTF-8
+already.
 
 **Constraints** come from module commands. Put them in `desc.constraints`
 as a struct array (`[c1 c2]`) or as a cell. A factor is a 1-based index, a
@@ -594,6 +622,10 @@ factor name, or `'condition'` for the condition row. A level is 1-based, or
 | `'min_gap', factor, level, gap` | at least `gap` other trials between two |
 | `'no_transition', factor, from, to` | `from` is never directly followed by `to` |
 | `'first_not', factor, level` | the first main trial does not have that level |
+| `'followed_by', factor, level, next_level` | every trial with `level` is directly followed by one with `next_level` (v0.2) |
+| `'preceded_by', factor, level, prev_level` | every trial with `level` is directly preceded by one with `prev_level` (v0.2) |
+| `'chunk', factor` | each run of rows with one value of `factor` runs as a unit (v0.2) |
+| `'balance', factor [, 'no_repeat'] [, 'no_leadin']` | every ordered pair of levels adjacent equally often (v0.2) |
 
 **Tracks.** A track is `{'stair', h}`, `{'quest', h}` or `{'gp', h}`, a
 handle of one of the other modules, or a function handle that returns true
@@ -632,7 +664,7 @@ level = typecast(psy_trials('record', h, i), 'double');
 | `'condition_from_levels', h, levels` | double | |
 | `'condition_at', h, slot`, `'schedule', h`, `'n_scheduled', h` | | the schedule, for preloading stimuli |
 | `'n_valid', h, c`, `'count', h, c [, outcome]`, `'proportion', h, c [, outcome]` | double | tallies; `outcome` defaults to 1 |
-| `'history', h` | struct of columns | `condition`, `track`, `rep`, `block`, `outcome`, `flags`, and the logicals `practice`, `requeued`, `done`, `warmup`, `after_break`, `first_in_block`, `violation` |
+| `'history', h` | struct of columns | `condition`, `track`, `rep`, `block`, `outcome`, `flags`, and the logicals `practice`, `requeued`, `done`, `warmup`, `after_break`, `first_in_block`, `violation`, `leadin` |
 | `'record', h, i` | `uint8` row | |
 | `'format_header', h`, `'format_row', h, i`, `'format_meta', h` | string with a newline | the header's CSV, in the header's own numbering (0-based, -1 for none) |
 | `'save', h`, `'load', bytes, desc` | `uint8` row, handle | |
@@ -640,6 +672,10 @@ level = typecast(psy_trials('record', h, i), 'double');
 | `'rng_state', h [, state]` | `uint64` | seed generators only |
 | `'n_conditions'`, `'n_factors'`, `'n_run'`, `'n_done'`, `'swaps'`, `'record_size'` (each with `h`) | double | |
 | `'close', h` | none | |
+| `'format_rules', h` | string | the session's settings as rules text (v0.2) |
+| `'values', h, c` | struct | condition `c`'s table row, one field per column (v0.2) |
+| `'table_info', h`, `'table', csv` | struct | `columns`, `types`, `n_rows`, `n_skipped`, `levels`, `values` (a cell), `hash` (v0.2) |
+| `'latin', n, row [, balanced]` | `[items, rows]` | row `row` (0-based, taken modulo `rows`) of a cyclic or Williams square, 1-based items (v0.2) |
 | `'splitmix', state` | `[u, state]` | one step of the seed generator |
 | `'version'`, `'strerror', code` | string | |
 

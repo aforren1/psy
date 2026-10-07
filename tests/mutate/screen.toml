@@ -1,0 +1,110 @@
+
+# psy_screen.h mutants: the v0.3.1 list (aborts, panic, icon), the 12 of the
+# 41 that psy_screen.h's header comment counts. The 29 earlier mutants
+# (docs/psy_screen.md, "Mutations") were run from scripts that were not kept.
+header = "psy_screen.h"
+
+[test.screen]
+source = "tests/adapt/psy_screen_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O1", "-w"]
+libs = ["-lm"]
+timeout = 300
+
+[[mutant]]
+id = "abort-00"
+name = "repeats count"
+test = "screen"
+why = "Key auto-repeat while the combination is held must not count as more presses (Shift+Esc held with 8 repeats is one abort)."
+find = 'int press = down && !*held;'
+replace = 'int press = down;'
+
+[[mutant]]
+id = "abort-01"
+name = "mods ignored"
+test = "screen"
+why = "The abort needs its modifiers; Esc alone is not an abort."
+find = 'if ((mods & psyscr__ab.mods) != psyscr__ab.mods) return 0;'
+replace = ''
+
+[[mutant]]
+id = "abort-02"
+name = "reported every begin"
+test = "screen"
+why = "An abort is an edge: reported once, not at every begin()."
+find = '''
+    s->abort_seen = k - 1;
+    if (!mask) return 0;'''
+replace = '    if (!mask) return 0;'
+
+[[mutant]]
+id = "abort-03"
+name = "group begins member 0 first"
+test = "screen"
+why = "A group's begin must report an abort pending on any member, not only the first."
+find = '    for (i = 0; i < n && !psyscr__abort_pending(s[i]); i++) { }'
+replace = '    i = n;'
+
+[[mutant]]
+id = "abort-04"
+name = "panic ignores the ack"
+test = "screen"
+why = "The panic watchdog must not fire when the program acknowledged the abort within the grace period."
+find = 'return n >= psyscr__ab.presses && (ack == 0 || t - ack > psyscr__ab.grace_ns);'
+replace = 'return n >= psyscr__ab.presses;'
+
+[[mutant]]
+id = "abort-05"
+name = "panic ignores the window"
+test = "screen"
+why = "The panic needs its presses within the window, not spread over the whole run."
+find = 't - psyscr__ab.press[i] < psyscr__ab.window_ns) n++;'
+replace = '1) n++;'
+
+[[mutant]]
+id = "abort-06"
+name = "dedup off"
+test = "screen"
+why = "One physical press seen by two input paths must count once."
+find = '    if (!(psyscr__ab.last_t && t - psyscr__ab.last_t'
+replace = '    if (1 || !(psyscr__ab.last_t && t - psyscr__ab.last_t'
+
+[[mutant]]
+id = "abort-07"
+name = "MOD_NONE read as shift"
+test = "screen"
+why = "PSYSCR_MOD_NONE means Esc alone, not the Shift default."
+find = 'm = m == 0 ? PSYSCR_MOD_SHIFT : (m & PSYSCR_MOD_NONE) ? 0u : m;'
+replace = 'm = m == 0 ? PSYSCR_MOD_SHIFT : (m & PSYSCR_MOD_NONE) ? PSYSCR_MOD_SHIFT : m;'
+
+[[mutant]]
+id = "abort-08"
+name = "record time is the report time"
+test = "screen"
+why = "The abort record carries the key's time stamp, not the time begin() reported it."
+find = 'ev.t_ns = (uint64_t)(c.t ? c.t : now);'
+replace = 'ev.t_ns = (uint64_t)now;'
+
+[[mutant]]
+id = "abort-09"
+name = "decoder run off by one"
+test = "screen"
+why = "The icon's run-length decoder stores run - 1 in the high nibble."
+find = 'int run = (r[i] >> 4) + 1, j;'
+replace = 'int run = (r[i] >> 4), j;'
+
+[[mutant]]
+id = "abort-10"
+name = "old aborts reported at open"
+test = "screen"
+why = "Aborts from before open must not be reported."
+find = '    s->abort_seen = psyscr__a_load(&psyscr__ab.seq);   /* not the aborts of before */'
+replace = ''
+
+[[mutant]]
+id = "abort-11"
+name = "lost entries reported"
+test = "screen"
+why = "Entries written over in the 16-entry lock-free log must be skipped, not reported with another entry's data."
+find = '        if (s1 != k || psyscr__a_load(&e->seq) != k) continue;   /* written over: lost */'
+replace = ''

@@ -4,7 +4,10 @@ A CPython extension for the [psy_trials.h](../../../psy_trials.h)
 single-header library: the layer above the adaptive methods. It decides which
 trial comes next (conditions and repetitions, sequential, random and
 constrained orders, interleaved adaptive tracks, blocks, practice, warmup and
-re-queued trials) and records what happened. It uses the plain CPython C API
+re-queued trials) and records what happened. From version 0.2 it also reads
+conditions files and trial lists from CSV, samples with or without
+replacement, orders groups by Latin square, keeps units together ("b always
+follows a"), balances transitions, and takes the header's rules text. It uses the plain CPython C API
 and has no dependencies. It is built against the **Limited API / stable ABI**
 (`Py_LIMITED_API = 0x03080000`), so one `psy/trials.abi3.so` works on CPython
 3.8 and later.
@@ -25,17 +28,18 @@ uv pip install .                    # build and install an abi3 wheel
 python setup.py build_ext --inplace
 ```
 
-In a development tree, setup.py finds `psy_trials.h` at the repository root.
-An isolated build (an sdist or a cibuildwheel run) sees only this directory.
-Copy the header next to `setup.py` first:
+In a development tree, setup.py finds `psy_trials.h` and `psy_table.h` at the
+repository root. An isolated build (an sdist or a cibuildwheel run) sees only
+this directory. Copy both headers next to `setup.py` first:
 
 ```sh
-cp ../../../psy_trials.h .
+cp ../../../psy_trials.h ../../../psy_table.h .
 uv build --sdist
 ```
 
-The copy is gitignored, and the repository root wins when it is present.
-psy_trials.h includes no other header of the collection.
+The copies are gitignored, and the repository root wins when it is present.
+psy_trials.h requires psy_table.h (the CSV parser and the table block) and
+no other header of the collection.
 
 ## How to run the method of constant stimuli
 
@@ -61,6 +65,34 @@ A constraint names a factor by index or by name, or `CONDITION` for the row.
 An impossible design (for example, two rows with unequal counts and
 `max_run(CONDITION, ANY_LEVEL, 1)`) fails at construction with `Error` and
 the header's message, not at trial 190.
+
+## How to run a conditions file
+
+```python
+import psy.trials as pt
+
+with open("conditions.csv", encoding="utf-8") as f:
+    tab = pt.Table(f.read())               # the binding reads; the header does not
+t = pt.Trials(table=tab, participant=7, rng=20261007, rules="""
+    order constrained
+    reps 4
+    where list=@participant
+    max_run target 3
+    followed_by cue valid probe
+""")
+while (ti := t.next()) is not None:
+    row = t.values(ti.condition)           # {"target": "a", "contrast": 0.25, ...}
+    t.update(run_trial(row))
+print(t.format_rules())                    # the settings, as rules text
+```
+
+A table's rows are the conditions and its columns the factors. A constraint
+names a column and a level by value (`pt.max_run("target", "catch", 1)`). The
+rules text is the header's (psy_trials.h, GRAMMAR); `format_rules()` writes a
+session's settings in it, so a logged session pastes back in. A CSV fault
+raises `ArgumentError` with the line, the row and the column. A `Table` keeps
+its own copy of the block; `to_bytes()` is the block a pack stores, and
+`Table.from_bytes()` checks one.
 
 ## How to interleave adaptive tracks
 
@@ -124,7 +156,7 @@ default.
 | `n_conditions` | plain rows; 0 with `factors` |
 | `factors` | a list of `(name, n_levels)`; `name` may be None. Rows are the product, last factor fastest. |
 | `reps`, `cond_reps` | repetitions of every row, or a list with one count per row (a weighted design) |
-| `order` | `ORDER_SEQUENTIAL` (default), `ORDER_RANDOM`, `ORDER_FULL_RANDOM`, `ORDER_CONSTRAINED` |
+| `order` | `ORDER_SEQUENTIAL` (default), `ORDER_RANDOM`, `ORDER_FULL_RANDOM`, `ORDER_CONSTRAINED`, `ORDER_LIST`, `ORDER_WITH_REPLACEMENT` |
 | `constraints`, `max_swaps` | constraints from the helpers below; the repair budget (0 = 100000) |
 | `tracks` | a list of tracks, or of `(track, weight)` |
 | `interleave` | `INTERLEAVE_RANDOM` (default) or `INTERLEAVE_ROUND_ROBIN` |
@@ -134,6 +166,13 @@ default.
 | `requeue_gap` | a re-queued trial goes at least this many slots later; 0 = at the end |
 | `rng` | a callable that returns a float in [0, 1), or an int seed for the header's splitmix64 |
 | `record_size` | bytes of caller data per trial; the binding owns the buffer |
+| `table` | a `Table`; its rows are the conditions (v0.2) |
+| `order_list` | condition rows in play order, for `ORDER_LIST` (v0.2) |
+| `draws`, `weights` | draws and per-row weights for `ORDER_WITH_REPLACEMENT` (v0.2) |
+| `subset` | keep this many rows, chosen uniformly, before any order (v0.2) |
+| `groups` | from `groups()`: blocked or alternating groups of one factor (v0.2) |
+| `rules` | rules text, applied after the other arguments (v0.2) |
+| `participant` | the participant number for `@participant` and the Latin orders (v0.2) |
 
 | Method or property | Returns |
 |---|---|
@@ -145,9 +184,11 @@ default.
 | `level(c, f)`, `levels(c)`, `condition_from_levels(levels)` | the factorial table |
 | `condition_at(slot)`, `schedule()`, `n_scheduled` | the schedule, for preloading stimuli |
 | `n_valid(c)`, `count(c, outcome=1)`, `proportion(c, outcome=1)` | tallies over valid, non-practice, non-warmup trials |
-| `history()` | a list of `Trial` named tuples: `index, condition, track, rep, block, outcome, flags`, and one bool per flag (`practice, warmup, requeued, after_break, first_in_block, violation, done`) |
+| `history()` | a list of `Trial` named tuples: `index, condition, track, rep, block, outcome, flags`, and one bool per flag (`practice, warmup, requeued, after_break, first_in_block, violation, done, leadin`) |
 | `record(i)` | trial `i`'s record as bytes |
 | `format_header()`, `format_row(i)`, `format_meta()` | CSV lines and a `key=value` line, as str with the newline |
+| `format_rules()` | the session's settings as rules text (v0.2) |
+| `values(c)`, `table` | condition `c`'s table row as a dict; the `Table` or None (v0.2) |
 | `save()`, `Trials.load(data, **desc)`, `restore(outcomes, records=None)` | snapshot, resume, replay. `records` is one bytes object or a list of records. |
 | `rng_state` | the splitmix state for an int seed (read and write); None for a callable |
 | `n_conditions`, `n_factors`, `n_run`, `n_done`, `swaps`, `is_open`, `record_size` | counts and state |
@@ -165,6 +206,24 @@ and `track` is -1 on a condition trial.
 | `min_gap(factor, level, gap)` | at least `gap` other trials between two |
 | `no_transition(factor, from_level, to_level)` | `from_level` never directly followed by `to_level` |
 | `first_not(factor, level)` | the first main trial does not have that level |
+| `followed_by(factor, level, next_level)` | every trial with `level` is directly followed by one with `next_level` (v0.2) |
+| `preceded_by(factor, level, prev_level)` | every trial with `level` is directly preceded by one with `prev_level` (v0.2) |
+| `chunk(factor)` | each run of rows with one value of `factor` runs as a unit (v0.2) |
+| `balance(factor, *, no_repeat=False, no_leadin=False)` | every ordered pair of levels adjacent equally often (v0.2) |
+
+`groups(factor, mode='blocked', order='sequential', *, participant=0,
+list=None)` makes the `groups` argument: `mode` is `'blocked'` or
+`'alternate'`, `order` is `'sequential'`, `'random'`, `'latin'`,
+`'balanced_latin'` or `'list'`. `latin(n, row, balanced=False)` returns row
+`row` (taken modulo the design's rows) of a cyclic or Williams square, and
+`latin_rows(n, balanced=False)` the row count (2n for a balanced square of
+odd n).
+
+`Table(csv, *, types=None, delimiter=',', allow_empty=False)` parses CSV text
+(str or bytes); `types` maps column names to `'integer'`, `'number'` or
+`'string'`. A `Table` has `columns`, `types`, `n_rows`, `n_skipped`, `hash`,
+and `value(row, col)`, `row(i)`, `levels(col)`, `level(row, col)`,
+`find(col, value)`, `col(name)`, `to_bytes()` and `Table.from_bytes(b)`.
 
 `splitmix(state)` returns `(u, new_state)`: one step of the header's
 generator. `strerror(code)` names an `ERR_*` code. Enums (standard-library
@@ -217,3 +276,11 @@ not, the counts per condition are exact on both sides. The weighted
 sequential orders differ by design: PsychoPy runs a row's copies back to
 back, and this header cycles the rows. The script reports that difference
 and does not fail on it.
+
+The v0.2 tests in [tests/test_trials.py](tests/test_trials.py) check the
+table parser against two oracles that other people wrote: 40 random CSV
+files written by Python's `csv` module and read back by both, and 5000
+random decimals parsed by both `Table` and `float()`, bit for bit. They also
+run every v0.2 order, groups, units and balance, and check that rules text
+gives the same schedule as the equivalent arguments and survives a round
+trip through `format_rules()`.

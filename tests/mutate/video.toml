@@ -1,0 +1,207 @@
+
+# psy_video.h mutants: round 2 Media Foundation and soundtrack lists
+# (docs/psy_video.md, "Builds and mutations"). The Media Foundation
+# mutants need the clips of tests/media/make_video_clips.sh in
+# build-vid/media, or PSYVID_TEST_MEDIA set to their directory. The v0.1
+# list (23) and the base-rate list (9) were not kept.
+header = "psy_video.h"
+
+[test.video]
+source = "tests/adapt/psy_video_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 1800
+unset = ["PSYVID_TEST_MEDIA"]
+
+[test.video_mf]
+source = "tests/adapt/psy_video_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 1800
+env_default = { PSYVID_TEST_MEDIA = "{repo}/build-vid/media" }
+
+[[mutant]]
+id = "mf-00"
+name = "pts to index rounds down"
+test = "video_mf"
+why = "A frame's index from its presentation time must round to nearest."
+find = '    return a * m->num + (b * m->num + d / 2) / d;'
+replace = '    return a * m->num + (b * m->num) / d;'
+
+[[mutant]]
+id = "mf-01"
+name = "chroma plane after the visible rows"
+test = "video_mf"
+why = "The chroma plane starts after the padded rows (the frame height), not the visible ones. Caught by comparing with ffmpeg's frames."
+find = '''
+    rows = m->fh;
+'''
+replace = '''
+    rows = m->h;
+'''
+[[mutant.also]]
+find = 'if (r > rows && r * 3 * (int64_t)pitch == (int64_t)len * 2) rows = r;'
+replace = '(void)r;'
+
+[[mutant]]
+id = "mf-02"
+name = "display aperture ignored (type change)"
+test = "video_mf"
+why = "A media type change must take the display aperture's size."
+find = '        got == sizeof a) { ax = a.x; ay = a.y; w = (int32_t)a.cx; h = (int32_t)a.cy; }'
+replace = '        got == sizeof a) { ax = a.x; ay = a.y; }'
+
+[[mutant]]
+id = "mf-03"
+name = "seek stops at an earlier keyframe"
+test = "video_mf"
+expect = "survived"
+why = "A seek must start at the keyframe at or before the target and read forward."
+note = "Known survivor: Media Foundation always positions on the keyframe itself on these clips, so the forward read never runs (docs/psy_video.md)."
+find = '        if (i == key) { m->pending = smp; m->pending_ts = ts; return PSYVID_OK; }'
+replace = '        if (i <= key) { m->pending = smp; m->pending_ts = ts; return PSYVID_OK; }'
+
+[[mutant]]
+id = "mf-04"
+name = "B-frame checks removed"
+test = "video_mf"
+why = "Streams with B-frames (decode order differs from presentation order) must be refused."
+find = '&& (int64_t)dts != ts) {'
+replace = '&& (int64_t)dts != ts && 0) {'
+[[mutant.also]]
+find = '        if (n1 > 0 && ts <= prev_ts) {'
+replace = '        if (0) {'
+
+[[mutant]]
+id = "mf-05"
+name = "rate fit tolerance 1 ms"
+test = "video_mf"
+why = "The frame-rate fit must hold to 100 ns, not 1 ms."
+find = '                if (t - g > 100 || g - t > 100) break;'
+replace = '                if (t - g > 1000000 || g - t > 1000000) break;'
+
+[[mutant]]
+id = "mf-06"
+name = "edit list check skipped"
+test = "video_mf"
+why = "MP4 files with an edit list must be refused."
+find = '    if ((rc = psyvid__mp4_edits(media_path, err, cap)) < 0) goto fail;'
+replace = '    (void)&psyvid__mp4_edits;'
+
+[[mutant]]
+id = "mf-07"
+name = "interlace check per sample skipped"
+test = "video_mf"
+why = "Interlaced samples must be refused, also when only some samples are."
+find = '        if (m->interlaced) {'
+replace = '        if (m->interlaced && 0) {'
+
+[[mutant]]
+id = "mf-08"
+name = "decoded time not checked against the grid"
+test = "video_mf"
+expect = "survived"
+why = "Decoded frame times must lie on the rate's grid."
+note = "Known survivor: The compressed times' rate fit catches every clip that would fail it; the check stays for a decoder that restamps frames (docs/psy_video.md)."
+find = '        if (t - grid > 100 || grid - t > 100) {'
+replace = '        if (0) {'
+
+[[mutant]]
+id = "mf-09"
+name = "the SPS's color ignored"
+test = "video_mf"
+why = "The index must take the H.264 SPS's color description."
+find = '    if (vui_found) {'
+replace = '    if (0 && vui_found) {'
+
+[[mutant]]
+id = "mf-10"
+name = "SPS colour fields read in the wrong order"
+test = "video_mf"
+why = "The SPS's color fields are primaries, transfer, matrix, in that order. Caught after a clip with three different fields was added."
+find = '            prim = psyvid__bu(&b, 8); trc = psyvid__bu(&b, 8); mat = psyvid__bu(&b, 8);'
+replace = '            mat = psyvid__bu(&b, 8); trc = psyvid__bu(&b, 8); prim = psyvid__bu(&b, 8);'
+
+[[mutant]]
+id = "snd-00"
+name = "length rounded down, not to nearest"
+test = "video"
+why = "A soundtrack's length in frames must round to nearest."
+find = '        want = (A2 + num) / (2 * num);'
+replace = '        want = A2 / (2 * num);'
+
+[[mutant]]
+id = "snd-01"
+name = "loop check removed"
+test = "video"
+why = "A looping soundtrack whose length is not a whole number of frames must be refused."
+find = '        } else if (mv->d.loop && (N * den * rate) % num != 0) {'
+replace = '        } else if (0) {'
+
+[[mutant]]
+id = "snd-02"
+name = "follow from the device stream, not the soundtrack's sample"
+test = "video"
+why = "The follow must read the soundtrack's own sample position, not the device stream's. Caught after the test checked for the CLOCK record."
+find = '    if (mv && mv->open && mv->snd) {'
+replace = '    if (0) {'
+
+[[mutant]]
+id = "snd-03"
+name = "ASAP start without the audio lead"
+test = "video"
+why = "An ASAP start must leave the audio lead."
+find = '    int64_t t = (now > f->onset ? now : f->onset) + (lead > 0 ? lead : 0) + f->period;'
+replace = '    int64_t t = (now > f->onset ? now : f->onset) + f->period;'
+
+[[mutant]]
+id = "snd-04"
+name = "ASAP target not on a display onset"
+test = "video"
+why = "The shared ASAP target must be on a display onset."
+find = '    if (f->period > 0) t = f->onset + (t - f->onset + f->period - 1) / f->period * f->period;'
+replace = '    (void)0;'
+
+[[mutant]]
+id = "snd-05"
+name = "resume at the frozen sample, not one period on"
+test = "video"
+why = "Resume must restart one period after the frozen sample."
+find = '            psyvid__snd_rearm(mv, 0, mv->state == PSYVID__STOPPED ? 0 : mv->anchor_mt + psyvid__scale(f->period, mv->rate_num, mv->rate_den),'
+replace = '            psyvid__snd_rearm(mv, 0, mv->state == PSYVID__STOPPED ? 0 : mv->anchor_mt,'
+
+[[mutant]]
+id = "snd-06"
+name = "sample of a movie time rounded down"
+test = "video"
+why = "A movie time's sample must round to nearest."
+find = '    return cycle * mv->snd_frames + q * r + (2 * rem * r + PSYVID__NS - 1) / (2 * PSYVID__NS);'
+replace = '    return cycle * mv->snd_frames + q * r + (rem * r) / PSYVID__NS;'
+
+[[mutant]]
+id = "snd-07"
+name = "base anchored at the landing onset, not the shared target"
+test = "video"
+why = "The movie base must anchor at the shared target, not at the onset where the first frame landed."
+find = '                psyvid__anchor(mv, mv->snd && mv->snd_phase == 2 ? mv->snd_t : f->onset, mt);'
+replace = '                psyvid__anchor(mv, f->onset, mt);'
+
+[[mutant]]
+id = "snd-08"
+name = "a seek does not stop the sound"
+test = "video"
+why = "A seek must stop the sound."
+find = '    if (mv->snd_phase == 2) { mv->snd_ops->stop(mv->snd, t); psyvid__snd_record(mv, 2, t, -1, id); }'
+replace = '    if (0) { mv->snd_ops->stop(mv->snd, t); psyvid__snd_record(mv, 2, t, -1, id); }'
+
+[[mutant]]
+id = "snd-09"
+name = "not refused at a base rate other than 1"
+test = "video"
+why = "A soundtrack plays at rate 1 only; another base rate must be refused."
+find = '''
+        psyvid__err(mv, "psy_video: the movie base runs at %lld/%lld; a soundtrack plays at rate 1 only (no resampling)", (long long)rn, (long long)rd);
+        return PSYVID_ERR_REFUSED;'''
+replace = '        (void)0;'

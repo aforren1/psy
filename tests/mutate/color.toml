@@ -1,0 +1,284 @@
+
+# psy_color.h mutants (docs/psy_color.md, "Mutations"). Mutant 00 is a
+# control with no effect; it must survive.
+header = "psy_color.h"
+
+[test.color]
+source = "tests/adapt/psy_color_test.c"
+compiler = "gcc"
+flags = ["-std=c99", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 120
+
+[[mutant]]
+id = "00"
+name = "control: no change (must pass)"
+test = "color"
+expect = "survived"
+why = "Control: a change with no effect. The test must pass, so a failure here means the setup is wrong, not the header."
+find = '#define PSYCOL_VERSION_PATCH  0'
+replace = '#define PSYCOL_VERSION_PATCH  0 '
+
+[[mutant]]
+id = "01"
+name = "Lab epsilon"
+test = "color"
+why = "CIELAB's linear segment starts at 216/24389; another value moves L* for dark grays. Caught after the test got grays on each side of it."
+find = '#define PSYCOL__CIE_E (216.0 / 24389.0)'
+replace = '#define PSYCOL__CIE_E (216.0 / 24000.0)'
+
+[[mutant]]
+id = "02"
+name = "Luv u* against vn"
+test = "color"
+why = "u* is measured from the white's u'n; using v'n shifts every CIELUV hue."
+find = 'luv[1] = 13.0 * luv[0] * (up - un);'
+replace = 'luv[1] = 13.0 * luv[0] * (up - vn);'
+
+[[mutant]]
+id = "03"
+name = "Luv u' from Y"
+test = "color"
+why = "u' uses X; Y gives a wrong chromaticity."
+find = 'up = 4.0 * xyz[0] / den;'
+replace = 'up = 4.0 * xyz[1] / den;'
+
+[[mutant]]
+id = "04"
+name = "Oklab M1 row"
+test = "color"
+why = "A wrong Oklab M1 matrix row gives wrong lightness and hue."
+find = '0.0482003018, 0.2643662691, 0.6338517070'
+replace = '0.2643662691, 0.0482003018, 0.6338517070'
+
+[[mutant]]
+id = "05"
+name = "Oklab without the white scale"
+test = "color"
+why = "Oklab expects XYZ relative to a white of Y = 1."
+find = 'for (k = 0; k < 9; k++) xn[k] = m[k] / yw;'
+replace = 'for (k = 0; k < 9; k++) xn[k] = m[k];'
+
+[[mutant]]
+id = "06"
+name = "Bradford ratio inverted"
+test = "color"
+why = "Bradford adaptation scales by destination over source cone responses; the inverse adapts the wrong way."
+find = 'd[0] = cd[0] / cs[0];'
+replace = 'd[0] = cs[0] / cd[0];'
+
+[[mutant]]
+id = "07"
+name = "cbrt as pow"
+test = "color"
+why = "Oklab needs a real cube root; pow() returns NaN for a negative cone response. Caught after the test got a cone response below 0."
+find = 'l[k] = cbrt(l[k] + cx->ok_black[k]);'
+replace = 'l[k] = pow(l[k] + cx->ok_black[k], 1.0 / 3.0);'
+
+[[mutant]]
+id = "08"
+name = "hue in radians"
+test = "color"
+why = "The API gives hue in degrees."
+find = 'h = atan2(in[2], in[1]) / PSYCOL__D2R;'
+replace = 'h = atan2(in[2], in[1]);'
+
+[[mutant]]
+id = "09"
+name = "DKL azimuth sign"
+test = "color"
+why = "DKL azimuth turns the other way, so the isoluminant axes swap sign."
+find = 'cart[2] = r * cos(e) * sin(a);'
+replace = 'cart[2] = -r * cos(e) * sin(a);'
+
+[[mutant]]
+id = "10"
+name = "DKL elevation sin as cos"
+test = "color"
+why = "DKL elevation is the luminance axis; sine and cosine swapped put luminance in the plane."
+find = 'cart[0] = r * sin(e);'
+replace = 'cart[0] = r * cos(e);'
+
+[[mutant]]
+id = "11"
+name = "MacLeod-Boynton s scale"
+test = "color"
+why = "MacLeod-Boynton s is scaled to the observer's convention; without the scale the s axis is wrong."
+find = 'o[1] = cx->mb_k * lms[2] / V;'
+replace = 'o[1] = lms[2] / V;'
+
+[[mutant]]
+id = "12"
+name = "10 degree table ignored"
+test = "color"
+why = "The 10 degree cone fundamentals must be used when asked for, not the 2 degree table."
+find = 'return cones == PSYCOL_CONES_SS10 ? psycol__ss10 : psycol__ss2;'
+replace = 'return cones == PSYCOL_CONES_SS10 ? psycol__ss2 : psycol__ss2;'
+
+[[mutant]]
+id = "13"
+name = "luminance not normalized"
+test = "color"
+why = "The luminance fit must be normalized to the display's measured Y."
+find = 'scale = (ws[0] * sum[0]'
+replace = 'scale = 1.0 + 0.0 * (ws[0] * sum[0]'
+
+[[mutant]]
+id = "14"
+name = "lum fit sign"
+test = "color"
+why = "The luminance fit picks the root with the right sign."
+find = 'if (w[0] + w[1] < 0.0)'
+replace = 'if (w[0] + w[1] > 0.0)'
+
+[[mutant]]
+id = "15"
+name = "max_scale symmetric as one-sided"
+test = "color"
+why = "max_scale for a SYMMETRIC excursion must check both signs."
+find = 'if (sides == PSYCOL_SYMMETRIC) r ='
+replace = 'if (0) r ='
+
+[[mutant]]
+id = "16"
+name = "margin sign"
+test = "color"
+why = "The gamut margin is the distance to the nearer edge."
+find = 'm = rgb[k] < 1.0 - rgb[k] ? rgb[k] : 1.0 - rgb[k];'
+replace = 'm = rgb[k] > 1.0 - rgb[k] ? rgb[k] : 1.0 - rgb[k];'
+
+[[mutant]]
+id = "17"
+name = "below as above"
+test = "color"
+why = "A channel below 0 must be reported as below, not above."
+find = 'if (lo < 0.0) g->below |= 1u << k;'
+replace = 'if (lo < 0.0) g->above |= 1u << k;'
+
+[[mutant]]
+id = "18"
+name = "chroma bisection at 4 steps"
+test = "color"
+why = "The chroma bisection needs enough steps to reach the gamut edge to double precision."
+find = '''
+    for (i = 0; i < 60; i++) {
+        double mid'''
+replace = '''
+    for (i = 0; i < 4; i++) {
+        double mid'''
+
+[[mutant]]
+id = "19"
+name = "hex nibble order"
+test = "color"
+why = "Hex color strings are high nibble first."
+find = '(v[2 * k] * 16 + v[2 * k + 1])'
+replace = '(v[2 * k + 1] * 16 + v[2 * k])'
+
+[[mutant]]
+id = "20"
+name = "sRGB threshold"
+test = "color"
+why = "sRGB's linear segment ends at 0.04045 (IEC 61966-2-1); 0.03928 is the old draft value."
+find = 'a <= 0.04045 ?'
+replace = 'a <= 0.03928 ?'
+
+[[mutant]]
+id = "21"
+name = "src_white_Y ignored"
+test = "color"
+why = "src_white_Y selects absolute colorimetry; ignoring it falls back to relative."
+find = 'if (cx->desc.src_white_Y > 0.0) {   /* absolute */'
+replace = 'if (0) {   /* absolute */'
+
+[[mutant]]
+id = "22"
+name = "black not added to XYZ"
+test = "color"
+why = "The display's black light must be added to XYZ. Caught after the test got a black with light."
+find = 'for (k = 0; k < 3; k++) xyz[k] += cx->black_xyz[k];'
+replace = ''
+
+[[mutant]]
+id = "23"
+name = "set_background without the contrast spaces"
+test = "color"
+why = "set_background must update the cone-contrast and DKL spaces. Caught after the test compared with a fresh context."
+find = '''
+    for (k = 0; k < 3; k++) cx->bg[k] = cx->desc.background[k] = bg[k];
+    psycol__ctx_bg(cx);'''
+replace = '    for (k = 0; k < 3; k++) cx->bg[k] = cx->desc.background[k] = bg[k];'
+
+[[mutant]]
+id = "24"
+name = "ctx id without the lum CRC"
+test = "color"
+why = "The context id must cover the luminance settings, so two contexts that differ only there differ in id. Caught after the test compared ids."
+find = 'memcpy(buf + o, &lc, 4); o += 4;'
+replace = 'o += 4;'
+
+[[mutant]]
+id = "25"
+name = "output code rounding at 0.49"
+test = "color"
+why = "Output codes round to nearest. Caught after the test got values 0.002 of a code from a half."
+find = 'k = (float)floor(d * mx + 0.5f);'
+replace = 'k = (float)floor(d * mx + 0.49f);'
+
+[[mutant]]
+id = "26"
+name = "cone contrast without the background"
+test = "color"
+why = "Cone contrast is relative to the background's cone responses."
+find = 't[0] = v[0] * cx->bg_lms[0];'
+replace = 't[0] = v[0];'
+
+[[mutant]]
+id = "27"
+name = "CLUT inverse end"
+test = "color"
+why = "The CLUT inverse must return 1 only at or above the last entry."
+find = 'if (y >= l[n - 1]) return 1.0;'
+replace = 'if (y >= l[n - 2]) return 1.0;'
+
+[[mutant]]
+id = "28"
+name = "DKL S row without w_S"
+test = "color"
+why = "The DKL S row subtracts w_S. Caught after the test checked the luminance axis with an S weight."
+find = '/ b[2] - w[2];'
+replace = '/ b[2];'
+
+[[mutant]]
+id = "29"
+name = "gamut eps ignored"
+test = "color"
+why = "The gamut check allows PSYCOL_GAMUT_EPS of rounding error."
+find = 'if (lo < -PSYCOL_GAMUT_EPS || hi > 1.0 + PSYCOL_GAMUT_EPS) g->in = 0;'
+replace = 'if (lo < 0.0 || hi > 1.0) g->in = 0;'
+
+[[mutant]]
+id = "30"
+name = "map in-gamut not returned as is"
+test = "color"
+why = "Mapping must return an in-gamut color unchanged."
+find = '''
+    if (g->in) return psycol__rgb(rgb);
+    switch (method) {'''
+replace = '    switch (method) {'
+
+[[mutant]]
+id = "31"
+name = "BT.2020 alpha"
+test = "color"
+why = "BT.2020's alpha has full precision; 1.099 breaks the curve's continuity at the knee."
+find = '#define PSYCOL__B2020_A 1.09929682680944'
+replace = '#define PSYCOL__B2020_A 1.099'
+
+[[mutant]]
+id = "32"
+name = "relative white Y from the black-free sum only"
+test = "color"
+why = "The relative white must include the display's black light."
+find = 'else for (k = 0; k < 3; k++) cx->white_xyz[k] = m[k * 3] + m[k * 3 + 1] + m[k * 3 + 2] + cx->black_xyz[k];'
+replace = 'else for (k = 0; k < 3; k++) cx->white_xyz[k] = m[k * 3] + m[k * 3 + 1] + m[k * 3 + 2];'

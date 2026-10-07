@@ -650,8 +650,8 @@ only the caller knows what to do with that trial.
 
 ## Flip hooks (v0.3.0)
 
-The design is in the scratchpad note `screen_hooks_design.md`; this
-section records what was built and measured. All runs: one laptop, on
+The design note (`screen_hooks_design.md`) was not kept; this section is
+the record of what was built and measured. All runs: one laptop, on
 battery, Balanced power plan, `screen_flipstats` built with MSVC 19.4
 /O2, 2026-10-05, under the shared measurement lock.
 
@@ -1228,6 +1228,17 @@ Windows the header sets ICON_SMALL and ICON_BIG itself: the smallest of
 its sizes at least as large as the window's icon metric at its dpi. Read
 back, ICON_SMALL was the 16 pixel art and ICON_BIG the 32, every pixel
 equal to the header's.
+
+### Builds (v0.3.1, 2026-10-06)
+
+gcc 13.3 in WSL2: the core test at -O2 and under ASan and UBSan. gcc 13.3
+and clang 18.1 in an Ubuntu 24.04 container with SDL3 3.4.0: the compile
+checks, the COM check, the test, the examples and the loopback test,
+with the CI jobs' flags; the examples on the simulated display give
+their documented exit codes. MinGW-w64 gcc 16.2 (MSYS2): the Screen
+job's MinGW step. All pass. emcc 6.0.10 compiles it only inside
+psy_gfx.h's and psy_video.h's compile checks (`PSYSCR_NO_SDL`), which
+pass under node; its own test was not run under emcc.
 
 ## Not measured
 

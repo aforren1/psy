@@ -14,6 +14,15 @@
  *     while (ti := t.next()) is not None:
  *         t.update(run_trial(t.level(ti.condition, 0), t.level(ti.condition, 1)))
  *
+ *     tab = pt.Table(open("conditions.csv", encoding="utf-8").read())
+ *     t = pt.Trials(table=tab, rules="order constrained\nreps 10\nmax_run target 3\n",
+ *                   participant=7, rng=20260923)
+ *     row = t.values(ti.condition)          # {"target": "a", "contrast": 0.25, ...}
+ *
+ * TABLES. Table wraps psy_table.h: the parsed block lives in memory the
+ * Table owns, and a Trials keeps a reference to its Table, which the header
+ * reads for the whole session.
+ *
  * CALLBACKS. A track's is_done and a callable rng are Python; the header calls
  * them from next(), done, restore() and (rng) open() and requeue(). Those calls
  * keep the GIL. open() and load() release it when the generator is the
@@ -41,6 +50,7 @@ static PyObject* TFull;
 
 static PyObject* TInfoType;     /* namedtuple TrialInfo */
 static PyObject* TTrialType;    /* namedtuple Trial     */
+static PyObject* TTableType;    /* psy.trials.Table     */
 
 /* Heap-type instances visit their type in tp_traverse from 3.9 on only. */
 static int g_visit_type = 1;
@@ -87,6 +97,11 @@ typedef struct TrialsObject {
     int*      warmup;
     unsigned char* records;               /* record_size x PSYTR_MAX_TRIALS */
     size_t    record_size;
+    PyObject* table_obj;                  /* the Table desc.table points into */
+    int*      order_list;
+    double*   weights;
+    int*      group_list;
+    uint64_t* rules_arena;                /* psytr_rules() output, until open */
     int       busy;
     PyObject *cb_type, *cb_value, *cb_tb;
     t_track_ctx track_ctx[PSYTR_MAX_TRACKS];
@@ -101,6 +116,7 @@ static int t_traverse(PyObject* self, visitproc visit, void* arg) {
     for (i = 0; i < PSYTR_MAX_TRACKS; i++) Py_VISIT(o->tracks[i]);
     Py_VISIT(o->rng_obj);
     Py_VISIT(o->names);
+    Py_VISIT(o->table_obj);
     Py_VISIT(o->cb_type);
     Py_VISIT(o->cb_value);
     Py_VISIT(o->cb_tb);
@@ -117,6 +133,7 @@ static int t_clear(PyObject* self) {
     for (i = 0; i < PSYTR_MAX_TRACKS; i++) Py_CLEAR(o->tracks[i]);
     Py_CLEAR(o->rng_obj);
     Py_CLEAR(o->names);
+    Py_CLEAR(o->table_obj);
     Py_CLEAR(o->cb_type);
     Py_CLEAR(o->cb_value);
     Py_CLEAR(o->cb_tb);
@@ -128,6 +145,10 @@ static void t_free_bufs(TrialsObject* o) {
     PyMem_Free(o->warmup);    o->warmup = NULL;
     PyMem_Free(o->records);   o->records = NULL;
     o->record_size = 0;
+    PyMem_Free(o->order_list);  o->order_list = NULL;
+    PyMem_Free(o->weights);     o->weights = NULL;
+    PyMem_Free(o->group_list);  o->group_list = NULL;
+    PyMem_Free(o->rules_arena); o->rules_arena = NULL;
 }
 
 static void Trials_dealloc(PyObject* self) {
@@ -209,6 +230,340 @@ static bool t_tramp_done(void* ctx) {
 }
 
 /* ======================================================================= *
+ *  Table (psy_table.h)
+ * ======================================================================= */
+
+typedef struct TableObject {
+    PyObject_HEAD
+    uint64_t*   mem;        /* the block, 8-byte aligned, owned */
+    psytb_table tab;
+} TableObject;
+
+#define TB(self) ((TableObject*)(self))
+
+static void Table_dealloc(PyObject* self) {
+    PyTypeObject* tp = Py_TYPE(self);
+    freefunc tp_free = (freefunc)PyType_GetSlot(tp, Py_tp_free);
+    PyMem_Free(TB(self)->mem);
+    tp_free(self);
+    Py_DECREF(tp);
+}
+
+/* Keep exactly the block: copy it out of the parse arena and view it. */
+static int tb_adopt(TableObject* o, const void* block, size_t size) {
+    uint64_t* mem = (uint64_t*)PyMem_Malloc((size + 7) & ~(size_t)7);
+    psytb_table v;
+    if (!mem) { PyErr_NoMemory(); return -1; }
+    memcpy(mem, block, size);
+    if (!psytb_view(&v, mem, size)) {
+        PyErr_SetString(TArgumentError, psytb_error(&v));
+        PyMem_Free(mem);
+        return -1;
+    }
+    PyMem_Free(o->mem);
+    o->mem = mem;
+    o->tab = v;
+    return 0;
+}
+
+static int t_type_name(PyObject* v, psytb_type* out) {
+    PyObject* keep = NULL;
+    const char* s;
+    if (PyLong_Check(v)) { *out = (psytb_type)PyLong_AsLong(v); return 0; }
+    s = PyUnicode_Check(v) ? t_utf8(v, &keep) : NULL;
+    if (!s) { PyErr_SetString(PyExc_TypeError, "a column type is 'integer', 'number', 'string' or 'auto'"); return -1; }
+    if (strcmp(s, "integer") == 0) *out = PSYTB_INTEGER;
+    else if (strcmp(s, "number") == 0) *out = PSYTB_NUMBER;
+    else if (strcmp(s, "string") == 0) *out = PSYTB_STRING;
+    else if (strcmp(s, "auto") == 0) *out = PSYTB_AUTO;
+    else { Py_XDECREF(keep); PyErr_Format(TArgumentError, "unknown column type '%s'", s); return -1; }
+    Py_XDECREF(keep);
+    return 0;
+}
+
+static int Table_init(PyObject* self, PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "csv", "types", "delimiter", "allow_empty", NULL };
+    TableObject* o = TB(self);
+    PyObject *csv, *types = Py_None, *bytes = NULL, *keys = NULL;
+    const char* delim = ",";
+    int allow_empty = 0, ok;
+    psytb_csv_desc d;
+    psytb_table t;
+    uint64_t* arena;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|$Osp", kw, &csv, &types, &delim, &allow_empty))
+        return -1;
+    memset(&d, 0, sizeof(d));
+    if (PyUnicode_Check(csv)) bytes = PyUnicode_AsUTF8String(csv);
+    else bytes = PyBytes_FromObject(csv);
+    if (!bytes) return -1;
+    if (strlen(delim) != 1) { Py_DECREF(bytes); PyErr_SetString(TArgumentError, "delimiter must be one character"); return -1; }
+    d.delimiter = delim[0];
+    d.allow_empty = allow_empty != 0;
+    if (types != Py_None) {
+        Py_ssize_t i, n;
+        if (!PyDict_Check(types)) { Py_DECREF(bytes); PyErr_SetString(PyExc_TypeError, "types must be a dict of column name to type"); return -1; }
+        keys = PyDict_Keys(types);
+        if (!keys) { Py_DECREF(bytes); return -1; }
+        n = PyList_Size(keys);
+        if (n > PSYTB_MAX_COLUMNS) { Py_DECREF(keys); Py_DECREF(bytes); PyErr_SetString(TArgumentError, "too many types"); return -1; }
+        for (i = 0; i < n; i++) {
+            PyObject* k = PyList_GetItem(keys, i);
+            PyObject* kb = NULL;
+            if (!PyUnicode_Check(k) || !(kb = PyUnicode_AsUTF8String(k)) ||
+                t_type_name(PyDict_GetItem(types, k), &d.types[i].type) < 0) {
+                Py_XDECREF(kb);
+                Py_DECREF(keys);
+                Py_DECREF(bytes);
+                if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "types keys must be column names");
+                return -1;
+            }
+            /* The name must live through the parse: keep the bytes in the
+             * keys list (which this function holds) by replacing the key. */
+            PyList_SetItem(keys, i, kb);
+            d.types[i].name = PyBytes_AsString(kb);
+        }
+        d.n_types = (int)n;
+    }
+    d.text = PyBytes_AsString(bytes);
+    d.len = (size_t)PyBytes_Size(bytes);
+    /* A sizing pass, then the parse into an arena of that size. */
+    psytb_csv(&t, &d);
+    if (t.need == 0) {
+        Py_XDECREF(keys);
+        Py_DECREF(bytes);
+        PyErr_SetString(TArgumentError, psytb_error(&t));
+        return -1;
+    }
+    arena = (uint64_t*)PyMem_Malloc((t.need + 7) & ~(size_t)7);
+    if (!arena) { Py_XDECREF(keys); Py_DECREF(bytes); PyErr_NoMemory(); return -1; }
+    d.arena = arena;
+    d.arena_size = t.need;
+    Py_BEGIN_ALLOW_THREADS
+    ok = psytb_csv(&t, &d);
+    Py_END_ALLOW_THREADS
+    Py_XDECREF(keys);
+    Py_DECREF(bytes);
+    if (!ok) {
+        PyErr_SetString(TArgumentError, psytb_error(&t));
+        PyMem_Free(arena);
+        return -1;
+    }
+    ok = tb_adopt(o, t.base, t.size);
+    PyMem_Free(arena);
+    return ok;
+}
+
+static PyObject* Table_from_bytes(PyObject* cls, PyObject* arg) {
+    /* Not the buffer protocol: it is Limited API only from 3.11. */
+    PyObject *self, *b = PyBytes_FromObject(arg);
+    if (!b) return NULL;
+    self = PyObject_CallMethod(cls, "__new__", "O", cls);
+    if (!self) { Py_DECREF(b); return NULL; }
+    if (tb_adopt(TB(self), PyBytes_AsString(b), (size_t)PyBytes_Size(b)) < 0) {
+        Py_DECREF(b);
+        Py_DECREF(self);
+        return NULL;
+    }
+    Py_DECREF(b);
+    return self;
+}
+
+static int tb_ready(TableObject* o) {
+    if (!o->tab.base) { PyErr_SetString(TClosed, "the Table holds no table"); return -1; }
+    return 0;
+}
+
+/* A column argument: index or name. */
+static int tb_col(TableObject* o, PyObject* c) {
+    if (PyUnicode_Check(c)) {
+        PyObject* keep;
+        const char* s = t_utf8(c, &keep);
+        int i;
+        if (!s) return -1;
+        i = psytb_col(&o->tab, s);
+        if (i < 0) PyErr_Format(PyExc_KeyError, "no column '%s'", s);
+        Py_DECREF(keep);
+        return i;
+    } else {
+        long i = PyLong_AsLong(c);
+        if (i == -1 && PyErr_Occurred()) return -1;
+        if (i < 0 || i >= o->tab.n_cols) { PyErr_Format(PyExc_IndexError, "column %ld out of range", i); return -1; }
+        return (int)i;
+    }
+}
+
+static PyObject* tb_cell(TableObject* o, int r, int c) {
+    switch (psytb_col_type(&o->tab, c)) {
+    case PSYTB_INTEGER: return PyLong_FromLong((long)psytb_int(&o->tab, r, c));
+    case PSYTB_NUMBER: {
+        double v = psytb_num(&o->tab, r, c);
+        if (v != v) Py_RETURN_NONE;   /* an empty cell under allow_empty */
+        return PyFloat_FromDouble(v);
+    }
+    default: return PyUnicode_FromString(psytb_text(&o->tab, r, c));
+    }
+}
+
+static PyObject* Table_value(PyObject* self, PyObject* args) {
+    TableObject* o = TB(self);
+    int r, c;
+    PyObject* col;
+    if (!PyArg_ParseTuple(args, "iO", &r, &col)) return NULL;
+    if (tb_ready(o) < 0 || (c = tb_col(o, col)) < 0) return NULL;
+    if (r < 0 || r >= o->tab.n_rows) { PyErr_Format(PyExc_IndexError, "row %d out of range", r); return NULL; }
+    return tb_cell(o, r, c);
+}
+
+static PyObject* tb_row(TableObject* o, int r) {
+    PyObject* d = PyDict_New();
+    int c;
+    if (!d) return NULL;
+    for (c = 0; c < o->tab.n_cols; c++) {
+        PyObject* v = tb_cell(o, r, c);
+        if (!v || PyDict_SetItemString(d, psytb_col_name(&o->tab, c), v) < 0) {
+            Py_XDECREF(v);
+            Py_DECREF(d);
+            return NULL;
+        }
+        Py_DECREF(v);
+    }
+    return d;
+}
+
+static PyObject* Table_row(PyObject* self, PyObject* arg) {
+    TableObject* o = TB(self);
+    long r = PyLong_AsLong(arg);
+    if (r == -1 && PyErr_Occurred()) return NULL;
+    if (tb_ready(o) < 0) return NULL;
+    if (r < 0 || r >= o->tab.n_rows) { PyErr_Format(PyExc_IndexError, "row %ld out of range", r); return NULL; }
+    return tb_row(o, (int)r);
+}
+
+static PyObject* Table_levels(PyObject* self, PyObject* arg) {
+    TableObject* o = TB(self);
+    int c, l, n;
+    PyObject* list;
+    if (tb_ready(o) < 0 || (c = tb_col(o, arg)) < 0) return NULL;
+    n = psytb_n_levels(&o->tab, c);
+    list = PyList_New(n);
+    if (!list) return NULL;
+    for (l = 0; l < n; l++) PyList_SetItem(list, l, PyUnicode_FromString(psytb_level_text(&o->tab, c, l)));
+    return list;
+}
+
+static PyObject* Table_level(PyObject* self, PyObject* args) {
+    TableObject* o = TB(self);
+    int r, c;
+    PyObject* col;
+    if (!PyArg_ParseTuple(args, "iO", &r, &col)) return NULL;
+    if (tb_ready(o) < 0 || (c = tb_col(o, col)) < 0) return NULL;
+    if (r < 0 || r >= o->tab.n_rows) { PyErr_Format(PyExc_IndexError, "row %d out of range", r); return NULL; }
+    return PyLong_FromLong(psytb_level(&o->tab, r, c));
+}
+
+static PyObject* Table_find(PyObject* self, PyObject* args) {
+    TableObject* o = TB(self);
+    PyObject *col, *val, *s, *keep;
+    const char* txt;
+    int c, l;
+    if (!PyArg_ParseTuple(args, "OO", &col, &val)) return NULL;
+    if (tb_ready(o) < 0 || (c = tb_col(o, col)) < 0) return NULL;
+    s = PyUnicode_Check(val) ? (Py_INCREF(val), val) : PyObject_Str(val);
+    if (!s) return NULL;
+    txt = t_utf8(s, &keep);
+    Py_DECREF(s);
+    if (!txt) return NULL;
+    l = psytb_find(&o->tab, c, txt);
+    Py_DECREF(keep);
+    return PyLong_FromLong(l);
+}
+
+static PyObject* Table_col(PyObject* self, PyObject* arg) {
+    TableObject* o = TB(self);
+    int c;
+    if (tb_ready(o) < 0 || (c = tb_col(o, arg)) < 0) return NULL;
+    return PyLong_FromLong(c);
+}
+
+static PyObject* Table_to_bytes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    TableObject* o = TB(self);
+    if (tb_ready(o) < 0) return NULL;
+    return PyBytes_FromStringAndSize((const char*)o->tab.base, (Py_ssize_t)o->tab.size);
+}
+
+static Py_ssize_t Table_len(PyObject* self) { return TB(self)->tab.n_rows; }
+
+static PyObject* Table_get_columns(PyObject* self, void* Py_UNUSED(c)) {
+    TableObject* o = TB(self);
+    PyObject* list = PyList_New(o->tab.n_cols);
+    int c;
+    if (!list) return NULL;
+    for (c = 0; c < o->tab.n_cols; c++) PyList_SetItem(list, c, PyUnicode_FromString(psytb_col_name(&o->tab, c)));
+    return list;
+}
+
+static PyObject* Table_get_types(PyObject* self, void* Py_UNUSED(c)) {
+    TableObject* o = TB(self);
+    PyObject* list = PyList_New(o->tab.n_cols);
+    int c;
+    if (!list) return NULL;
+    for (c = 0; c < o->tab.n_cols; c++)
+        PyList_SetItem(list, c, PyUnicode_FromString(psytb_type_name(psytb_col_type(&o->tab, c))));
+    return list;
+}
+
+static PyObject* Table_get_n_rows(PyObject* self, void* Py_UNUSED(c)) { return PyLong_FromLong(TB(self)->tab.n_rows); }
+static PyObject* Table_get_n_skipped(PyObject* self, void* Py_UNUSED(c)) { return PyLong_FromLong(TB(self)->tab.n_skipped); }
+static PyObject* Table_get_hash(PyObject* self, void* Py_UNUSED(c)) {
+    return PyLong_FromUnsignedLongLong((unsigned long long)psytb_hash(&TB(self)->tab));
+}
+
+static PyGetSetDef Table_getset[] = {
+    { "columns", Table_get_columns, NULL, "Column names.", NULL },
+    { "types", Table_get_types, NULL, "Column types: 'integer', 'number' or 'string'.", NULL },
+    { "n_rows", Table_get_n_rows, NULL, "Data rows.", NULL },
+    { "n_skipped", Table_get_n_skipped, NULL, "CSV rows with every field empty, skipped.", NULL },
+    { "hash", Table_get_hash, NULL, "The block's content hash.", NULL },
+    { NULL }
+};
+
+static PyMethodDef Table_methods[] = {
+    { "value", Table_value, METH_VARARGS, "value(row, col) -> int | float | str | None" },
+    { "row", Table_row, METH_O, "row(i) -> dict: column name to value." },
+    { "levels", Table_levels, METH_O, "levels(col) -> list[str]: the level texts in order." },
+    { "level", Table_level, METH_VARARGS, "level(row, col) -> int" },
+    { "find", Table_find, METH_VARARGS, "find(col, value) -> int: the level of a value, or -1." },
+    { "col", Table_col, METH_O, "col(name) -> int" },
+    { "to_bytes", Table_to_bytes, METH_NOARGS, "to_bytes() -> bytes: the block, as a pack stores it." },
+    { "from_bytes", Table_from_bytes, METH_O | METH_CLASS,
+      "Table.from_bytes(b) -> Table: check a block and keep a copy." },
+    { NULL }
+};
+
+static PyType_Slot Table_slots[] = {
+    { Py_tp_doc, (void*)
+      "Table(csv, *, types=None, delimiter=',', allow_empty=False)\n\n"
+      "A psy_table.h table parsed from CSV text (str or bytes). types maps column "
+      "names to 'integer', 'number' or 'string'; other columns are inferred. "
+      "Raises ArgumentError with the line, row and column of a fault." },
+    { Py_tp_new, (void*)PyType_GenericNew },
+    { Py_tp_init, (void*)Table_init },
+    { Py_tp_dealloc, (void*)Table_dealloc },
+    { Py_tp_methods, Table_methods },
+    { Py_tp_getset, Table_getset },
+    { Py_sq_length, (void*)Table_len },
+    { 0, NULL }
+};
+
+static PyType_Spec Table_spec = {
+    .name = "psy.trials.Table",
+    .basicsize = sizeof(TableObject),
+    .itemsize = 0,
+    .flags = Py_TPFLAGS_DEFAULT,
+    .slots = Table_slots,
+};
+
+/* ======================================================================= *
  *  Desc parsing
  * ======================================================================= */
 
@@ -236,12 +591,44 @@ static int t_int_list(PyObject* seq, int** out, int* n_out, const char* what) {
     return 0;
 }
 
-/* Index of a factor named `name` in the desc, or -1. */
+/* Index of a factor named `name` in the desc (a table column, or a named
+ * factor), or -1. */
 static int t_factor_by_name(const psytr_desc* d, const char* name) {
     int f;
+    if (d->table) return psytb_col(d->table, name);
     for (f = 0; f < d->n_factors; f++)
         if (d->factors[f].name && strcmp(d->factors[f].name, name) == 0) return f;
     return -1;
+}
+
+/* A level: an int, or with a table a value (str, int or float) looked up
+ * in the factor's column. */
+static int t_level(const psytr_desc* d, int factor, PyObject* v, int* out, const char* what) {
+    if (!v) return 0;
+    if (PyUnicode_Check(v) || (d->table && factor >= 0 && !PyLong_Check(v))) {
+        PyObject *s, *keep;
+        const char* txt;
+        if (!d->table || factor < 0) {
+            PyErr_Format(TArgumentError, "%s: a level by name needs a table column", what);
+            return -1;
+        }
+        s = PyUnicode_Check(v) ? (Py_INCREF(v), v) : PyObject_Str(v);
+        if (!s) return -1;
+        txt = t_utf8(s, &keep);
+        Py_DECREF(s);
+        if (!txt) return -1;
+        *out = psytb_find(d->table, factor, txt);
+        if (*out < 0) PyErr_Format(TArgumentError, "%s: column '%s' has no level '%s'", what,
+                                   psytb_col_name(d->table, factor), txt);
+        Py_DECREF(keep);
+        return *out < 0 ? -1 : 0;
+    } else {
+        long x = PyLong_AsLong(v);
+        if (x == -1 && PyErr_Occurred()) return -1;
+        /* An int level of a table column: a level number, as in C. */
+        *out = (int)x;
+        return 0;
+    }
 }
 
 static int t_dict_int(PyObject* dict, const char* key, int* out, int dflt) {
@@ -261,7 +648,8 @@ static int t_parse_constraint(PyObject* c, const psytr_desc* d, psytr_constraint
     int rule;
     if (!PyDict_Check(c)) {
         PyErr_Format(PyExc_TypeError, "constraints[%d] must come from max_run(), "
-                     "max_in_window(), min_gap(), no_transition() or first_not()", ci);
+                     "max_in_window(), min_gap(), no_transition(), first_not(), "
+                     "followed_by(), preceded_by(), chunk() or balance()", ci);
         return -1;
     }
     memset(out, 0, sizeof(*out));
@@ -275,7 +663,7 @@ static int t_parse_constraint(PyObject* c, const psytr_desc* d, psytr_constraint
         out->factor = t_factor_by_name(d, name);
         if (out->factor < 0) {
             PyErr_Format(TArgumentError, "constraints[%d] names factor '%s', which is not in "
-                         "factors", ci, name);
+                         "factors or the table", ci, name);
             Py_DECREF(keep);
             return -1;
         }
@@ -283,9 +671,14 @@ static int t_parse_constraint(PyObject* c, const psytr_desc* d, psytr_constraint
     } else if (t_dict_int(c, "factor", &out->factor, PSYTR_CONDITION) < 0) {
         return -1;
     }
-    if (t_dict_int(c, "level", &out->level, 0) < 0 ||
-        t_dict_int(c, "level2", &out->level2, 0) < 0 ||
-        t_dict_int(c, "n", &out->n, 0) < 0 ||
+    {
+        char what[32];
+        PyOS_snprintf(what, sizeof(what), "constraints[%d]", ci);
+        if (t_level(d, out->factor, PyDict_GetItemString(c, "level"), &out->level, what) < 0 ||
+            t_level(d, out->factor, PyDict_GetItemString(c, "level2"), &out->level2, what) < 0)
+            return -1;
+    }
+    if (t_dict_int(c, "n", &out->n, 0) < 0 ||
         t_dict_int(c, "window", &out->window, 0) < 0)
         return -1;
     return 0;
@@ -296,20 +689,34 @@ static int t_build(TrialsObject* o, PyObject* args, PyObject* kwds, psytr_desc* 
                           "constraints", "max_swaps", "tracks", "interleave",
                           "track_rate", "block_size", "constraints_span_blocks",
                           "n_practice", "n_warmup", "warmup_conditions", "requeue_gap",
-                          "rng", "record_size", NULL };
+                          "rng", "record_size", "table", "order_list", "draws", "weights",
+                          "subset", "groups", "rules", "participant", NULL };
     PyObject *factors = Py_None, *cond_reps = Py_None, *constraints = Py_None,
-             *tracks = Py_None, *warmup = Py_None, *rng = Py_None;
-    int order = 0, interleave = 0, span = 0;
+             *tracks = Py_None, *warmup = Py_None, *rng = Py_None, *table = Py_None,
+             *order_list = Py_None, *weights = Py_None, *groups = Py_None, *rules = Py_None;
+    int order = 0, interleave = 0, span = 0, participant = 0;
     Py_ssize_t record_size = 0, n, i;
 
     memset(d, 0, sizeof(*d));
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$iOiOiOiOidipiiOiOn", kw,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$iOiOiOiOidipiiOiOnOOiOiOOi", kw,
                                      &d->n_conditions, &factors, &d->reps, &cond_reps,
                                      &order, &constraints, &d->max_swaps, &tracks,
                                      &interleave, &d->track_rate, &d->block_size, &span,
                                      &d->n_practice, &d->n_warmup, &warmup,
-                                     &d->requeue_gap, &rng, &record_size))
+                                     &d->requeue_gap, &rng, &record_size, &table, &order_list,
+                                     &d->draws, &weights, &d->subset, &groups, &rules,
+                                     &participant))
         return -1;
+    if (table != Py_None) {
+        if (!PyObject_TypeCheck(table, (PyTypeObject*)TTableType)) {
+            PyErr_SetString(PyExc_TypeError, "table must be a psy.trials.Table");
+            return -1;
+        }
+        if (tb_ready(TB(table)) < 0) return -1;
+        Py_INCREF(table);
+        o->table_obj = table;
+        d->table = &TB(table)->tab;
+    }
     d->order = (psytr_order)order;
     d->interleave = (psytr_interleave)interleave;
     d->constraints_span_blocks = span ? true : false;
@@ -370,7 +777,7 @@ static int t_build(TrialsObject* o, PyObject* args, PyObject* kwds, psytr_desc* 
         /* The header reads one entry per condition; a short list would be
          * read past its end, so the count is checked against the rows. */
         {
-            int rows = d->n_conditions, f;
+            int rows = d->table ? d->table->n_rows : d->n_conditions, f;
             if (rows == 0 && d->n_factors > 0) {
                 rows = 1;
                 for (f = 0; f < d->n_factors; f++) rows *= d->factors[f].n_levels > 0 ? d->factors[f].n_levels : 1;
@@ -405,6 +812,105 @@ static int t_build(TrialsObject* o, PyObject* args, PyObject* kwds, psytr_desc* 
             if (rc < 0) return -1;
         }
         d->n_constraints = (int)n;
+    }
+
+    if (order_list != Py_None) {
+        if (t_int_list(order_list, &o->order_list, &d->n_order_list, "order_list") < 0) return -1;
+        d->order_list = o->order_list;
+    }
+    if (weights != Py_None || groups != Py_None) {
+        int rows = d->table ? d->table->n_rows : d->n_conditions, f;
+        if (rows == 0 && d->n_factors > 0) {
+            rows = 1;
+            for (f = 0; f < d->n_factors; f++) rows *= d->factors[f].n_levels > 0 ? d->factors[f].n_levels : 1;
+        }
+        if (weights != Py_None) {
+            n = PySequence_Size(weights);
+            if (n < 0) { PyErr_Clear(); PyErr_SetString(PyExc_TypeError, "weights must be a sequence of numbers"); return -1; }
+            if (n != rows) {
+                PyErr_Format(TArgumentError, "weights has %zd entries, the design has %d conditions", n, rows);
+                return -1;
+            }
+            o->weights = (double*)PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(double));
+            if (!o->weights) { PyErr_NoMemory(); return -1; }
+            for (i = 0; i < n; i++) {
+                PyObject* it = PySequence_GetItem(weights, i);
+                double w;
+                if (!it) return -1;
+                w = PyFloat_AsDouble(it);
+                Py_DECREF(it);
+                if (w == -1.0 && PyErr_Occurred()) return -1;
+                o->weights[i] = w;
+            }
+            d->weights = o->weights;
+        }
+        if (groups != Py_None) {
+            /* {"factor": name or index, "mode": "blocked" | "alternate",
+             *  "order": "sequential" | "random" | "latin" | "balanced_latin"
+             *  | "list", "participant": int, "list": [values]} */
+            static const char* const modes[] = { "none", "blocked", "alternate" };
+            static const char* const orders[] = { "sequential", "random", "latin", "balanced_latin", "list" };
+            PyObject *v;
+            int k;
+            if (!PyDict_Check(groups)) { PyErr_SetString(PyExc_TypeError, "groups must be a dict (see groups())"); return -1; }
+            v = PyDict_GetItemString(groups, "factor");
+            if (!v) { PyErr_SetString(TArgumentError, "groups needs a factor"); return -1; }
+            if (PyUnicode_Check(v)) {
+                PyObject* keep;
+                const char* nm = t_utf8(v, &keep);
+                if (!nm) return -1;
+                d->groups.factor = t_factor_by_name(d, nm);
+                Py_DECREF(keep);
+                if (d->groups.factor < 0) { PyErr_SetString(TArgumentError, "groups names an unknown factor"); return -1; }
+            } else if (t_dict_int(groups, "factor", &d->groups.factor, 0) < 0) {
+                return -1;
+            }
+            d->groups.mode = PSYTR_GROUPS_BLOCKED;
+            v = PyDict_GetItemString(groups, "mode");
+            if (v) {
+                if (PyLong_Check(v)) d->groups.mode = (psytr_group_mode)PyLong_AsLong(v);
+                else {
+                    PyObject* keep;
+                    const char* nm = t_utf8(v, &keep);
+                    if (!nm) return -1;
+                    for (k = 0; k < 3 && strcmp(nm, modes[k]) != 0; k++) {}
+                    Py_DECREF(keep);
+                    if (k == 3) { PyErr_SetString(TArgumentError, "groups mode is 'blocked' or 'alternate'"); return -1; }
+                    d->groups.mode = (psytr_group_mode)k;
+                }
+            }
+            v = PyDict_GetItemString(groups, "order");
+            if (v) {
+                if (PyLong_Check(v)) d->groups.order = (psytr_group_order)PyLong_AsLong(v);
+                else {
+                    PyObject* keep;
+                    const char* nm = t_utf8(v, &keep);
+                    if (!nm) return -1;
+                    for (k = 0; k < 5 && strcmp(nm, orders[k]) != 0; k++) {}
+                    Py_DECREF(keep);
+                    if (k == 5) { PyErr_SetString(TArgumentError, "unknown groups order"); return -1; }
+                    d->groups.order = (psytr_group_order)k;
+                }
+            }
+            if (t_dict_int(groups, "participant", &d->groups.participant, participant) < 0) return -1;
+            v = PyDict_GetItemString(groups, "list");
+            if (v && v != Py_None) {
+                n = PySequence_Size(v);
+                if (n < 0) { PyErr_Clear(); PyErr_SetString(PyExc_TypeError, "groups list must be a sequence"); return -1; }
+                o->group_list = (int*)PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+                if (!o->group_list) { PyErr_NoMemory(); return -1; }
+                for (i = 0; i < n; i++) {
+                    PyObject* it = PySequence_GetItem(v, i);
+                    int rc;
+                    if (!it) return -1;
+                    rc = t_level(d, d->groups.factor, it, &o->group_list[i], "groups list");
+                    Py_DECREF(it);
+                    if (rc < 0) return -1;
+                }
+                d->groups.list = o->group_list;
+                d->groups.n_list = (int)n;
+            }
+        }
     }
 
     /* Tracks: an object, or (object, weight). */
@@ -461,6 +967,32 @@ static int t_build(TrialsObject* o, PyObject* args, PyObject* kwds, psytr_desc* 
         }
     }
 
+    if (rules != Py_None) {
+        /* Rules text, applied over the keywords above (psytr_rules). The
+         * arena holds what the rules make until open() has read it. */
+        psytr_rules_desc rd;
+        PyObject *keep;
+        char err[512];
+        int line, rows = d->table ? d->table->n_rows : PSYTR_MAX_CONDITIONS;
+        size_t sz = (size_t)4 * PSYTR_MAX_TRIALS + (size_t)32 * (size_t)(rows > 0 ? rows : 1) + 1024;
+        const char* txt;
+        if (!PyUnicode_Check(rules)) { PyErr_SetString(PyExc_TypeError, "rules must be a str"); return -1; }
+        txt = t_utf8(rules, &keep);
+        if (!txt) return -1;
+        o->rules_arena = (uint64_t*)PyMem_Malloc(sz);
+        if (!o->rules_arena) { Py_DECREF(keep); PyErr_NoMemory(); return -1; }
+        memset(&rd, 0, sizeof(rd));
+        rd.text = txt;
+        rd.len = strlen(txt);
+        rd.table = d->table;
+        rd.participant = participant;
+        rd.arena = o->rules_arena;
+        rd.arena_size = sz;
+        line = psytr_rules(d, &rd, err, sizeof(err));
+        Py_DECREF(keep);
+        if (line != 0) { PyErr_SetString(TArgumentError, err); return -1; }
+    }
+
     if (record_size < 0) { PyErr_SetString(TArgumentError, "record_size must be >= 0"); return -1; }
     if (record_size > 0) {
         if ((size_t)record_size > ((size_t)-1) / PSYTR_MAX_TRIALS / 2) {
@@ -506,6 +1038,8 @@ static int Trials_init(PyObject* self, PyObject* args, PyObject* kwds) {
         ok = psytr_open(&o->t, &d);
         Py_END_ALLOW_THREADS
     }
+    PyMem_Free(o->rules_arena);
+    o->rules_arena = NULL;
     if (t_leave(o) < 0) { o->t.open = false; t_reset(o); return -1; }
     if (!ok) {
         /* An unmet constraint is a property of the design, not a bad
@@ -743,7 +1277,7 @@ static PyObject* Trials_history(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     for (i = 0; i < n; i++) {
         unsigned f = h[i].flags;
         PyObject* tr = PyObject_CallFunction(
-            TTrialType, "iiiiiiIOOOOOOO", i, (int)h[i].condition, (int)h[i].track,
+            TTrialType, "iiiiiiIOOOOOOOO", i, (int)h[i].condition, (int)h[i].track,
             (int)h[i].rep, (int)h[i].block, (int)h[i].outcome, f,
             (f & PSYTR_FLAG_PRACTICE) ? Py_True : Py_False,
             (f & PSYTR_FLAG_WARMUP) ? Py_True : Py_False,
@@ -751,7 +1285,8 @@ static PyObject* Trials_history(PyObject* self, PyObject* Py_UNUSED(ignored)) {
             (f & PSYTR_FLAG_AFTER_BREAK) ? Py_True : Py_False,
             (f & PSYTR_FLAG_FIRST_IN_BLOCK) ? Py_True : Py_False,
             (f & PSYTR_FLAG_VIOLATION) ? Py_True : Py_False,
-            (f & PSYTR_FLAG_DONE) ? Py_True : Py_False);
+            (f & PSYTR_FLAG_DONE) ? Py_True : Py_False,
+            (f & PSYTR_FLAG_LEADIN) ? Py_True : Py_False);
         if (!tr) { Py_DECREF(list); return NULL; }
         PyList_SetItem(list, i, tr);
     }
@@ -809,6 +1344,27 @@ static PyObject* Trials_format_row(PyObject* self, PyObject* arg) {
 static PyObject* Trials_format_header(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     return t_format(TO(self), t_fmt_header, 0);
 }
+static int t_fmt_rules(const psytr_trials* t, int i, char* b, size_t c) { (void)i; return psytr_format_rules(t, b, c); }
+static PyObject* Trials_format_rules(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    return t_format(TO(self), t_fmt_rules, 0);
+}
+
+static PyObject* Trials_values(PyObject* self, PyObject* arg) {
+    TrialsObject* o = TO(self);
+    long c = PyLong_AsLong(arg);
+    if (c == -1 && PyErr_Occurred()) return NULL;
+    if (!o->table_obj) { PyErr_SetString(TArgumentError, "values() needs a session with a table"); return NULL; }
+    if (c < 0 || c >= TB(o->table_obj)->tab.n_rows) { PyErr_Format(PyExc_IndexError, "condition %ld out of range", c); return NULL; }
+    return tb_row(TB(o->table_obj), (int)c);
+}
+
+static PyObject* Trials_get_table(PyObject* self, void* Py_UNUSED(c)) {
+    TrialsObject* o = TO(self);
+    if (!o->table_obj) Py_RETURN_NONE;
+    Py_INCREF(o->table_obj);
+    return o->table_obj;
+}
+
 static PyObject* Trials_format_meta(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     return t_format(TO(self), t_fmt_meta, 0);
 }
@@ -971,6 +1527,7 @@ static PyGetSetDef Trials_getset[] = {
     { "swaps", Trials_get_swaps, NULL, "Swaps the constraint repair used at open.", NULL },
     { "is_open", Trials_get_is_open, NULL, "True after a successful open or load.", NULL },
     { "record_size", Trials_get_record_size, NULL, "Bytes per trial record.", NULL },
+    { "table", Trials_get_table, NULL, "The Table, or None.", NULL },
     { "rng_state", Trials_get_rng_state, Trials_set_rng_state,
       "The splitmix64 state when rng was an int seed (None otherwise). Save it "
       "beside save(); pass it as rng= to load().", NULL },
@@ -1016,6 +1573,11 @@ static PyMethodDef Trials_methods[] = {
       "format_header() -> str: the matching CSV header line." },
     { "format_meta", Trials_format_meta, METH_NOARGS,
       "format_meta() -> str: one key=value line describing the session." },
+    { "format_rules", Trials_format_rules, METH_NOARGS,
+      "format_rules() -> str: the order settings as rules text, which pastes "
+      "back as rules=." },
+    { "values", Trials_values, METH_O,
+      "values(condition) -> dict: the table row of a condition." },
     { "save", Trials_save, METH_NOARGS, "save() -> bytes: a snapshot of the session." },
     { "load", (PyCFunction)(void (*)(void))Trials_load, METH_VARARGS | METH_KEYWORDS | METH_CLASS,
       "Trials.load(data, **desc) -> Trials: rebuild a session from save()'s "
@@ -1034,8 +1596,13 @@ static PyType_Slot Trials_slots[] = {
       "order=ORDER_SEQUENTIAL, constraints=None, max_swaps=0, tracks=None, "
       "interleave=INTERLEAVE_RANDOM, track_rate=0.0, block_size=0, "
       "constraints_span_blocks=False, n_practice=0, n_warmup=0, "
-      "warmup_conditions=None, requeue_gap=0, rng=None, record_size=0)\n\n"
+      "warmup_conditions=None, requeue_gap=0, rng=None, record_size=0, "
+      "table=None, order_list=None, draws=0, weights=None, subset=0, "
+      "groups=None, rules=None, participant=0)\n\n"
       "One psy_trials.h session. factors is a list of (name, n_levels); "
+      "table is a Table whose rows are the conditions (names then resolve "
+      "against its columns and levels); rules is rules text (psytr_rules) "
+      "applied over the keywords; groups comes from groups(); "
       "constraints come from max_run() and friends; tracks are objects with "
       "is_done() or a done attribute, or (object, weight); rng is a callable "
       "returning [0, 1) or an int seed for the header's splitmix64." },
@@ -1061,12 +1628,22 @@ static PyType_Spec Trials_spec = {
  *  Module functions: constraint helpers and splitmix
  * ======================================================================= */
 
-/* A constraint as a dict. `factor` may be a factor name, resolved at open. */
-static PyObject* t_constraint(const psytr_constraint* c, PyObject* factor) {
-    PyObject* d = Py_BuildValue("{s:i,s:O,s:i,s:i,s:i,s:i}", "rule", (int)c->rule,
-                                "factor", factor, "level", c->level, "level2", c->level2,
+/* A constraint as a dict. `factor` may be a factor or column name and a
+ * level a column value, resolved at open. */
+static PyObject* t_constraint_o(const psytr_constraint* c, PyObject* factor, PyObject* level,
+                                PyObject* level2) {
+    PyObject* d = Py_BuildValue("{s:i,s:O,s:O,s:O,s:i,s:i}", "rule", (int)c->rule,
+                                "factor", factor, "level", level, "level2", level2,
                                 "n", c->n, "window", c->window);
     return d;
+}
+
+static PyObject* t_constraint(const psytr_constraint* c, PyObject* factor) {
+    PyObject *l = PyLong_FromLong(c->level), *l2 = PyLong_FromLong(c->level2), *r = NULL;
+    if (l && l2) r = t_constraint_o(c, factor, l, l2);
+    Py_XDECREF(l);
+    Py_XDECREF(l2);
+    return r;
 }
 
 static PyObject* t_factor_arg(PyObject* f, int* idx) {
@@ -1079,69 +1656,125 @@ static PyObject* t_factor_arg(PyObject* f, int* idx) {
     }
 }
 
+/* The helpers keep a level as given (an int, or a column value with a
+ * table) and the factor as an index or a name; open() resolves both. */
+static PyObject* t_make(psytr_constraint c, PyObject* f, PyObject* l, PyObject* l2) {
+    PyObject *fo, *r;
+    int fi;
+    PyObject* zero = PyLong_FromLong(0);
+    if (!zero) return NULL;
+    if (!(fo = t_factor_arg(f, &fi))) { Py_DECREF(zero); return NULL; }
+    r = t_constraint_o(&c, fo, l ? l : zero, l2 ? l2 : zero);
+    Py_DECREF(fo);
+    Py_DECREF(zero);
+    return r;
+}
+
 static PyObject* mod_max_run(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
     static char* kw[] = { "factor", "level", "n", NULL };
-    PyObject *f, *fo, *r;
-    int fi, level, n;
-    psytr_constraint c;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Oii", kw, &f, &level, &n)) return NULL;
-    if (!(fo = t_factor_arg(f, &fi))) return NULL;
-    c = psytr_max_run(fi, level, n);
-    r = t_constraint(&c, fo);
-    Py_DECREF(fo);
-    return r;
+    PyObject *f, *l;
+    int n;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOi", kw, &f, &l, &n)) return NULL;
+    return t_make(psytr_max_run(0, 0, n), f, l, NULL);
 }
 
 static PyObject* mod_max_in_window(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
     static char* kw[] = { "factor", "level", "window", "n", NULL };
-    PyObject *f, *fo, *r;
-    int fi, level, w, n;
-    psytr_constraint c;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Oiii", kw, &f, &level, &w, &n)) return NULL;
-    if (!(fo = t_factor_arg(f, &fi))) return NULL;
-    c = psytr_max_in_window(fi, level, w, n);
-    r = t_constraint(&c, fo);
-    Py_DECREF(fo);
-    return r;
+    PyObject *f, *l;
+    int w, n;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOii", kw, &f, &l, &w, &n)) return NULL;
+    return t_make(psytr_max_in_window(0, 0, w, n), f, l, NULL);
 }
 
 static PyObject* mod_min_gap(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
     static char* kw[] = { "factor", "level", "gap", NULL };
-    PyObject *f, *fo, *r;
-    int fi, level, g;
-    psytr_constraint c;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Oii", kw, &f, &level, &g)) return NULL;
-    if (!(fo = t_factor_arg(f, &fi))) return NULL;
-    c = psytr_min_gap(fi, level, g);
-    r = t_constraint(&c, fo);
-    Py_DECREF(fo);
-    return r;
+    PyObject *f, *l;
+    int g;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOi", kw, &f, &l, &g)) return NULL;
+    return t_make(psytr_min_gap(0, 0, g), f, l, NULL);
 }
 
 static PyObject* mod_no_transition(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
     static char* kw[] = { "factor", "from_level", "to_level", NULL };
-    PyObject *f, *fo, *r;
-    int fi, a, b;
-    psytr_constraint c;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Oii", kw, &f, &a, &b)) return NULL;
-    if (!(fo = t_factor_arg(f, &fi))) return NULL;
-    c = psytr_no_transition(fi, a, b);
-    r = t_constraint(&c, fo);
-    Py_DECREF(fo);
-    return r;
+    PyObject *f, *a, *b;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO", kw, &f, &a, &b)) return NULL;
+    return t_make(psytr_no_transition(0, 0, 0), f, a, b);
 }
 
 static PyObject* mod_first_not(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
     static char* kw[] = { "factor", "level", NULL };
-    PyObject *f, *fo, *r;
-    int fi, level;
-    psytr_constraint c;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Oi", kw, &f, &level)) return NULL;
-    if (!(fo = t_factor_arg(f, &fi))) return NULL;
-    c = psytr_first_not(fi, level);
-    r = t_constraint(&c, fo);
-    Py_DECREF(fo);
-    return r;
+    PyObject *f, *l;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO", kw, &f, &l)) return NULL;
+    return t_make(psytr_first_not(0, 0), f, l, NULL);
+}
+
+static PyObject* mod_followed_by(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "factor", "level", "next_level", NULL };
+    PyObject *f, *a, *b;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO", kw, &f, &a, &b)) return NULL;
+    return t_make(psytr_followed_by(0, 0, 0), f, a, b);
+}
+
+static PyObject* mod_preceded_by(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "factor", "level", "prev_level", NULL };
+    PyObject *f, *a, *b;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO", kw, &f, &a, &b)) return NULL;
+    return t_make(psytr_preceded_by(0, 0, 0), f, a, b);
+}
+
+static PyObject* mod_chunk(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "factor", NULL };
+    PyObject* f;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O", kw, &f)) return NULL;
+    return t_make(psytr_chunk(0), f, NULL, NULL);
+}
+
+static PyObject* mod_balance(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "factor", "no_repeat", "no_leadin", NULL };
+    PyObject* f;
+    int nr = 0, nl = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|$pp", kw, &f, &nr, &nl)) return NULL;
+    return t_make(psytr_balance_flags(0, (nr ? PSYTR_BALANCE_NO_REPEAT : 0) | (nl ? PSYTR_BALANCE_NO_LEADIN : 0)),
+                  f, NULL, NULL);
+}
+
+static PyObject* mod_groups(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "factor", "mode", "order", "participant", "list", NULL };
+    PyObject *f, *lst = Py_None;
+    const char *mode = "blocked", *order = "sequential";
+    int p = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|ss$iO", kw, &f, &mode, &order, &p, &lst)) return NULL;
+    return Py_BuildValue("{s:O,s:s,s:s,s:i,s:O}", "factor", f, "mode", mode, "order", order,
+                         "participant", p, "list", lst);
+}
+
+static PyObject* mod_latin(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "n", "row", "balanced", NULL };
+    int n, row, bal = 0, rows, j;
+    int* out;
+    PyObject* list;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "ii|p", kw, &n, &row, &bal)) return NULL;
+    if (n < 1 || n > PSYTR_MAX_CONDITIONS || row < 0) {
+        PyErr_SetString(TArgumentError, "latin(n, row): n in [1, MAX_CONDITIONS], row >= 0");
+        return NULL;
+    }
+    out = (int*)PyMem_Malloc(sizeof(int) * (size_t)n);
+    if (!out) return PyErr_NoMemory();
+    rows = psytr_latin(n, row, bal != 0, out);
+    (void)rows;
+    list = PyList_New(n);
+    if (list)
+        for (j = 0; j < n; j++) PyList_SetItem(list, j, PyLong_FromLong(out[j]));
+    PyMem_Free(out);
+    return list;
+}
+
+static PyObject* mod_latin_rows(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "n", "balanced", NULL };
+    int n, bal = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "i|p", kw, &n, &bal)) return NULL;
+    if (n < 1 || n > PSYTR_MAX_CONDITIONS) { PyErr_SetString(TArgumentError, "n in [1, MAX_CONDITIONS]"); return NULL; }
+    return PyLong_FromLong((bal && n % 2) ? 2 * n : n);
 }
 
 static PyObject* mod_splitmix(PyObject* Py_UNUSED(m), PyObject* arg) {
@@ -1174,6 +1807,26 @@ static PyMethodDef module_methods[] = {
       "followed by to_level." },
     { "first_not", (PyCFunction)(void (*)(void))mod_first_not, METH_VARARGS | METH_KEYWORDS,
       "first_not(factor, level): the first main trial does not have it." },
+    { "followed_by", (PyCFunction)(void (*)(void))mod_followed_by, METH_VARARGS | METH_KEYWORDS,
+      "followed_by(factor, level, next_level): every trial with level is "
+      "directly followed by one with next_level (units)." },
+    { "preceded_by", (PyCFunction)(void (*)(void))mod_preceded_by, METH_VARARGS | METH_KEYWORDS,
+      "preceded_by(factor, level, prev_level): every trial with level is "
+      "directly preceded by one with prev_level (units)." },
+    { "chunk", (PyCFunction)(void (*)(void))mod_chunk, METH_VARARGS | METH_KEYWORDS,
+      "chunk(factor): contiguous rows with one value run as one unit." },
+    { "balance", (PyCFunction)(void (*)(void))mod_balance, METH_VARARGS | METH_KEYWORDS,
+      "balance(factor, *, no_repeat=False, no_leadin=False): every ordered pair "
+      "of levels adjacent equally often." },
+    { "groups", (PyCFunction)(void (*)(void))mod_groups, METH_VARARGS | METH_KEYWORDS,
+      "groups(factor, mode='blocked', order='sequential', *, participant=0, "
+      "list=None) -> dict for Trials(groups=)." },
+    { "latin", (PyCFunction)(void (*)(void))mod_latin, METH_VARARGS | METH_KEYWORDS,
+      "latin(n, row, balanced=False) -> list[int]: row of a cyclic or "
+      "Williams Latin square (row taken modulo the design's rows)." },
+    { "latin_rows", (PyCFunction)(void (*)(void))mod_latin_rows, METH_VARARGS | METH_KEYWORDS,
+      "latin_rows(n, balanced=False) -> int: rows of the design (2n for a "
+      "balanced square of odd n)." },
     { "splitmix", mod_splitmix, METH_O,
       "splitmix(state) -> (u, new_state): one psytr_splitmix step, for a "
       "caller that wants to reproduce the header's generator." },
@@ -1185,7 +1838,9 @@ static PyModuleDef psy_trials_module = {
     PyModuleDef_HEAD_INIT,
     .m_name = "psy.trials",
     .m_doc = "Trial sequencing: conditions, orders, constraints, interleaved "
-             "adaptive tracks, blocks, re-queues, tallies (psy_trials.h).",
+             "adaptive tracks, blocks, re-queues, tallies (psy_trials.h); "
+             "tables from CSV (psy_table.h), order lists, draws, subsets, "
+             "groups, units, balance, Latin squares and rules text.",
     .m_size = -1,
     .m_methods = module_methods,
 };
@@ -1249,14 +1904,28 @@ PyMODINIT_FUNC PyInit_trials(void) {
     static const t_member order_m[] = { { "SEQUENTIAL", PSYTR_ORDER_SEQUENTIAL },
                                         { "RANDOM", PSYTR_ORDER_RANDOM },
                                         { "FULL_RANDOM", PSYTR_ORDER_FULL_RANDOM },
-                                        { "CONSTRAINED", PSYTR_ORDER_CONSTRAINED } };
+                                        { "CONSTRAINED", PSYTR_ORDER_CONSTRAINED },
+                                        { "LIST", PSYTR_ORDER_LIST },
+                                        { "WITH_REPLACEMENT", PSYTR_ORDER_WITH_REPLACEMENT } };
     static const t_member il_m[] = { { "RANDOM", PSYTR_INTERLEAVE_RANDOM },
                                      { "ROUND_ROBIN", PSYTR_INTERLEAVE_ROUND_ROBIN } };
     static const t_member rule_m[] = { { "MAX_RUN", PSYTR_RULE_MAX_RUN },
                                        { "MAX_IN_WINDOW", PSYTR_RULE_MAX_IN_WINDOW },
                                        { "MIN_GAP", PSYTR_RULE_MIN_GAP },
                                        { "NO_TRANSITION", PSYTR_RULE_NO_TRANSITION },
-                                       { "FIRST_NOT", PSYTR_RULE_FIRST_NOT } };
+                                       { "FIRST_NOT", PSYTR_RULE_FIRST_NOT },
+                                       { "FOLLOWED_BY", PSYTR_RULE_FOLLOWED_BY },
+                                       { "PRECEDED_BY", PSYTR_RULE_PRECEDED_BY },
+                                       { "CHUNK", PSYTR_RULE_CHUNK },
+                                       { "BALANCE", PSYTR_RULE_BALANCE } };
+    static const t_member gm_m[] = { { "NONE", PSYTR_GROUPS_NONE },
+                                     { "BLOCKED", PSYTR_GROUPS_BLOCKED },
+                                     { "ALTERNATE", PSYTR_GROUPS_ALTERNATE } };
+    static const t_member go_m[] = { { "SEQUENTIAL", PSYTR_GROUP_ORDER_SEQUENTIAL },
+                                     { "RANDOM", PSYTR_GROUP_ORDER_RANDOM },
+                                     { "LATIN", PSYTR_GROUP_ORDER_LATIN },
+                                     { "BALANCED_LATIN", PSYTR_GROUP_ORDER_BALANCED_LATIN },
+                                     { "LIST", PSYTR_GROUP_ORDER_LIST } };
     PyObject *m, *type, *mod = NULL, *cls, *fields, *bases;
 
     m = PyModule_Create(&psy_trials_module);
@@ -1277,6 +1946,10 @@ PyMODINIT_FUNC PyInit_trials(void) {
     type = PyType_FromSpec(&Trials_spec);
     if (!type) goto fail;
     if (PyModule_AddObject(m, "Trials", type) < 0) { Py_DECREF(type); goto fail; }
+    TTableType = PyType_FromSpec(&Table_spec);
+    if (!TTableType) goto fail;
+    Py_INCREF(TTableType);
+    if (PyModule_AddObject(m, "Table", TTableType) < 0) { Py_DECREF(TTableType); goto fail; }
 
     if (!(TError = t_add_exc(m, "psy.trials.Error", "Error", NULL))) goto fail;
     bases = PyTuple_Pack(2, TError, PyExc_ValueError);
@@ -1290,11 +1963,15 @@ PyMODINIT_FUNC PyInit_trials(void) {
 
     mod = PyImport_ImportModule("enum");
     if (!mod) goto fail;
-    if (!(cls = t_add_enum(m, mod, "Order", "ORDER", order_m, 4))) goto fail;
+    if (!(cls = t_add_enum(m, mod, "Order", "ORDER", order_m, 6))) goto fail;
     Py_DECREF(cls);
     if (!(cls = t_add_enum(m, mod, "Interleave", "INTERLEAVE", il_m, 2))) goto fail;
     Py_DECREF(cls);
-    if (!(cls = t_add_enum(m, mod, "Rule", "RULE", rule_m, 5))) goto fail;
+    if (!(cls = t_add_enum(m, mod, "Rule", "RULE", rule_m, 9))) goto fail;
+    Py_DECREF(cls);
+    if (!(cls = t_add_enum(m, mod, "GroupMode", "GROUPS", gm_m, 3))) goto fail;
+    Py_DECREF(cls);
+    if (!(cls = t_add_enum(m, mod, "GroupOrder", "GROUP_ORDER", go_m, 5))) goto fail;
     Py_DECREF(cls);
     Py_CLEAR(mod);
 
@@ -1307,9 +1984,9 @@ PyMODINIT_FUNC PyInit_trials(void) {
     if (!TInfoType) goto fail;
     Py_INCREF(TInfoType);
     if (PyModule_AddObject(m, "TrialInfo", TInfoType) < 0) { Py_DECREF(TInfoType); goto fail; }
-    fields = Py_BuildValue("[ssssssssssssss]", "index", "condition", "track", "rep", "block",
+    fields = Py_BuildValue("[sssssssssssssss]", "index", "condition", "track", "rep", "block",
                            "outcome", "flags", "practice", "warmup", "requeued", "after_break",
-                           "first_in_block", "violation", "done");
+                           "first_in_block", "violation", "done", "leadin");
     TTrialType = fields ? t_namedtuple(mod, "Trial", fields) : NULL;
     Py_XDECREF(fields);
     if (!TTrialType) goto fail;
@@ -1341,6 +2018,10 @@ PyMODINIT_FUNC PyInit_trials(void) {
     PyModule_AddIntConstant(m, "FLAG_AFTER_BREAK", PSYTR_FLAG_AFTER_BREAK);
     PyModule_AddIntConstant(m, "FLAG_FIRST_IN_BLOCK", PSYTR_FLAG_FIRST_IN_BLOCK);
     PyModule_AddIntConstant(m, "FLAG_VIOLATION", PSYTR_FLAG_VIOLATION);
+    PyModule_AddIntConstant(m, "FLAG_LEADIN", PSYTR_FLAG_LEADIN);
+    PyModule_AddIntConstant(m, "BALANCE_NO_REPEAT", PSYTR_BALANCE_NO_REPEAT);
+    PyModule_AddIntConstant(m, "BALANCE_NO_LEADIN", PSYTR_BALANCE_NO_LEADIN);
+    if (PyModule_AddStringConstant(m, "table_version", psytb_version()) < 0) goto fail;
     return m;
 
 fail:

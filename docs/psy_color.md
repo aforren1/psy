@@ -266,8 +266,8 @@ not light), `psygfx_calibrated()`.
 
 ### Stages
 
-Each stage was a copy of psy_gfx.h in the scratchpad; the tree got only
-the last one. The baseline is v0.4.0 as the gfx worker left it. For every
+Each stage was a copy of psy_gfx.h outside the tree (the copies were not
+kept); the tree got only the last one. The baseline is v0.4.0 as the gfx worker left it. For every
 stage, psy_gfx's full test ran on the Iris Xe (ANGLE D3D11), WARP and
 SwiftShader with a harness that folds every `psygfx_read_scene`,
 `_read_output` and `_read_target` result into an FNV-1a hash, and the
@@ -413,8 +413,10 @@ IEEE double without contraction.
 
 ### Mutations
 
-`mutate.py` (scratchpad): each fault in a copy of the header, the test
-built with MinGW gcc against it; a fault must fail the test. A control
+[tests/mutate/color.toml](../tests/mutate/color.toml), run with
+`uv run tests/mutate/mutate.py color.toml` ([tests/mutate](../tests/mutate/README.md)):
+each fault in a copy of the header, the test built with MinGW gcc against
+it; a fault must fail the test. A control
 with no change passes. Run again after the gamut tolerance became 2^-20:
 32 of 32 again.
 
@@ -466,12 +468,15 @@ Warnings as errors (MSVC `/W4 /WX`; gcc `-Wall -Wextra -Wpedantic
 | MSVC 19.44, `cl` | the test in the default C dialect, the gfx test | pass |
 | MinGW-w64 gcc 14.3 | compile checks C99, C11, C++17, the macros as C++20, the test with `-DPSYCOL_API=static`, both examples; after stage C, psy_gfx's and psy_video's compile checks and tests and gfx_gallery | pass; color_convert exits 0 |
 | gcc 11.4 (WSL2), ASan and UBSan | the test, the gfx test | pass, no report |
-| emcc | not run locally; the CI wasm job runs the test and the gfx test | |
+| gcc 13.3 (WSL2, Ubuntu 24.04), 2026-10-06 | the test at -O2 and under ASan and UBSan | pass, no report |
+| gcc 13.3 and clang 18.1 (Ubuntu 24.04 container, the CI jobs' flags), 2026-10-06 | every target, ctest | pass |
+| MinGW-w64 gcc 16.2 (MSYS2 MINGW64), 2026-10-06 | the MinGW CI job: every compile check and test | pass |
+| emcc 6.0.10, node, 2026-10-06 | the CI wasm job: the compile check, the test, the gfx test | pass |
 
 ### Not done
 
 - No measurement of light: every number is arithmetic.
-- No emcc run of the header locally; no clang build.
+- No Apple clang build here (CI's macOS jobs build it).
 - The WebAssembly shim for the designer.
 
 ## Cost

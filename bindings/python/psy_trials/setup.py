@@ -6,9 +6,8 @@ REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 
 # psy_trials.h lives at the repo root; that copy always wins in a dev tree so a
 # stale staged copy cannot shadow it. Isolated builds (sdist / cibuildwheel see
-# only this directory) get the header staged next to this file first.
-# psy_trials.h is not a transport header and includes nothing from the
-# collection, so it is the only header staged.
+# only this directory) get the headers staged next to this file first:
+# psy_trials.h and psy_table.h, which it includes.
 HEADER_DIR = REPO_ROOT if os.path.exists(os.path.join(REPO_ROOT, "psy_trials.h")) else HERE
 
 # Target the CPython 3.8+ stable ABI (Limited API): one .abi3.so works across

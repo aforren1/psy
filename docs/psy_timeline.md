@@ -1014,6 +1014,8 @@ residual, a change that leaves "now", a same-rate call that re-anchors,
 and an anchor that resets the rate. All 28 model mutation bits fail.
 
 Mutations of the header, one at a time on a copy: 24. 21 are caught.
+They are `rate-00` to `rate-23` in
+[tests/mutate/timeline.toml](../tests/mutate/timeline.toml).
 Three cannot change any result, and the reasons are:
 - `r <= 0` for `r < 0` in the floor correction. With r = 0 it gives
   q - 1 and r = den, and (q - 1) num + den num / den is q num.
@@ -1071,7 +1073,8 @@ For the sequences, the same writer added these checks:
   events.
 
 Mutations of the sequence code in the header, one at a time: 19, all
-caught. They include the draft's overwrite, a yoyo return key not marked
+caught (`seq-00` to `seq-18` in
+[tests/mutate/timeline.toml](../tests/mutate/timeline.toml)). They include the draft's overwrite, a yoyo return key not marked
 for the takeover, a compaction that leaves the offsets, psytl_check_ops
 without binding, psytl_run without its check, the gap not held, the
 takeover value or the Hermite tangent not written, growth in place
@@ -1092,8 +1095,10 @@ clean on MinGW gcc 16.1, MSVC 19.44 (C++20) and gcc 11.4.
   adds the events again and anchors again.
 - One timeline is for one display. A second display that flips on its own
   grid needs its own timeline or its own evaluate.
-- No run on macOS or on a big-endian machine, and no emcc run for v0.4.0
-  (CI covers it).
+- No run on macOS or on a big-endian machine (CI builds macOS). v0.4.0
+  ran on 2026-10-06 with emcc 6.0.10 under node (compile check, test),
+  gcc 13.3 in WSL2 (the test at -O2 and under ASan and UBSan), and gcc
+  13.3 and clang 18.1 in an Ubuntu 24.04 container (the CI jobs): pass.
 - psy_video.h still anchors on a seek and reads `tl->lead`. Changing it
   to `psytl_skip()` and `psytl_lead()` is that header's change, and so
   are the rate changes listed in "Base rates".

@@ -25,7 +25,7 @@ that a restart loses nothing.
 | Decode-ahead on a pump, inline mode | Done, tested (one threaded case) |
 | Upload through psy_gfx.h | Done, measured; YUV as planes since round 2 |
 | Mutations | v0.1: 23 of 23 caught; round 2: 29 of 31 ("Builds and mutations") |
-| Build matrix | MSVC, MinGW, gcc (ASan, UBSan, TSan): pass; emcc: v0.1 only (see "Builds and mutations") |
+| Build matrix | MSVC, MinGW, gcc (ASan, UBSan, TSan): pass; v0.2.0 on 2026-10-06: emcc 6.0.10, gcc 13.3 (WSL2, ASan and UBSan), clang 18.1, MinGW gcc 16.2: pass after a test fix (see "Builds and mutations") |
 | Decode thread that cannot start (wasm without -pthread) | Falls back to inline decode; describe() says so |
 | Follow-up (2026-10-05) | psy_timeline.h v0.3.0: `psytl_lead()` replaces the read of `tl->lead`; seeks and manual jumps use `psytl_skip()`, and the SEEK record counts the skipped annotations. psy_screen.h: `psyscr_frame.done` completes every flip record. See "Seeks and annotations" and "Records" |
 | Round 2 (2026-10-06): Media Foundation | Done (v0.2.0): `PSYVID_BACKEND_MF`, the MP4 index maker (with the H.264 SPS's color), `desc.hw_decode` (AUTO is DXVA, by M2). Tested on generated clips (`tests/media/make_video_clips.sh`, the core test with `PSYVID_TEST_MEDIA`); 9 of 11 mutations caught. M1, M3, M4 measured. See "Media Foundation" |
@@ -34,7 +34,7 @@ that a restart loses nothing.
 | Round 2: planar upload | Done, measured (M1, M2): kept; the RGBA8 conversion left the play path. See "Upload and conversion" and M2 |
 | Round 2: GPU path | `PSYVID_PATH_GPU` done; on psy_screen.h's `desc.d3d11_video` (in the tree since its v0.3.1 checkpoint). `examples/video_check.c` (against UPLOAD on hardware: the same value at every pixel) and `video_play --gpu` landed; measured (M7). An option: UPLOAD stays the default. See "GPU path" |
 | Round 2: fixes | A data race on the free queue after a PENDING decode, found with a new threaded case under ThreadSanitizer; fixed ("Builds and mutations") |
-| Round 2: missed bars | DXVA's cold open at 1080p60 (259 to 308 ms, bar 300 ms; M3); the software decoder's seek (M4); 2 Media Foundation mutations not caught (why, in "Builds and mutations"); emcc not re-run |
+| Round 2: missed bars | DXVA's cold open at 1080p60 (259 to 308 ms, bar 300 ms; M3); the software decoder's seek (M4); 2 Media Foundation mutations not caught (why, in "Builds and mutations") |
 | Round 2: not built | `PSYVID_PATH_SHARED`; HEVC's VUI |
 | Not in this task | Capture, FFmpeg, AVFoundation |
 
@@ -779,10 +779,14 @@ Round 2 builds (2026-10-06, on the v0.2.0 header):
 | MSVC 19.44, CMake, Release | compile checks C and C++17 with pl_mpeg, the COM check (`tests/compile/psy_video_com.cpp`: every GUID, `MFVideoArea` and the IStream table against the Windows SDK), the core test with the clips (`PSYVID_TEST_MEDIA`), the examples |
 | MinGW-w64 gcc 16.1 | compile check C99 and C++17 with pl_mpeg, the COM check |
 | gcc 11.4, WSL2 | compile check C99 -O3 and C++17; core test under ASan and UBSan, and under ThreadSanitizer (run with `setarch -R`: this WSL kernel's address layout makes TSan stop at "unexpected memory mapping" otherwise) |
-| emcc | not run in round 2: the Docker engine that holds emsdk was not running. The Media Foundation code compiles out off Windows, as the gcc builds show |
+| emcc 6.0.10, node (2026-10-06) | the CI wasm job's commands: compile check with and without the decode thread, the core test, pl_mpeg compiled. The test first failed to compile: clang's `-Wunused-but-set-global` on five upload globals that only the Media Foundation cases read. Fixed in the test; the CI job had passed anyway, because `set -e` ignored the failed `emcc` on the left of `&&` (fixed in ci.yml) |
+| gcc 13.3 (WSL2 and an Ubuntu 24.04 container), clang 18.1 (2026-10-06) | core test at -O2 and under ASan and UBSan; every target and ctest with the CI jobs' flags |
+| MinGW-w64 gcc 16.2, MSYS2 (2026-10-06) | the MinGW CI job and the Screen job's MinGW step, with the COM check. The core test first failed: `-Wmaybe-uninitialized` on `psyrt_event`s that a failed `psyvid_result()` leaves unwritten. Fixed in the test |
 
 Round 2 mutations, each on a copy of the header, run against the core
-test (with the clips for Media Foundation):
+test (with the clips for Media Foundation). The Media Foundation and
+soundtrack lists are in [tests/mutate/video.toml](../tests/mutate/video.toml);
+the base-rate list was not kept:
 
 | Area | Caught | Not caught, and why |
 |---|---|---|
