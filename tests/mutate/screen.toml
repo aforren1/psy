@@ -1,14 +1,14 @@
 
-# psy_screen.h mutants: the v0.3.1 list (aborts, panic, icon), the 12 of the
-# 41 that psy_screen.h's header comment counts, v0.3.2's 2 (text input,
+# ysp/screen.h mutants: the v0.3.1 list (aborts, panic, icon), the 12 of the
+# 41 that ysp/screen.h's header comment counts, v0.3.2's 2 (text input,
 # both killed on 2026-10-07), v0.3.3's 5 (input), v0.3.4's 3 (devices),
 # v0.3.5's 5 (raw mice; the 2 on its queue went with the queue) and
-# v0.4.0's 6 (the input bridge). The 29 earlier mutants (docs/psy_screen.md,
+# v0.4.0's 6 (the input bridge). The 29 earlier mutants (docs/screen.md,
 # "Mutations") were run from scripts that were not kept.
-header = "psy_screen.h"
+header = "ysp/screen.h"
 
 [test.screen]
-source = "tests/adapt/psy_screen_test.c"
+source = "tests/adapt/screen_test.c"
 compiler = "gcc"
 flags = ["-std=c11", "-O1", "-w"]
 libs = ["-lm"]
@@ -27,7 +27,7 @@ id = "abort-01"
 name = "mods ignored"
 test = "screen"
 why = "The abort needs its modifiers; Esc alone is not an abort."
-find = 'if ((mods & psyscr__ab.mods) != psyscr__ab.mods) return 0;'
+find = 'if ((mods & yscr__ab.mods) != yscr__ab.mods) return 0;'
 replace = ''
 
 [[mutant]]
@@ -45,7 +45,7 @@ id = "abort-03"
 name = "group begins member 0 first"
 test = "screen"
 why = "A group's begin must report an abort pending on any member, not only the first."
-find = '    for (i = 0; i < n && !psyscr__abort_pending(s[i]); i++) { }'
+find = '    for (i = 0; i < n && !yscr__abort_pending(s[i]); i++) { }'
 replace = '    i = n;'
 
 [[mutant]]
@@ -53,15 +53,15 @@ id = "abort-04"
 name = "panic ignores the ack"
 test = "screen"
 why = "The panic watchdog must not fire when the program acknowledged the abort within the grace period."
-find = 'return n >= psyscr__ab.presses && (ack == 0 || t - ack > psyscr__ab.grace_ns);'
-replace = 'return n >= psyscr__ab.presses;'
+find = 'return n >= yscr__ab.presses && (ack == 0 || t - ack > yscr__ab.grace_ns);'
+replace = 'return n >= yscr__ab.presses;'
 
 [[mutant]]
 id = "abort-05"
 name = "panic ignores the window"
 test = "screen"
 why = "The panic needs its presses within the window, not spread over the whole run."
-find = 't - psyscr__ab.press[i] < psyscr__ab.window_ns) n++;'
+find = 't - yscr__ab.press[i] < yscr__ab.window_ns) n++;'
 replace = '1) n++;'
 
 [[mutant]]
@@ -69,16 +69,16 @@ id = "abort-06"
 name = "dedup off"
 test = "screen"
 why = "One physical press seen by two input paths must count once."
-find = '    if (!(psyscr__ab.last_t && t - psyscr__ab.last_t'
-replace = '    if (1 || !(psyscr__ab.last_t && t - psyscr__ab.last_t'
+find = '    if (!(yscr__ab.last_t && t - yscr__ab.last_t'
+replace = '    if (1 || !(yscr__ab.last_t && t - yscr__ab.last_t'
 
 [[mutant]]
 id = "abort-07"
 name = "MOD_NONE read as shift"
 test = "screen"
-why = "PSYSCR_MOD_NONE means Esc alone, not the Shift default."
-find = 'm = m == 0 ? PSYSCR_MOD_SHIFT : (m & PSYSCR_MOD_NONE) ? 0u : m;'
-replace = 'm = m == 0 ? PSYSCR_MOD_SHIFT : (m & PSYSCR_MOD_NONE) ? PSYSCR_MOD_SHIFT : m;'
+why = "YSCR_MOD_NONE means Esc alone, not the Shift default."
+find = 'm = m == 0 ? YSCR_MOD_SHIFT : (m & YSCR_MOD_NONE) ? 0u : m;'
+replace = 'm = m == 0 ? YSCR_MOD_SHIFT : (m & YSCR_MOD_NONE) ? YSCR_MOD_SHIFT : m;'
 
 [[mutant]]
 id = "abort-08"
@@ -101,7 +101,7 @@ id = "abort-10"
 name = "old aborts reported at open"
 test = "screen"
 why = "Aborts from before open must not be reported."
-find = '    s->abort_seen = psyscr__a_load(&psyscr__ab.seq);   /* not the aborts of before */'
+find = '    s->abort_seen = yscr__a_load(&yscr__ab.seq);   /* not the aborts of before */'
 replace = ''
 
 [[mutant]]
@@ -109,7 +109,7 @@ id = "abort-11"
 name = "lost entries reported"
 test = "screen"
 why = "Entries written over in the 16-entry lock-free log must be skipped, not reported with another entry's data."
-find = '        if (s1 != k || psyscr__a_load(&e->seq) != k) continue;   /* written over: lost */'
+find = '        if (s1 != k || yscr__a_load(&e->seq) != k) continue;   /* written over: lost */'
 replace = ''
 
 [[mutant]]
@@ -117,7 +117,7 @@ id = "text-00"
 name = "text input flag not set"
 test = "screen"
 why = "Flips planned while text input is on must say so: their keys came from the message path, not the raw timed path (v0.3.2)."
-find = '    if (s->text_input) flags |= PSYSCR_FLIP_TEXT_INPUT;'
+find = '    if (s->text_input) flags |= YSCR_FLIP_TEXT_INPUT;'
 replace = ''
 
 [[mutant]]
@@ -132,9 +132,9 @@ replace = ''
 id = "input-00"
 name = "raw keyboard inverted"
 test = "screen"
-why = "psy_response.h labels key stamps by caps.raw_keyboard; a screen with no window has no raw keyboard path (v0.3.3)."
-find = '    out->raw_keyboard = psyscr__raw_keyboard(s);'
-replace = '    out->raw_keyboard = !psyscr__raw_keyboard(s);'
+why = "ysp/response.h labels key stamps by caps.raw_keyboard; a screen with no window has no raw keyboard path (v0.3.3)."
+find = '    out->raw_keyboard = yscr__raw_keyboard(s);'
+replace = '    out->raw_keyboard = !yscr__raw_keyboard(s);'
 
 [[mutant]]
 id = "input-01"
@@ -149,15 +149,15 @@ id = "input-02"
 name = "abort merge 30 ms"
 test = "screen"
 why = "A key injected by virtual key comes twice, up to 34.2 ms apart; at 30 ms two presses through a remote-desktop or assistive tool count as four and end the program (v0.3.3)."
-find = '#define PSYSCR__AB_SAME_NS  50000000'
-replace = '#define PSYSCR__AB_SAME_NS  30000000'
+find = '#define YSCR__AB_SAME_NS  50000000'
+replace = '#define YSCR__AB_SAME_NS  30000000'
 
 [[mutant]]
 id = "input-03"
 name = "text input not observed"
 test = "screen"
 why = "Another library (Dear ImGui's SDL3 backend) can start text input; its keys then come 11.4 ms late, and the record must say so (v0.3.3)."
-find = '        int ti = PSYSCR__TEXT_INPUT_ACTIVE(s);'
+find = '        int ti = YSCR__TEXT_INPUT_ACTIVE(s);'
 replace = '        int ti = s->text_input;'
 
 [[mutant]]
@@ -165,8 +165,8 @@ id = "input-04"
 name = "observed change not marked external"
 test = "screen"
 why = "The ring record must tell a change the program made from one another library made (v0.3.3)."
-find = '        if (ti != s->text_input) psyscr__text_input_set(s, ti, 1, 0, 0, 0, 0);'
-replace = '        if (ti != s->text_input) psyscr__text_input_set(s, ti, 0, 0, 0, 0, 0);'
+find = '        if (ti != s->text_input) yscr__text_input_set(s, ti, 1, 0, 0, 0, 0);'
+replace = '        if (ti != s->text_input) yscr__text_input_set(s, ti, 0, 0, 0, 0, 0);'
 
 [[mutant]]
 id = "dev-00"
@@ -216,7 +216,7 @@ id = "rm-04"
 name = "lost registration not renewed"
 test = "screen"
 why = "After SDL's relative mode ends, nobody is registered for mice; the reader must register again (v0.3.5)."
-find = '    return registered ? 0 : (int)PSYSCR_RAW_MICE_REGISTERED;'
+find = '    return registered ? 0 : (int)YSCR_RAW_MICE_REGISTERED;'
 replace = '    return registered * 0;'
 
 [[mutant]]
@@ -240,7 +240,7 @@ id = "br-00"
 name = "overwrites not counted"
 test = "screen"
 why = "A record overwritten before anyone decoded it is a lost event; the ring record and the stats must count it (v0.4.0)."
-find = '    if (psyscr__a_load(&sl->state) == 1) psyscr__a_inc(&psyscr__in.overwritten);'
+find = '    if (yscr__a_load(&sl->state) == 1) yscr__a_inc(&yscr__in.overwritten);'
 replace = ''
 
 [[mutant]]
@@ -248,31 +248,31 @@ id = "br-01"
 name = "decode ignores the sequence"
 test = "screen"
 why = "A doorbell must find its own record: decoded late or out of order, it must not take another producer's (v0.4.0)."
-find = '''    if (psyscr__a_load(&sl->seq) != seq) return 0;
+find = '''    if (yscr__a_load(&sl->seq) != seq) return 0;
     copy = sl->e;
     o = sl->origin;
-    if (psyscr__a_load(&sl->seq) != seq) return 0;           /* torn: rewritten meanwhile */'''
+    if (yscr__a_load(&sl->seq) != seq) return 0;           /* torn: rewritten meanwhile */'''
 replace = '''    copy = sl->e;
     o = sl->origin;'''
 [[mutant.also]]
-find = '''    if (!psyscr__a_cas(&sl->state, 1, 2)) return psyscr__a_load(&sl->seq) == seq ? -1 : 0;
-    if (psyscr__a_load(&sl->seq) != seq) return 0;'''
-replace = '''    if (!psyscr__a_cas(&sl->state, 1, 2)) return psyscr__a_load(&sl->seq) == seq ? -1 : 0;'''
+find = '''    if (!yscr__a_cas(&sl->state, 1, 2)) return yscr__a_load(&sl->seq) == seq ? -1 : 0;
+    if (yscr__a_load(&sl->seq) != seq) return 0;'''
+replace = '''    if (!yscr__a_cas(&sl->state, 1, 2)) return yscr__a_load(&sl->seq) == seq ? -1 : 0;'''
 
 [[mutant]]
 id = "br-02"
 name = "a record decoded twice"
 test = "screen"
 why = "Each record is delivered once; a second decode of its doorbell must return nothing (v0.4.0)."
-find = '    if (!psyscr__a_cas(&sl->state, 1, 2)) return psyscr__a_load(&sl->seq) == seq ? -1 : 0;'
-replace = '    psyscr__a_store(&sl->state, 2);'
+find = '    if (!yscr__a_cas(&sl->state, 1, 2)) return yscr__a_load(&sl->seq) == seq ? -1 : 0;'
+replace = '    yscr__a_store(&sl->state, 2);'
 
 [[mutant]]
 id = "br-03"
 name = "refused doorbells never rung again"
 test = "screen"
 why = "When SDL's queue is full, the record waits and its doorbell must be pushed again, or the event never reaches the loop (v0.4.0)."
-find = '        if (!PSYSCR__DOORBELL(seq)) { waiting = 1; break; }'
+find = '        if (!YSCR__DOORBELL(seq)) { waiting = 1; break; }'
 replace = '        waiting = 1; break;'
 
 [[mutant]]
@@ -280,13 +280,13 @@ id = "br-04"
 name = "lost decodes not counted"
 test = "screen"
 why = "A doorbell whose record was overwritten is a lost event; the count goes in the ring record (v0.4.0)."
-find = '    if (r == 0) psyscr__a_inc(&psyscr__in.lost);'
+find = '    if (r == 0) yscr__a_inc(&yscr__in.lost);'
 replace = ''
 
 [[mutant]]
 id = "br-05"
 name = "the loss record every frame"
 test = "screen"
-why = "The PSYSCR_EV_INPUT_LOST record is written when a count moves, not every frame (v0.4.0)."
-find = '    if (v[0] == psyscr__in.logged[0] && v[1] == psyscr__in.logged[1] && v[2] == psyscr__in.logged[2]) {'
+why = "The YSCR_EV_INPUT_LOST record is written when a count moves, not every frame (v0.4.0)."
+find = '    if (v[0] == yscr__in.logged[0] && v[1] == yscr__in.logged[1] && v[2] == yscr__in.logged[2]) {'
 replace = '    if (0) {'

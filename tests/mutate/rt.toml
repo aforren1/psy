@@ -1,13 +1,13 @@
-# psy_rt.h mutants: the device clock fit (DEVICE CLOCK FIT, v0.6.0). The
-# test runs the fit's part of tests/adapt/psy_rt_test.c only
-# (PSYRT_TEST_FIT_ONLY), which takes under a second. docs/psy_rt.md lists
+# ysp/rt.h mutants: the device clock fit (DEVICE CLOCK FIT, v0.6.0). The
+# test runs the fit's part of tests/adapt/rt_test.c only
+# (YRT_TEST_FIT_ONLY), which takes under a second. docs/rt.md lists
 # the results.
-header = "psy_rt.h"
+header = "ysp/rt.h"
 
 [test.fit]
-source = "tests/adapt/psy_rt_test.c"
+source = "tests/adapt/rt_test.c"
 compiler = "gcc"
-flags = ["-std=c11", "-O2", "-w", "-DPSYRT_TEST_FIT_ONLY"]
+flags = ["-std=c11", "-O2", "-w", "-DYRT_TEST_FIT_ONLY"]
 libs = ["-lm"]
 timeout = 120
 
@@ -24,7 +24,7 @@ id = "fit-02"
 name = "first hull edge"
 test = "fit"
 why = "The least summed gap is the edge that spans the mean x (Moon et al. 1999); the first edge rests on the oldest points only."
-find = '            while (j + 1 < h - 1 && PSYRT__X(hull[j + 1]) <= xm) j++;'
+find = '            while (j + 1 < h - 1 && YRT__X(hull[j + 1]) <= xm) j++;'
 replace = '            (void)xm;'
 
 [[mutant]]
@@ -81,8 +81,8 @@ id = "fit-09"
 name = "wide brackets taken"
 test = "fit"
 why = "A bracket wider than max_width_ns bounds the device's time too loosely to use."
-find = '    if (f->d.mode == PSYRT_FIT_BRACKET && (width_ns < 0 || width_ns > f->d.max_width_ns)) {'
-replace = '    if (f->d.mode == PSYRT_FIT_BRACKET && (width_ns < 0 || width_ns > 2 * f->d.max_width_ns)) {'
+find = '    if (f->d.mode == YRT_FIT_BRACKET && (width_ns < 0 || width_ns > f->d.max_width_ns)) {'
+replace = '    if (f->d.mode == YRT_FIT_BRACKET && (width_ns < 0 || width_ns > 2 * f->d.max_width_ns)) {'
 
 [[mutant]]
 id = "fit-10"
@@ -98,7 +98,7 @@ id = "fit-11"
 name = "no CLOCK records"
 test = "fit"
 why = "The thinned pairs in the log are what an offline refit of the session reads."
-find = '''            psyrt__fit_record(f, (uint16_t)PSYRT_KIND_CLOCK, (f->head + f->n - 1) % N);
+find = '''            yrt__fit_record(f, (uint16_t)YRT_KIND_CLOCK, (f->head + f->n - 1) % N);
             closed = true;'''
 replace = '''            closed = true;'''
 
@@ -107,8 +107,8 @@ id = "fit-12"
 name = "no FIT record at the first pair"
 test = "fit"
 why = "The log must hold the map that stamped the first events of an epoch."
-find = '        if (first || closed) psyrt__fit_record(f, (uint16_t)PSYRT_KIND_FIT, 0);'
-replace = '        if (closed) psyrt__fit_record(f, (uint16_t)PSYRT_KIND_FIT, 0);'
+find = '        if (first || closed) yrt__fit_record(f, (uint16_t)YRT_KIND_FIT, 0);'
+replace = '        if (closed) yrt__fit_record(f, (uint16_t)YRT_KIND_FIT, 0);'
 
 [[mutant]]
 id = "fit-13"
@@ -130,7 +130,7 @@ replace = '    (void)0;'
 id = "fit-15"
 name = "slope at once"
 test = "fit"
-why = "A slope from a short span is worse than the drift it corrects (psy_audio.h measured it)."
+why = "A slope from a short span is worse than the drift it corrects (ysp/audio.h measured it)."
 find = '    if (n >= 2 && f->py[il] - y0 >= f->d.slope_span_ns) {'
 replace = '    if (n >= 2) {'
 

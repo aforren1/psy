@@ -1,11 +1,11 @@
 
-# psy_timeline.h mutants: RATE (v0.4.0) and the sequence code (psytl_seq).
-# docs/psy_timeline.md: 24 RATE mutants, 21 caught and 3 equivalent; 19
+# ysp/timeline.h mutants: RATE (v0.4.0) and the sequence code (ytl_seq).
+# docs/timeline.md: 24 RATE mutants, 21 caught and 3 equivalent; 19
 # sequence mutants, all caught. The v0.3.0 list (23) was not kept.
-header = "psy_timeline.h"
+header = "ysp/timeline.h"
 
 [test.timeline]
-source = "tests/adapt/psy_timeline_test.c"
+source = "tests/adapt/timeline_test.c"
 compiler = "gcc"
 flags = ["-std=c11", "-O2", "-w"]
 libs = ["-lm"]
@@ -30,7 +30,7 @@ name = "r <= 0 for r < 0"
 test = "timeline"
 expect = "survived"
 why = "r = 0 gives q - 1 and r = den, and (q - 1) num + den num / den is q num."
-note = "Equivalent: it cannot change a result (docs/psy_timeline.md)."
+note = "Equivalent: it cannot change a result (docs/timeline.md)."
 find = '''
     if (r < 0) {
         q--;'''
@@ -43,8 +43,8 @@ id = "rate-02"
 name = "inverse rounds down"
 test = "timeline"
 why = "rt_time() must invert bt with the matching rounding direction."
-find = 'x = psytl__scale(b->anchor_bt - t, b->den, b->num, b->lim_d, &s);'
-replace = 'x = -psytl__scale(t - b->anchor_bt, b->den, b->num, b->lim_d, &s);'
+find = 'x = ytl__scale(b->anchor_bt - t, b->den, b->num, b->lim_d, &s);'
+replace = 'x = -ytl__scale(t - b->anchor_bt, b->den, b->num, b->lim_d, &s);'
 
 [[mutant]]
 id = "rate-03"
@@ -52,15 +52,15 @@ name = "quotient bound q >= lim"
 test = "timeline"
 expect = "survived"
 why = "At q = lim the scaled part is more than 2^63 - 2^32, so the sum is out of range whether or not the scale saturates."
-note = "Equivalent: it cannot change a result (docs/psy_timeline.md)."
+note = "Equivalent: it cannot change a result (docs/timeline.md)."
 find = '    if (q > lim) {'
 replace = '    if (q >= lim) {'
 
 [[mutant]]
 id = "rate-04"
-name = "rate through psytl_anchor"
+name = "rate through ytl_anchor"
 test = "timeline"
-why = "A rate change re-anchors in place; psytl_anchor() also changes state the rate change must keep."
+why = "A rate change re-anchors in place; ytl_anchor() also changes state the rate change must keep."
 find = '''
         b->anchor_rt = rt;
         b->anchor_bt = bt;
@@ -68,7 +68,7 @@ find = '''
     }
     b->num = num;'''
 replace = '''
-        psytl_anchor(tl, base, rt, bt);
+        ytl_anchor(tl, base, rt, bt);
     }
     b->num = num;'''
 
@@ -103,15 +103,15 @@ id = "rate-07"
 name = "pause at rate 1"
 test = "timeline"
 why = "Pause must freeze the scaled base time, not add the RT difference."
-find = '        b->anchor_bt = psytl__bt_s(b, rt, &sat);'
+find = '        b->anchor_bt = ytl__bt_s(b, rt, &sat);'
 replace = '        b->anchor_bt += rt - b->anchor_rt;'
 
 [[mutant]]
 id = "rate-08"
 name = "next_due at rate 1"
 test = "timeline"
-why = "psytl_next_due() must map event times through the rate."
-find = '            t = psytl__rt_s(b, e->time, &sat);'
+why = "ytl_next_due() must map event times through the rate."
+find = '            t = ytl__rt_s(b, e->time, &sat);'
 replace = '            t = b->anchor_rt + (e->time - b->anchor_bt);'
 
 [[mutant]]
@@ -119,7 +119,7 @@ id = "rate-09"
 name = "peek copy at rate 1"
 test = "timeline"
 why = "A peeked copy's onset must be mapped through the rate."
-find = '            c.onset = psytl__rt_s(b, e->time, &sat);'
+find = '            c.onset = ytl__rt_s(b, e->time, &sat);'
 replace = '            c.onset = b->anchor_rt + (e->time - b->anchor_bt);'
 
 [[mutant]]
@@ -127,7 +127,7 @@ id = "rate-10"
 name = "report key onset - residual"
 test = "timeline"
 why = "A key's reported onset on a scaled running base must take the rounding residual into account."
-find = '        if (b->scaled && b->state == PSYTL__RUNNING) {'
+find = '        if (b->scaled && b->state == YTL__RUNNING) {'
 replace = '        if (0) {'
 
 [[mutant]]
@@ -135,16 +135,16 @@ id = "rate-11"
 name = "evaluate window bt(onset) + L"
 test = "timeline"
 why = "The evaluate window ends at the base time of onset plus the lead in RT, not at base time plus an RT lead."
-find = '        hi_t = psytl__bt_s(b, f->onset + lead_ns, &sat);'
+find = '        hi_t = ytl__bt_s(b, f->onset + lead_ns, &sat);'
 replace = '        hi_t = now + lead_ns;'
 
 [[mutant]]
 id = "rate-12"
-name = "psytl_window rounds the lead"
+name = "ytl_window rounds the lead"
 test = "timeline"
-why = "psytl_window() must use the same lead in ns as evaluate (psytl__lead_ns), or the two disagree by 1 ns."
-find = '    x = psytl__bt_s(b, f->onset + psytl__lead_ns(tl, f->period), &sat);'
-replace = '    x = psytl__bt_s(b, f->onset + (int64_t)(tl->lead * (double)f->period + 0.5), &sat);'
+why = "ytl_window() must use the same lead in ns as evaluate (ytl__lead_ns), or the two disagree by 1 ns."
+find = '    x = ytl__bt_s(b, f->onset + ytl__lead_ns(tl, f->period), &sat);'
+replace = '    x = ytl__bt_s(b, f->onset + (int64_t)(tl->lead * (double)f->period + 0.5), &sat);'
 
 [[mutant]]
 id = "rate-13"
@@ -158,13 +158,13 @@ replace = '    b->scaled = (uint8_t)(num != 1);'
 id = "rate-14"
 name = "anchor resets the rate"
 test = "timeline"
-why = "psytl_anchor() must keep the base's rate."
+why = "ytl_anchor() must keep the base's rate."
 find = '''
-    b->state = PSYTL__RUNNING;
+    b->state = YTL__RUNNING;
     b->anchor_rt = rt;
     b->anchor_bt = base_time;'''
 replace = '''
-    b->state = PSYTL__RUNNING;
+    b->state = YTL__RUNNING;
     b->num = b->den = 1;
     b->scaled = 0;
     b->anchor_rt = rt;
@@ -176,15 +176,15 @@ name = "rate re-anchors a paused base"
 test = "timeline"
 expect = "survived"
 why = "A paused base's time does not read its anchor's RT time, the resume sets it again, and its now is already the frozen time."
-note = "Equivalent: it cannot change a result (docs/psy_timeline.md)."
+note = "Equivalent: it cannot change a result (docs/timeline.md)."
 find = '''
-    if (b->state == PSYTL__RUNNING) {
+    if (b->state == YTL__RUNNING) {
         bool sat = false;
-        int64_t bt = psytl__bt_s(b, rt, &sat);'''
+        int64_t bt = ytl__bt_s(b, rt, &sat);'''
 replace = '''
-    if (b->state != PSYTL__STOPPED) {
+    if (b->state != YTL__STOPPED) {
         bool sat = false;
-        int64_t bt = psytl__bt_s(b, rt, &sat);'''
+        int64_t bt = ytl__bt_s(b, rt, &sat);'''
 
 [[mutant]]
 id = "rate-16"
@@ -210,22 +210,22 @@ id = "rate-18"
 name = "clamp boundary > for >="
 test = "timeline"
 why = "A time of exactly 2^62 must clamp. Caught after a check for it was added."
-find = '    if (x >= 0 ? x >= PSYTL__LIMIT - a : x <= -PSYTL__LIMIT - a) {'
-replace = '    if (x >= 0 ? x > PSYTL__LIMIT - a : x < -PSYTL__LIMIT - a) {'
+find = '    if (x >= 0 ? x >= YTL__LIMIT - a : x <= -YTL__LIMIT - a) {'
+replace = '    if (x >= 0 ? x > YTL__LIMIT - a : x < -YTL__LIMIT - a) {'
 
 [[mutant]]
 id = "rate-19"
 name = "rt_time on a paused base"
 test = "timeline"
-why = "psytl_rt_time() must refuse a paused base: no RT time maps to its base time."
+why = "ytl_rt_time() must refuse a paused base: no RT time maps to its base time."
 find = '''
     b = &tl->bases[base];
-    if (b->state != PSYTL__RUNNING) return false;
-    x = psytl__rt_s(b, bt, &sat);'''
+    if (b->state != YTL__RUNNING) return false;
+    x = ytl__rt_s(b, bt, &sat);'''
 replace = '''
     b = &tl->bases[base];
-    if (b->state == PSYTL__STOPPED) return false;
-    x = psytl__rt_s(b, bt, &sat);'''
+    if (b->state == YTL__STOPPED) return false;
+    x = ytl__rt_s(b, bt, &sat);'''
 
 [[mutant]]
 id = "rate-20"
@@ -233,7 +233,7 @@ name = "rate accepts |rt| >= 2^62"
 test = "timeline"
 why = "A rate change at an RT time beyond the 2^62 limit must be refused."
 find = '''
-    if (rt >= PSYTL__LIMIT || rt <= -PSYTL__LIMIT) return PSYTL_ERR_ARG;
+    if (rt >= YTL__LIMIT || rt <= -YTL__LIMIT) return YTL_ERR_ARG;
     /* Reduced'''
 replace = '    /* Reduced'
 
@@ -242,8 +242,8 @@ id = "rate-21"
 name = "lim_d from num"
 test = "timeline"
 why = "The overflow bound divides by den, the multiplier of the inverse."
-find = '    b->lim_d = PSYTL__QMAX / den;'
-replace = '    b->lim_d = PSYTL__QMAX / num;'
+find = '    b->lim_d = YTL__QMAX / den;'
+replace = '    b->lim_d = YTL__QMAX / num;'
 
 [[mutant]]
 id = "rate-22"
@@ -251,25 +251,25 @@ name = "queries accept a clamped time (base_time)"
 test = "timeline"
 why = "A query whose result saturated must return false, not a clamped time."
 find = '''
-    if (sat || x >= PSYTL__LIMIT || x <= -PSYTL__LIMIT) return false;
+    if (sat || x >= YTL__LIMIT || x <= -YTL__LIMIT) return false;
     *out = x;
     return true;
 }
 
-PSYTL_API int psytl_rate'''
+YTL_API int ytl_rate'''
 replace = '''
     *out = x;
     return true;
 }
 
-PSYTL_API int psytl_rate'''
+YTL_API int ytl_rate'''
 
 [[mutant]]
 id = "rate-23"
 name = "rate-1 path unchecked"
 test = "timeline"
 why = "Rate 1 must also saturate at the limit. Caught after the clamp record of a base at rate 1 was checked."
-find = '    if (!b->scaled) return psytl__add_clamp(b->anchor_bt, rt - b->anchor_rt, sat);'
+find = '    if (!b->scaled) return ytl__add_clamp(b->anchor_bt, rt - b->anchor_rt, sat);'
 replace = '    if (!b->scaled) return b->anchor_bt + (rt - b->anchor_rt);'
 
 [[mutant]]
@@ -311,8 +311,8 @@ replace = '''
 id = "seq-03"
 name = "check_ops skips binding"
 test = "timeline"
-why = "psytl_check_ops() must bind channels as the run does, or it accepts what the run refuses."
-find = '            rc = psytl__op_bind(tl, base, ops, i);'
+why = "ytl_check_ops() must bind channels as the run does, or it accepts what the run refuses."
+find = '            rc = ytl__op_bind(tl, base, ops, i);'
 replace = '            rc = 0;'
 count = 2
 
@@ -320,8 +320,8 @@ count = 2
 id = "seq-04"
 name = "run applies without the check"
 test = "timeline"
-why = "psytl_run() must check the ops before it applies any."
-find = '    rc = psytl__check_ops(q->tl, q->base, q->t, q->id, ops, n, &bad);'
+why = "ytl_run() must check the ops before it applies any."
+find = '    rc = ytl__check_ops(q->tl, q->base, q->t, q->id, ops, n, &bad);'
 replace = '''
     rc = 0;
     bad = -1;'''
@@ -333,7 +333,7 @@ test = "timeline"
 why = "The gap before a block must hold the last key's value (STEP), not ease into the next block."
 find = '''
     /* The block's last key holds its value until this start. */
-    if (nk0 > 0) k[nk0 - 1].ease = PSYTL_EASE_STEP;'''
+    if (nk0 > 0) k[nk0 - 1].ease = YTL_EASE_STEP;'''
 replace = ''
 
 [[mutant]]
@@ -342,7 +342,7 @@ name = "takeover value not written"
 test = "timeline"
 why = "A takeover key must start from the channel's current value."
 find = '''
-        if (k[i].reserved_ & PSYTL__KEY_TAKE) k[i].value = (float)from;
+        if (k[i].reserved_ & YTL__KEY_TAKE) k[i].value = (float)from;
 '''
 replace = ''
 
@@ -362,7 +362,7 @@ name = "grow in place without moving the curves"
 test = "timeline"
 why = "Growing a block in place must move its curve data."
 find = '''
-                memmove(&k[nk + ak], &k[nk], (size_t)nc * sizeof(psytl_key));
+                memmove(&k[nk + ak], &k[nk], (size_t)nc * sizeof(ytl_key));
 '''
 replace = ''
 
@@ -371,8 +371,8 @@ id = "seq-09"
 name = "overlap allowed"
 test = "timeline"
 why = "Overlapping blocks on one channel must be refused."
-find = '    if (has_prev && (r.start < prev_end || d->keep_velocity)) return PSYTL_ERR_ARG;'
-replace = '    if (has_prev && d->keep_velocity) return PSYTL_ERR_ARG;'
+find = '    if (has_prev && (r.start < prev_end || d->keep_velocity)) return YTL_ERR_ARG;'
+replace = '    if (has_prev && d->keep_velocity) return YTL_ERR_ARG;'
 
 [[mutant]]
 id = "seq-10"
@@ -380,7 +380,7 @@ name = "cancel without recompute"
 test = "timeline"
 why = "Cancel must recompute the channel state it removed events from."
 find = '''
-    psytl__recompute(tl, q->base, -1);
+    ytl__recompute(tl, q->base, -1);
     for (ch = 0; ch < tl->n_channels; ch++) {'''
 replace = '    for (ch = 0; ch < tl->n_channels; ch++) {'
 
@@ -389,16 +389,16 @@ id = "seq-11"
 name = "cancel deletes every event of the base"
 test = "timeline"
 why = "Cancel must delete the events of its sequence only, not every event of the base."
-find = '    removed = psytl__compact(tl, q->base, false, true, q->id0);'
-replace = '    removed = psytl__compact(tl, q->base, false, true, 0);'
+find = '    removed = ytl__compact(tl, q->base, false, true, q->id0);'
+replace = '    removed = ytl__compact(tl, q->base, false, true, 0);'
 
 [[mutant]]
 id = "seq-12"
 name = "check_ops without room for a copy"
 test = "timeline"
 why = "The check must leave room for the copy the run makes."
-find = '            if (live + slots + maxblk > tl->arena_cap) return PSYTL_ERR_FULL;'
-replace = '            if (live + slots > tl->arena_cap) return PSYTL_ERR_FULL;'
+find = '            if (live + slots + maxblk > tl->arena_cap) return YTL_ERR_FULL;'
+replace = '            if (live + slots > tl->arena_cap) return YTL_ERR_FULL;'
 
 [[mutant]]
 id = "seq-13"
@@ -406,8 +406,8 @@ name = "on_n not checked first"
 test = "timeline"
 why = "on_n must check the binding before anything else."
 find = '''
-        if (tl->track_base[ch]) return PSYTL_ERR_BOUND;
-        if (tl->chans[ch].n_events > 0 && tl->chans[ch].base != q->base) return PSYTL_ERR_BOUND;
+        if (tl->track_base[ch]) return YTL_ERR_BOUND;
+        if (tl->chans[ch].n_events > 0 && tl->chans[ch].base != q->base) return YTL_ERR_BOUND;
 '''
 replace = ''
 
@@ -417,7 +417,7 @@ name = "STEP detection off"
 test = "timeline"
 why = "A block whose keys are all STEP is detected as such."
 find = '''
-        if (k[i].ease != PSYTL_EASE_STEP) st = 0;
+        if (k[i].ease != YTL_EASE_STEP) st = 0;
     if (!offp) {'''
 replace = '''
         st = 0;
@@ -438,8 +438,8 @@ id = "seq-16"
 name = "start_set accepted"
 test = "timeline"
 why = "A start_set descriptor must be refused where it is not supported."
-find = '    if (d->start_set || d->cycles == PSYTL_FOREVER) return PSYTL_ERR_ARG;'
-replace = '    if (d->cycles == PSYTL_FOREVER) return PSYTL_ERR_ARG;'
+find = '    if (d->start_set || d->cycles == YTL_FOREVER) return YTL_ERR_ARG;'
+replace = '    if (d->cycles == YTL_FOREVER) return YTL_ERR_ARG;'
 
 [[mutant]]
 id = "seq-17"
@@ -458,5 +458,5 @@ id = "seq-18"
 name = "arena curves read from the wrong end (L)"
 test = "timeline"
 why = "Arena curves follow the keys; reading them at the keys' start reads keys as curves."
-find = '    return psytl__ease(a, curves, keys + n, a->value, b->value,'
-replace = '    return psytl__ease(a, curves, keys, a->value, b->value,'
+find = '    return ytl__ease(a, curves, keys + n, a->value, b->value,'
+replace = '    return ytl__ease(a, curves, keys, a->value, b->value,'

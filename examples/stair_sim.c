@@ -10,14 +10,14 @@
  * correctly half the time at zero contrast and its threshold is at 79.4%
  * correct, which is where a 1-up-3-down staircase converges. The generator is
  * splitmix64 inside this file, seeded from the command line, because
- * psy_stair.h owns no random source: psyst_simulate_response() takes the
+ * ysp/stair.h owns no random source: yst_simulate_response() takes the
  * uniform variate the caller drew, so a run is reproducible from its seed.
  *
  * Nothing here touches hardware and nothing here is a timing measurement.
  *
  * Build (from the repository root):
- *     cc -O2 -I. -o stair_sim examples/stair_sim.c -lm   # Linux / macOS
- *     cl /O2 /I. examples\stair_sim.c                    # Windows (MSVC)
+ *     cc -O2 -Iinclude -o stair_sim examples/stair_sim.c -lm   # Linux / macOS
+ *     cl /O2 /Iinclude examples\stair_sim.c                    # Windows (MSVC)
  * or:  cmake -B build && cmake --build build
  *
  * Usage: stair_sim [seed] [threshold]
@@ -26,8 +26,8 @@
  *
  * Exit code: 0 always.
  */
-#define PSY_STAIR_IMPLEMENTATION
-#include "psy_stair.h"
+#define YSP_STAIR_IMPLEMENTATION
+#include "ysp/stair.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -71,20 +71,20 @@ static double uniform01(void) {
 }
 
 /* The display cannot show every contrast, so quantize to 12 bits. This is the
- * whole reason psyst_update() takes the level that was shown. */
+ * whole reason yst_update() takes the level that was shown. */
 static double quantize(double x) {
     double q = floor(x * 4096.0 + 0.5) / 4096.0;
     return q > 0.0 ? q : 1.0 / 4096.0;
 }
 
 int main(int argc, char** argv) {
-    static psyst_stair s;
-    psyst_desc d;
+    static yst_stair s;
+    yst_desc d;
     double alpha = 0.20;
     double truth, est_rev, est_med, est_tri, est_last;
     unsigned long seed = 1;
     int n = 0, i;
-    const psyst_trial* h;
+    const yst_trial* h;
 
     if (argc > 1) seed = strtoul(argv[1], NULL, 10);
     if (argc > 2) alpha = atof(argv[2]);
@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     d.start          = 0.5;
     d.n_up           = 1;
     d.n_down         = 3;
-    d.step_type      = PSYST_STEP_LOG;
+    d.step_type      = YST_STEP_LOG;
     d.steps[0]       = 0.30;      /* a factor of 2 */
     d.steps[1]       = 0.15;
     d.steps[2]       = 0.075;
@@ -113,12 +113,12 @@ int main(int argc, char** argv) {
     d.stop_trials    = 200;
     d.stop_at_limit  = 20;
 
-    if (!psyst_open(&s, &d)) {
-        fprintf(stderr, "stair_sim: %s\n", psyst_error(&s));
+    if (!yst_open(&s, &d)) {
+        fprintf(stderr, "stair_sim: %s\n", yst_error(&s));
         return 0;
     }
 
-    truth = observer_level(psyst_convergence_p(d.n_up, d.n_down, d.step_down_scale),
+    truth = observer_level(yst_convergence_p(d.n_up, d.n_down, d.step_down_scale),
                            alpha);
 
     printf("stair_sim: 1-up-3-down, LOG steps 0.30 / 0.15 / 0.075, "
@@ -126,51 +126,51 @@ int main(int argc, char** argv) {
     printf("observer: Weibull, alpha %.4f, beta %.1f, guess %.2f; "
            "converges on p = %.4f at contrast %.5f\n",
            alpha, OBS_BETA, OBS_GAMMA,
-           psyst_convergence_p(d.n_up, d.n_down, d.step_down_scale), truth);
+           yst_convergence_p(d.n_up, d.n_down, d.step_down_scale), truth);
     printf("\n trial   proposed      shown   p(corr)  resp  step  rev\n");
 
-    while (!psyst_done(&s)) {
-        double proposed = psyst_next(&s);
+    while (!yst_done(&s)) {
+        double proposed = yst_next(&s);
         double shown = quantize(proposed);
         double p = observer_p(shown, alpha);
-        int resp = psyst_simulate_response(p, uniform01());
-        int ev = psyst_update(&s, shown, resp);
+        int resp = yst_simulate_response(p, uniform01());
+        int ev = yst_update(&s, shown, resp);
         if (ev < 0) {
-            fprintf(stderr, "stair_sim: %s\n", psyst_strerror(ev));
+            fprintf(stderr, "stair_sim: %s\n", yst_strerror(ev));
             break;
         }
-        h = psyst_history(&s, &n);
+        h = yst_history(&s, &n);
         printf("  %4d   %8.5f   %8.5f   %6.3f   %3d  %4d  %s\n",
                n, proposed, shown, p, resp,
                (int)h[n - 1].step_index,
-               (ev & PSYST_EVENT_REVERSAL) ? "<--" : "");
+               (ev & YST_EVENT_REVERSAL) ? "<--" : "");
     }
 
-    est_rev  = psyst_estimate(&s, PSYST_EST_REVERSALS);
-    est_med  = psyst_estimate(&s, PSYST_EST_MEDIAN_REV);
-    est_tri  = psyst_estimate(&s, PSYST_EST_TRIALS);
-    est_last = psyst_estimate(&s, PSYST_EST_LAST);
+    est_rev  = yst_estimate(&s, YST_EST_REVERSALS);
+    est_med  = yst_estimate(&s, YST_EST_MEDIAN_REV);
+    est_tri  = yst_estimate(&s, YST_EST_TRIALS);
+    est_last = yst_estimate(&s, YST_EST_LAST);
 
     printf("\nstopped after %d trials and %d reversals, reason %d\n",
-           psyst_n_trials(&s), psyst_n_reversals(&s), (int)psyst_stop_reason(&s));
+           yst_n_trials(&s), yst_n_reversals(&s), (int)yst_stop_reason(&s));
     printf("reversal levels:");
-    for (i = 0; i < psyst_n_reversals(&s); i++)
-        printf(" %.5f", psyst_reversal_level(&s, i));
+    for (i = 0; i < yst_n_reversals(&s); i++)
+        printf(" %.5f", yst_reversal_level(&s, i));
     printf("\n\n");
 
     printf("estimator          level    p(corr)   error (log10)   n\n");
     printf("EST_REVERSALS   %8.5f   %6.3f   %+8.4f        %3d\n",
            est_rev, observer_p(est_rev, alpha), log10(est_rev / truth),
-           psyst_estimate_count(&s, PSYST_EST_REVERSALS));
+           yst_estimate_count(&s, YST_EST_REVERSALS));
     printf("EST_MEDIAN_REV  %8.5f   %6.3f   %+8.4f        %3d\n",
            est_med, observer_p(est_med, alpha), log10(est_med / truth),
-           psyst_estimate_count(&s, PSYST_EST_MEDIAN_REV));
+           yst_estimate_count(&s, YST_EST_MEDIAN_REV));
     printf("EST_TRIALS      %8.5f   %6.3f   %+8.4f        %3d\n",
            est_tri, observer_p(est_tri, alpha), log10(est_tri / truth),
-           psyst_estimate_count(&s, PSYST_EST_TRIALS));
+           yst_estimate_count(&s, YST_EST_TRIALS));
     printf("EST_LAST        %8.5f   %6.3f   %+8.4f        %3d\n",
            est_last, observer_p(est_last, alpha), log10(est_last / truth),
-           psyst_estimate_count(&s, PSYST_EST_LAST));
+           yst_estimate_count(&s, YST_EST_LAST));
     printf("truth           %8.5f   %6.3f\n", truth,
            observer_p(truth, alpha));
     printf("\nOne track is one sample. The error above is this seed's, not the\n"

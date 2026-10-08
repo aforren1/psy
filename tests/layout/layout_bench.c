@@ -1,10 +1,10 @@
-/* layout_bench.c - what pack/psy_layout costs (docs/psy_layout.md, Costs).
+/* layout_bench.c - what pack/layout costs (docs/layout.md, Costs).
  *
  *   Re-layout of a label and of a 500-codepoint paragraph (the glue and
  *   Skribidi, glyphs already built), one editor keystroke at 500
  *   codepoints (Skribidi's edit and layout and the glue's conversion), the
  *   first build of a glyph into a curve set, and adding a font (HarfBuzz and
- *   psy_outline.h open it, the glue hashes it).
+ *   ysp/outline.h open it, the glue hashes it).
  *   Medians of each round's median, 3 interleaved rounds, at least 0.3 s an
  *   item a round. Run it under the shared measurement lock.
  * Usage: layout_bench [FONT_DIR]   (default C:/Windows/Fonts)
@@ -12,11 +12,11 @@
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS
 #endif
-#define PSY_RT_IMPLEMENTATION
-#include "psy_rt.h"
-#define PSY_OUTLINE_IMPLEMENTATION
-#include "psy_outline.h"
-#include "psy_layout.h"
+#define YSP_RT_IMPLEMENTATION
+#include "ysp/rt.h"
+#define YSP_OUTLINE_IMPLEMENTATION
+#include "ysp/outline.h"
+#include "ysp/layout.h"
 #include "skribidi/skb_editor.h"
 
 #include <stdio.h>
@@ -85,9 +85,9 @@ int main(int argc, char** argv) {
     char path[600];
     size_t n_segoe = 0, n_yahei = 0;
     uint8_t* segoe, * yahei;
-    psyol_ctx ol;
-    psylay_lib* L;
-    psylay_block b;
+    yol_ctx ol;
+    ylay_lib* L;
+    ylay_block b;
     int n_en, n_ar;
     char* en500 = repeat_to(EN_PARA, 500, &n_en);
     char* ar500 = repeat_to(AR_PARA, 500, &n_ar);
@@ -100,31 +100,31 @@ int main(int argc, char** argv) {
     snprintf(path, sizeof path, "%s/msyh.ttc", dir);
     yahei = read_file(path, &n_yahei);
     if (!segoe || !yahei) { printf("layout_bench: needs segoeui.ttf and msyh.ttc in %s\n", dir); return 0; }
-    psyol_init(&ol, NULL);
+    yol_init(&ol, NULL);
     memset(&b, 0, sizeof b);
 
     /* adding a font, and the first build of glyphs */
     {
         double t_add[2];
-        psylay_font_info fi;
-        int64_t t0 = psyrt_now_ns();
-        psylay_create(&L, &(psylay_desc){ .ol = &ol });
-        psylay_add_font(L, segoe, n_segoe, 0, "segoeui.ttf");
-        t_add[0] = (double)(psyrt_now_ns() - t0) * 1e-3;
-        t0 = psyrt_now_ns();
-        psylay_add_font(L, yahei, n_yahei, 0, "msyh.ttc");
-        t_add[1] = (double)(psyrt_now_ns() - t0) * 1e-3;
+        ylay_font_info fi;
+        int64_t t0 = yrt_now_ns();
+        ylay_create(&L, &(ylay_desc){ .ol = &ol });
+        ylay_add_font(L, segoe, n_segoe, 0, "segoeui.ttf");
+        t_add[0] = (double)(yrt_now_ns() - t0) * 1e-3;
+        t0 = yrt_now_ns();
+        ylay_add_font(L, yahei, n_yahei, 0, "msyh.ttc");
+        t_add[1] = (double)(yrt_now_ns() - t0) * 1e-3;
         printf("add font: Segoe UI (%zu bytes) %.0f us, Microsoft YaHei (%zu bytes) %.0f us\n", n_segoe, t_add[0], n_yahei, t_add[1]);
-        psylay_layout(L, en500, -1, &(psylay_style){ .size = 16, .width = 600 }, NULL, 0, &b);
-        psylay_font(L, 0, &fi);
+        ylay_layout(L, en500, -1, &(ylay_style){ .size = 16, .width = 600 }, NULL, 0, &b);
+        ylay_font(L, 0, &fi);
         printf("first build: Latin %u glyphs in %.0f us, %.1f us a glyph\n", fi.n_built, fi.build_us, fi.build_us / fi.n_built);
-        psylay_layout(L, ZH_PARA, -1, &(psylay_style){ .size = 16, .width = 600, .lang = "zh-Hans" }, NULL, 0, &b);
-        psylay_font(L, 1, &fi);
+        ylay_layout(L, ZH_PARA, -1, &(ylay_style){ .size = 16, .width = 600, .lang = "zh-Hans" }, NULL, 0, &b);
+        ylay_font(L, 1, &fi);
         printf("first build: CJK %u glyphs in %.0f us, %.1f us a glyph\n", fi.n_built, fi.build_us, fi.build_us / fi.n_built);
         /* Arabic glyphs too, so the timed layouts build nothing */
-        psylay_layout(L, ar500, -1, &(psylay_style){ .size = 16, .width = 600 }, NULL, 0, &b);
-        psylay_layout(L, AR_LABEL, -1, &(psylay_style){ .size = 32 }, NULL, 0, &b);
-        psylay_layout(L, EN_LABEL, -1, &(psylay_style){ .size = 32 }, NULL, 0, &b);
+        ylay_layout(L, ar500, -1, &(ylay_style){ .size = 16, .width = 600 }, NULL, 0, &b);
+        ylay_layout(L, AR_LABEL, -1, &(ylay_style){ .size = 32 }, NULL, 0, &b);
+        ylay_layout(L, EN_LABEL, -1, &(ylay_style){ .size = 32 }, NULL, 0, &b);
     }
 
     items[0] = (item){ "label, English", K_LAYOUT, EN_LABEL, 0 };
@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
     for (r = 0; r < ROUNDS; r++) {
         for (i = 0; i < 6; i++) {
             int n = 0;
-            int64_t start = psyrt_now_ns();
+            int64_t start = yrt_now_ns();
             skb_editor_t* ed = NULL;
             if (items[i].kind == K_KEY) {
                 skb_attribute_t la[1], pa[1];
@@ -144,36 +144,36 @@ int main(int argc, char** argv) {
                 la[0] = skb_attribute_make_text_wrap(SKB_WRAP_WORD_CHAR);
                 pa[0] = skb_attribute_make_font_size(16);
                 memset(&p, 0, sizeof p);
-                p.font_collection = psylay_skb_fonts(L);
-                p.attribute_collection = psylay_skb_attributes(L);
+                p.font_collection = ylay_skb_fonts(L);
+                p.attribute_collection = ylay_skb_attributes(L);
                 p.editor_width = items[i].width;
                 p.editor_height = -1.0f;
                 p.layout_attributes = (skb_attribute_set_t){ la, 1, 0, NULL };
                 p.paragraph_attributes = (skb_attribute_set_t){ pa, 1, 0, NULL };
                 ed = skb_editor_create(&p);
-                skb_editor_set_text_utf8(ed, psylay_skb_temp(L), items[i].text, -1);
+                skb_editor_set_text_utf8(ed, ylay_skb_temp(L), items[i].text, -1);
             }
-            while (n < MAX_SAMPLES && (n < 30 || psyrt_now_ns() - start < 300000000)) {
-                int64_t t0 = psyrt_now_ns();
+            while (n < MAX_SAMPLES && (n < 30 || yrt_now_ns() - start < 300000000)) {
+                int64_t t0 = yrt_now_ns();
                 if (items[i].kind == K_LAYOUT) {
-                    psylay_layout(L, items[i].text, -1, &(psylay_style){ .size = items[i].width > 0 ? 16.0f : 32.0f, .width = items[i].width },
+                    ylay_layout(L, items[i].text, -1, &(ylay_style){ .size = items[i].width > 0 ? 16.0f : 32.0f, .width = items[i].width },
                                   NULL, 0, &b);
                 } else {
                     /* type a letter at the end, or take it back: the text stays near 500 */
                     int k, np;
-                    if (n & 1) skb_editor_process_key_pressed(ed, psylay_skb_temp(L), SKB_KEY_BACKSPACE, 0);
-                    else skb_editor_insert_codepoint(ed, psylay_skb_temp(L), SKB_CURRENT_SELECTION, 'e');
+                    if (n & 1) skb_editor_process_key_pressed(ed, ylay_skb_temp(L), SKB_KEY_BACKSPACE, 0);
+                    else skb_editor_insert_codepoint(ed, ylay_skb_temp(L), SKB_CURRENT_SELECTION, 'e');
                     np = skb_editor_get_paragraph_count(ed);
                     for (k = 0; k < np; k++) {
                         skb_vec2_t off = skb_editor_get_paragraph_offset(ed, k);
-                        psylay_from_skb(L, skb_editor_get_paragraph_layout(ed, k), off.x, off.y, 0, k > 0, &b);
+                        ylay_from_skb(L, skb_editor_get_paragraph_layout(ed, k), off.x, off.y, 0, k > 0, &b);
                     }
                 }
-                samples[n++] = (double)(psyrt_now_ns() - t0) * 1e-3;
+                samples[n++] = (double)(yrt_now_ns() - t0) * 1e-3;
             }
             med[i][r] = median(samples, n);
             if (ed) {
-                skb_editor_set_text_utf8(ed, psylay_skb_temp(L), items[i].text, -1);
+                skb_editor_set_text_utf8(ed, ylay_skb_temp(L), items[i].text, -1);
                 if (r == ROUNDS - 1) printf("  %s: p90 %.1f us, max %.1f us of %d calls (last round)\n", items[i].name,
                                             samples[n * 9 / 10], samples[n - 1], n);
             } else if (r == ROUNDS - 1) {
@@ -188,9 +188,9 @@ int main(int argc, char** argv) {
         memcpy(m, med[i], sizeof m);
         printf("  %-36s %8.1f %8.1f %8.1f  -> %.1f\n", items[i].name, med[i][0], med[i][1], med[i][2], median(m, ROUNDS));
     }
-    psylay_block_free(&b);
-    psylay_destroy(L);
-    psyol_free(&ol);
+    ylay_block_free(&b);
+    ylay_destroy(L);
+    yol_free(&ol);
     free(segoe); free(yahei); free(en500); free(ar500);
     return 0;
 }

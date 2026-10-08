@@ -1,6 +1,6 @@
 /* timeline_trial.c - one trial's timeline on a simulated 60 Hz display.
  *
- * The USAGE example of psy_timeline.h, run for real: a fixation point from
+ * The USAGE example of ysp/timeline.h, run for real: a fixation point from
  * 0 to 0.5 s, then a grating whose contrast ramps up over 100 ms with a
  * raised cosine, holds at 0.5 and ramps down to end at 1.2 s, and a trigger
  * at the grating's onset. The trial runs twice from the same events: the
@@ -21,14 +21,14 @@
  * onset as an argument.
  *
  * Build (from the repository root):
- *     cc -O2 -I. -o timeline_trial examples/timeline_trial.c -lm   # Linux / macOS
- *     cl /O2 /I. examples\timeline_trial.c                         # Windows (MSVC)
+ *     cc -O2 -Iinclude -o timeline_trial examples/timeline_trial.c -lm   # Linux / macOS
+ *     cl /O2 /Iinclude examples\timeline_trial.c                         # Windows (MSVC)
  *
  * Usage: timeline_trial
  * Exit code: 0, or 1 if a call failed.
  */
-#define PSY_TIMELINE_IMPLEMENTATION
-#include "psy_timeline.h"
+#define YSP_TIMELINE_IMPLEMENTATION
+#include "ysp/timeline.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -36,21 +36,21 @@
 enum { FIX_ON, GRATING_ON, CONTRAST, N_CHANNELS };
 enum { TRIAL = 1 };
 
-#define S PSYTL_NS_PER_S
+#define S YTL_NS_PER_S
 
 /* The keys stay valid while the channel uses them, so they are static. */
-static const psytl_key ramp[] = {
-    { S / 2,          0.0f, PSYTL_EASE_COSINE, 0, 0 },
-    { S / 2 + S / 10, 0.5f, PSYTL_EASE_LINEAR, 0, 0 },
-    { 11 * S / 10,    0.5f, PSYTL_EASE_COSINE, 0, 0 },
-    { 6 * S / 5,      0.0f, PSYTL_EASE_LINEAR, 0, 0 },
+static const ytl_key ramp[] = {
+    { S / 2,          0.0f, YTL_EASE_COSINE, 0, 0 },
+    { S / 2 + S / 10, 0.5f, YTL_EASE_LINEAR, 0, 0 },
+    { 11 * S / 10,    0.5f, YTL_EASE_COSINE, 0, 0 },
+    { 6 * S / 5,      0.0f, YTL_EASE_LINEAR, 0, 0 },
 };
 
-static psytl_event storage[64];
-static psytl_timeline tl;
+static ytl_event storage[64];
+static ytl_timeline tl;
 
-static psytl_event ev(int64_t t, int kind, int target, int code) {
-    psytl_event e;
+static ytl_event ev(int64_t t, int kind, int target, int code) {
+    ytl_event e;
     memset(&e, 0, sizeof(e));
     e.time = t;
     e.base = TRIAL;
@@ -62,11 +62,11 @@ static psytl_event ev(int64_t t, int kind, int target, int code) {
 
 static const char* kind_name(int k) {
     switch (k) {
-    case PSYTL_MARK:    return "mark";
-    case PSYTL_TRIGGER: return "trigger";
-    case PSYTL_ONSET:   return "onset";
-    case PSYTL_OFFSET:  return "offset";
-    case PSYTL_SET:     return "set";
+    case YTL_MARK:    return "mark";
+    case YTL_TRIGGER: return "trigger";
+    case YTL_ONSET:   return "onset";
+    case YTL_OFFSET:  return "offset";
+    case YTL_SET:     return "set";
     default:            return "user";
     }
 }
@@ -79,40 +79,40 @@ static int64_t grid(int64_t k) { return (k * S * 2 + 60) / 120; }
 static int run_trial(int64_t* k, int n, int64_t anchor, int drop, bool show_contrast) {
     int i, j;
     int64_t period = grid(1) - grid(0);
-    if (psytl_anchor(&tl, TRIAL, anchor, 0) < 0) return 1;
+    if (ytl_anchor(&tl, TRIAL, anchor, 0) < 0) return 1;
     for (i = 0; i < n; i++) {
-        psytl_frame f;
-        psytl_event fired[8];
+        ytl_frame f;
+        ytl_event fired[8];
         int nf;
         if (i == drop) (*k)++;
         f.onset = grid(*k);
         f.period = period;
         f.index = *k;
-        nf = psytl_evaluate(&tl, &f, fired, 8);
+        nf = ytl_evaluate(&tl, &f, fired, 8);
         if (nf < 0) {
-            fprintf(stderr, "evaluate: %s\n", psytl_strerror(nf));
+            fprintf(stderr, "evaluate: %s\n", ytl_strerror(nf));
             return 1;
         }
         for (j = 0; j < nf && j < 8; j++) {
-            const psytl_event* e = &fired[j];
+            const ytl_event* e = &fired[j];
             printf("  frame %4lld  onset %9.3f ms  %-7s %s %2d  residual %+7.3f ms%s\n",
                    (long long)e->frame, (double)e->onset / 1e6, kind_name(e->kind),
-                   e->kind == PSYTL_TRIGGER ? "code   " : "channel",
-                   e->kind == PSYTL_TRIGGER ? e->code : e->target,
+                   e->kind == YTL_TRIGGER ? "code   " : "channel",
+                   e->kind == YTL_TRIGGER ? e->code : e->target,
                    (double)e->residual / 1e6,
-                   (e->flags & PSYTL_EV_LATE) ? "  late" : "");
+                   (e->flags & YTL_EV_LATE) ? "  late" : "");
         }
         if (show_contrast && i % 5 == 0 && i >= 25 && i <= 80)
             printf("                                   contrast at trial frame %2d: %.4f\n",
-                   i, (double)psytl_value(&tl, CONTRAST));
+                   i, (double)ytl_value(&tl, CONTRAST));
         (*k)++;
     }
     return 0;
 }
 
 int main(void) {
-    psytl_desc d;
-    psytl_event e[5];
+    ytl_desc d;
+    ytl_event e[5];
     int64_t k = 0;
     int rc;
 
@@ -120,21 +120,21 @@ int main(void) {
     d.events = storage;
     d.event_capacity = 64;
     d.n_channels = N_CHANNELS;
-    if (!psytl_open(&tl, &d)) {
-        fprintf(stderr, "%s\n", psytl_error(&tl));
+    if (!ytl_open(&tl, &d)) {
+        fprintf(stderr, "%s\n", ytl_error(&tl));
         return 1;
     }
-    e[0] = ev(0,         PSYTL_ONSET,   FIX_ON, 0);
-    e[1] = ev(S / 2,     PSYTL_OFFSET,  FIX_ON, 0);
-    e[2] = ev(S / 2,     PSYTL_ONSET,   GRATING_ON, 0);
-    e[3] = ev(S / 2,     PSYTL_TRIGGER, 0, 12);
-    e[4] = ev(6 * S / 5, PSYTL_OFFSET,  GRATING_ON, 0);
-    rc = psytl_add_n(&tl, e, 5);
-    if (rc < 0) { fprintf(stderr, "add: %s\n", psytl_strerror(rc)); return 1; }
-    rc = psytl_set_keys(&tl, CONTRAST, TRIAL, ramp, 4);
-    if (rc < 0) { fprintf(stderr, "keys: %s\n", psytl_strerror(rc)); return 1; }
+    e[0] = ev(0,         YTL_ONSET,   FIX_ON, 0);
+    e[1] = ev(S / 2,     YTL_OFFSET,  FIX_ON, 0);
+    e[2] = ev(S / 2,     YTL_ONSET,   GRATING_ON, 0);
+    e[3] = ev(S / 2,     YTL_TRIGGER, 0, 12);
+    e[4] = ev(6 * S / 5, YTL_OFFSET,  GRATING_ON, 0);
+    rc = ytl_add_n(&tl, e, 5);
+    if (rc < 0) { fprintf(stderr, "add: %s\n", ytl_strerror(rc)); return 1; }
+    rc = ytl_set_keys(&tl, CONTRAST, TRIAL, ramp, 4);
+    if (rc < 0) { fprintf(stderr, "keys: %s\n", ytl_strerror(rc)); return 1; }
 
-    printf("psy_timeline %s, simulated 60 Hz\n", psytl_version());
+    printf("ysp_timeline %s, simulated 60 Hz\n", ytl_version());
     printf("trial 1: anchored on the grid at frame %lld; loop frame 30 drops\n", (long long)k);
     if (run_trial(&k, 80, grid(k), 30, true)) return 1;
 

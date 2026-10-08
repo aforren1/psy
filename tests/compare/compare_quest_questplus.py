@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Run psy.quest and the questplus package side by side on the same grids and
+"""Run ysp.quest and the questplus package side by side on the same grids and
 the same simulated observer, and report per-trial stimulus agreement and the
 largest posterior difference.
 
-Not part of CI. This is the acceptance test for psy_quest.h that
-docs/psy_adapt.md ("Verification") reports.
+Not part of CI. This is the acceptance test for ysp/quest.h that
+docs/adapt.md ("Verification") reports.
 
-    uv pip install ./bindings/python/psy_quest numpy questplus
+    uv pip install ./bindings/python/ysp_quest numpy questplus
     python tests/compare/compare_quest_questplus.py
 
 One seeded numpy Generator draws one uniform u per trial and both sides get
-that u: psy.quest through Quest.simulate(), questplus through the same rule
+that u: ysp.quest through Quest.simulate(), questplus through the same rule
 written in numpy (outcome 1 when u >= p(incorrect)). Both then see the stimulus
-psy.quest proposed, so a disagreement at one trial does not fork the two
+ysp.quest proposed, so a disagreement at one trial does not fork the two
 posteriors and the posterior comparison stays meaningful to the end.
 
 Three runs:
@@ -26,7 +26,7 @@ Three runs:
 
 A selection that differs is classed as a TIE when the reference expected
 entropies of the two stimuli differ by less than TIE_BITS; the float table
-moves a score by up to about 5e-8 bits (psy_quest.h, STATUS), so a closer
+moves a score by up to about 5e-8 bits (ysp/quest.h, STATUS), so a closer
 pair is not separable. Exits 1 on a non-tie disagreement, an outcome mismatch,
 or a posterior difference above POST_TOL.
 """
@@ -37,7 +37,7 @@ from importlib.metadata import version
 import numpy as np
 import questplus as qp
 
-import psy.quest as pq
+import ysp.quest as pq
 
 SEED = 20260922
 N_TRIALS = 60
@@ -142,14 +142,14 @@ def main():
         rng = np.random.default_rng(SEED)
         results.append(run(label, g, lam, nuis, rng))
 
-    print(f"psy-quest {version('psy-quest')} vs questplus {qp.__version__}; seed {SEED}, "
+    print(f"ysp-quest {version('ysp-quest')} vs questplus {qp.__version__}; seed {SEED}, "
           f"{N_TRIALS} trials per run, truth {TRUTH}")
     print(f"posterior tolerance {POST_TOL:g}, tie band {TIE_BITS:g} bits")
     bad = 0
     for r in results:
         print()
         print(f"== {r['label']}  (S = {len(STIM)}, P = {r['P']})")
-        print(f"{'trial':>5s} {'psy.quest':>9s} {'ref':>5s} {'select':>6s} {'k':>3s} {'k ref':>5s} "
+        print(f"{'trial':>5s} {'ysp.quest':>9s} {'ref':>5s} {'select':>6s} {'k':>3s} {'k ref':>5s} "
               f"{'max|dpost|':>11s} {'|dEH| bits':>11s}")
         for (t, i, j, kind, k1, k2, dp, deh) in r["rows"]:
             print(f"{t:5d} {i:9d} {j:5d} {kind:>6s} {k1:3d} {k2:5d} {dp:11.3e} {deh:11.3e}")
@@ -161,13 +161,13 @@ def main():
         ok = diffs == 0 and kmis == 0 and worst <= POST_TOL
         bad += not ok
         r.update(same=same, ties=ties, diffs=diffs, kmis=kmis, worst=worst, ok=ok)
-        print(f"estimate (mean): psy.quest {np.round(r['est_ours'], 6).tolist()}  "
+        print(f"estimate (mean): ysp.quest {np.round(r['est_ours'], 6).tolist()}  "
               f"questplus {np.round(r['est_ref'], 6).tolist()}")
 
     print()
     print("SUMMARY")
     hdr = (f"{'run':16s} {'same':>5s} {'tie':>4s} {'diff':>5s} {'k mismatch':>10s} "
-           f"{'max|dpost|':>11s} {'psy.quest s':>11s} {'reference s':>11s} {'result':>6s}")
+           f"{'max|dpost|':>11s} {'ysp.quest s':>11s} {'reference s':>11s} {'result':>6s}")
     # "reference s" is questplus's next_stim for the joint runs and the numpy
     # marginal expected entropy for the marginal run; selection time only.
     print(hdr)

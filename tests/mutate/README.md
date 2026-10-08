@@ -65,24 +65,24 @@ values change from run to run.
 
 | List | Compiler | Command |
 |---|---|---|
-| `gfx.toml` | MSVC (`cl`), found with `vswhere` | `cl /nologo /O1 /W3 /D_CRT_SECURE_NO_WARNINGS /I<copy> tests/adapt/psy_gfx_test.c` |
-| `color.toml` | gcc | `gcc -std=c99 -O2 -w -I<copy> tests/adapt/psy_color_test.c -lm` |
-| `screen.toml` | gcc | `gcc -std=c11 -O1 -w -I<copy> tests/adapt/psy_screen_test.c -lm` |
-| `timeline.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/psy_timeline_test.c -lm` |
-| `rt.toml` | gcc | `gcc -std=c11 -O2 -w -DPSYRT_TEST_FIT_ONLY -I<copy> tests/adapt/psy_rt_test.c -lm` (the device clock fit only) |
-| `video.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/psy_video_test.c -lm` |
+| `gfx.toml` | MSVC (`cl`), found with `vswhere` | `cl /nologo /O1 /W3 /D_CRT_SECURE_NO_WARNINGS /I<copy> tests/adapt/gfx_test.c` |
+| `color.toml` | gcc | `gcc -std=c99 -O2 -w -I<copy> tests/adapt/color_test.c -lm` |
+| `screen.toml` | gcc | `gcc -std=c11 -O1 -w -I<copy> tests/adapt/screen_test.c -lm` |
+| `timeline.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/timeline_test.c -lm` |
+| `rt.toml` | gcc | `gcc -std=c11 -O2 -w -DYRT_TEST_FIT_ONLY -I<copy> tests/adapt/rt_test.c -lm` (the device clock fit only) |
+| `video.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/video_test.c -lm` |
 
 These are the compilers of the original runs. The runner finds gcc in
-this order: the `PSY_MUT_GCC` environment variable,
+this order: the `YSP_MUT_GCC` environment variable,
 `C:\tmp\winlibs\mingw64\bin\gcc.exe`, then `gcc` on the `PATH`. To use a
-different `vcvars64.bat`, set `PSY_MUT_VCVARS`.
+different `vcvars64.bat`, set `YSP_MUT_VCVARS`.
 
 ### Environment
 
 | List | Needs |
 |---|---|
-| `gfx.toml` | Windows, a D3D11 GPU, and ANGLE (`libEGL.dll`, `libGLESv2.dll`) in `PSYSCR_ANGLE_DIR`. Default: `C:/Program Files/Docker/Docker/frontend`. |
-| `video.toml` | For the `mf-` mutants: Windows (Media Foundation) and the clips of `tests/media/make_video_clips.sh` in `build-vid/media`, or `PSYVID_TEST_MEDIA` set to their directory. |
+| `gfx.toml` | Windows, a D3D11 GPU, and ANGLE (`libEGL.dll`, `libGLESv2.dll`) in `YSCR_ANGLE_DIR`. Default: `C:/Program Files/Docker/Docker/frontend`. |
+| `video.toml` | For the `mf-` mutants: Windows (Media Foundation) and the clips of `tests/media/make_video_clips.sh` in `build-vid/media`, or `YVID_TEST_MEDIA` set to their directory. |
 
 ### Shared machine
 
@@ -91,7 +91,7 @@ Before each build and each test run, the runner looks for the quiet flag
 looks again every 60 s. Before each mutant, the runner also looks for the
 measurement lock `C:\tmp\psy-measure.lock` and waits while it exists. The
 runner never makes or removes these files. To use other paths, set
-`PSY_QUIET_FLAG` and `PSY_MEASURE_LOCK`.
+`YSP_QUIET_FLAG` and `YSP_MEASURE_LOCK`.
 
 ## Add a mutant
 
@@ -130,7 +130,7 @@ newline directly after the opening quotes is not part of the text.
 | `replace` | yes | The replacement text. |
 | `count` | no | The number of times `find` must occur. All of them are replaced. Default 1. |
 | `file` | no | The header to edit, when it is not the file's `header`. |
-| `env` | no | Environment variables for this mutant's test run (for example, `PSYGFX_TEST_PARTS`). |
+| `env` | no | Environment variables for this mutant's test run (for example, `YGFX_TEST_PARTS`). |
 | `expect` | no | `killed` (default) or `survived`. Use `survived` for a control or for an equivalent mutant, and give the reason in `note`. |
 | `note` | no | Why the mutant is expected to survive. |
 | `[[mutant.also]]` | no | More edits for the same mutant: `find`, `replace`, and optionally `count` and `file`. |

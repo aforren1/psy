@@ -1,5 +1,5 @@
-/* gfx_layout.c - text layout through pack/psy_layout (Skribidi, pinned and
- * patched) drawn as psy_gfx.h curve runs over psy_outline.h curve sets.
+/* gfx_layout.c - text layout through pack/layout (Skribidi, pinned and
+ * patched) drawn as ysp/gfx.h curve runs over ysp/outline.h curve sets.
  *
  * Four pages in a 1200 x 760 window:
  *   1  wrapped paragraphs in Latin, Arabic, Hebrew, Devanagari, Thai,
@@ -15,7 +15,7 @@
  *   4  an editable text box on Skribidi's editor: caret moves in bidi text,
  *      selection (Shift+arrows, drag, double and triple click), undo and
  *      redo, IME composition. It turns on text input with
- *      psyscr_text_input(): typed input is untimed while it is on.
+ *      yscr_text_input(): typed input is untimed while it is on.
  *
  * Fonts: Segoe UI, Arial, Nirmala UI, Leelawadee UI, Microsoft YaHei and
  * Yu Gothic from C:/Windows/Fonts, or the folder given with --fonts. One
@@ -24,7 +24,7 @@
  * font is named on stdout and on every page; with no font at all the pages
  * draw nothing and say so on stdout, as on a CI runner. Curve sets hold the
  * glyphs the layouts use, built on demand at setup and when text changes,
- * uploaded between frames with psygfx_cset_add(). Static text is laid out
+ * uploaded between frames with ygfx_cset_add(). Static text is laid out
  * once; the frame loop draws items and allocates nothing until text
  * changes. Colors are linear light through a nominal calibration (sRGB
  * primaries, gamma 2.2): NOT a measurement of this display. Moderate
@@ -46,23 +46,23 @@
  *   --composition  the composition swapchain (Windows)
  *   --shots PREFIX show each page for 120 frames, read the output back,
  *                  write PREFIX-pN.ppm, then quit
- *   --cache DIR    keep compiled programs in DIR (psygfx_file_cache_init:
+ *   --cache DIR    keep compiled programs in DIR (ygfx_file_cache_init:
  *                  it writes files there); the default is the per-user
- *                  folder of psygfx_default_cache_dir(), when there is one
+ *                  folder of ygfx_default_cache_dir(), when there is one
  *   --no-cache     compile every program; read and write no cache file
  *   --fonts DIR    the font folder (default C:/Windows/Fonts)
  * Exit code: 0; 1 when the screen, the gfx or the layout did not open, or a
  * draw or setup step was refused; 2 for a bad argument. A missing font is
- * not an error. On Windows set PSYSCR_ANGLE_DIR to ANGLE's directory.
+ * not an error. On Windows set YSCR_ANGLE_DIR to ANGLE's directory.
  */
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS
 #endif
-#define PSY_GFX_IMPLEMENTATION
-#include "psy_gfx.h"
-#define PSY_OUTLINE_IMPLEMENTATION
-#include "psy_outline.h"
-#include "psy_layout.h"
+#define YSP_GFX_IMPLEMENTATION
+#include "ysp/gfx.h"
+#define YSP_OUTLINE_IMPLEMENTATION
+#include "ysp/outline.h"
+#include "ysp/layout.h"
 #include "skribidi/skb_editor.h"
 
 #include <stdio.h>
@@ -74,10 +74,10 @@
 #define SHOT_FRAMES 120
 #define COUNT(a) (int)(sizeof(a) / sizeof((a)[0]))
 
-static psyscr_screen scr;
-static psygfx_gfx gfx;
-static psycol_cal cal;
-static psyol_ctx ol;
+static yscr_screen scr;
+static ygfx_gfx gfx;
+static ycol_cal cal;
+static yol_ctx ol;
 static int sim;
 static int shot_select;   /* --shots: page 4 shows a selection across the bidi runs */
 
@@ -89,7 +89,7 @@ static const float CARET[3] = { 0.60f, 0.32f, 0.04f };
 static const float GRIP[3]  = { 0.30f, 0.30f, 0.30f };
 static const float WHITE[3] = { 1.0f, 1.0f, 1.0f };
 
-/* The text palette (PSYGFX_I_COLOR): an item's color is its index. */
+/* The text palette (YGFX_I_COLOR): an item's color is its index. */
 enum { C_INK, C_LIGHT, C_DIM, C_AMBER, C_TEAL, C_RED, N_COLORS };
 static const float text_pal[3 * N_COLORS] = {
     0.55f, 0.55f, 0.55f,  0.66f, 0.66f, 0.66f,  0.34f, 0.34f, 0.34f,
@@ -102,12 +102,12 @@ static long refused;
 static const char* cur_what = "";
 static const char* reported_what;
 
-static void put(const psygfx_stim* s) {
-    int rc = psygfx_draw(&gfx, s);
+static void put(const ygfx_stim* s) {
+    int rc = ygfx_draw(&gfx, s);
     if (rc < 0) {
         refused++;
         if (reported_what != cur_what) {
-            fprintf(stderr, "gfx_layout: %s: %s (%s)\n", cur_what, psygfx_strerror(rc), psygfx_error(&gfx));
+            fprintf(stderr, "gfx_layout: %s: %s (%s)\n", cur_what, ygfx_strerror(rc), ygfx_error(&gfx));
             reported_what = cur_what;
         }
     }
@@ -118,14 +118,14 @@ static void fail(const char* what, const char* why) {
 }
 static void rgb(float* dst, const float* src) { dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; }
 
-static psygfx_stim rect(float x0, float y0, float w, float h, const float* color) {
-    psygfx_shape_desc d;
+static ygfx_stim rect(float x0, float y0, float w, float h, const float* color) {
+    ygfx_shape_desc d;
     memset(&d, 0, sizeof d);
-    d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_TOP_LEFT;
-    d.shape = PSYGFX_RECT; d.x = x0; d.y = y0; d.w = w > 0.5f ? w : 0.5f; d.h = h > 0.5f ? h : 0.5f;
-    d.edge = PSYGFX_EDGE_COSINE; d.edge_width = 1.0f;
+    d.place = YGFX_TOP_LEFT; d.anchor = YGFX_TOP_LEFT;
+    d.shape = YGFX_RECT; d.x = x0; d.y = y0; d.w = w > 0.5f ? w : 0.5f; d.h = h > 0.5f ? h : 0.5f;
+    d.edge = YGFX_EDGE_COSINE; d.edge_width = 1.0f;
     rgb(d.color, color);
-    return psygfx_shape(&d);
+    return ygfx_shape(&d);
 }
 
 /* --- fonts and libraries ---------------------------------------------------- */
@@ -150,10 +150,10 @@ static font_file files[N_FILES] = {
 /* A layout library and, per font, its curve set on the GPU. */
 #define MAX_LIB_FONTS 8
 typedef struct xlib {
-    psylay_lib* L;
+    ylay_lib* L;
     int         n;
     int         file_of[MAX_LIB_FONTS];
-    psygfx_cset set[MAX_LIB_FONTS];
+    ygfx_cset set[MAX_LIB_FONTS];
 } xlib;
 static xlib X_main, X_ja;
 static int set_gen;   /* bumps when a set is made again: runs refer to its id */
@@ -161,12 +161,12 @@ static int set_gen;   /* bumps when a set is made again: runs refer to its id */
 static int xlib_open(xlib* X, const int* order, int n) {
     int i;
     memset(X, 0, sizeof *X);
-    if (psylay_create(&X->L, &(psylay_desc){ .ol = &ol }) != PSYLAY_OK) return -1;
+    if (ylay_create(&X->L, &(ylay_desc){ .ol = &ol }) != YLAY_OK) return -1;
     for (i = 0; i < n; i++) {
         font_file* F = &files[order[i]];
         if (!F->bytes) continue;
-        if (psylay_add_font(X->L, F->bytes, F->n, 0, F->file) < 0) {
-            snprintf(F->why, sizeof F->why, "%s", psylay_error(X->L));
+        if (ylay_add_font(X->L, F->bytes, F->n, 0, F->file) < 0) {
+            snprintf(F->why, sizeof F->why, "%s", ylay_error(X->L));
             continue;
         }
         X->file_of[X->n++] = order[i];
@@ -181,25 +181,25 @@ static void xlib_sync(xlib* X) {
     int i;
     for (i = 0; i < X->n; i++) {
         const uint32_t* g;
-        int n = psylay_take_new_glyphs(X->L, i, &g), rc;
-        psylay_font_info fi;
-        psygfx_cset_desc d;
+        int n = ylay_take_new_glyphs(X->L, i, &g), rc;
+        ylay_font_info fi;
+        ygfx_cset_desc d;
         if (n <= 0) continue;
-        psylay_font(X->L, i, &fi);
+        ylay_font(X->L, i, &fi);
         memset(&d, 0, sizeof d);
         d.texels = fi.set->texels; d.n_texels = fi.set->n_texels;
         d.words = fi.set->words; d.n_words = fi.set->n_words;
         if (X->set[i].id) {
-            rc = psygfx_cset_add(&gfx, X->set[i], &d, g, n);
-            if (rc == PSYGFX_ERR_FULL) { psygfx_cset_free(&gfx, X->set[i]); X->set[i].id = 0; }
-            else if (rc < 0) fail("curve set", psygfx_error(&gfx));
+            rc = ygfx_cset_add(&gfx, X->set[i], &d, g, n);
+            if (rc == YGFX_ERR_FULL) { ygfx_cset_free(&gfx, X->set[i]); X->set[i].id = 0; }
+            else if (rc < 0) fail("curve set", ygfx_error(&gfx));
         }
         if (!X->set[i].id) {
             /* room for typed text: about 1000 Latin or 100 CJK glyphs */
             d.cap_texels = d.n_texels + d.n_texels / 2 + 16384;
             d.cap_words = (d.n_words + d.n_words / 2 + 65536 + 3) & ~3u;
-            X->set[i] = psygfx_cset_make(&gfx, &d);
-            if (!X->set[i].id) fail("curve set", psygfx_error(&gfx));
+            X->set[i] = ygfx_cset_make(&gfx, &d);
+            if (!X->set[i].id) fail("curve set", ygfx_error(&gfx));
             set_gen++;
         }
     }
@@ -210,8 +210,8 @@ static void xlib_sync(xlib* X) {
 #define TB_RUNS 16
 typedef struct tb {
     xlib*        X;
-    psylay_block b;
-    psygfx_stim  st[TB_RUNS];
+    ylay_block b;
+    ygfx_stim  st[TB_RUNS];
     int          n_st, gen;
     float        x, y;
     const float* pal;
@@ -223,29 +223,29 @@ static void tb_build(tb* t) {
     t->n_st = 0;
     t->gen = set_gen;
     for (r = 0; r < t->b.n_runs && t->n_st < TB_RUNS; r++) {
-        const psylay_run* run = &t->b.runs[r];
-        psygfx_crun_desc d;
+        const ylay_run* run = &t->b.runs[r];
+        ygfx_crun_desc d;
         if (!run->n) continue;
         memset(&d, 0, sizeof d);
-        d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_TOP_LEFT;
+        d.place = YGFX_TOP_LEFT; d.anchor = YGFX_TOP_LEFT;
         d.x = t->x; d.y = t->y;
         /* every run of the block shares its box, so the items' origin is the
          * block's top-left */
         d.w = t->b.w > 1 ? t->b.w : 1; d.h = t->b.h > 1 ? t->b.h : 1;
         d.set = t->X->set[run->font];
         d.items = t->b.items + run->first; d.n = (int)run->n; d.size = run->size;
-        d.fields = PSYGFX_I_COLOR; d.palette = t->pal ? t->pal : text_pal; d.n_palette = t->pal ? t->n_pal : N_COLORS;
+        d.fields = YGFX_I_COLOR; d.palette = t->pal ? t->pal : text_pal; d.n_palette = t->pal ? t->n_pal : N_COLORS;
         rgb(d.color, WHITE);
-        t->st[t->n_st++] = psygfx_crun(&gfx, &d);
+        t->st[t->n_st++] = ygfx_crun(&gfx, &d);
     }
 }
 
 /* Lays text out into t at x, y (the block's top-left, screen px). */
-static int tb_set(tb* t, xlib* X, const char* text, const psylay_style* st, float x, float y) {
+static int tb_set(tb* t, xlib* X, const char* text, const ylay_style* st, float x, float y) {
     t->X = X; t->x = x; t->y = y;
     if (!X->n) { t->n_st = 0; return -1; }
-    if (psylay_layout(X->L, text, -1, st, NULL, 0, &t->b) != PSYLAY_OK) {
-        fail("layout", psylay_error(X->L));
+    if (ylay_layout(X->L, text, -1, st, NULL, 0, &t->b) != YLAY_OK) {
+        fail("layout", ylay_error(X->L));
         t->n_st = 0;
         return -1;
     }
@@ -262,17 +262,17 @@ static void tb_draw(tb* t) {
 
 /* A label: one line in the UI fonts, its baseline near y. */
 static void label(tb* t, float x, float y, float px, int color, const char* s) {
-    psylay_style st;
+    ylay_style st;
     memset(&st, 0, sizeof st);
-    st.size = px; st.color = (float)color; st.dir = PSYLAY_DIR_LTR;
+    st.size = px; st.color = (float)color; st.dir = YLAY_DIR_LTR;
     tb_set(t, &X_main, s, &st, x, y - px);
 }
 /* The same, ending at x_right: right-aligned in a box of width w. */
 static void label_right(tb* t, float x_right, float y, float px, int color, const char* s) {
-    psylay_style st;
+    ylay_style st;
     const float w = 700;
     memset(&st, 0, sizeof st);
-    st.size = px; st.color = (float)color; st.dir = PSYLAY_DIR_LTR; st.width = w; st.align = PSYLAY_ALIGN_END;
+    st.size = px; st.color = (float)color; st.dir = YLAY_DIR_LTR; st.width = w; st.align = YLAY_ALIGN_END;
     tb_set(t, &X_main, s, &st, x_right - w, y - px);
 }
 
@@ -386,7 +386,7 @@ static const para paras[] = {
 static tb p1_body[N_PARAS], p1_info[N_PARAS], p1_total;
 static float p1_width = 470;
 static int p1_drag;
-static psygfx_stim p1_handle, p1_panel[2];
+static ygfx_stim p1_handle, p1_panel[2];
 
 static void p1_layout(void) {
     char s[200];
@@ -395,7 +395,7 @@ static void p1_layout(void) {
     int i;
     col_x[1] = col_x[0] + p1_width + 48;
     for (i = 0; i < N_PARAS; i++) {
-        psylay_style st;
+        ylay_style st;
         int c = i < 4 ? 0 : 1;
         memset(&st, 0, sizeof st);
         st.size = P1_PX; st.width = p1_width; st.lang = paras[i].lang; st.color = C_INK;
@@ -426,24 +426,24 @@ static void p1_draw(void) {
 #define AR_PHRASE "\xd9\x85\xd9\x8e\xd8\xb1\xd9\x92\xd8\xad\xd9\x8e\xd8\xa8\xd9\x8b\xd8\xa7 \xd8\xa8\xd9\x90\xd8\xa7\xd9\x84\xd9\x92\xd8\xb9\xd9\x8e\xd8\xa7\xd9\x84\xd9\x8e\xd9\x85\xd9\x90"
 typedef struct bidi_case { const char* text; int dir; const char* expect; const char* unpatched; } bidi_case;
 static const bidi_case bidi_cases[] = {
-    { "The word " AR_PHRASE " 123 means hello world.", PSYLAY_DIR_LTR,
+    { "The word " AR_PHRASE " 123 means hello world.", YLAY_DIR_LTR,
       "LTR paragraph. Must read: \"The word\", then 123, then the Arabic phrase (right to left), then \"means hello world.\"",
       "Unpatched Skribidi put the Arabic phrase after \"world.\": the number's run merged with the LTR run after it." },
-    { "\xd9\x85\xd8\xb9 English \xd9\x88 123", PSYLAY_DIR_RTL,
+    { "\xd9\x85\xd8\xb9 English \xd9\x88 123", YLAY_DIR_RTL,
       "RTL paragraph. Must read from the right: the first Arabic word, \"English\", the one-letter word waw, then 123 at the left end.",
       "Unpatched Skribidi dropped the waw: a space run after \"English\" merged with it, and the merged run lost its glyph." },
-    { "abc \xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7 123 def", PSYLAY_DIR_LTR,
+    { "abc \xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7 123 def", YLAY_DIR_LTR,
       "LTR paragraph, the editor's caret string. Must read: abc, 123, the Arabic word (right to left), def.",
       "Unpatched Skribidi put the Arabic word after \"def\"." },
 };
 #define N_BIDI COUNT(bidi_cases)
 static tb p2_line[N_BIDI], p2_expect[N_BIDI], p2_unp[N_BIDI], p2_note;
-static psygfx_stim p2_panel[N_BIDI];
+static ygfx_stim p2_panel[N_BIDI];
 
 static void p2_setup(void) {
     int i;
     for (i = 0; i < N_BIDI; i++) {
-        psylay_style st;
+        ylay_style st;
         float y = 96 + 190.0f * (float)i;
         uint32_t k, ncp = 0;
         memset(&st, 0, sizeof st);
@@ -473,7 +473,7 @@ static void p2_draw(void) {
 
 static float p3_width = 300;
 static tb p3_body[4], p3_info[4], p3_note;
-static psygfx_stim p3_panel[4];
+static ygfx_stim p3_panel[4];
 
 static void p3_layout(void) {
     static const char* const langs[4] = { "ja", "en", "th", "en" };
@@ -482,7 +482,7 @@ static void p3_layout(void) {
     char s[200];
     int i;
     for (i = 0; i < 4; i++) {
-        psylay_style st;
+        ylay_style st;
         float x = 40 + (float)(i % 2) * 560, y = 110 + (float)(i / 2) * 300;
         memset(&st, 0, sizeof st);
         st.size = 20; st.width = p3_width; st.lang = langs[i]; st.color = C_INK;
@@ -510,7 +510,7 @@ static void p3_draw(void) {
 #define MAX_SEL 64
 static skb_editor_t* editor;
 static tb ed_text, ed_info, ed_note[2];
-static psygfx_stim ed_panel, ed_caret, ed_sel[MAX_SEL];
+static ygfx_stim ed_panel, ed_caret, ed_sel[MAX_SEL];
 static int ed_n_sel, ed_has_caret, ed_dragging, ed_composing;
 static double ed_last_us;
 static int64_t ed_edits;
@@ -550,7 +550,7 @@ static void sel_bands(void) {
 }
 
 /* Lays the editor's paragraphs into ed_text, the selection and the caret:
- * after every change. t0: when the change began (psyrt ns), for its cost;
+ * after every change. t0: when the change began (yrt ns), for its cost;
  * 0 for none. */
 static void ed_refresh(int64_t t0) {
     int i, n = skb_editor_get_paragraph_count(editor);
@@ -559,8 +559,8 @@ static void ed_refresh(int64_t t0) {
     ed_text.X = &X_main; ed_text.x = 0; ed_text.y = 0;
     for (i = 0; i < n; i++) {
         skb_vec2_t off = skb_editor_get_paragraph_offset(editor, i);
-        if (psylay_from_skb(X_main.L, skb_editor_get_paragraph_layout(editor, i), ED_X + off.x, ED_Y + off.y, C_LIGHT, i > 0, &ed_text.b) != PSYLAY_OK)
-            fail("editor", psylay_error(X_main.L));
+        if (ylay_from_skb(X_main.L, skb_editor_get_paragraph_layout(editor, i), ED_X + off.x, ED_Y + off.y, C_LIGHT, i > 0, &ed_text.b) != YLAY_OK)
+            fail("editor", ylay_error(X_main.L));
     }
     xlib_sync(&X_main);
     tb_build(&ed_text);
@@ -583,11 +583,11 @@ static void ed_refresh(int64_t t0) {
         ed_caret = rect(ED_X + c.x - 1, ED_Y + c.y + c.ascender, 2, h, CARET);
         ed_has_caret = 1;
         /* the input method's window goes by the caret */
-        if (psyscr_text_input(&scr, true, (int)(ED_X + c.x), (int)(ED_Y + c.y + c.ascender), 2, (int)h) < 0)
-            fail("text input", psyscr_error(&scr));
+        if (yscr_text_input(&scr, true, (int)(ED_X + c.x), (int)(ED_Y + c.y + c.ascender), 2, (int)h) < 0)
+            fail("text input", yscr_error(&scr));
     }
     if (t0) {
-        ed_last_us = (double)(psyrt_now_ns() - t0) * 1e-3;
+        ed_last_us = (double)(yrt_now_ns() - t0) * 1e-3;
         ed_edits++;
     }
     if (ed_edits)
@@ -609,21 +609,21 @@ static int ed_setup(void) {
     layout_attrs[1] = skb_attribute_make_line_height(SKB_LINE_HEIGHT_METRICS_RELATIVE, 1.3f);
     para_attrs[0] = skb_attribute_make_font_size(ED_PX);
     memset(&p, 0, sizeof p);
-    p.font_collection = psylay_skb_fonts(X_main.L);
-    p.attribute_collection = psylay_skb_attributes(X_main.L);
+    p.font_collection = ylay_skb_fonts(X_main.L);
+    p.attribute_collection = ylay_skb_attributes(X_main.L);
     p.editor_width = ED_W;
     p.editor_height = -1.0f;
     p.layout_attributes = (skb_attribute_set_t){ layout_attrs, 2, 0, NULL };
     p.paragraph_attributes = (skb_attribute_set_t){ para_attrs, 1, 0, NULL };
     editor = skb_editor_create(&p);
     if (!editor) return -1;
-    skb_editor_set_text_utf8(editor, psylay_skb_temp(X_main.L), initial, -1);
+    skb_editor_set_text_utf8(editor, ylay_skb_temp(X_main.L), initial, -1);
     ed_text.pal = text_pal; ed_text.n_pal = N_COLORS;
     ed_panel = rect(ED_X - 12, ED_Y - 12, ED_W + 24, 420, PANEL);
     label(&ed_note[0], 24, WIN_H - 66, 14, C_AMBER,
           "Typed input is untimed: while this page has text input on, keys come through the message path, not the raw timed path.");
     label(&ed_note[1], 24, WIN_H - 48, 12, C_DIM,
-          "psyscr_text_input() turns it on for this page only; every flip meanwhile carries PSYSCR_FLIP_TEXT_INPUT and the ring gets a record.");
+          "yscr_text_input() turns it on for this page only; every flip meanwhile carries YSCR_FLIP_TEXT_INPUT and the ring gets a record.");
     return 0;
 }
 
@@ -651,7 +651,7 @@ static int to_utf32(const char* s, uint32_t* out, int cap) {
 
 /* One key for the editor; 1 when it changed something. */
 static int ed_key(SDL_Keycode key, SDL_Keymod mod) {
-    skb_temp_alloc_t* tmp = psylay_skb_temp(X_main.L);
+    skb_temp_alloc_t* tmp = ylay_skb_temp(X_main.L);
     uint32_t m = sdl_mods(mod);
     skb_editor_key_t k = SKB_KEY_NONE;
     if (mod & SDL_KMOD_CTRL) {
@@ -677,7 +677,7 @@ static int ed_key(SDL_Keycode key, SDL_Keymod mod) {
 }
 
 static void ed_text_input(const char* utf8) {
-    skb_temp_alloc_t* tmp = psylay_skb_temp(X_main.L);
+    skb_temp_alloc_t* tmp = ylay_skb_temp(X_main.L);
     if (ed_composing) {
         uint32_t u[256];
         int n = to_utf32(utf8, u, 256);
@@ -689,7 +689,7 @@ static void ed_text_input(const char* utf8) {
 }
 
 static void ed_editing(const char* utf8, int start) {
-    skb_temp_alloc_t* tmp = psylay_skb_temp(X_main.L);
+    skb_temp_alloc_t* tmp = ylay_skb_temp(X_main.L);
     uint32_t u[256];
     int n = to_utf32(utf8, u, 256);
     if (n == 0) { if (ed_composing) skb_editor_clear_composition(editor, tmp); ed_composing = 0; return; }
@@ -713,12 +713,12 @@ static void ed_script(void) {
     static const char* const typed[3] = { "x", "\xd8\xb3", "1" };
     int64_t t0;
     int i;
-    for (i = 0; i < 3; i++) { t0 = psyrt_now_ns(); ed_text_input(typed[i]); ed_refresh(t0); }
-    t0 = psyrt_now_ns(); ed_editing("\xe3\x81\x8b\xe3\x81\xaa", 2); ed_refresh(t0);
-    t0 = psyrt_now_ns(); ed_text_input("\xe4\xbb\xae\xe5\x90\x8d"); ed_refresh(t0);
-    for (i = 0; i < 4; i++) { t0 = psyrt_now_ns(); ed_key(SDLK_LEFT, SDL_KMOD_NONE); ed_refresh(t0); }
-    t0 = psyrt_now_ns(); ed_key(SDLK_RIGHT, SDL_KMOD_SHIFT); ed_refresh(t0);
-    t0 = psyrt_now_ns(); ed_key(SDLK_Z, SDL_KMOD_CTRL); ed_refresh(t0);
+    for (i = 0; i < 3; i++) { t0 = yrt_now_ns(); ed_text_input(typed[i]); ed_refresh(t0); }
+    t0 = yrt_now_ns(); ed_editing("\xe3\x81\x8b\xe3\x81\xaa", 2); ed_refresh(t0);
+    t0 = yrt_now_ns(); ed_text_input("\xe4\xbb\xae\xe5\x90\x8d"); ed_refresh(t0);
+    for (i = 0; i < 4; i++) { t0 = yrt_now_ns(); ed_key(SDLK_LEFT, SDL_KMOD_NONE); ed_refresh(t0); }
+    t0 = yrt_now_ns(); ed_key(SDLK_RIGHT, SDL_KMOD_SHIFT); ed_refresh(t0);
+    t0 = yrt_now_ns(); ed_key(SDLK_Z, SDL_KMOD_CTRL); ed_refresh(t0);
     printf("page 4 script: %lld changes, the last (an undo) %.0f us; %u glyphs\n", (long long)ed_edits, ed_last_us, ed_text.b.n_items);
 }
 
@@ -746,8 +746,8 @@ static int read_font(font_file* F, const char* dir) {
 /* sRGB's primaries and white at gamma 2.2. Not a measurement. */
 static int cal_setup(void) {
     static const float xy[4][2] = { { 0.64f, 0.33f }, { 0.30f, 0.60f }, { 0.15f, 0.06f }, { 0.3127f, 0.3290f } };
-    if (psycol_cal_nominal(&cal, xy, 80.0f, 2.2) < 0) return -1;
-    psycol_cal_save(&cal, NULL, 0);   /* seals the CRC, which open() checks */
+    if (ycol_cal_nominal(&cal, xy, 80.0f, 2.2) < 0) return -1;
+    ycol_cal_save(&cal, NULL, 0);   /* seals the CRC, which open() checks */
     return 0;
 }
 
@@ -767,10 +767,10 @@ static void show_page(int p, int prev) {
     char title[160];
     /* SDL and printf may allocate: only here, on a page change */
     snprintf(title, sizeof title, "gfx_layout %d/%d: %s", p + 1, N_PAGES, page_names[p]);
-    if (psyscr_window(&scr)) SDL_SetWindowTitle(psyscr_window(&scr), title);
+    if (yscr_window(&scr)) SDL_SetWindowTitle(yscr_window(&scr), title);
     printf("page %d/%d: %s\n", p + 1, N_PAGES, page_names[p]);
     fflush(stdout);
-    if (prev == 3) psyscr_text_input(&scr, false, 0, 0, 0, 0);
+    if (prev == 3) yscr_text_input(&scr, false, 0, 0, 0, 0);
     cur_what = page_names[p];
     frame_static(p);
     if (p == 3 && editor) {
@@ -788,14 +788,14 @@ static void show_page(int p, int prev) {
 int main(int argc, char** argv) {
     static const int main_order[] = { F_SEGOE, F_ARIAL, F_NIRMALA, F_LEELAWADEE, F_YAHEI };
     static const int ja_order[] = { F_SEGOE, F_YUGOTHIC };
-    psyscr_desc sd;
-    psygfx_desc gd;
-    psyscr_frame f;
+    yscr_desc sd;
+    ygfx_desc gd;
+    yscr_frame f;
     const char* shots = NULL;
     const char* fonts_dir = "C:/Windows/Fonts";
-    static psygfx_file_cache pcache;
+    static ygfx_file_cache pcache;
     static char cache_dir[512];
-    const psygfx_cache* cache = NULL;
+    const ygfx_cache* cache = NULL;
     int no_cache = 0;
     uint8_t* shot_px = NULL;
     int64_t frames = -1, on_page = 0;
@@ -806,12 +806,12 @@ int main(int argc, char** argv) {
     memset(&sd, 0, sizeof sd);
     sd.windowed = true; sd.window_w = WIN_W; sd.window_h = WIN_H;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--sim")) { sd.backend = PSYSCR_BACKEND_SIM; sim = 1; }
-        else if (!strcmp(argv[i], "--composition")) sd.backend = PSYSCR_BACKEND_COMPOSITION;
+        if (!strcmp(argv[i], "--sim")) { sd.backend = YSCR_BACKEND_SIM; sim = 1; }
+        else if (!strcmp(argv[i], "--composition")) sd.backend = YSCR_BACKEND_COMPOSITION;
         else if (!strcmp(argv[i], "--page") && i + 1 < argc) cur = atoi(argv[++i]) - 1;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = atoll(argv[++i]); if (frames < 1) cur = -1; }
         else if (!strcmp(argv[i], "--shots") && i + 1 < argc) { shots = argv[++i]; shot_select = 1; }
-        else if (!strcmp(argv[i], "--cache") && i + 1 < argc) { cache = psygfx_file_cache_init(&pcache, argv[++i]); if (!cache) cur = -1; }
+        else if (!strcmp(argv[i], "--cache") && i + 1 < argc) { cache = ygfx_file_cache_init(&pcache, argv[++i]); if (!cache) cur = -1; }
         else if (!strcmp(argv[i], "--no-cache")) no_cache = 1;
         else if (!strcmp(argv[i], "--fonts") && i + 1 < argc) fonts_dir = argv[++i];
         else cur = -1;
@@ -824,72 +824,72 @@ int main(int argc, char** argv) {
     /* The per-user folder unless told otherwise, so that a second run loads
      * the programs instead of compiling them (PROGRAM CACHE). */
     if (no_cache) cache = NULL;
-    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
-        cache = psygfx_file_cache_init(&pcache, cache_dir);
+    else if (!cache && ygfx_default_cache_dir(cache_dir, sizeof cache_dir) == YGFX_OK)
+        cache = ygfx_file_cache_init(&pcache, cache_dir);
     for (i = 0; i < N_FILES; i++) {
         n_fonts += read_font(&files[i], fonts_dir);
         if (files[i].why[0]) printf("missing font: %s\n", files[i].why);
     }
     if (cal_setup() < 0) { fprintf(stderr, "gfx_layout: the nominal calibration failed\n"); return 1; }
-    if (!psyscr_open(&scr, &sd)) { fprintf(stderr, "gfx_layout: %s\n", psyscr_error(&scr)); return 1; }
+    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_layout: %s\n", yscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
     rgb(gd.background, BG);
     gd.cal = &cal;
     gd.width = WIN_W; gd.height = WIN_H;   /* the simulated display's size */
     gd.cache = cache;
-    if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_layout: %s\n", psygfx_error(&gfx)); psyscr_close(&scr); return 1; }
-    psyscr_describe(&scr, line, sizeof line);
+    if (!ygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_layout: %s\n", ygfx_error(&gfx)); yscr_close(&scr); return 1; }
+    yscr_describe(&scr, line, sizeof line);
     printf("%s\n", line);
-    psygfx_describe(&gfx, line, sizeof line);
+    ygfx_describe(&gfx, line, sizeof line);
     printf("%s\n", line);
-    if (psyol_init(&ol, NULL) != PSYOL_OK || xlib_open(&X_main, main_order, COUNT(main_order)) < 0 ||
+    if (yol_init(&ol, NULL) != YOL_OK || xlib_open(&X_main, main_order, COUNT(main_order)) < 0 ||
         xlib_open(&X_ja, ja_order, COUNT(ja_order)) < 0) {
         fprintf(stderr, "gfx_layout: the layout library did not open\n");
-        psygfx_close(&gfx); psyscr_close(&scr);
+        ygfx_close(&gfx); yscr_close(&scr);
         return 1;
     }
     for (i = 0; i < N_FILES; i++) if (files[i].why[0] && files[i].bytes) printf("refused font: %s\n", files[i].why);
     if (!n_fonts) printf("no font opened (%s): every page draws nothing and says so here\n", fonts_dir);
-    psylay_stamp(X_main.L, NULL, stamp_line, sizeof stamp_line);
+    ylay_stamp(X_main.L, NULL, stamp_line, sizeof stamp_line);
     printf("%s\n", stamp_line);
     {
-        const psylay_versions* v = psylay_get_versions();
-        snprintf(stamp_short, sizeof stamp_short, "Skribidi %.7s with patches %.19s..., HarfBuzz %s, psy_layout %s (the whole stamp, with the font hashes, is on stdout)",
-                 v->skribidi, v->skribidi_patch, v->harfbuzz, v->psylay);
+        const ylay_versions* v = ylay_get_versions();
+        snprintf(stamp_short, sizeof stamp_short, "Skribidi %.7s with patches %.19s..., HarfBuzz %s, ysp_layout %s (the whole stamp, with the font hashes, is on stdout)",
+                 v->skribidi, v->skribidi_patch, v->harfbuzz, v->ylay);
     }
 
     /* Setup: every page's static text, laid out once; the glyphs they use
      * become the first curve sets. */
     {
-        int64_t t0 = psyrt_now_ns();
+        int64_t t0 = yrt_now_ns();
         p1_layout();
         p2_setup();
         p3_layout();
         if (ed_setup() < 0) { fprintf(stderr, "gfx_layout: the editor did not open\n"); return 1; }
-        printf("setup: every page laid out, glyphs built and uploaded in %.0f ms\n", (double)(psyrt_now_ns() - t0) * 1e-6);
+        printf("setup: every page laid out, glyphs built and uploaded in %.0f ms\n", (double)(yrt_now_ns() - t0) * 1e-6);
     }
     if (n_fonts) {
         int k;
         for (k = 0; k < X_main.n; k++) {
-            psylay_font_info fi;
-            psylay_font(X_main.L, k, &fi);
+            ylay_font_info fi;
+            ylay_font(X_main.L, k, &fi);
             printf("  %-14s %5u glyphs built in %6.1f ms\n", fi.name, fi.n_built, fi.build_us * 1e-3);
         }
     }
     if (shots) shot_px = (uint8_t*)malloc((size_t)WIN_W * WIN_H * 4);
 
     next = cur;
-    while (psyscr_begin(&scr, &f) == PSYSCR_OK) {
-        if (psyscr_window(&scr)) {
+    while (yscr_begin(&scr, &f) == YSCR_OK) {
+        if (yscr_window(&scr)) {
             SDL_Event ev;
-            while (psyscr_poll(&scr, &ev, NULL)) {   /* psyscr_begin() reports Shift+Esc and close itself */
+            while (yscr_poll(&scr, &ev, NULL)) {   /* yscr_begin() reports Shift+Esc and close itself */
                 if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) quit = 1;
                 else if (ev.type == SDL_EVENT_KEY_UP) { if (ev.key.scancode < SDL_SCANCODE_COUNT) key_down[ev.key.scancode] = 0; }
                 else if (ev.type == SDL_EVENT_KEY_DOWN) {
                     SDL_Keycode key = ev.key.key;
                     /* A key injected by virtual-key code arrives twice
-                     * (psy_screen.h INPUT): a press counts after a release */
+                     * (ysp/screen.h INPUT): a press counts after a release */
                     if (!ev.key.repeat && ev.key.scancode < SDL_SCANCODE_COUNT) {
                         if (key_down[ev.key.scancode]) continue;
                         key_down[ev.key.scancode] = 1;
@@ -901,7 +901,7 @@ int main(int argc, char** argv) {
                     if (key == SDLK_PAGEUP) { next = (cur + N_PAGES - 1) % N_PAGES; continue; }
                     if (key >= SDLK_F1 && key < SDLK_F1 + (SDL_Keycode)N_PAGES) { next = (int)(key - SDLK_F1); continue; }
                     if (cur == 3 && editor) {
-                        int64_t t0 = psyrt_now_ns();
+                        int64_t t0 = yrt_now_ns();
                         if (!ed_composing && ed_key(key, ev.key.mod)) ed_refresh(t0);
                         continue;
                     }
@@ -917,18 +917,18 @@ int main(int argc, char** argv) {
                         if (cur == 0) p1_layout(); else p3_layout();
                     }
                 } else if (ev.type == SDL_EVENT_TEXT_INPUT && cur == 3 && editor) {
-                    int64_t t0 = psyrt_now_ns();
+                    int64_t t0 = yrt_now_ns();
                     ed_text_input(ev.text.text);
                     ed_refresh(t0);
                 } else if (ev.type == SDL_EVENT_TEXT_EDITING && cur == 3 && editor) {
-                    int64_t t0 = psyrt_now_ns();
+                    int64_t t0 = yrt_now_ns();
                     ed_editing(ev.edit.text, ev.edit.start);
                     ed_refresh(t0);
                 } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                     float hx = 24 + p1_width + 2;
                     if (cur == 0 && ev.button.x >= hx - 6 && ev.button.x <= hx + 14 && ev.button.y >= P1_TOP) { p1_drag = 1; p1_layout(); }
                     if (cur == 3 && editor) {
-                        int64_t t0 = psyrt_now_ns();
+                        int64_t t0 = yrt_now_ns();
                         skb_editor_process_mouse_click(editor, ev.button.x - ED_X, ev.button.y - ED_Y, sdl_mods(SDL_GetModState()),
                                                        (double)ev.button.timestamp * 1e-9);
                         ed_dragging = 1;
@@ -945,7 +945,7 @@ int main(int argc, char** argv) {
                         if (w != p1_width) { p1_width = w; p1_layout(); }
                     }
                     if (ed_dragging && cur == 3 && editor) {
-                        int64_t t0 = psyrt_now_ns();
+                        int64_t t0 = yrt_now_ns();
                         skb_editor_process_mouse_drag(editor, ev.motion.x - ED_X, ev.motion.y - ED_Y);
                         ed_refresh(t0);
                     }
@@ -954,45 +954,45 @@ int main(int argc, char** argv) {
         }
         if (!started || next != cur) { prev = started ? cur : -1; cur = next; show_page(cur, prev); on_page = 0; started = 1; }
 
-        psygfx_begin(&gfx, &f);
+        ygfx_begin(&gfx, &f);
         cur_what = page_names[cur];
         if (cur == 0) p1_draw();
         else if (cur == 1) p2_draw();
         else if (cur == 2) p3_draw();
         else p4_draw();
         for (i = 0; i < 5; i++) tb_draw(&frame_tb[i]);
-        psygfx_end(&gfx);
+        ygfx_end(&gfx);
         on_page++;
         if (shot_px && on_page == SHOT_FRAMES) {   /* the back buffer, before the flip */
             char path[512];
             snprintf(path, sizeof path, "%s-p%d.ppm", shots, cur + 1);
-            if (psygfx_read_output(&gfx, 0, 0, WIN_W, WIN_H, shot_px) < 0 || write_ppm(path, shot_px, WIN_W, WIN_H) < 0)
+            if (ygfx_read_output(&gfx, 0, 0, WIN_W, WIN_H, shot_px) < 0 || write_ppm(path, shot_px, WIN_W, WIN_H) < 0)
                 fprintf(stderr, "gfx_layout: could not write %s\n", path);
             else
                 printf("wrote %s\n", path);
         }
-        psyscr_flip(&scr);
+        yscr_flip(&scr);
         if (sim || (shots && on_page == SHOT_FRAMES)) {   /* each page once */
             if (++pages_done == N_PAGES) break;
             next = (cur + 1) % N_PAGES;
         }
         if (quit || (frames > 0 && f.index + 1 >= frames)) break;
     }
-    if (cur == 3) psyscr_text_input(&scr, false, 0, 0, 0, 0);
+    if (cur == 3) yscr_text_input(&scr, false, 0, 0, 0, 0);
     if (editor) skb_editor_destroy(editor);
     free(shot_px);
-    for (i = 0; i < N_PARAS; i++) { psylay_block_free(&p1_body[i].b); psylay_block_free(&p1_info[i].b); }
-    for (i = 0; i < N_BIDI; i++) { psylay_block_free(&p2_line[i].b); psylay_block_free(&p2_expect[i].b); psylay_block_free(&p2_unp[i].b); }
-    for (i = 0; i < 4; i++) { psylay_block_free(&p3_body[i].b); psylay_block_free(&p3_info[i].b); }
-    for (i = 0; i < 6; i++) psylay_block_free(&frame_tb[i].b);
-    psylay_block_free(&p1_total.b); psylay_block_free(&p2_note.b); psylay_block_free(&p3_note.b);
-    psylay_block_free(&ed_text.b); psylay_block_free(&ed_info.b); psylay_block_free(&ed_note[0].b); psylay_block_free(&ed_note[1].b);
-    psygfx_close(&gfx);
-    psylay_destroy(X_main.L);
-    psylay_destroy(X_ja.L);
-    psyol_free(&ol);
+    for (i = 0; i < N_PARAS; i++) { ylay_block_free(&p1_body[i].b); ylay_block_free(&p1_info[i].b); }
+    for (i = 0; i < N_BIDI; i++) { ylay_block_free(&p2_line[i].b); ylay_block_free(&p2_expect[i].b); ylay_block_free(&p2_unp[i].b); }
+    for (i = 0; i < 4; i++) { ylay_block_free(&p3_body[i].b); ylay_block_free(&p3_info[i].b); }
+    for (i = 0; i < 6; i++) ylay_block_free(&frame_tb[i].b);
+    ylay_block_free(&p1_total.b); ylay_block_free(&p2_note.b); ylay_block_free(&p3_note.b);
+    ylay_block_free(&ed_text.b); ylay_block_free(&ed_info.b); ylay_block_free(&ed_note[0].b); ylay_block_free(&ed_note[1].b);
+    ygfx_close(&gfx);
+    ylay_destroy(X_main.L);
+    ylay_destroy(X_ja.L);
+    yol_free(&ol);
     for (i = 0; i < N_FILES; i++) free(files[i].bytes);
-    psyscr_close(&scr);
+    yscr_close(&scr);
     if (refused) { fprintf(stderr, "gfx_layout: %ld refused draws or setup errors\n", refused); return 1; }
     return 0;
 }

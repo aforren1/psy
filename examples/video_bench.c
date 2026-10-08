@@ -3,7 +3,7 @@
  * 1280 x 720 and 1920 x 1080 (or --size). CPU only: no window, no GPU.
  *
  * The MPEG-1 clip is the caller's (--mpg PATH, an MPEG-PS file; make one with
- * ffmpeg's testsrc2, docs/psy_video.md). --mp4 PATH (with its index) measures
+ * ffmpeg's testsrc2, docs/video.md). --mp4 PATH (with its index) measures
  * Media Foundation instead, in one decoder configuration (--hw), with open
  * and seek times (tests/media/make_video_clips.sh --long makes the clips).
  * The other inputs are generated: a
@@ -16,8 +16,8 @@
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS   /* sscanf() and fopen() under /W4 /WX */
 #endif
-#define PSY_VIDEO_IMPLEMENTATION
-#include "psy_video.h"
+#define YSP_VIDEO_IMPLEMENTATION
+#include "ysp/video.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,35 +44,35 @@ static void bench_size(int w, int h, int reps) {
     size_t px = (size_t)w * h;
     uint8_t* rgba = (uint8_t*)malloc(px * 4);
     uint8_t* back = (uint8_t*)malloc(px * 4);
-    uint8_t* enc = (uint8_t*)malloc(psyvid_qoi_max_bytes(w, h, 4));
+    uint8_t* enc = (uint8_t*)malloc(yvid_qoi_max_bytes(w, h, 4));
     uint8_t* yuv = (uint8_t*)malloc(px + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2));
-    int16_t* rows = (int16_t*)malloc(psyvid_yuv_rows_bytes(w));
+    int16_t* rows = (int16_t*)malloc(yvid_yuv_rows_bytes(w));
     int64_t* t = (int64_t*)malloc(sizeof(int64_t) * (size_t)reps);
-    psyvid_planes p;
+    yvid_planes p;
     int k, r, x, y;
     uint64_t sink = 0;
     if (!rgba || !back || !enc || !yuv || !rows || !t) { fprintf(stderr, "video_bench: out of memory\n"); exit(1); }
     printf("%d x %d, %d repetitions\n", w, h, reps);
-    psyvid__planes_layout(PSYVID_FMT_I420, w, h, yuv, &p);
+    yvid__planes_layout(YVID_FMT_I420, w, h, yuv, &p);
     for (k = 0; k < (int)(px + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2)); k++) yuv[k] = (uint8_t)(k * 2654435761u >> 24);
     for (r = 0; r < reps; r++) {
-        int64_t t0 = (int64_t)psyrt_now_ns();
-        psyvid_yuv_to_rgba(&p, PSYVID_FMT_I420, w, h, PSYVID_MATRIX_BT709, PSYVID_RANGE_LIMITED, PSYVID_SITING_LEFT,
-                           PSYVID_CHROMA_SITED, rgba, w * 4, rows);
-        t[r] = (int64_t)psyrt_now_ns() - t0;
+        int64_t t0 = (int64_t)yrt_now_ns();
+        yvid_yuv_to_rgba(&p, YVID_FMT_I420, w, h, YVID_MATRIX_BT709, YVID_RANGE_LIMITED, YVID_SITING_LEFT,
+                           YVID_CHROMA_SITED, rgba, w * 4, rows);
+        t[r] = (int64_t)yrt_now_ns() - t0;
     }
     report("I420 to RGBA8, sited chroma", t, reps, (double)px * 4);
     for (r = 0; r < reps; r++) {
-        int64_t t0 = (int64_t)psyrt_now_ns();
-        psyvid_yuv_to_rgba(&p, PSYVID_FMT_I420, w, h, PSYVID_MATRIX_BT709, PSYVID_RANGE_LIMITED, PSYVID_SITING_LEFT,
-                           PSYVID_CHROMA_NEAREST, rgba, w * 4, rows);
-        t[r] = (int64_t)psyrt_now_ns() - t0;
+        int64_t t0 = (int64_t)yrt_now_ns();
+        yvid_yuv_to_rgba(&p, YVID_FMT_I420, w, h, YVID_MATRIX_BT709, YVID_RANGE_LIMITED, YVID_SITING_LEFT,
+                           YVID_CHROMA_NEAREST, rgba, w * 4, rows);
+        t[r] = (int64_t)yrt_now_ns() - t0;
     }
     report("I420 to RGBA8, nearest chroma", t, reps, (double)px * 4);
     for (r = 0; r < reps; r++) {
-        int64_t t0 = (int64_t)psyrt_now_ns();
-        sink ^= psyvid__hash_planes(PSYVID_FMT_I420, &p);
-        t[r] = (int64_t)psyrt_now_ns() - t0;
+        int64_t t0 = (int64_t)yrt_now_ns();
+        sink ^= yvid__hash_planes(YVID_FMT_I420, &p);
+        t[r] = (int64_t)yrt_now_ns() - t0;
     }
     report("XXH64 of the I420 planes", t, reps, (double)px * 1.5);
     for (k = 0; k < 2; k++) {
@@ -83,11 +83,11 @@ static void bench_size(int w, int h, int reps) {
             int v = k == 0 ? (112 + (x * 32) / w + ((x / 16 + y / 16) & 1) * 8) : (int)((uint32_t)((y * w + x) * 2654435761u) >> 24);
             q[0] = (uint8_t)v; q[1] = (uint8_t)(k ? v ^ 0x55 : v); q[2] = (uint8_t)(k ? v ^ 0xaa : v); q[3] = 255;
         }
-        n = psyvid_qoi_encode(rgba, w, h, 4, enc, psyvid_qoi_max_bytes(w, h, 4));
+        n = yvid_qoi_encode(rgba, w, h, 4, enc, yvid_qoi_max_bytes(w, h, 4));
         for (r = 0; r < reps; r++) {
-            int64_t t0 = (int64_t)psyrt_now_ns();
-            if (psyvid_qoi_decode(enc, (size_t)n, back, w, h) != PSYVID_OK) { fprintf(stderr, "video_bench: QOI failed\n"); exit(1); }
-            t[r] = (int64_t)psyrt_now_ns() - t0;
+            int64_t t0 = (int64_t)yrt_now_ns();
+            if (yvid_qoi_decode(enc, (size_t)n, back, w, h) != YVID_OK) { fprintf(stderr, "video_bench: QOI failed\n"); exit(1); }
+            t[r] = (int64_t)yrt_now_ns() - t0;
         }
         if (memcmp(back, rgba, px * 4) != 0) { fprintf(stderr, "video_bench: QOI round trip differs\n"); exit(1); }
         snprintf(what, sizeof what, "QOI decode, %s (%.1f:1)", k == 0 ? "smooth" : "noise", (double)px * 4 / (double)n);
@@ -97,7 +97,7 @@ static void bench_size(int w, int h, int reps) {
     free(rgba); free(back); free(enc); free(yuv); free(rows); free(t);
 }
 
-#ifndef PSYVID_NO_PL_MPEG
+#ifndef YVID_NO_PL_MPEG
 static int bench_mpg(const char* path) {
     plm_t* plm = plm_create_with_filename(path);
     int64_t* t;
@@ -112,24 +112,24 @@ static int bench_mpg(const char* path) {
     th = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
     tc = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
     rgba = (uint8_t*)malloc((size_t)w * h * 4);
-    rows = (int16_t*)malloc(psyvid_yuv_rows_bytes(w));
+    rows = (int16_t*)malloc(yvid_yuv_rows_bytes(w));
     if (!t || !th || !tc || !rgba || !rows) return 1;
     printf("%s: %d x %d at %.3f fps\n", path, w, h, plm_get_framerate(plm));
     for (;;) {
-        int64_t t0 = (int64_t)psyrt_now_ns(), t1, t2;
+        int64_t t0 = (int64_t)yrt_now_ns(), t1, t2;
         plm_frame_t* f = plm_decode_video(plm);
-        psyvid_planes p;
+        yvid_planes p;
         if (!f || n >= cap) break;
-        t1 = (int64_t)psyrt_now_ns();
+        t1 = (int64_t)yrt_now_ns();
         memset(&p, 0, sizeof p);
         p.data[0] = f->y.data; p.stride[0] = (int32_t)f->y.width; p.w[0] = w; p.h[0] = h;
         p.data[1] = f->cb.data; p.stride[1] = (int32_t)f->cb.width; p.w[1] = (w + 1) / 2; p.h[1] = (h + 1) / 2;
         p.data[2] = f->cr.data; p.stride[2] = (int32_t)f->cr.width; p.w[2] = (w + 1) / 2; p.h[2] = (h + 1) / 2;
-        (void)psyvid__hash_planes(PSYVID_FMT_I420, &p);
-        t2 = (int64_t)psyrt_now_ns();
-        psyvid_yuv_to_rgba(&p, PSYVID_FMT_I420, w, h, PSYVID_MATRIX_BT601, PSYVID_RANGE_LIMITED, PSYVID_SITING_CENTER,
-                           PSYVID_CHROMA_SITED, rgba, w * 4, rows);
-        tc[n] = (int64_t)psyrt_now_ns() - t2;
+        (void)yvid__hash_planes(YVID_FMT_I420, &p);
+        t2 = (int64_t)yrt_now_ns();
+        yvid_yuv_to_rgba(&p, YVID_FMT_I420, w, h, YVID_MATRIX_BT601, YVID_RANGE_LIMITED, YVID_SITING_CENTER,
+                           YVID_CHROMA_SITED, rgba, w * 4, rows);
+        tc[n] = (int64_t)yrt_now_ns() - t2;
         th[n] = t2 - t1;
         t[n] = t1 - t0;
         n++;
@@ -145,7 +145,7 @@ static int bench_mpg(const char* path) {
 }
 #endif
 
-#if PSYVID__MF
+#if YVID__MF
 static double cpu_s(int process) {
     FILETIME a, b, k, u;
     BOOL ok = process ? GetProcessTimes(GetCurrentProcess(), &a, &b, &k, &u) : GetThreadTimes(GetCurrentThread(), &a, &b, &k, &u);
@@ -159,11 +159,11 @@ static double cpu_s(int process) {
  * hash; the NV12 to RGBA8 conversion), the CPU time of the whole process per
  * frame (Media Foundation's own threads included), open, and seeks. */
 static int bench_mp4(const char* path, int hw, int seeks) {
-    psyvid__mf* m = (psyvid__mf*)malloc(sizeof(psyvid__mf));
-    psyvid_decoder_open in;
-    psyvid_stream st;
-    psyvid__index ix;
-    psyvid_desc vd;
+    yvid__mf* m = (yvid__mf*)malloc(sizeof(yvid__mf));
+    yvid_decoder_open in;
+    yvid_stream st;
+    yvid__index ix;
+    yvid_desc vd;
     char err[512], name[256];
     int64_t *td, *th, *tc, *tt, *tp, *tq, opens[5];
     uint8_t* slot;
@@ -176,25 +176,25 @@ static int bench_mp4(const char* path, int hw, int seeks) {
     if (!m) return 1;
     memset(&vd, 0, sizeof vd);
     vd.path = path;
-    if (psyvid__index_load(&vd, &ix, 0, err, sizeof err) < 0) { fprintf(stderr, "video_bench: %s\n", err); return 1; }
+    if (yvid__index_load(&vd, &ix, 0, err, sizeof err) < 0) { fprintf(stderr, "video_bench: %s\n", err); return 1; }
     memset(&in, 0, sizeof in);
     in.path = path;
     for (k = 0; k < 5; k++) {   /* the first is the cold one */
-        int64_t t0 = (int64_t)psyrt_now_ns();
+        int64_t t0 = (int64_t)yrt_now_ns();
         memset(&st, 0, sizeof st);
-        rc = psyvid__mf_open_ex(m, &in, &st, hw, NULL, 0, ix.c.fps_num, ix.c.fps_den, err, sizeof err);
-        if (rc == PSYVID_OK) {
-            psyvid_out o;
-            psyvid_planes d;
+        rc = yvid__mf_open_ex(m, &in, &st, hw, NULL, 0, ix.c.fps_num, ix.c.fps_den, err, sizeof err);
+        if (rc == YVID_OK) {
+            yvid_out o;
+            yvid_planes d;
             memset(&o, 0, sizeof o);
-            rc = psyvid__mf_next(m, &d, &o);   /* to the first frame in hand */
+            rc = yvid__mf_next(m, &d, &o);   /* to the first frame in hand */
         }
-        opens[k] = (int64_t)psyrt_now_ns() - t0;
-        if (rc != PSYVID_OK) { fprintf(stderr, "video_bench: %s: %s\n", path, err); return 1; }
-        if (k < 4) psyvid__mf_close(m);
+        opens[k] = (int64_t)yrt_now_ns() - t0;
+        if (rc != YVID_OK) { fprintf(stderr, "video_bench: %s: %s\n", path, err); return 1; }
+        if (k < 4) yvid__mf_close(m);
     }
-    psyvid__mf_describe(m, name, sizeof name);
-    psyvid__mf_close(m);
+    yvid__mf_describe(m, name, sizeof name);
+    yvid__mf_close(m);
     printf("%s: %d x %d, %d/%d fps, %lld frames; %s (asked: %s)\n", path, (int)ix.c.w, (int)ix.c.h, (int)ix.c.fps_num,
            (int)ix.c.fps_den, (long long)ix.c.frames, name, hwn[hw]);
     printf("  open to the first frame: %.1f ms cold, then %.1f %.1f %.1f %.1f ms\n", opens[0] / 1e6, opens[1] / 1e6,
@@ -206,37 +206,37 @@ static int bench_mp4(const char* path, int hw, int seeks) {
     tt = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
     tp = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
     tq = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
-    slot = (uint8_t*)malloc(psyvid__planes_layout(PSYVID_FMT_NV12, ix.c.w, ix.c.h, NULL, NULL));
+    slot = (uint8_t*)malloc(yvid__planes_layout(YVID_FMT_NV12, ix.c.w, ix.c.h, NULL, NULL));
     rgba = (uint8_t*)malloc((size_t)ix.c.w * ix.c.h * 4);
-    rows = (int16_t*)malloc(psyvid_yuv_rows_bytes(ix.c.w));
+    rows = (int16_t*)malloc(yvid_yuv_rows_bytes(ix.c.w));
     if (!td || !th || !tc || !tt || !tp || !tq || !slot || !rgba || !rows) return 1;
     memset(&st, 0, sizeof st);
-    if (psyvid__mf_open_ex(m, &in, &st, hw, NULL, 0, ix.c.fps_num, ix.c.fps_den, err, sizeof err) != PSYVID_OK) return 1;
+    if (yvid__mf_open_ex(m, &in, &st, hw, NULL, 0, ix.c.fps_num, ix.c.fps_den, err, sizeof err) != YVID_OK) return 1;
     p0 = cpu_s(1); c0 = cpu_s(0);
     for (;;) {
-        psyvid_out o;
-        psyvid_planes d;
-        int64_t t0 = (int64_t)psyrt_now_ns(), t1, t2, t3, t4;
+        yvid_out o;
+        yvid_planes d;
+        int64_t t0 = (int64_t)yrt_now_ns(), t1, t2, t3, t4;
         memset(&o, 0, sizeof o);
-        if (n >= cap || psyvid__mf_next(m, &d, &o) != PSYVID_OK) break;
-        t1 = (int64_t)psyrt_now_ns();
-        (void)psyvid__hash_planes(PSYVID_FMT_NV12, &o.planes);
-        t2 = (int64_t)psyrt_now_ns();
-        psyvid_yuv_to_rgba(&o.planes, PSYVID_FMT_NV12, ix.c.w, ix.c.h, PSYVID_MATRIX_BT709, PSYVID_RANGE_LIMITED,
-                           PSYVID_SITING_LEFT, PSYVID_CHROMA_SITED, rgba, ix.c.w * 4, rows);
-        t3 = (int64_t)psyrt_now_ns();
+        if (n >= cap || yvid__mf_next(m, &d, &o) != YVID_OK) break;
+        t1 = (int64_t)yrt_now_ns();
+        (void)yvid__hash_planes(YVID_FMT_NV12, &o.planes);
+        t2 = (int64_t)yrt_now_ns();
+        yvid_yuv_to_rgba(&o.planes, YVID_FMT_NV12, ix.c.w, ix.c.h, YVID_MATRIX_BT709, YVID_RANGE_LIMITED,
+                           YVID_SITING_LEFT, YVID_CHROMA_SITED, rgba, ix.c.w * 4, rows);
+        t3 = (int64_t)yrt_now_ns();
         {   /* the planar path's step instead of the conversion: the planes,
              * with the decoder's pitch, into a slot's tight ones */
-            psyvid_planes sp;
+            yvid_planes sp;
             int pk, y;
-            psyvid__planes_layout(PSYVID_FMT_NV12, ix.c.w, ix.c.h, slot, &sp);
+            yvid__planes_layout(YVID_FMT_NV12, ix.c.w, ix.c.h, slot, &sp);
             for (pk = 0; pk < 2; pk++) {
-                size_t rb = psyvid__row_bytes(PSYVID_FMT_NV12, &sp, pk);
+                size_t rb = yvid__row_bytes(YVID_FMT_NV12, &sp, pk);
                 for (y = 0; y < sp.h[pk]; y++)
                     memcpy(sp.data[pk] + (size_t)y * (size_t)sp.stride[pk], o.planes.data[pk] + (size_t)y * (size_t)o.planes.stride[pk], rb);
             }
         }
-        t4 = (int64_t)psyrt_now_ns();
+        t4 = (int64_t)yrt_now_ns();
         td[n] = t1 - t0; th[n] = t2 - t1; tc[n] = t3 - t2; tt[n] = t3 - t0; tp[n] = t4 - t3; tq[n] = (t2 - t0) + (t4 - t3);
         n++;
     }
@@ -256,23 +256,23 @@ static int bench_mp4(const char* path, int hw, int seeks) {
         int64_t* ts = (int64_t*)malloc(sizeof(int64_t) * (size_t)seeks);
         for (k = 0; k < seeks; k++) {
             int64_t target, key, j, t0;
-            psyvid_out o;
-            psyvid_planes d;
+            yvid_out o;
+            yvid_planes d;
             r ^= r << 13; r ^= r >> 7; r ^= r << 17;
             target = (int64_t)(r % (uint64_t)ix.c.frames);
             key = target - target % ix.c.gop;
-            t0 = (int64_t)psyrt_now_ns();
-            if (psyvid__mf_seek(m, key, 0) != PSYVID_OK) { fprintf(stderr, "video_bench: seek failed\n"); return 1; }
+            t0 = (int64_t)yrt_now_ns();
+            if (yvid__mf_seek(m, key, 0) != YVID_OK) { fprintf(stderr, "video_bench: seek failed\n"); return 1; }
             for (j = key; j <= target; j++) {
                 memset(&o, 0, sizeof o);
-                if (psyvid__mf_next(m, j == target ? &d : NULL, &o) != PSYVID_OK) { fprintf(stderr, "video_bench: decode after seek failed\n"); return 1; }
+                if (yvid__mf_next(m, j == target ? &d : NULL, &o) != YVID_OK) { fprintf(stderr, "video_bench: decode after seek failed\n"); return 1; }
             }
-            ts[k] = (int64_t)psyrt_now_ns() - t0;
+            ts[k] = (int64_t)yrt_now_ns() - t0;
         }
         report("seek to a random frame", ts, seeks, 0);
         free(ts);
     }
-    psyvid__mf_close(m);
+    yvid__mf_close(m);
     free(td); free(th); free(tc); free(tt); free(tp); free(tq); free(slot); free(rgba); free(rows); free(m);
     return 0;
 }
@@ -281,13 +281,13 @@ static int bench_mp4(const char* path, int hw, int seeks) {
 int main(int argc, char** argv) {
     const char* mpg = NULL;
     const char* mp4 = NULL;
-    int w = 0, h = 0, reps = 100, i, hw = PSYVID_HW_OFF, seeks = 50;
+    int w = 0, h = 0, reps = 100, i, hw = YVID_HW_OFF, seeks = 50;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mpg") && i + 1 < argc) mpg = argv[++i];
         else if (!strcmp(argv[i], "--mp4") && i + 1 < argc) mp4 = argv[++i];
         else if (!strcmp(argv[i], "--hw") && i + 1 < argc) {
             const char* v = argv[++i];
-            hw = !strcmp(v, "sw") ? PSYVID_HW_OFF : !strcmp(v, "dxva") ? PSYVID_HW_DXVA : -1;
+            hw = !strcmp(v, "sw") ? YVID_HW_OFF : !strcmp(v, "dxva") ? YVID_HW_DXVA : -1;
             if (hw < 0) { fprintf(stderr, "video_bench: --hw sw or dxva\n"); return 2; }
         }
         else if (!strcmp(argv[i], "--seeks") && i + 1 < argc) seeks = atoi(argv[++i]);
@@ -297,7 +297,7 @@ int main(int argc, char** argv) {
     }
     if (reps <= 0 || (w != 0 && (w <= 0 || h <= 0))) { fprintf(stderr, "video_bench: bad size or count\n"); return 2; }
     if (mp4) {
-#if PSYVID__MF
+#if YVID__MF
         return bench_mp4(mp4, hw, seeks);
 #else
         (void)hw; (void)seeks;
@@ -306,10 +306,10 @@ int main(int argc, char** argv) {
 #endif
     }
     if (mpg) {
-#ifndef PSYVID_NO_PL_MPEG
+#ifndef YVID_NO_PL_MPEG
         return bench_mpg(mpg);
 #else
-        fprintf(stderr, "video_bench: built with PSYVID_NO_PL_MPEG\n");
+        fprintf(stderr, "video_bench: built with YVID_NO_PL_MPEG\n");
         return 1;
 #endif
     }

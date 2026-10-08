@@ -1,8 +1,8 @@
-/* outline_bench.c - the cost of psy_outline.h's builds on this machine.
+/* outline_bench.c - the cost of ysp/outline.h's builds on this machine.
  *
  * The outline builder runs in the pack tool and, for glyphs a pack lacks,
  * in the player between frames. This program times the rows of
- * docs/psy_outline.md against their bars, on the fonts it finds:
+ * docs/outline.md against their bars, on the fonts it finds:
  *   set      a whole font into a curve set, resolved (the default) and with
  *            keep_overlaps
  *   curves   curves per glyph of a CFF font at two cubic tolerances
@@ -11,11 +11,11 @@
  *   stroke   every glyph of a Latin and a CJK font outlined at 0.08 em,
  *            round joins, resolve included
  * Rows are interleaved: each round runs every row once, and each row
- * prints the median of its rounds. Times are psy_rt.h clock reads.
+ * prints the median of its rounds. Times are ysp/rt.h clock reads.
  *
  * Build (from the repository root):
- *     cc -O2 -I. -o outline_bench examples/outline_bench.c -lm
- *     cl /O2 /I. examples\outline_bench.c
+ *     cc -O2 -Iinclude -o outline_bench examples/outline_bench.c -lm
+ *     cl /O2 /Iinclude examples\outline_bench.c
  *
  * Usage: outline_bench [rounds] [font directory]
  *        (default 3 rounds and C:/Windows/Fonts)
@@ -25,12 +25,12 @@
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS
 #endif
-#define PSYRT_NO_THREADS
-#define PSY_RT_IMPLEMENTATION
-#include "psy_rt.h"
+#define YRT_NO_THREADS
+#define YSP_RT_IMPLEMENTATION
+#include "ysp/rt.h"
 
-#define PSY_OUTLINE_IMPLEMENTATION
-#include "psy_outline.h"
+#define YSP_OUTLINE_IMPLEMENTATION
+#include "ysp/outline.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,10 +39,10 @@
 #define MAX_ROUNDS 15
 #define NFONTS 5
 
-static psyol_ctx g_cx;
+static yol_ctx g_cx;
 static int g_fail;
 
-typedef struct font { const char* name; char path[512]; uint8_t* data; size_t n; psyol_font f; int ok; } font;
+typedef struct font { const char* name; char path[512]; uint8_t* data; size_t n; yol_font f; int ok; } font;
 
 static uint8_t* read_file(const char* path, size_t* n) {
     FILE* fp = fopen(path, "rb");
@@ -56,97 +56,97 @@ static uint8_t* read_file(const char* path, size_t* n) {
     return d;
 }
 
-static double now_s(void) { return (double)psyrt_now_ns() * 1e-9; }
+static double now_s(void) { return (double)yrt_now_ns() * 1e-9; }
 static int cmp_d(const void* a, const void* b) { double p = *(const double*)a, q = *(const double*)b; return p < q ? -1 : p > q; }
 static double median(double* v, int n) { qsort(v, (size_t)n, sizeof(double), cmp_d); return n ? v[n / 2] : 0; }
 
 /* A whole font into a set: seconds. */
 static double row_set(font* ft, int keep) {
-    psyol_cset s;
-    psyol_cset_desc d;
+    yol_cset s;
+    yol_cset_desc d;
     double t0, t;
     memset(&d, 0, sizeof d);
     d.n_glyphs = (uint32_t)ft->f.n_glyphs; d.keep_overlaps = keep != 0;
-    if (psyol_cset_init(&s, &g_cx, &d) < 0) { g_fail = 1; return 0; }
+    if (yol_cset_init(&s, &g_cx, &d) < 0) { g_fail = 1; return 0; }
     t0 = now_s();
-    if (psyol_cset_add_font(&s, &ft->f, NULL, 0, 0) < 0) { fprintf(stderr, "%s: %s\n", ft->name, psyol_error(&g_cx)); g_fail = 1; }
+    if (yol_cset_add_font(&s, &ft->f, NULL, 0, 0) < 0) { fprintf(stderr, "%s: %s\n", ft->name, yol_error(&g_cx)); g_fail = 1; }
     t = now_s() - t0;
-    psyol_cset_free(&s);
+    yol_cset_free(&s);
     return t;
 }
 
 /* Curves per glyph after the cubic conversion. */
 static double curves_per_glyph(font* ft, double tol) {
-    psyol_path p;
-    psyol_glyph_desc gd;
+    yol_path p;
+    yol_glyph_desc gd;
     uint64_t n = 0;
     int g, ng = 0;
     memset(&gd, 0, sizeof gd);
     gd.tol = tol;
-    psyol_path_init(&p, &g_cx);
+    yol_path_init(&p, &g_cx);
     for (g = 0; g < ft->f.n_glyphs; g++) {
-        psyol_path_clear(&p);
-        if (psyol_font_glyph(&g_cx, &ft->f, (uint32_t)g, &p, &gd) < 0) continue;
+        yol_path_clear(&p);
+        if (yol_font_glyph(&g_cx, &ft->f, (uint32_t)g, &p, &gd) < 0) continue;
         n += (uint64_t)((p.n_pts - p.n_contours) / 2);
         ng++;
     }
-    psyol_path_free(&p);
+    yol_path_free(&p);
     return ng ? (double)n / ng : 0;
 }
 
 /* Exact alpha for `count` glyphs, every `step`, at the sizes; with `once`
- * one resolve per glyph, else psyol_raster() resolves on each call. */
+ * one resolve per glyph, else yol_raster() resolves on each call. */
 static double row_alpha(font* ft, int step, int count, const double* sizes, int nsizes, int once, int* done_out) {
     static uint8_t img[512 * 512];
-    psyol_path p, r;
+    yol_path p, r;
     double t0, t;
     int g, k, done = 0;
-    psyol_path_init(&p, &g_cx); psyol_path_init(&r, &g_cx);
+    yol_path_init(&p, &g_cx); yol_path_init(&r, &g_cx);
     t0 = now_s();
     for (g = 0; g < ft->f.n_glyphs && done < count; g += step) {
-        const psyol_path* src = &p;
-        psyol_path_clear(&p);
-        if (psyol_font_glyph(&g_cx, &ft->f, (uint32_t)g, &p, NULL) < 0) continue;
-        if (once) { if (psyol_resolve(&g_cx, &p, &r) < 0) { g_fail = 1; continue; } src = &r; }
+        const yol_path* src = &p;
+        yol_path_clear(&p);
+        if (yol_font_glyph(&g_cx, &ft->f, (uint32_t)g, &p, NULL) < 0) continue;
+        if (once) { if (yol_resolve(&g_cx, &p, &r) < 0) { g_fail = 1; continue; } src = &r; }
         for (k = 0; k < nsizes; k++) {
-            psyol_raster_desc rd;
-            psyol_box b;
+            yol_raster_desc rd;
+            yol_box b;
             memset(&rd, 0, sizeof rd);
             rd.scale = sizes[k];
-            if (psyol_raster(&g_cx, src, &rd, &b) < 0) { g_fail = 1; continue; }
+            if (yol_raster(&g_cx, src, &rd, &b) < 0) { g_fail = 1; continue; }
             if (b.x1 - b.x0 > 512 || b.y1 - b.y0 > 512) continue;
             rd.x = -b.x0; rd.y = -b.y0; rd.out = img; rd.w = b.x1 - b.x0; rd.h = b.y1 - b.y0; rd.stride = rd.w;
-            if (psyol_raster(&g_cx, src, &rd, NULL) < 0) g_fail = 1;
+            if (yol_raster(&g_cx, src, &rd, NULL) < 0) g_fail = 1;
         }
         done++;
     }
     t = now_s() - t0;
-    psyol_path_free(&p); psyol_path_free(&r);
+    yol_path_free(&p); yol_path_free(&r);
     *done_out = done;
     return t;
 }
 
 /* Every glyph outlined at 0.08 em: seconds; *worst gets the slowest glyph. */
 static double row_stroke(font* ft, double* worst, int* worst_g) {
-    psyol_path p, o;
-    psyol_stroke_desc sd;
+    yol_path p, o;
+    yol_stroke_desc sd;
     double t0, t;
     int g;
     memset(&sd, 0, sizeof sd);
     sd.width = 0.08;
-    psyol_path_init(&p, &g_cx); psyol_path_init(&o, &g_cx);
+    yol_path_init(&p, &g_cx); yol_path_init(&o, &g_cx);
     *worst = 0;
     t0 = now_s();
     for (g = 0; g < ft->f.n_glyphs; g++) {
         double a = now_s(), b;
-        psyol_path_clear(&p);
-        if (psyol_font_glyph(&g_cx, &ft->f, (uint32_t)g, &p, NULL) < 0) continue;
-        if (psyol_stroke(&g_cx, &p, &o, &sd) < 0) { fprintf(stderr, "%s glyph %d: %s\n", ft->name, g, psyol_error(&g_cx)); g_fail = 1; }
+        yol_path_clear(&p);
+        if (yol_font_glyph(&g_cx, &ft->f, (uint32_t)g, &p, NULL) < 0) continue;
+        if (yol_stroke(&g_cx, &p, &o, &sd) < 0) { fprintf(stderr, "%s glyph %d: %s\n", ft->name, g, yol_error(&g_cx)); g_fail = 1; }
         b = now_s() - a;
         if (b > *worst) { *worst = b; *worst_g = g; }
     }
     t = now_s() - t0;
-    psyol_path_free(&p); psyol_path_free(&o);
+    yol_path_free(&p); yol_path_free(&o);
     return t;
 }
 
@@ -159,12 +159,12 @@ int main(int argc, char** argv) {
     double sw[2] = { 0, 0 };
     font *latin = NULL, *cjk = NULL, *cff = NULL;
     if (rounds < 1 || rounds > MAX_ROUNDS) { fprintf(stderr, "usage: outline_bench [rounds 1..%d] [font directory]\n", MAX_ROUNDS); return 2; }
-    psyol_init(&g_cx, NULL);
+    yol_init(&g_cx, NULL);
     for (i = 0; i < NFONTS; i++) {
         fonts[i].name = names[i];
         snprintf(fonts[i].path, sizeof fonts[i].path, "%s/%s", dir, names[i]);
         fonts[i].data = read_file(fonts[i].path, &fonts[i].n);
-        fonts[i].ok = fonts[i].data && psyol_font_open(&fonts[i].f, fonts[i].data, fonts[i].n, 0, NULL, 0) == PSYOL_OK;
+        fonts[i].ok = fonts[i].data && yol_font_open(&fonts[i].f, fonts[i].data, fonts[i].n, 0, NULL, 0) == YOL_OK;
         any |= fonts[i].ok;
     }
     if (!any) { printf("outline_bench: none of the fonts is in %s\n", dir); return 3; }
@@ -199,6 +199,6 @@ int main(int argc, char** argv) {
     if (cjk) printf("stroke 0.08 em, %s: %.2f s for the font, %.0f us/glyph (bar 1000), slowest %.1f ms (glyph %d)\n", cjk->name,
                     median(t_stroke[1], rounds), 1e6 * median(t_stroke[1], rounds) / cjk->f.n_glyphs, 1e3 * sw[1], swg[1]);
     for (i = 0; i < NFONTS; i++) free(fonts[i].data);
-    psyol_free(&g_cx);
+    yol_free(&g_cx);
     return g_fail ? 1 : 0;
 }

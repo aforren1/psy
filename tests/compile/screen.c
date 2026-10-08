@@ -1,0 +1,25 @@
+/* Compile check: ysp/screen.h as a C translation unit with the
+ * implementation enabled. CMake and CI build this as C11 with warnings as
+ * errors when SDL3 is found; screen.cpp builds the same source as C++17.
+ * It runs three frames on the simulated display, which needs no window, so
+ * it passes on a machine with no display and no ANGLE. */
+#define YSP_SCREEN_IMPLEMENTATION
+#include "ysp/screen.h"
+
+int main(void) {
+    yscr_screen s;
+    yscr_desc d;
+    yscr_frame f;
+    int i, n = 0;
+    memset(&s, 0, sizeof s);
+    memset(&d, 0, sizeof d);
+    d.backend = YSCR_BACKEND_SIM;
+    d.sim_period_ns = 2000000;
+    if (!yscr_open(&s, &d)) return 1;
+    for (i = 0; i < 3; i++) {
+        if (yscr_begin(&s, &f) != YSCR_OK) return 2;
+        if (yscr_flip(&s) != YSCR_OK) return 3;
+    }
+    yscr_close(&s);
+    return yscr_params(&n) && n > 0 ? 0 : 4;
+}

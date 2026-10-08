@@ -1,14 +1,14 @@
 #!/bin/sh
-# make_video_clips.sh - the MP4 clips psy_video.h's Media Foundation tests and
+# make_video_clips.sh - the MP4 clips ysp/video.h's Media Foundation tests and
 # benchmarks use, made with ffmpeg (libx264, libx265), the encoder the pack
 # tool uses. Nothing is downloaded.
 #
 # Usage: tests/media/make_video_clips.sh OUTDIR [--long | --av]
-#   OUTDIR   where the clips go (made if missing); point PSYVID_TEST_MEDIA at it
+#   OUTDIR   where the clips go (made if missing); point YVID_TEST_MEDIA at it
 #   --long   also the 60 s measurement clips
 #   --av     also the 10 min A/V clip with its WAV
 #
-# Canonical clips ("c_*") pass psy_video.h's checks because of these flags:
+# Canonical clips ("c_*") pass ysp/video.h's checks because of these flags:
 #   -bf 0, x264 bframes=0           no B-frames: decode order is display order
 #   -g G -keyint_min G              one GOP length
 #   -sc_threshold 0, scenecut=0     no extra keyframe at a scene cut

@@ -1,27 +1,27 @@
 /* rt_ring_csv.c - log a frame loop and an audio callback to CSV through
- * psy_rt.h's event ring.
+ * ysp/rt.h's event ring.
  *
  * Two producers push into one ring. A deadline worker stands in for an
  * audio callback: every 5.33 ms (256 frames at 48 kHz) it pushes an onset
  * record and a plot point. The main thread runs a 60 Hz frame loop: it
- * times its phases, pushes a flip record in the layout psy_screen.h will
+ * times its phases, pushes a flip record in the layout ysp/screen.h will
  * use, marks the frame, and at the end of every frame drains the ring to
- * CSV. The program is built in PSYRT_TRACE_RING mode, so the zones, the
+ * CSV. The program is built in YRT_TRACE_RING mode, so the zones, the
  * plots and the frame marks go into the same ring, and so do the zones
- * psy_rt.h puts in its own worker and waits.
+ * ysp/rt.h puts in its own worker and waits.
  *
- * Nothing here needs hardware. The "flip" is a psyrt_sleep_until() to the
+ * Nothing here needs hardware. The "flip" is a yrt_sleep_until() to the
  * next 16.67 ms boundary, and the "work" is a spin of a few hundred
  * microseconds per phase.
  *
  * Build (from the repository root):
- *     cc -O2 -pthread -I. -o rt_ring_csv examples/rt_ring_csv.c   # Linux / macOS
- *     cl /O2 /I. examples\rt_ring_csv.c                           # Windows (MSVC)
- *     emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -I. \
+ *     cc -O2 -pthread -Iinclude -o rt_ring_csv examples/rt_ring_csv.c   # Linux / macOS
+ *     cl /O2 /Iinclude examples\rt_ring_csv.c                           # Windows (MSVC)
+ *     emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -Iinclude \
  *          -o rt_ring_csv.js examples/rt_ring_csv.c && node rt_ring_csv.js
  * or:  cmake -B build && cmake --build build
  *
- * With PSYRT_NO_THREADS there is no worker, and the frame loop pushes the
+ * With YRT_NO_THREADS there is no worker, and the frame loop pushes the
  * audio records itself. Under Emscripten, write to stdout: a wasm module
  * sees no host file unless it is linked with -sNODERAWFS=1.
  *
@@ -42,65 +42,65 @@
 /* fopen() is C4996 under /W4 /WX, and fopen_s() is not portable. */
 #define _CRT_SECURE_NO_WARNINGS
 #endif
-#define PSYRT_TRACE_RING
-#define PSY_RT_IMPLEMENTATION
-#include "psy_rt.h"
+#define YRT_TRACE_RING
+#define YSP_RT_IMPLEMENTATION
+#include "ysp/rt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* This program's own source number and kinds. */
-#define SRC_DEMO   PSYRT_SRC_USER
+#define SRC_DEMO   YRT_SRC_USER
 #define KIND_FLIP  1u
 #define KIND_ONSET 2u
 
 #define FRAME_NS   16666667ull
 #define AUDIO_NS    5333333ull   /* 256 frames at 48 kHz */
 
-static unsigned char g_mem[PSYRT_RING_BYTES(4096)];
-static psyrt_ring g_ring;
+static unsigned char g_mem[YRT_RING_BYTES(4096)];
+static yrt_ring g_ring;
 static uint64_t g_audio_frames;
 
 /* What a real callback would push: the device frame count at the start of
  * the buffer, and how late the callback ran. */
 static void push_onset(int64_t late_ns) {
-    psyrt_event ev;
+    yrt_event ev;
     memset(&ev, 0, sizeof(ev));        /* C++-safe; in C a compound literal does */
     ev.source = SRC_DEMO;
     ev.kind = KIND_ONSET;
     ev.u.u64[0] = g_audio_frames;
     ev.u.i64[1] = late_ns;
-    (void)psyrt_ring_push(&g_ring, &ev);
-    PSYRT_PLOT("audio fill", (double)(g_audio_frames % 1024u) / 1024.0);
+    (void)yrt_ring_push(&g_ring, &ev);
+    YRT_PLOT("audio fill", (double)(g_audio_frames % 1024u) / 1024.0);
     g_audio_frames += 256u;
 }
 
-#ifndef PSYRT_NO_THREADS
+#ifndef YRT_NO_THREADS
 typedef struct audio_sim {
-    psyrt_worker w;
+    yrt_worker w;
     uint64_t next;
 } audio_sim;
 
 /* Re-arms itself: a worker job may submit to its own worker. */
-static void audio_cb(void* ctx, const psyrt_job_info* info) {
+static void audio_cb(void* ctx, const yrt_job_info* info) {
     audio_sim* a = (audio_sim*)ctx;
     if (info->flushed) return;          /* the stop, not a deadline */
     {
-        PSYRT_ZONE(z, "audio callback");
+        YRT_ZONE(z, "audio callback");
         push_onset(info->late_ns);
-        PSYRT_ZONE_END(z);
+        YRT_ZONE_END(z);
     }
     a->next += AUDIO_NS;
-    (void)psyrt_worker_submit(&a->w, a->next, audio_cb, a);
+    (void)yrt_worker_submit(&a->w, a->next, audio_cb, a);
 }
 #endif
 
 /* Stand-in for a phase of the frame: spin, and return how long it took. */
 static uint32_t phase(uint64_t ns) {
-    uint64_t t0 = psyrt_now_ns();
-    (void)psyrt_spin_until(t0 + ns);
-    return (uint32_t)(psyrt_now_ns() - t0);
+    uint64_t t0 = yrt_now_ns();
+    (void)yrt_spin_until(t0 + ns);
+    return (uint32_t)(yrt_now_ns() - t0);
 }
 
 /* A label in quotes, with quotes doubled, so a message with a comma stays
@@ -114,31 +114,31 @@ static void csv_text(FILE* f, const char* s) {
     fputc('"', f);
 }
 
-static void csv_row(FILE* f, const psyrt_event* e) {
+static void csv_row(FILE* f, const yrt_event* e) {
     fprintf(f, "%lu,%llu,%lu,%u,%u,%lu,", (unsigned long)e->seq,
             (unsigned long long)e->t_ns, (unsigned long)e->tid,
             (unsigned)e->source, (unsigned)e->kind, (unsigned long)e->aux);
-    if (e->source == PSYRT_SRC_RT) {
+    if (e->source == YRT_SRC_RT) {
         switch (e->kind) {
-        case PSYRT_KIND_ZONE:
+        case YRT_KIND_ZONE:
             csv_text(f, e->u.zone.loc->name);
             fprintf(f, ",%llu,%llu,\n", (unsigned long long)e->u.zone.dur_ns,
                     (unsigned long long)e->u.zone.value);
             return;
-        case PSYRT_KIND_PLOT:
+        case YRT_KIND_PLOT:
             csv_text(f, e->u.plot.name);
             fprintf(f, ",%.9g,,\n", e->u.plot.value);
             return;
-        case PSYRT_KIND_FRAME:
+        case YRT_KIND_FRAME:
             csv_text(f, e->u.plot.name ? e->u.plot.name : "frame");
             fputs(",,,\n", f);
             return;
-        case PSYRT_KIND_MESSAGE:
-        case PSYRT_KIND_THREAD_NAME:
+        case YRT_KIND_MESSAGE:
+        case YRT_KIND_THREAD_NAME:
             csv_text(f, e->u.text);
             fputs(",,,\n", f);
             return;
-        case PSYRT_KIND_LOSS:
+        case YRT_KIND_LOSS:
             fprintf(f, "\"loss\",%llu,%llu,\n", (unsigned long long)e->u.u64[0],
                     (unsigned long long)e->u.u64[1]);
             return;
@@ -164,14 +164,14 @@ static void csv_row(FILE* f, const psyrt_event* e) {
 int main(int argc, char** argv) {
     int frames = (argc > 1) ? atoi(argv[1]) : 120;
     FILE* out = stdout;
-    psyrt_ring_desc rd;
-    psyrt_event ev[64];
+    yrt_ring_desc rd;
+    yrt_event ev[64];
     uint64_t target, rows = 0, lost = 0, worst_drain = 0;
     uint16_t dropped = 0;
     int f, n, i;
-#ifndef PSYRT_NO_THREADS
+#ifndef YRT_NO_THREADS
     static audio_sim audio;
-    psyrt_worker_desc wd;
+    yrt_worker_desc wd;
     int audio_on = 0;
 #endif
 
@@ -184,47 +184,47 @@ int main(int argc, char** argv) {
     memset(&rd, 0, sizeof(rd));
     rd.memory = g_mem;
     rd.bytes = sizeof(g_mem);
-    if (!psyrt_ring_open(&g_ring, &rd)) {
-        fprintf(stderr, "rt_ring_csv: %s\n", psyrt_ring_error(&g_ring));
+    if (!yrt_ring_open(&g_ring, &rd)) {
+        fprintf(stderr, "rt_ring_csv: %s\n", yrt_ring_error(&g_ring));
         return 1;
     }
-    psyrt_trace_set_ring(&g_ring);
-    PSYRT_THREAD_INIT("frame loop");
+    yrt_trace_set_ring(&g_ring);
+    YRT_THREAD_INIT("frame loop");
     fputs("seq,t_ns,tid,source,kind,aux,label,v0,v1,v2\n", out);
 
-    target = psyrt_now_ns() + FRAME_NS;
-#ifndef PSYRT_NO_THREADS
+    target = yrt_now_ns() + FRAME_NS;
+#ifndef YRT_NO_THREADS
     /* No elevation: an example should not ask for FIFO on a shared machine.
      * A rig's audio thread belongs to the audio library anyway. */
     memset(&wd, 0, sizeof(wd));
     wd.no_elevate = true;
-    if (psyrt_worker_start(&audio.w, &wd)) {
-        audio.next = psyrt_now_ns() + AUDIO_NS;
-        audio_on = psyrt_worker_submit(&audio.w, audio.next, audio_cb, &audio) > 0;
+    if (yrt_worker_start(&audio.w, &wd)) {
+        audio.next = yrt_now_ns() + AUDIO_NS;
+        audio_on = yrt_worker_submit(&audio.w, audio.next, audio_cb, &audio) > 0;
     } else {
         fprintf(stderr, "rt_ring_csv: no audio thread (%s); the frame loop "
-                        "pushes the onsets\n", psyrt_worker_error(&audio.w));
+                        "pushes the onsets\n", yrt_worker_error(&audio.w));
     }
 #endif
-    PSYRT_MESSAGEF("session start, %d frames", frames);
+    YRT_MESSAGEF("session start, %d frames", frames);
 
     for (f = 0; f < frames; f++) {
-        psyrt_event flip;
+        yrt_event flip;
         uint32_t ph[6];
         uint64_t onset, t0;
-        PSYRT_ZONE(fz, "frame");
-        PSYRT_ZONE_VALUE(fz, f);
+        YRT_ZONE(fz, "frame");
+        YRT_ZONE_VALUE(fz, f);
         ph[0] = phase(50000);    /* timeline evaluate */
         ph[1] = phase(100000);   /* script callback   */
         {
-            PSYRT_ZONE(dz, "draw");
+            YRT_ZONE(dz, "draw");
             ph[2] = phase(400000);
-            PSYRT_ZONE_END(dz);
+            YRT_ZONE_END(dz);
         }
         ph[3] = phase(30000);    /* texture upload    */
-        t0 = psyrt_now_ns();
-        (void)psyrt_sleep_until(target, PSYRT_DEFAULT_SPIN_NS);   /* "swap" */
-        onset = psyrt_now_ns();
+        t0 = yrt_now_ns();
+        (void)yrt_sleep_until(target, YRT_DEFAULT_SPIN_NS);   /* "swap" */
+        onset = yrt_now_ns();
         ph[4] = (uint32_t)(onset - t0);
         ph[5] = 0;               /* no GPU timer here */
         while (onset > target + FRAME_NS / 2) {   /* a missed vblank */
@@ -243,9 +243,9 @@ int main(int argc, char** argv) {
         flip.u.u16[4] = dropped;
         flip.u.u16[5] = 0;
         for (i = 0; i < 6; i++) flip.u.u32[3 + i] = ph[i];
-        (void)psyrt_ring_push(&g_ring, &flip);
-        PSYRT_FRAME_MARK();
-#ifndef PSYRT_NO_THREADS
+        (void)yrt_ring_push(&g_ring, &flip);
+        YRT_FRAME_MARK();
+#ifndef YRT_NO_THREADS
         if (!audio_on)
 #endif
         {
@@ -253,28 +253,28 @@ int main(int argc, char** argv) {
             push_onset(0);
             push_onset(0);
         }
-        PSYRT_ZONE_END(fz);
+        YRT_ZONE_END(fz);
 
         /* The drain: once per frame, on the frame thread, after the flip. */
-        t0 = psyrt_now_ns();
-        while ((n = psyrt_ring_drain(&g_ring, ev, 64)) > 0) {
+        t0 = yrt_now_ns();
+        while ((n = yrt_ring_drain(&g_ring, ev, 64)) > 0) {
             for (i = 0; i < n; i++) {
-                if (ev[i].source == PSYRT_SRC_RT && ev[i].kind == PSYRT_KIND_LOSS)
+                if (ev[i].source == YRT_SRC_RT && ev[i].kind == YRT_KIND_LOSS)
                     lost += ev[i].u.u64[0];
                 csv_row(out, &ev[i]);
             }
             rows += (uint64_t)n;
             if (n < 64) break;
         }
-        if (psyrt_now_ns() - t0 > worst_drain) worst_drain = psyrt_now_ns() - t0;
+        if (yrt_now_ns() - t0 > worst_drain) worst_drain = yrt_now_ns() - t0;
         target += FRAME_NS;
     }
 
-#ifndef PSYRT_NO_THREADS
-    psyrt_worker_stop(&audio.w);
+#ifndef YRT_NO_THREADS
+    yrt_worker_stop(&audio.w);
 #endif
-    psyrt_trace_set_ring(NULL);
-    while ((n = psyrt_ring_drain(&g_ring, ev, 64)) > 0) {
+    yrt_trace_set_ring(NULL);
+    while ((n = yrt_ring_drain(&g_ring, ev, 64)) > 0) {
         for (i = 0; i < n; i++) csv_row(out, &ev[i]);
         rows += (uint64_t)n;
     }

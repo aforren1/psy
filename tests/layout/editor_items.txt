@@ -1,5 +1,5 @@
 # Items of the wrapping, selection and caret comparison against Edge
-# (editor_ref.py, psy_layout_test.c, docs/psy_layout.md "Editing against
+# (editor_ref.py, layout_test.c, docs/layout.md "Editing against
 # Edge"). Fields:
 #   id|font files in C:/Windows/Fonts, in fallback order|dir|lang|text
 # user_bidi is the line a user tried in gfx_layout's editor; page4 is that

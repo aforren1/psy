@@ -1,35 +1,35 @@
-# psy MATLAB / Octave (MEX) bindings
+# ysp MATLAB / Octave (MEX) bindings
 
 One MEX function per header, in the command-dispatch style of widmann's
 [ppdev-mex](https://github.com/widmann/ppdev-mex): the first argument is a
 command string, and `open` returns an opaque `uint64` handle that you pass
 back to every other command. A handle is a counter, not an address, and is
 never reused, so a handle kept past its `close` always raises
-`psy_<name>:handle` instead of reaching whichever port was opened next.
+`ysp_<name>:handle` instead of reaching whichever port was opened next.
 
 | Source | Wraps | Example |
 |---|---|---|
-| `psy_parallel.c` | [psy_parallel.h](../../psy_parallel.h) | [example_parallel.m](example_parallel.m) |
-| `psy_serial.c` | [psy_serial.h](../../psy_serial.h) | [example_serial.m](example_serial.m) |
-| `psy_stair.c` | [psy_stair.h](../../psy_stair.h) | [example_stair.m](example_stair.m) |
-| `psy_quest.c` | [psy_quest.h](../../psy_quest.h) | [example_quest.m](example_quest.m) |
-| `psy_gp.c` | [psy_gp.h](../../psy_gp.h) | [example_gp.m](example_gp.m) |
-| `psy_trials.c` | [psy_trials.h](../../psy_trials.h) | [example_trials.m](example_trials.m) |
-| `psy_color.c` | [psy_color.h](../../psy_color.h) | [test_mex_color.m](test_mex_color.m); the command reference is in [docs/psy_color.md](../../docs/psy_color.md) |
+| `ysp_parallel.c` | [ysp/parallel.h](../../include/ysp/parallel.h) | [example_parallel.m](example_parallel.m) |
+| `ysp_serial.c` | [ysp/serial.h](../../include/ysp/serial.h) | [example_serial.m](example_serial.m) |
+| `ysp_stair.c` | [ysp/stair.h](../../include/ysp/stair.h) | [example_stair.m](example_stair.m) |
+| `ysp_quest.c` | [ysp/quest.h](../../include/ysp/quest.h) | [example_quest.m](example_quest.m) |
+| `ysp_aep.c` | [ysp/aep.h](../../include/ysp/aep.h) | [example_aep.m](example_aep.m) |
+| `ysp_trials.c` | [ysp/trials.h](../../include/ysp/trials.h) | [example_trials.m](example_trials.m) |
+| `ysp_color.c` | [ysp/color.h](../../include/ysp/color.h) | [test_mex_color.m](test_mex_color.m); the command reference is in [docs/color.md](../../docs/color.md) |
 
-The two transport headers build on the shared [psy_rt.h](../../psy_rt.h), so
-both MEX functions compile it too. `psy_quest.c` and `psy_gp.c` define
-`PSYQ_ASYNC` and `PSYGP_ASYNC`, so they also compile `psy_rt.h`, for the
-async inference thread. `psy_stair.c` compiles nothing but its header, and
-`psy_trials.c` compiles psy_trials.h and the [psy_table.h](../../psy_table.h)
+The two transport headers build on the shared [ysp/rt.h](../../include/ysp/rt.h), so
+both MEX functions compile it too. `ysp_quest.c` and `ysp_aep.c` define
+`YQST_ASYNC` and `YAEP_ASYNC`, so they also compile `ysp/rt.h`, for the
+async inference thread. `ysp_stair.c` compiles nothing but its header, and
+`ysp_trials.c` compiles ysp/trials.h and the [ysp/table.h](../../include/ysp/table.h)
 it requires. The four adaptive-method sources also include
-`psy_mex_util.h`, a binding-internal header with the handle table and the
+`ysp_mex_util.h`, a binding-internal header with the handle table and the
 argument helpers; a copy of one of those sources needs that file beside it.
 
 [test_mex.m](test_mex.m) runs the key checks of the four adaptive modules in
 MATLAB or Octave and prints `PASS`. [test_mex_color.m](test_mex_color.m) does
-the same for `psy_color` (compiles nothing but psy_color.h and
-`psy_mex_util.h`); `tests/compare/psy_color_ptb.m` compares it with
+the same for `ysp_color` (compiles nothing but ysp/color.h and
+`ysp_mex_util.h`); `tests/compare/color_ptb.m` compares it with
 Psychtoolbox's colorimetric code.
 
 ## Build
@@ -37,7 +37,7 @@ Psychtoolbox's colorimetric code.
 In MATLAB or Octave, from this directory:
 
 ```matlab
-run build.m            % builds every psy_*.c
+run build.m            % builds every ysp_*.c
 build('parallel')      % builds one
 ```
 
@@ -45,38 +45,39 @@ build('parallel')      % builds one
   (`sudo apt install octave-dev`, or `liboctave-dev` on older releases).
 - **MATLAB** needs a configured compiler (`mex -setup`).
 
-The build adds `-I` for the repository root, where the headers live. That
-one path covers the transport header and the `psy_rt.h` it includes. A
-standalone build outside this repository must keep `psy_rt.h` next to the
-transport header, or add a `-I` for wherever it is. The build also links
+The build adds `-I` for include/ under the repository root, where the headers live. That
+one path covers the transport header and the `ysp/rt.h` it includes. A
+standalone build outside this repository must keep `ysp/rt.h` in the same
+`ysp/` directory as the transport header and put the parent of that `ysp/`
+directory on the include path with `-I`. The build also links
 `-lpthread` on Linux/macOS for the async-pulse workers. Windows uses
-Win32 threads and needs no thread library. `psy_serial` needs `setupapi` and
+Win32 threads and needs no thread library. `ysp_serial` needs `setupapi` and
 `advapi32` for port enumeration on Windows, and `build.m` passes
 `-lsetupapi -ladvapi32` there: the header's `#pragma comment(lib)` reaches
 MSVC only, so a MinGW toolchain (MinGW Octave, MATLAB's MinGW-w64 add-on)
 needs the libraries on the command line. `mex` accepts that spelling on both
 toolchains. The adaptive-method sources need no library but the thread
-library, which `psy_quest.c` and `psy_gp.c` use on Linux/macOS.
+library, which `ysp_quest.c` and `ysp_aep.c` use on Linux/macOS.
 
-## psy_parallel
+## ysp_parallel
 
 ```matlab
-ports = psy_parallel('list');                 % struct array: name/backend/base_addr
+ports = ysp_parallel('list');                 % struct array: name/backend/base_addr
 
-h = psy_parallel('open');                      % platform defaults
-% h = psy_parallel('open', '/dev/parport1');   % ppdev device (Linux)
-% h = psy_parallel('open', 'direct', 888);     % raw x86 I/O @ base (root)
-% h = psy_parallel('open', 'inpout', 888);     % Windows inpout @ base
+h = ysp_parallel('open');                      % platform defaults
+% h = ysp_parallel('open', '/dev/parport1');   % ppdev device (Linux)
+% h = ysp_parallel('open', 'direct', 888);     % raw x86 I/O @ base (root)
+% h = ysp_parallel('open', 'inpout', 888);     % Windows inpout @ base
 
-psy_parallel('write',      h, 85);             % data register (0..255)
-d = psy_parallel('read',   h);                 % read data register (uint8)
-psy_parallel('setdir',     h, true);           % data direction: input
-psy_parallel('pulse',      h, 85, 2000);       % blocking 2 ms pulse
-psy_parallel('pulseasync', h, 85, 2000);       % non-blocking pulse
-s = psy_parallel('status', h);                 % status register
-c = psy_parallel('control', h);                % read control register
-psy_parallel('control',    h, 4);              % write control register
-psy_parallel('close',      h);
+ysp_parallel('write',      h, 85);             % data register (0..255)
+d = ysp_parallel('read',   h);                 % read data register (uint8)
+ysp_parallel('setdir',     h, true);           % data direction: input
+ysp_parallel('pulse',      h, 85, 2000);       % blocking 2 ms pulse
+ysp_parallel('pulseasync', h, 85, 2000);       % non-blocking pulse
+s = ysp_parallel('status', h);                 % status register
+c = ysp_parallel('control', h);                % read control register
+ysp_parallel('control',    h, 4);              % write control register
+ysp_parallel('close',      h);
 ```
 
 Tune the async-pulse worker's real-time reservation (Linux
@@ -85,9 +86,9 @@ by passing a trailing **struct** (fields in nanoseconds) to `open`:
 
 ```matlab
 rt = struct('runtime_ns', 5e5, 'deadline_ns', 2e6, 'period_ns', 2e6);
-h  = psy_parallel('open', rt);                  % default device + RT params
-h  = psy_parallel('open', '/dev/parport0', rt); % with an explicit device
-cur = psy_parallel('sched', h);                 % struct of effective params
+h  = ysp_parallel('open', rt);                  % default device + RT params
+h  = ysp_parallel('open', '/dev/parport0', rt); % with an explicit device
+cur = ysp_parallel('sched', h);                 % struct of effective params
 ```
 
 Any subset of fields is accepted. Missing fields are 0, and a 0 `period_ns`
@@ -99,13 +100,13 @@ Bracket a trigger with the library's own clock so your timestamps and the
 library's deadlines share one base:
 
 ```matlab
-t0 = psy_parallel('now_us');     % monotonic microseconds, no handle needed
-psy_parallel('write', h, 85);
-t1 = psy_parallel('now_us');     % the onset lies after t0; t1 - t0 bounds it
+t0 = ysp_parallel('now_us');     % monotonic microseconds, no handle needed
+ysp_parallel('write', h, 85);
+t1 = ysp_parallel('now_us');     % the onset lies after t0; t1 - t0 bounds it
 ```
 
-`psy_serial('now_us')` reads the same clock: both headers build on
-`psy_rt.h`, so one time base covers the whole rig.
+`ysp_serial('now_us')` reads the same clock: both headers build on
+`ysp/rt.h`, so one time base covers the whole rig.
 
 ### Commands
 
@@ -121,45 +122,45 @@ t1 = psy_parallel('now_us');     % the onset lies after t0; t1 - t0 bounds it
 | `'status', h` | `uint8` | status register (read-only) |
 | `'control', h [, value]` | `uint8` / none | read or write control register |
 | `'sched', h` | struct | effective RT params `runtime_ns`/`deadline_ns`/`period_ns` and `policy` (`deadline`, `fifo`, `time_critical`, `normal`, `none`), the policy the worker actually obtained |
-| `'now_us'` | `double` | monotonic microseconds from the library clock, the same clock as `psy_serial('now_us')`; opens nothing |
+| `'now_us'` | `double` | monotonic microseconds from the library clock, the same clock as `ysp_serial('now_us')`; opens nothing |
 | `'close', h` | none | release the port |
 
-Errors are raised through `error()` with id `psy_parallel:*`. Every open port
-is closed automatically on `clear psy_parallel` and at interpreter exit
+Errors are raised through `error()` with id `ysp_parallel:*`. Every open port
+is closed automatically on `clear ysp_parallel` and at interpreter exit
 (a `mexAtExit` hook), so a forgotten `close` cannot leave the async worker
 thread running against a freed port. Calling `close` yourself is still good
 form.
 
 Platform setup (ppdev permissions, the Windows inpout DLL) is documented in
-the header: [psy_parallel.h](../../psy_parallel.h).
+the header: [ysp/parallel.h](../../include/ysp/parallel.h).
 
-## psy_serial
+## ysp_serial
 
 ```matlab
-ports = psy_serial('list');                    % struct array, one per port
+ports = ysp_serial('list');                    % struct array, one per port
 % name / description / serial_number / location / vid / pid
-match = psy_serial('find', struct('vid', 1027, 'pid', 24577));   % FTDI FT232R
+match = ysp_serial('find', struct('vid', 1027, 'pid', 24577));   % FTDI FT232R
 
-h = psy_serial('open', '/dev/ttyUSB0');        % 115200 8N1 by default
-% h = psy_serial('open', 'COM3', struct('baud', 9600, 'parity', 'even'));
+h = ysp_serial('open', '/dev/ttyUSB0');        % 115200 8N1 by default
+% h = ysp_serial('open', 'COM3', struct('baud', 9600, 'parity', 'even'));
 
-n    = psy_serial('write',     h, uint8([1 2 3]));  % or [1 2 3]
-n    = psy_serial('writebyte', h, 85);              % trigger workhorse
-data = psy_serial('read',      h, 6, 500, 'all');   % 6-byte frame in 500 ms
-data = psy_serial('read',      h, 64, 0);           % poll: [] if nothing
-psy_serial('pulse',      h, 85, 0, 2000);      % blocking: 85, 2 ms, then 0
-psy_serial('pulseasync', h, 85, 0, 2000);      % non-blocking (RT worker)
-info = psy_serial('info', h);                  % effective settings
-psy_serial('close', h);
+n    = ysp_serial('write',     h, uint8([1 2 3]));  % or [1 2 3]
+n    = ysp_serial('writebyte', h, 85);              % trigger workhorse
+data = ysp_serial('read',      h, 6, 500, 'all');   % 6-byte frame in 500 ms
+data = ysp_serial('read',      h, 64, 0);           % poll: [] if nothing
+ysp_serial('pulse',      h, 85, 0, 2000);      % blocking: 85, 2 ms, then 0
+ysp_serial('pulseasync', h, 85, 0, 2000);      % non-blocking (RT worker)
+info = ysp_serial('info', h);                  % effective settings
+ysp_serial('close', h);
 ```
 
 Bracket a trigger with the library's own clock so your timestamps and the
 library's deadlines share one base (see TIMING in the header):
 
 ```matlab
-t0 = psy_serial('now_us');       % monotonic microseconds, no handle needed
-psy_serial('writebyte', h, 85);
-t1 = psy_serial('now_us');       % the onset lies after t0; t1 - t0 bounds it
+t0 = ysp_serial('now_us');       % monotonic microseconds, no handle needed
+ysp_serial('writebyte', h, 85);
+t1 = ysp_serial('now_us');       % the onset lies after t0; t1 - t0 bounds it
 ```
 
 `read` returns a `uint8` row vector, empty on timeout. A disconnect, an
@@ -200,7 +201,7 @@ policy the worker actually obtained, which is not always the one requested.
 | `'drain', h` | none | wait until the transmit buffer is empty |
 | `'purge', h [, 'rx' \| 'tx' \| 'both']` | none | discard buffered bytes; default `'rx'` |
 | `'interrupt', h` | none | latch a wake that the next `read` consumes; it cannot reach a read already in flight (see below) |
-| `'now_us'` | `double` | monotonic microseconds from the library clock, the same clock as `psy_parallel('now_us')`; opens nothing |
+| `'now_us'` | `double` | monotonic microseconds from the library clock, the same clock as `ysp_parallel('now_us')`; opens nothing |
 | `'pulse', h, on, off, usec` | count (optional) | blocking; returns 2 |
 | `'pulseasync', h, on, off, usec` | count (optional) | non-blocking; returns 1 when the onset was accepted |
 | `'setdtr', h, on` / `'setrts', h, on` | none | drive the output lines |
@@ -210,7 +211,7 @@ policy the worker actually obtained, which is not always the one requested.
 | `'close', h` | none | release the port |
 
 `write`, `writebyte`, `pulse` and `pulseasync` return their count only when
-you ask for it (`n = psy_serial('write', ...)`), so a bare call prints
+you ask for it (`n = ysp_serial('write', ...)`), so a bare call prints
 nothing. The count matters: a write that hits `write_timeout_ms` returns fewer
 bytes than you passed and is not an error.
 
@@ -219,14 +220,14 @@ code, so a script can branch on it:
 
 | Identifier | Meaning |
 |---|---|
-| `psy_serial:io` | OS error; the number is in `info.rd_oserr` / `wr_oserr` / `misc_oserr` |
-| `psy_serial:disconnected` | the device went away (USB unplug); close the handle |
-| `psy_serial:closed` | the port is not open |
-| `psy_serial:interrupted` | `interrupt` woke a blocked `read` |
-| `psy_serial:arg` | bad argument |
-| `psy_serial:open`, `psy_serial:handle`, `psy_serial:usage` | open failure, bad handle, bad call |
+| `ysp_serial:io` | OS error; the number is in `info.rd_oserr` / `wr_oserr` / `misc_oserr` |
+| `ysp_serial:disconnected` | the device went away (USB unplug); close the handle |
+| `ysp_serial:closed` | the port is not open |
+| `ysp_serial:interrupted` | `interrupt` woke a blocked `read` |
+| `ysp_serial:arg` | bad argument |
+| `ysp_serial:open`, `ysp_serial:handle`, `ysp_serial:usage` | open failure, bad handle, bad call |
 
-Every open port is closed automatically on `clear psy_serial` and at
+Every open port is closed automatically on `clear ysp_serial` and at
 interpreter exit (a `mexAtExit` hook), so a forgotten `close` cannot leave the
 async worker thread running against a freed port. Calling `close` yourself is
 still good form.
@@ -240,7 +241,7 @@ Ctrl-C are all dispatched on that same thread, so **nothing can interrupt a
 blocked `read`**: a `timer` whose callback calls `interrupt` never runs while
 the read is in flight.
 
-Never pass `TIMEOUT_INFINITE` (the header's `PSYS_TIMEOUT_INFINITE`,
+Never pass `TIMEOUT_INFINITE` (the header's `YSER_TIMEOUT_INFINITE`,
 `4294967295`) from MATLAB or Octave. Poll in short slices instead, so the
 interpreter gets the thread back between them:
 
@@ -249,29 +250,29 @@ interpreter gets the thread back between them:
 frame = uint8([]);
 t0 = tic;
 while toc(t0) < 5
-    frame = [frame psy_serial('read', h, 6 - numel(frame), 50)];  % 50 ms slice
+    frame = [frame ysp_serial('read', h, 6 - numel(frame), 50)];  % 50 ms slice
     if numel(frame) == 6, break; end
     drawnow limitrate;    % run timers, Ctrl-C and the GUI
 end
 ```
 
 `interrupt` latches a wake that the *next* `read` consumes, so on one thread it
-only makes that read return immediately with `psy_serial:interrupted`. It
+only makes that read return immediately with `ysp_serial:interrupted`. It
 exists for symmetry with the C API; a real cross-thread wake needs the C API,
 not MEX.
 
 Device naming, USB latency, DTR-driven board resets and what a serial trigger
 is worth in timing terms are documented in the header:
-[psy_serial.h](../../psy_serial.h).
+[ysp/serial.h](../../include/ysp/serial.h).
 
 ## Adaptive methods: common rules
 
-`psy_stair`, `psy_quest`, `psy_gp` and `psy_trials` share these rules.
+`ysp_stair`, `ysp_quest`, `ysp_aep` and `ysp_trials` share these rules.
 
 - **Descs are structs.** `open` takes one 1x1 struct whose fields are the
   C desc's fields, with the same names. A missing field, or `[]`, is the
   library default, as a zero is in C. An unknown field name raises
-  `psy_<name>:arg`, so a typo cannot leave a default in force. An enum field
+  `ysp_<name>:arg`, so a typo cannot leave a default in force. An enum field
   is a string, and case does not matter: `'log'`, `'gumbel'`, `'eavc'`.
 - **Indices are 1-based.** Stimuli, parameter axes, candidates, conditions,
   factors, levels, tracks, trials and reversals are numbered from 1. Where C
@@ -279,7 +280,7 @@ is worth in timing terms are documented in the header:
   rule: 0 is no repetition, or a practice trial.
 - **Outcomes are values.** A response keeps the header's numbering: 1 is
   correct or yes, 0 is incorrect or no, and 0..K-1 in general.
-  `psy_trials` keeps -1 (no valid response) and -2 (re-queued).
+  `ysp_trials` keeps -1 (no valid response) and -2 (re-queued).
 - **Histories are structs of columns.** `history` returns one struct with
   one column per field of the C trial record. `struct2table(history)` makes
   a MATLAB table from it.
@@ -289,18 +290,18 @@ is worth in timing terms are documented in the header:
 - **Generators.** `desc.rng` is a function handle that returns a uniform
   number in [0, 1), or an integer seed (a `uint64`, or a double below
   2^53). A seed drives a splitmix64 generator that the module keeps, the
-  same generator as `psytr_splitmix()`. `rng_state` reads and writes its
+  same generator as `ytr_splitmix()`. `rng_state` reads and writes its
   state. A seed never calls the interpreter, so the async layers accept it.
 - **Errors.** Every header code becomes an error identifier
-  `psy_<name>:<code>`: `arg`, `closed`, `full`, `memory`, and per module
-  `order` (trials), `nocross` and `numeric` (gp), `busy` and `timeout`
-  (quest, gp). The binding adds `handle` (a closed or unknown handle),
+  `ysp_<name>:<code>`: `arg`, `closed`, `full`, `memory`, and per module
+  `order` (trials), `nocross` and `numeric` (aep), `busy` and `timeout`
+  (quest, aep). The binding adds `handle` (a closed or unknown handle),
   `usage` (a bad command or argument count), `open` and `load` (the header
   refused the desc or the snapshot; the message is the header's),
   `callback` (a MATLAB callback returned the wrong shape) and `async` (the
   async thread did not start). An error in a MATLAB callback keeps the
   callback's own identifier.
-- **Cleanup.** `close` frees a handle. `clear psy_<name>`, `clear mex` and
+- **Cleanup.** `close` frees a handle. `clear ysp_<name>`, `clear mex` and
   interpreter exit free every open handle and stop every async thread.
 
 ### Explanation: MATLAB callbacks and the header
@@ -318,19 +319,19 @@ the binding runs the callback inside `cellfun` with an `ErrorHandler`, which
 keeps the original identifier and message.
 
 A callback must not call the handle that it runs under. That raises
-`psy_<name>:busy`.
+`ysp_<name>:busy`.
 
-## psy_stair
+## ysp_stair
 
 ```matlab
-h = psy_stair('open', struct('start', 0.5, 'n_down', 3, 'step_type', 'log', ...
+h = ysp_stair('open', struct('start', 0.5, 'n_down', 3, 'step_type', 'log', ...
               'steps', [0.3 0.15 0.075], 'min', 0.001, 'max', 1, 'stop_reversals', 10));
-while ~psy_stair('done', h)
-    x = psy_stair('next', h);                  % the proposed level
-    psy_stair('update', h, x, run_trial(x));   % the level shown, and 1 or 0
+while ~ysp_stair('done', h)
+    x = ysp_stair('next', h);                  % the proposed level
+    ysp_stair('update', h, x, run_trial(x));   % the level shown, and 1 or 0
 end
-thr = psy_stair('estimate', h, 'reversals');
-psy_stair('close', h);
+thr = ysp_stair('estimate', h, 'reversals');
+ysp_stair('close', h);
 ```
 
 Desc fields: `start`, `rule` (`'updown'`, `'asa'`), `n_up`, `n_down`,
@@ -338,7 +339,7 @@ Desc fields: `start`, `rule` (`'updown'`, `'asa'`), `n_up`, `n_down`,
 schedule), `step_down_scale`, `target_p`, `min`, `max`, `use_limits`,
 `harder_is_up`, `initial_rule`, `stop_reversals`, `stop_trials`,
 `stop_at_limit`, `est_reversals`, `est_trials`. The manual of
-[psy_stair.h](../../psy_stair.h) gives the semantics.
+[ysp/stair.h](../../include/ysp/stair.h) gives the semantics.
 
 | Command | Returns | Notes |
 |---|---|---|
@@ -359,20 +360,20 @@ schedule), `step_down_scale`, `target_p`, `min`, `max`, `use_limits`,
 | `'simulate_response', p, u` | 0 or 1 | 1 when `u < p` |
 | `'version'`, `'strerror', code` | string | |
 
-## psy_quest
+## ysp_quest
 
 ```matlab
 d = struct();
 d.stim  = {{-3, 0, 31}};                       % one axis: a linspace
 d.param = {{-3, 0, 61}, {0.5, 6, 12}, 0.5, 0.02};
 d.stop_trials = 60;
-h = psy_quest('open', d);
-while ~psy_quest('done', h)
-    [i, x] = psy_quest('next', h);             % the grid index and its value
-    psy_quest('update', h, i, run_trial(10 ^ x));
+h = ysp_quest('open', d);
+while ~ysp_quest('done', h)
+    [i, x] = ysp_quest('next', h);             % the grid index and its value
+    ysp_quest('update', h, i, run_trial(10 ^ x));
 end
-est = psy_quest('estimate', h, 'mean');
-psy_quest('close', h);
+est = ysp_quest('estimate', h, 'mean');
+ysp_quest('close', h);
 ```
 
 An axis is a numeric vector of explicit values (a scalar is a fixed
@@ -402,7 +403,7 @@ For QUEST, use a Gaussian prior on the threshold and quantile placement:
 
 ```matlab
 d.param = {{-3, 0, 61}, 3.5, 0.5, 0.01};
-d.prior = {psy_quest('prior_normal', {-3, 0, 61}, -1.5, 0.5), [], [], []};
+d.prior = {ysp_quest('prior_normal', {-3, 0, 61}, -1.5, 0.5), [], [], []};
 d.select = 'quantile';
 ```
 
@@ -465,31 +466,31 @@ Async commands (see
 | Command | Returns | Notes |
 |---|---|---|
 | `'async_start', h [, opts]` | none | `opts`: `estimator`, `below_normal`, `pin_cpu`, `queue_depth` |
-| `'async_submit', h, i, outcome` | seq | `psy_quest:busy` when the queue is full |
+| `'async_submit', h, i, outcome` | seq | `ysp_quest:busy` when the queue is full |
 | `'async_submit_values', h, stim, outcome` | seq | refused with a MATLAB `pf_batch` |
 | `'async_poll', h` | snapshot struct | `seq`, `proposed` (1-based), `stim`, `update_rc`, `n_trials`, `done`, `stop`, `estimate`, `entropy`, `sd` (of parameter 1) |
-| `'async_wait', h, seq [, timeout_s]` | snapshot struct | the default timeout is 1 s; `psy_quest:timeout` |
+| `'async_wait', h, seq [, timeout_s]` | snapshot struct | the default timeout is 1 s; `ysp_quest:timeout` |
 | `'async_pending', h` | double | queued responses; takes the queue mutex |
 | `'async_policy', h` | string | `'normal'`, `'below_normal'`, `'none'` |
 | `'async_running', h` | logical | |
 | `'async_stop', h` | none | drains the queue and joins the thread |
 
-## psy_gp
+## ysp_aep
 
 ```matlab
 d = struct('lo', [0 -3], 'hi', [1.5 0], 'intensity_dim', 2, 'acq', 'eavc', ...
            'target_p', 0.75, 'grid', [15 25], 'n_init', 10, ...
            'fit', true, 'fit_every', 10, 'stop_trials', 150);
-h = psy_gp('open', d);
-while ~psy_gp('done', h)
-    x = psy_gp('next', h);                     % 1 x n_dims
-    psy_gp('update', h, x, run_trial(x));      % the stimulus shown
+h = ysp_aep('open', d);
+while ~ysp_aep('done', h)
+    x = ysp_aep('next', h);                     % 1 x n_dims
+    ysp_aep('update', h, x, run_trial(x));      % the stimulus shown
 end
-[thr, lo, hi] = psy_gp('threshold', h, 0.7);   % at log10 SF 0.7
-psy_gp('close', h);
+[thr, lo, hi] = ysp_aep('threshold', h, 0.7);   % at log10 SF 0.7
+ysp_aep('close', h);
 ```
 
-The desc fields are those of `psygp_desc`. `n_dims` is `numel(lo)`.
+The desc fields are those of `yaep_desc`. `n_dims` is `numel(lo)`.
 
 | Field | Value |
 |---|---|
@@ -529,7 +530,7 @@ The binding does not expose `desc.memory`.
 | `'predict_outcomes', h, x` | row of K | |
 | `'predict_p_many', h, X` | column | `X` is n x n_dims, one point per row |
 | `'predict_f_many', h, X [, latent]` | `[mu, sd]` columns | |
-| `'threshold', h, ctx [, target]` | `[x, lo, hi]` | `ctx` has n_dims - 1 values; leave it out for 1-D; `psy_gp:nocross` |
+| `'threshold', h, ctx [, target]` | `[x, lo, hi]` | `ctx` has n_dims - 1 values; leave it out for 1-D; `ysp_aep:nocross` |
 | `'threshold_multi_cross', h` | logical | |
 | `'argmax', h` | `[x, value, i]` | |
 | `'fit', h` | logical | true when the fit converged |
@@ -546,12 +547,12 @@ The binding does not expose `desc.memory`.
 | `'memory_size', desc`, `'version'`, `'strerror', code` | | |
 
 `update` records the trial also when the Cholesky fails
-(`PSYGP_ERR_NUMERIC`), and the previous posterior stays in force. With an
-output (`rc = psy_gp('update', ...)`) the binding returns that code, -6.
-Without an output it raises `psy_gp:numeric`, so the failure cannot pass
+(`YAEP_ERR_NUMERIC`), and the previous posterior stays in force. With an
+output (`rc = ysp_aep('update', ...)`) the binding returns that code, -6.
+Without an output it raises `ysp_aep:numeric`, so the failure cannot pass
 unnoticed.
 
-The async commands are those of `psy_quest`, with these differences.
+The async commands are those of `ysp_quest`, with these differences.
 `async_start` takes the `opts` fields `context` (n_dims - 1 values),
 `target`, `fit_in_idle`, `below_normal` and `pin_cpu`. The submits are
 `async_submit(h, x, outcome)` and `async_submit_real(h, x, y)`. The
@@ -560,19 +561,19 @@ snapshot has `seq`, `x`, `proposed`, `update_rc`, `n_trials`, `done`,
 `multi_cross`, `hyper`, `log_marginal`, `numeric` and `fitting`.
 `async_start` refuses a `'pairwise'` GP.
 
-## psy_trials
+## ysp_trials
 
 ```matlab
 d = struct('reps', 20, 'order', 'constrained', 'rng', uint64(20260923));
 d.factors = {{'orientation', 2}, {'contrast', 5}};
-d.constraints = psy_trials('max_run', 'orientation', 'any', 3);
-h = psy_trials('open', d);
-ti = psy_trials('next', h);
+d.constraints = ysp_trials('max_run', 'orientation', 'any', 3);
+h = ysp_trials('open', d);
+ti = ysp_trials('next', h);
 while ~isempty(ti)
-    psy_trials('update', h, run_trial(ti.levels));   % levels: 1-based, per factor
-    ti = psy_trials('next', h);
+    ysp_trials('update', h, run_trial(ti.levels));   % levels: 1-based, per factor
+    ti = ysp_trials('next', h);
 end
-psy_trials('close', h);
+ysp_trials('close', h);
 ```
 
 Desc fields: `n_conditions`, `factors` (a cell of `{name, n_levels}` pairs,
@@ -592,16 +593,16 @@ takes `'list'` and `'with_replacement'`.
 factors, so a constraint names a column and a level by its value:
 
 ```matlab
-csv = fileread('conditions.csv');          % psy_table.h reads no files here
+csv = fileread('conditions.csv');          % ysp/table.h reads no files here
 d = struct('table', csv, 'participant', 7, 'rng', uint64(20261007));
 d.rules = sprintf(['order constrained\nreps 4\nwhere list=@participant\n' ...
                    'max_run target 3\nfollowed_by cue valid probe\n']);
-h = psy_trials('open', d);
-ti = psy_trials('next', h);
-row = psy_trials('values', h, ti.condition);  % struct: one field per column
+h = ysp_trials('open', d);
+ti = ysp_trials('next', h);
+row = ysp_trials('values', h, ti.condition);  % struct: one field per column
 ```
 
-`desc.rules` is the header's rules text (psy_trials.h, GRAMMAR), applied
+`desc.rules` is the header's rules text (ysp/trials.h, GRAMMAR), applied
 after the other fields. `desc.participant` is the participant number for
 `@participant`, `latin` and `balanced_latin`. `desc.groups` is
 `struct('factor', 'block', 'mode', 'blocked', 'order', 'balanced_latin')`;
@@ -612,20 +613,20 @@ binding converts it to UTF-8 before the parse; Octave's text is UTF-8
 already.
 
 **Jitter (v0.2.1).** `desc.jitters` is a struct array from
-`psy_trials('uniform', name, lo, hi [, rate])`,
-`psy_trials('choice', name, values [, rate])` and
-`psy_trials('exponential', name, lo, hi, scale [, rate])`: a duration in
+`ysp_trials('uniform', name, lo, hi [, rate])`,
+`ysp_trials('choice', name, values [, rate])` and
+`ysp_trials('exponential', name, lo, hi, scale [, rate])`: a duration in
 seconds drawn per trial from the session's generator, logged in
 `format_row` and reproduced by `restore` and `load`. `lo`, `hi` and `scale`
 may be a table column's name; `rate` is `NUM` or `[NUM DEN]` Hz and snaps the
 draws to whole frames.
 
 ```matlab
-d.jitters = [psy_trials('exponential', 'fp', 0.5, 2.0, 0.4, [60000 1001]), ...
-             psy_trials('uniform', 'iti', 0.8, 1.2)];
-h = psy_trials('open', d);
-ti = psy_trials('next', h);
-fp = psy_trials('jitter', h, ti.index, 'fp');   % fp.s, fp.ns (int64), fp.frames
+d.jitters = [ysp_trials('exponential', 'fp', 0.5, 2.0, 0.4, [60000 1001]), ...
+             ysp_trials('uniform', 'iti', 0.8, 1.2)];
+h = ysp_trials('open', d);
+ti = ysp_trials('next', h);
+fp = ysp_trials('jitter', h, ti.index, 'fp');   % fp.s, fp.ns (int64), fp.frames
 ```
 
 **Constraints** come from module commands. Put them in `desc.constraints`
@@ -645,16 +646,16 @@ factor name, or `'condition'` for the condition row. A level is 1-based, or
 | `'chunk', factor` | each run of rows with one value of `factor` runs as a unit (v0.2) |
 | `'balance', factor [, 'no_repeat'] [, 'no_leadin']` | every ordered pair of levels adjacent equally often (v0.2) |
 
-**Tracks.** A track is `{'stair', h}`, `{'quest', h}` or `{'gp', h}`, a
+**Tracks.** A track is `{'stair', h}`, `{'quest', h}` or `{'aep', h}`, a
 handle of one of the other modules, or a function handle that returns true
 when the track is done. The header asks each live track whether it is done
 from inside `next` and `done`. The binding answers with
-`psy_stair('done', h)` (or quest, gp). A closed track handle raises that
-module's error, for example `psy_stair:handle`, from `next`.
+`ysp_stair('done', h)` (or quest, aep). A closed track handle raises that
+module's error, for example `ysp_stair:handle`, from `next`.
 
 Why a call through the interpreter: the modules are separate shared
-libraries, each with its own handle table, so `psy_trials` cannot read the
-table of `psy_stair` in C. A shared table needs symbols exported across MEX
+libraries, each with its own handle table, so `ysp_trials` cannot read the
+table of `ysp_stair` in C. A shared table needs symbols exported across MEX
 files, and neither MATLAB nor Octave supports that portably. The call is
 safe, because the done test runs on the interpreter thread, inside the call
 that the script made. It costs one MEX call per live track per trial.
@@ -666,13 +667,13 @@ zeros. `record(h, i)` returns them as `uint8`, and `typecast` gets the value
 back:
 
 ```matlab
-psy_trials('update', h, r, level);                       % a double: 8 bytes
-level = typecast(psy_trials('record', h, i), 'double');
+ysp_trials('update', h, r, level);                       % a double: 8 bytes
+level = typecast(ysp_trials('record', h, i), 'double');
 ```
 
 | Command | Returns | Notes |
 |---|---|---|
-| `'open', desc` | handle | an impossible design fails here with `psy_trials:open` |
+| `'open', desc` | handle | an impossible design fails here with `ysp_trials:open` |
 | `'next', h` | struct, or `[]` when done | `index`, `condition` (0 for a track trial), `track` (0 for a condition trial), `rep`, `block` (0 for practice), `levels` (1-based, per factor), `first_in_block`, `after_break`, `practice`, `warmup`, `requeued`. The same trial until `update` or `requeue` |
 | `'update', h, outcome [, record]` | none | `outcome` >= 0, or -1 for no valid response |
 | `'requeue', h` | none | instead of `update`: schedule the condition again |
@@ -705,8 +706,8 @@ level = typecast(psy_trials('record', h, i), 'double');
    state:
 
    ```matlab
-   snap = psy_quest('save', h);
-   state = psy_quest('rng_state', h);          % only with an integer-seed rng
+   snap = ysp_quest('save', h);
+   state = ysp_quest('rng_state', h);          % only with an integer-seed rng
    save('session.mat', 'snap', 'state', 'desc');
    ```
 
@@ -716,36 +717,36 @@ level = typecast(psy_trials('record', h, i), 'double');
    ```matlab
    load('session.mat');
    desc.rng = state;                           % only with an integer-seed rng
-   h = psy_quest('load', snap, desc);
+   h = ysp_quest('load', snap, desc);
    ```
 
 The resumed session makes the same proposals and has the same posterior as
 the session that was not interrupted. This is also true when a proposal was
 pending at the save. The desc must agree with the snapshot on every number.
-A mismatch raises `psy_quest:load` with the header's message, which names
-the first field that differs. The same steps apply to `psy_gp` and
-`psy_trials`. With a function-handle generator, save and restore its state
+A mismatch raises `ysp_quest:load` with the header's message, which names
+the first field that differs. The same steps apply to `ysp_aep` and
+`ysp_trials`. With a function-handle generator, save and restore its state
 yourself.
 
-A `psy_trials` session with tracks also needs the state of each track.
-`psy_stair` has no snapshot: open each staircase again with its desc, and
+A `ysp_trials` session with tracks also needs the state of each track.
+`ysp_stair` has no snapshot: open each staircase again with its desc, and
 replay its `history` (`shown`, `response`) through `update`. A staircase is
-deterministic, so the replay restores it exactly. `psy_quest` and `psy_gp`
+deterministic, so the replay restores it exactly. `ysp_quest` and `ysp_aep`
 tracks have their own `save`.
 
 With an async session, stop it first (`async_stop`), then save.
 
 ## How to run the inference on a thread
 
-`psy_quest` and `psy_gp` can run the update and the selection (and for gp,
+`ysp_quest` and `ysp_aep` can run the update and the selection (and for aep,
 the threshold search) on a C thread. The frame loop then only polls.
 
 1. Open the handle as usual, then start the thread:
 
    ```matlab
-   h = psy_gp('open', desc);
-   psy_gp('async_start', h, struct('below_normal', true));
-   snap = psy_gp('async_poll', h);              % seq 0: the first stimulus
+   h = ysp_aep('open', desc);
+   ysp_aep('async_start', h, struct('below_normal', true));
+   snap = ysp_aep('async_poll', h);              % seq 0: the first stimulus
    ```
 
 2. For each trial, submit the response. Then poll once per frame until the
@@ -754,11 +755,11 @@ the threshold search) on a C thread. The frame loop then only polls.
    ```matlab
    while ~snap.done
        y = run_trial_frames(snap.x);
-       seq = psy_gp('async_submit', h, snap.x, y);
-       snap = psy_gp('async_poll', h);
+       seq = ysp_aep('async_submit', h, snap.x, y);
+       snap = ysp_aep('async_poll', h);
        while snap.seq < seq
            draw_one_frame();                    % Screen('Flip', ...) and so on
-           snap = psy_gp('async_poll', h);
+           snap = ysp_aep('async_poll', h);
        end
    end
    ```
@@ -766,46 +767,46 @@ the threshold search) on a C thread. The frame loop then only polls.
 3. Stop the thread. The handle is yours again:
 
    ```matlab
-   psy_gp('async_stop', h);
-   [thr, lo, hi] = psy_gp('threshold', h, 0.5);
+   ysp_aep('async_stop', h);
+   [thr, lo, hi] = ysp_aep('threshold', h, 0.5);
    ```
 
 Between `async_start` and `async_stop` the thread owns the handle, and every
-other command on it raises `psy_<name>:busy`. Read the snapshot instead.
+other command on it raises `ysp_<name>:busy`. Read the snapshot instead.
 `async_poll` is one atomic load and a struct copy. `async_wait(h, seq,
 timeout_s)` blocks for up to `timeout_s` seconds (default 1) and then raises
-`psy_<name>:timeout`. Nothing in the interpreter runs while it blocks, not
+`ysp_<name>:timeout`. Nothing in the interpreter runs while it blocks, not
 even Ctrl-C, so keep the timeout short. `async_submit` raises
-`psy_<name>:busy` when the queue is full. Nothing was queued, so submit the
+`ysp_<name>:busy` when the queue is full. Nothing was queued, so submit the
 same response again on the next frame.
 
 The thread is C and never calls the interpreter. So `async_start` refuses a
 handle whose `rng` is a function handle (use an integer seed), and
-`psy_quest` also refuses a MATLAB `pf_batch` under `no_table`.
+`ysp_quest` also refuses a MATLAB `pf_batch` under `no_table`.
 `async_submit_values` refuses a MATLAB `pf_batch`. A MATLAB `pf_batch` with
 a table is permitted, because the table is built before the thread starts.
 
 ## Verification
 
 [tests/compare/compare_quest_mquestplus.m](../../tests/compare/compare_quest_mquestplus.m)
-runs `psy_quest` and mQUESTPlus on the examples of Watson (2017) figures 2,
+runs `ysp_quest` and mQUESTPlus on the examples of Watson (2017) figures 2,
 3 and 4 and on the mQUESTPlus marginalization demo. It compares the
 selection and the posterior on every trial.
 [tests/compare/compare_stair_palamedes.m](../../tests/compare/compare_stair_palamedes.m)
-replays fixed response sequences through `psy_stair` and Palamedes
-`PAL_AMUD`, and runs `psy_quest` beside `PAL_AMPM` (Psi and Psi-marginal).
+replays fixed response sequences through `ysp_stair` and Palamedes
+`PAL_AMUD`, and runs `ysp_quest` beside `PAL_AMPM` (Psi and Psi-marginal).
 Both scripts print a table and raise an error on a disagreement beyond
 tolerance. The results in MATLAB R2023a:
 
 - mQUESTPlus: 0 of 424 selections differ. 32 selections are ties within
   6.9e-10 bits, and in each of them both picked the same stimulus. The
   posteriors agree within 4.3e-7, which is the float likelihood table of
-  `psy_quest.h`.
+  `ysp/quest.h`.
 - `PAL_AMPM`: identical selections over 60 trials each for Psi and
   Psi-marginal, and posteriors within 5.7e-8.
 - `PAL_AMUD`: eight configurations are identical, level for level and
   reversal for reversal. Two differences are Palamedes' design choices,
-  and the `psy_stair.h` manual states both: `PAL_AMUD` keeps the
+  and the `ysp/stair.h` manual states both: `PAL_AMUD` keeps the
   opposite-direction counter when a response causes no step, and a step
   that a caller changes after the reversing update applies one trial later
   than a schedule does.

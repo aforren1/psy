@@ -44,13 +44,13 @@ numbers below are the record.
    console text field active and the stimulus window gets the focus, the
    stimulus window's text input turns on: its keys leave the raw path
    (stamped 11.4 ms after they were sent instead of about 0.25 ms), and
-   `psy_screen.h` records nothing, because the backend calls SDL
-   directly and not `psyscr_text_input()` (section 5). A 15-line
+   `ysp/screen.h` records nothing, because the backend calls SDL
+   directly and not `yscr_text_input()` (section 5). A 15-line
    replacement for `platform_io.Platform_SetImeDataFn` fixes it: the
-   console window only, or `psyscr_text_input()` for an overlay.
+   console window only, or `yscr_text_input()` for an overlay.
 4. **Use the overlay (configuration b) for development only.** ImGui in
    the stimulus window did not cost a flip either, but it adds 0.1 to
-   0.3 ms of CPU inside `psyscr_flip_at()` and 0.1 to 1.1 ms of GPU time
+   0.3 ms of CPU inside `yscr_flip_at()` and 0.1 to 1.1 ms of GPU time
    to the timed frame, its pixels are device values that bypass the
    calibration (section 4), and a participant sees it.
 5. **Put the console on the frame thread only while it stays this
@@ -77,7 +77,7 @@ numbers below are the record.
 - AC power. Auto color management on (`color=wcg` in the describe line).
   DWM composes the desktop; the timed window is kept on top.
 - ANGLE 2.1.23876 (git fffbc739779a), the copy in Docker Desktop's
-  front end. SDL 3.4.0. `psy_screen.h` v0.3.2, `psy_gfx.h` at the
+  front end. SDL 3.4.0. `ysp/screen.h` v0.3.2, `ysp/gfx.h` at the
   tree of 2026-10-07.
 - cimgui master `125f397` (2026-09-14) with its Dear ImGui submodule at
   v1.92.9b, docking branch (`b48d1af`). cimgui's own `cimconfig.h`, which
@@ -99,17 +99,17 @@ numbers below are the record.
 
 ### The timed window
 
-`psy_screen.h` and `psy_gfx.h` as a rig uses them: an 800 x 600 window at
+`ysp/screen.h` and `ysp/gfx.h` as a rig uses them: an 800 x 600 window at
 (40, 120), kept on top and in the foreground, a 0.30 gray background
 and four drifting gabors at contrast 0.3 (the console's sliders drive
-them). Each frame: `psyscr_begin()`, `psygfx_begin/draw/end`,
-`psyscr_flip_at(f.onset)`. The flip records come from `f.done`; the
+them). Each frame: `yscr_begin()`, `ygfx_begin/draw/end`,
+`yscr_flip_at(f.onset)`. The flip records come from `f.done`; the
 header's cost from its trace zones, as in `examples/screen_flipstats.c`.
 GPU time is a pair of D3D11 timestamp queries on the screen's own device
-(`psyscr_native()`): one after `psyscr_begin()`, one in the present
+(`yscr_native()`): one after `yscr_begin()`, one in the present
 callback, read 8 frames later without a flush. These are D3D11 calls
 beside ANGLE, not ANGLE's `GL_EXT_disjoint_timer_query`, which cost 115
-to 140 us a frame in docs/psy_screen.md; their own CPU cost was not
+to 140 us a frame in docs/screen.md; their own CPU cost was not
 measured apart, but the header's zones were the same as in earlier
 runs without them. The first 120 frames are warm-up and are not in the
 tables.
@@ -126,8 +126,8 @@ not over it. The probe makes its own D3D11 device on the timed screen's
 adapter (by LUID), a `DXGI_SWAP_EFFECT_FLIP_DISCARD` swapchain with 2
 buffers, a frame latency waitable object and a maximum latency of 1, and
 an ANGLE context on a client-buffer pbuffer, the same way
-`psy_screen.h`'s DXGI_FLIP backend does (the probe calls the header's
-private EGL loader). After `psyscr_flip_at()` returns, the frame thread
+`ysp/screen.h`'s DXGI_FLIP backend does (the probe calls the header's
+private EGL loader). After `yscr_flip_at()` returns, the frame thread
 does one console frame:
 
 1. `WaitForSingleObject(waitable, 0)`; if no slot is free, skip the
@@ -139,9 +139,9 @@ does one console frame:
    `ImGui_ImplOpenGL3_RenderDrawData`, `glFlush`;
 5. `Present(1, DXGI_PRESENT_DO_NOT_WAIT)`.
 
-The next `psyscr_begin()` makes the timed context current again (its
+The next `yscr_begin()` makes the timed context current again (its
 acquire does that every frame). Events: the frame loop reads every event
-with `psyscr_poll()` and passes the ones whose window id is the
+with `yscr_poll()` and passes the ones whose window id is the
 console's to `ImGui_ImplSDL3_ProcessEvent()`.
 
 With the timed window fullscreen, the console window was behind it
@@ -152,11 +152,11 @@ composition on a second display.
 ### Configuration (b): the overlay
 
 The same panels, scaled to the window, drawn into the timed window: the
-UI is built after `psygfx_end()` (so it counts in the DRAW phase), and
-`ImGui_ImplOpenGL3_RenderDrawData()` runs in `psyscr_on_present()`,
-after `psy_gfx.h`'s output stage and before the header's flush,
-photodiode patch and codes. `psy_gfx.h` drops its GL state cache when
-`psyscr_gl_epoch()` moves, so the backend's state changes do not leak
+UI is built after `ygfx_end()` (so it counts in the DRAW phase), and
+`ImGui_ImplOpenGL3_RenderDrawData()` runs in `yscr_on_present()`,
+after `ysp/gfx.h`'s output stage and before the header's flush,
+photodiode patch and codes. `ysp/gfx.h` drops its GL state cache when
+`yscr_gl_epoch()` moves, so the backend's state changes do not leak
 into the next frame.
 
 ### The panels
@@ -182,7 +182,7 @@ All panels update every frame (60 Hz).
 ### Row order
 
 ANGLE's client-buffer pbuffer puts GL row 0 at the top of the screen
-(psy_screen.h, GL STATE). The stock OpenGL3 backend assumes the
+(ysp/screen.h, GL STATE). The stock OpenGL3 backend assumes the
 opposite. The probe mirrors the vertex y and the clip rectangles of the
 draw data before `RenderDrawData` (2 us idle, 13 to 23 us mean busy on
 the console; up to 2.1 ms once). A screenshot confirmed upright text.
@@ -203,7 +203,7 @@ should do the same with no CPU pass; not tried.
 The renderer is the stock `imgui_impl_opengl3.cpp` with
 `IMGUI_IMPL_OPENGL_ES3` on ANGLE's GL ES 3.0, through a shim
 `GLES3/gl3.h` that declares 63 function pointers and loads them with
-`psyscr_gl_proc()`. The pointers serve both contexts, because they are
+`yscr_gl_proc()`. The pointers serve both contexts, because they are
 ANGLE's context-dispatching entry points. ES 3.0 has no
 `glDrawElementsBaseVertex`, so the backend does not set
 `RendererHasVtxOffset`: a single ImGui window must stay under 65,536
@@ -219,11 +219,11 @@ cimgui notes for a C player:
 - Vector arguments are `ImVec2_c` values; C has no default arguments, so
   every call passes every argument.
 
-An ImGui renderer written on `psy_gfx.h` calls was not built: ImGui needs
+An ImGui renderer written on `ysp/gfx.h` calls was not built: ImGui needs
 indexed textured triangles with per-vertex color and a scissor per draw
-command, and `psy_gfx.h` draws quads, instances and curve runs. On one
+command, and `ysp/gfx.h` draws quads, instances and curve runs. On one
 GL context the stock backend works, because the present callback and
-`psyscr_gl_epoch()` already isolate a foreign renderer.
+`yscr_gl_epoch()` already isolate a foreign renderer.
 
 ## 2. Configurations against the timed window
 
@@ -266,9 +266,9 @@ windowed DXGI_FLIP run with or without ImGui, and 0 fullscreen. Early
 flips (3 to 6) and estimated records (1 to 2) on windowed DXGI_FLIP were
 the same with and without ImGui.
 
-The header's own cost did not change: `psyscr_begin()` minus its wait
+The header's own cost did not change: `yscr_begin()` minus its wait
 was 6.2 to 10.6 us mean and 14.8 to 23.4 us p99 in every run;
-`psyscr_flip_at()` minus the present call was 1.9 to 2.2 us mean
+`yscr_flip_at()` minus the present call was 1.9 to 2.2 us mean
 without the overlay (with it, the callback's render is in that zone).
 
 ### 2.1 What the covered console did to a fullscreen window
@@ -287,7 +287,7 @@ path changes, not only drops.
 In the DXGI_FLIP console-busy run, one frame's GPU time was 31.9 ms on
 the timed device and, on the same frame, 31.5 ms on the console's
 device; that frame was a vblank late (prediction error 16.7 ms), and
-`psyscr_flip_at()` took 16.9 ms once. A stall that both devices see is
+`yscr_flip_at()` took 16.9 ms once. A stall that both devices see is
 GPU-wide: the console's own work was 0.9 ms mean on that run. One event
 in 3 minutes does not say whether the console caused it. Section 2.3
 has the longer pair.
@@ -314,7 +314,7 @@ in microseconds:
 
 | Part | COMPOSITION idle | COMPOSITION busy | DXGI_FLIP idle | DXGI_FLIP busy | fullscreen, covered, busy |
 |---|---|---|---|---|---|
-| All, after `psyscr_flip_at()` returns | 518 / 1127 / 2560 | 881 / 1735 / 3228 | 516 / 950 / 2671 | 928 / 1754 / 3900 | 872 / 1457 / 2814 |
+| All, after `yscr_flip_at()` returns | 518 / 1127 / 2560 | 881 / 1735 / 3228 | 516 / 950 / 2671 | 928 / 1754 / 3900 | 872 / 1457 / 2814 |
 | UI build (NewFrame to igRender) | 138 / 287 / 662 | 257 / 542 / 2072 | 135 / 263 / 2291 | 278 / 663 / 2379 | 256 / 470 / 978 |
 | `Present(1, DO_NOT_WAIT)` | 124 / 288 / 539 | 120 / 280 / 604 | 132 / 270 / 524 | 130 / 322 / 1574 | 135 / 240 / 2036 |
 | Console GPU | 415 / 690 / 1851 | 1030 / 1559 / 4261 | 303 / 572 / 1475 | 893 / 1544 / 31502 | 779 / 1155 / 2013 |
@@ -375,9 +375,9 @@ are meant as the sRGB code values the display shows.
   DWM shows as sRGB, as it shows every other window. The calibration of
   the stimulus display does not apply to it.
 - **(b) bypasses the calibration.** Drawn in the present callback, ImGui
-  writes framebuffer 0 after `psy_gfx.h`'s output stage, so its values
-  reach the display as device codes. Measured with `psygfx_read_output()`
-  on one frame: a `psy_gfx.h` rect at scene value 0.5 and an ImGui window
+  writes framebuffer 0 after `ysp/gfx.h`'s output stage, so its values
+  reach the display as device codes. Measured with `ygfx_read_output()`
+  on one frame: a `ysp/gfx.h` rect at scene value 0.5 and an ImGui window
   at color 0.5 both gave code 128 with the identity CLUT; with a CLUT of
   v^(1/2.2) the rect gave 186 and the ImGui window still 128.
   This is the correct place for a UI: drawn into the float scene, ImGui's
@@ -390,7 +390,7 @@ are meant as the sRGB code values the display shows.
 ## 5. Input
 
 SDL keeps one event queue per process and pumps it on the thread that
-made the windows. `psyscr_begin()` and `psyscr_poll()` pump it, so the
+made the windows. `yscr_begin()` and `yscr_poll()` pump it, so the
 console's events arrive on the frame thread with the others; the frame
 loop passes the console's (by window id) to ImGui. Keys go to the window
 with the keyboard focus. SDL 3.4 turns the raw keyboard path off per
@@ -411,30 +411,30 @@ active with `igSetKeyboardFocusHere`. Keys stamped minus sent, ms:
 - While the console has the focus, the stimulus window gets no keys at
   all. On a one-keyboard rig the participant's keys go wherever the
   operator last clicked; reaction times belong on a response box
-  (`psy_serial.h`) for that reason too.
+  (`ysp/serial.h`) for that reason too.
 - The stock backend's `ImGui_ImplSDL3_UpdateIme()` runs in every
   `ImGui_ImplSDL3_NewFrame()` and starts text input on
   `SDL_GetKeyboardFocus()`, whichever window that is. With an active
   ImGui text field, a focus change to the stimulus window turned that
   window's text input on: its keys went through the message path and
   were stamped 11.4 ms after they were sent (p50), not 0.2 ms. No
-  `PSYSCR_EV_TEXT_INPUT` record and no `PSYSCR_FLIP_TEXT_INPUT` flag
+  `YSCR_EV_TEXT_INPUT` record and no `YSCR_FLIP_TEXT_INPUT` flag
   showed it.
 - The fix is a replacement `Platform_SetImeDataFn`, set after
   `ImGui_ImplSDL3_InitForOther()` and before the first frame (the
   backend keeps the last IME data it saw, so swapping later keeps the
   bug): for the console it starts and stops text input on the console's
-  window only; for the overlay it calls `psyscr_text_input()`. With
+  window only; for the overlay it calls `yscr_text_input()`. With
   the overlay, the stock handler left text input on with 0 ring records
-  and 0 flagged flips; the routed one gave 1 `PSYSCR_EV_TEXT_INPUT`
-  record and 278 flips flagged `PSYSCR_FLIP_TEXT_INPUT`.
-- `psyscr_text_input()` (v0.3.2) acts on a `psy_screen.h` window. The
+  and 0 flagged flips; the routed one gave 1 `YSCR_EV_TEXT_INPUT`
+  record and 278 flips flagged `YSCR_FLIP_TEXT_INPUT`.
+- `yscr_text_input()` (v0.3.2) acts on a `ysp/screen.h` window. The
   console window is not one, so the console handler calls
   `SDL_StartTextInput(console)` itself. An untimed screen kind in
-  `psy_screen.h` could give the console the same call and records.
+  `ysp/screen.h` could give the console the same call and records.
 - Focus changes moved the timed window between paths (13 path changes
   in each 10-second input test on COMPOSITION).
-- `psy_screen.h` sees Shift+Esc through an SDL event watch, which sees
+- `ysp/screen.h` sees Shift+Esc through an SDL event watch, which sees
   the events of every window, so by its manual the abort combination
   also works with the console focused. Not tested.
 

@@ -5,12 +5,12 @@
  * --mode-test, fullscreen in another display mode) and sends Shift+Esc to
  * it. The cases:
  *   live    the child's frame loop runs and reads its events with
- *           psyscr_poll() before begin(). Esc alone must not abort; one
+ *           yscr_poll() before begin(). Esc alone must not abort; one
  *           Shift+Esc is one abort; Shift+Esc held with 8 repeats is one
  *           press; 3 presses in 1 s are 3 aborts and no panic, because the
  *           loop reported the first. The child exits 0.
  *   hang    the frame loop stops (a hang) 1 s after it started; 3 presses
- *           must end the child with PSYSCR_PANIC_EXIT_CODE, after its panic
+ *           must end the child with YSCR_PANIC_EXIT_CODE, after its panic
  *           callback ran and the gamma entry was restored.
  *   ghost   the same after a 7 s hang, when Windows has put a ghost window
  *           in front of the hung one.
@@ -29,9 +29,9 @@
  */
 /* The test seam: arm the watchdog in a window, so no case but --mode-test
  * goes fullscreen. */
-#define PSYSCR__PANIC_WINDOWED 1
-#define PSY_SCREEN_IMPLEMENTATION
-#include "psy_screen.h"
+#define YSCR__PANIC_WINDOWED 1
+#define YSP_SCREEN_IMPLEMENTATION
+#include "ysp/screen.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,16 +50,16 @@ int main(void) { printf("screen_abort: Windows only\n"); return 0; }
 
 /* --- the child ------------------------------------------------------------- */
 
-static psyscr_screen g_scr;
-static unsigned char g_ring_mem[PSYRT_RING_BYTES(256)];
-static psyrt_ring g_ring;
+static yscr_screen g_scr;
+static unsigned char g_ring_mem[YRT_RING_BYTES(256)];
+static yrt_ring g_ring;
 static int g_fake_gamma = -1;
 
 static void last_words(void* ctx) {
     (void)ctx;
     printf("last words: %.1f ms into the panic, gamma_claimed=%d\n",
-           (double)((int64_t)psyrt_now_ns() - psyscr__wd.t_panic) / 1e6,
-           g_fake_gamma >= 0 ? psyscr__gamma[g_fake_gamma].used == 0 : -1);
+           (double)((int64_t)yrt_now_ns() - yscr__wd.t_panic) / 1e6,
+           g_fake_gamma >= 0 ? yscr__gamma[g_fake_gamma].used == 0 : -1);
     fflush(stdout);
 }
 
@@ -73,32 +73,32 @@ static void fake_gamma(void) {
     int k;
     memset(&mi, 0, sizeof mi);
     mi.cbSize = sizeof mi;
-    psyscr__win_load();   /* gdi32 by name, as the header does */
-    if (!GetMonitorInfoW(mon, (LPMONITORINFO)&mi) || !psyscr__win.create_dc) return;
-    dc = psyscr__win.create_dc(mi.szDevice, NULL, NULL, NULL);
-    for (k = 0; k < PSYSCR__GAMMA_MAX && psyscr__gamma[k].used; k++) { }
-    if (dc && k < PSYSCR__GAMMA_MAX && psyscr__win.get_ramp(dc, psyscr__gamma[k].saved)) {
-        memcpy(psyscr__gamma[k].dev, mi.szDevice, sizeof psyscr__gamma[k].dev);
-        psyscr__gamma[k].used = 1;
+    yscr__win_load();   /* gdi32 by name, as the header does */
+    if (!GetMonitorInfoW(mon, (LPMONITORINFO)&mi) || !yscr__win.create_dc) return;
+    dc = yscr__win.create_dc(mi.szDevice, NULL, NULL, NULL);
+    for (k = 0; k < YSCR__GAMMA_MAX && yscr__gamma[k].used; k++) { }
+    if (dc && k < YSCR__GAMMA_MAX && yscr__win.get_ramp(dc, yscr__gamma[k].saved)) {
+        memcpy(yscr__gamma[k].dev, mi.szDevice, sizeof yscr__gamma[k].dev);
+        yscr__gamma[k].used = 1;
         g_fake_gamma = k;
     }
-    if (dc) psyscr__win.delete_dc(dc);
+    if (dc) yscr__win.delete_dc(dc);
 }
 
 static int child(int argc, char** argv) {
-    psyscr_desc d;
-    psyscr_frame f;
+    yscr_desc d;
+    yscr_frame f;
     int i, hang = 0, aborts = 0, presses = 0;
     int64_t hang_after = 1000000000LL, until, t0;
     void (GLCALL *clear_color)(float, float, float, float);
     void (GLCALL *clear)(unsigned int);
     char line[600];
     {
-        psyrt_ring_desc rd;
+        yrt_ring_desc rd;
         memset(&rd, 0, sizeof rd);
         rd.memory = g_ring_mem;
         rd.bytes = sizeof g_ring_mem;
-        psyrt_ring_open(&g_ring, &rd);
+        yrt_ring_open(&g_ring, &rd);
     }
     memset(&d, 0, sizeof d);
     d.ring = &g_ring;
@@ -116,12 +116,12 @@ static int child(int argc, char** argv) {
             d.mode.refresh_num = atoi(argv[++i]); d.mode.refresh_den = atoi(argv[++i]);
         }
     }
-    if (!psyscr_open(&g_scr, &d)) { printf("child: %s\n", psyscr_error(&g_scr)); return 1; }
+    if (!yscr_open(&g_scr, &d)) { printf("child: %s\n", yscr_error(&g_scr)); return 1; }
     if (d.windowed) fake_gamma();
-    psyscr_describe(&g_scr, line, sizeof line);
+    yscr_describe(&g_scr, line, sizeof line);
     printf("child: %s\n", line);
-    clear_color = (void (GLCALL*)(float, float, float, float))psyscr_gl_proc(&g_scr, "glClearColor");
-    clear = (void (GLCALL*)(unsigned int))psyscr_gl_proc(&g_scr, "glClear");
+    clear_color = (void (GLCALL*)(float, float, float, float))yscr_gl_proc(&g_scr, "glClearColor");
+    clear = (void (GLCALL*)(unsigned int))yscr_gl_proc(&g_scr, "glClear");
     {   /* the foreground, as screen_input.c gets it */
         INPUT in;
         memset(&in, 0, sizeof in);
@@ -130,34 +130,34 @@ static int child(int argc, char** argv) {
         SendInput(1, &in, sizeof in);
         SetForegroundWindow((HWND)g_scr.hwnd);
     }
-    t0 = (int64_t)psyrt_now_ns();
+    t0 = (int64_t)yrt_now_ns();
     until = t0 + (hang ? hang_after : 9000000000LL);
     printf("ready %lu\n", (unsigned long)GetCurrentProcessId());
     fflush(stdout);
-    while ((int64_t)psyrt_now_ns() < until) {
+    while ((int64_t)yrt_now_ns() < until) {
         SDL_Event ev;
         int rc;
-        while (psyscr_poll(&g_scr, &ev, NULL)) { }   /* the events read before begin() */
-        rc = psyscr_begin(&g_scr, &f);
-        if (rc == PSYSCR_QUIT) {
+        while (yscr_poll(&g_scr, &ev, NULL)) { }   /* the events read before begin() */
+        rc = yscr_begin(&g_scr, &f);
+        if (rc == YSCR_QUIT) {
             aborts++;
             presses += f.abort_presses;
             printf("abort mask=0x%x presses=%d t=%lld\n", f.abort, f.abort_presses, (long long)f.abort_ns);
             {   /* who saw each: flags 1 the watchdog's hook, 4 SDL, 2 injected */
-                psyrt_event ev2[32];
-                int j, n = psyrt_ring_drain(&g_ring, ev2, 32);
+                yrt_event ev2[32];
+                int j, n = yrt_ring_drain(&g_ring, ev2, 32);
                 for (j = 0; j < n; j++)
-                    if (ev2[j].kind == PSYSCR_EV_ABORT)
+                    if (ev2[j].kind == YSCR_EV_ABORT)
                         printf("  record reason=0x%x flags=0x%x t=%lld\n", ev2[j].u.u32[0], ev2[j].u.u32[1],
                                (long long)ev2[j].t_ns);
             }
             fflush(stdout);
             continue;
         }
-        if (rc != PSYSCR_OK) { printf("child: begin %s\n", psyscr_strerror(rc)); break; }
+        if (rc != YSCR_OK) { printf("child: begin %s\n", yscr_strerror(rc)); break; }
         clear_color(0.12f, 0.12f, 0.12f, 1.0f);
         clear(0x4000u);
-        psyscr_flip(&g_scr);
+        yscr_flip(&g_scr);
     }
     if (hang) {
         printf("hanging\n");
@@ -166,7 +166,7 @@ static int child(int argc, char** argv) {
     }
     printf("live done aborts=%d presses=%d\n", aborts, presses);
     fflush(stdout);
-    psyscr_close(&g_scr);
+    yscr_close(&g_scr);
     return 0;
 }
 
@@ -258,7 +258,7 @@ static int64_t press(const kid* k, int shift, int repeats) {
     int i;
     if (!child_in_front(k)) { printf("  the child is not in front: no key sent\n"); return 0; }
     if (shift) key(VK_LSHIFT, 0);
-    t = (int64_t)psyrt_now_ns();
+    t = (int64_t)yrt_now_ns();
     key(VK_ESCAPE, 0);
     for (i = 0; i < repeats; i++) { Sleep(30); key(VK_ESCAPE, 0); }
     key(VK_ESCAPE, 1);
@@ -303,11 +303,11 @@ static double three(kid* k, DWORD* code) {
         m.dmSize = sizeof m;
         if (g_mode_back_ms < 0 && g_desk_w && EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &m) &&
             m.dmPelsWidth == g_desk_w)
-            g_mode_back_ms = (double)((int64_t)psyrt_now_ns() - t) / 1e6;
-        if ((int64_t)psyrt_now_ns() - t > 5000000000LL) return -1;
+            g_mode_back_ms = (double)((int64_t)yrt_now_ns() - t) / 1e6;
+        if ((int64_t)yrt_now_ns() - t > 5000000000LL) return -1;
     }
     GetExitCodeProcess(k->pi.hProcess, code);
-    return (double)((int64_t)psyrt_now_ns() - t) / 1e6;
+    return (double)((int64_t)yrt_now_ns() - t) / 1e6;
 }
 
 static void case_live(void) {
@@ -356,7 +356,7 @@ static void case_hang(const char* name, const char* args, DWORD wait_ms) {
     drain(&k);
     printf("  third press to exit: %.1f ms, exit code %lu\n", ms, (unsigned long)code);
     printf("%s", k.buf);
-    verdict(name, code == PSYSCR_PANIC_EXIT_CODE && strstr(k.buf, "gamma_claimed=1") != NULL);
+    verdict(name, code == YSCR_PANIC_EXIT_CODE && strstr(k.buf, "gamma_claimed=1") != NULL);
     finish(&k);
 }
 
@@ -371,7 +371,7 @@ static void case_held(void) {
     Sleep(1500);
     verdict("held: no panic", WaitForSingleObject(k.pi.hProcess, 0) == WAIT_TIMEOUT);
     three(&k, &code);   /* and end it */
-    verdict("held: then 3 presses panic", code == PSYSCR_PANIC_EXIT_CODE);
+    verdict("held: then 3 presses panic", code == YSCR_PANIC_EXIT_CODE);
     finish(&k);
 }
 
@@ -382,15 +382,15 @@ static int mode_now(DEVMODEW* m) {
 }
 
 static void case_mode(void) {
-    psyscr_mode modes[64], desk;
-    psyscr_display_info di;
+    yscr_mode modes[64], desk;
+    yscr_display_info di;
     DEVMODEW before, after;
     char args[128];
     kid k;
     DWORD code = 0;
     double ms;
-    int i, n = psyscr_modes(0, modes, 64), pick = -1;
-    if (psyscr_displays(&di, 1) < 1) { verdict("mode", 0); return; }
+    int i, n = yscr_modes(0, modes, 64), pick = -1;
+    if (yscr_displays(&di, 1) < 1) { verdict("mode", 0); return; }
     desk = di.desktop;
     for (i = 0; i < n && i < 64; i++)
         if ((modes[i].w != desk.w || modes[i].h != desk.h) && modes[i].refresh_num * (int64_t)desk.refresh_den ==
@@ -420,7 +420,7 @@ static void case_mode(void) {
     printf("%s", k.buf);
     printf("  third press to exit: %.1f ms, exit code %lu; after: %lux%lu@%lu\n", ms, (unsigned long)code,
            (unsigned long)after.dmPelsWidth, (unsigned long)after.dmPelsHeight, (unsigned long)after.dmDisplayFrequency);
-    verdict("mode", code == PSYSCR_PANIC_EXIT_CODE && after.dmPelsWidth == before.dmPelsWidth &&
+    verdict("mode", code == YSCR_PANIC_EXIT_CODE && after.dmPelsWidth == before.dmPelsWidth &&
                     after.dmPelsHeight == before.dmPelsHeight && after.dmDisplayFrequency == before.dmDisplayFrequency);
     finish(&k);
     if (after.dmPelsWidth != before.dmPelsWidth || after.dmPelsHeight != before.dmPelsHeight) {

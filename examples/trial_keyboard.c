@@ -1,5 +1,5 @@
 /* trial_keyboard.c - the jsPsych html-keyboard-response trial as a small
- * experiment: psy_trials.h, psy_timeline.h, psy_gfx.h and psy_response.h.
+ * experiment: ysp/trials.h, ysp/timeline.h, ysp/gfx.h and ysp/response.h.
  *
  * Each trial: a fixation cross for 0.5 s, then a circle or a square until
  * a response or 1.5 s; F for the circle, J for the square (the physical
@@ -9,7 +9,7 @@
  * inter-trial interval drawn from 0.8 to 1.2 s in whole frames.
  *
  * The conditions are a CSV string (stimulus,key_answer), read by
- * psy_table.h and run by psy_trials.h in a random order. RT runs from the
+ * ysp/table.h and run by ysp/trials.h in a random order. RT runs from the
  * stimulus's flip onset (the OS's vblank time of the frame it landed on),
  * not from when the program started listening, and the data row says how
  * good that onset is (its tier) and how far the stimulus landed from its
@@ -17,7 +17,7 @@
  *
  * The data file has one row per trial. Columns with jsPsych's names where
  * they match: trial_index, stimulus, key_answer, response, rt, correct,
- * rt_key_duration; then psy's: onset_tier, onset_src, landing_residual,
+ * rt_key_duration; then ysp's: onset_tier, onset_src, landing_residual,
  * onset_frame, rsp_tier, rsp_flags, n_anticipations, n_duplicates, iti.
  * Times in seconds. A '#' line before the header has the session's
  * settings. Shift+Esc stops the session; the rows so far are kept.
@@ -25,7 +25,7 @@
  * --sim runs on the simulated display with a synthetic participant (no
  * keyboard): a correct response, an anticipation then a response, a wrong
  * key reported twice 9 ms apart (the pattern SDL 3.4 gives for a
- * virtual-key tap, docs/psy_response.md), a timeout, and two more correct
+ * virtual-key tap, docs/response.md), a timeout, and two more correct
  * responses. It checks its own results and exits 1 on a mismatch. CI runs
  * it. The simulated display runs on the real clock: about 15 s.
  *
@@ -39,14 +39,14 @@
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS
 #endif
-#define PSY_GFX_IMPLEMENTATION
-#include "psy_gfx.h"
-#define PSY_TIMELINE_IMPLEMENTATION
-#include "psy_timeline.h"
-#define PSY_TRIALS_IMPLEMENTATION
-#include "psy_trials.h"
-#define PSY_RESPONSE_IMPLEMENTATION
-#include "psy_response.h"
+#define YSP_GFX_IMPLEMENTATION
+#include "ysp/gfx.h"
+#define YSP_TIMELINE_IMPLEMENTATION
+#include "ysp/timeline.h"
+#define YSP_TRIALS_IMPLEMENTATION
+#include "ysp/trials.h"
+#define YSP_RESPONSE_IMPLEMENTATION
+#include "ysp/response.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -68,7 +68,7 @@ static const char conditions_csv[] =
     "circle,f\n"
     "square,j\n";
 
-static const psyrsp_choice keys[] = { { .key = "f" }, { .key = "j" } };
+static const yrsp_choice keys[] = { { .key = "f" }, { .key = "j" } };
 
 /* The synthetic participant of --sim, by trial number: presses at `at` s
  * after the stimulus onset, held `hold` s; `twice` reports it a second
@@ -85,35 +85,35 @@ static const sim_press sim_script[] = {
 };
 #define SIM_TRIALS 6
 
-static psyscr_screen scr;
-static psygfx_gfx gfx;
-static psytl_timeline tl;
-static psytl_event storage[64];
-static psytr_trials trials;                  /* about 100 KB: not the stack */
-static psyrsp_collector rsp;
+static yscr_screen scr;
+static ygfx_gfx gfx;
+static ytl_timeline tl;
+static ytl_event storage[64];
+static ytr_trials trials;                  /* about 100 KB: not the stack */
+static yrsp_collector rsp;
 static uint64_t table_arena[2048];
-static psytb_table tab;
+static ytb_table tab;
 
-static psygfx_stim fix, circle, square, fb_right, fb_wrong, fb_none;
-static const psygfx_bind binds[] = {
-    { .stim = &fix,      .param = PSYGFX_P_VISIBLE, .channel = FIX_ON    },
-    { .stim = &circle,   .param = PSYGFX_P_VISIBLE, .channel = CIRCLE_ON },
-    { .stim = &square,   .param = PSYGFX_P_VISIBLE, .channel = SQUARE_ON },
-    { .stim = &fb_right, .param = PSYGFX_P_VISIBLE, .channel = FB_RIGHT  },
-    { .stim = &fb_wrong, .param = PSYGFX_P_VISIBLE, .channel = FB_WRONG  },
-    { .stim = &fb_none,  .param = PSYGFX_P_VISIBLE, .channel = FB_NONE   },
+static ygfx_stim fix, circle, square, fb_right, fb_wrong, fb_none;
+static const ygfx_bind binds[] = {
+    { .stim = &fix,      .param = YGFX_P_VISIBLE, .channel = FIX_ON    },
+    { .stim = &circle,   .param = YGFX_P_VISIBLE, .channel = CIRCLE_ON },
+    { .stim = &square,   .param = YGFX_P_VISIBLE, .channel = SQUARE_ON },
+    { .stim = &fb_right, .param = YGFX_P_VISIBLE, .channel = FB_RIGHT  },
+    { .stim = &fb_wrong, .param = YGFX_P_VISIBLE, .channel = FB_WRONG  },
+    { .stim = &fb_none,  .param = YGFX_P_VISIBLE, .channel = FB_NONE   },
 };
 
-static psygfx_stim shape(psygfx_shape_kind kind, float w, float p0, float r, float g, float b) {
-    psygfx_shape_desc d;
+static ygfx_stim shape(ygfx_shape_kind kind, float w, float p0, float r, float g, float b) {
+    ygfx_shape_desc d;
     memset(&d, 0, sizeof d);
     d.shape = kind;
     d.w = d.h = w;
     d.shape_p[0] = p0;
-    d.edge = PSYGFX_EDGE_COSINE;
+    d.edge = YGFX_EDGE_COSINE;
     d.edge_width = 1;
     d.color[0] = r; d.color[1] = g; d.color[2] = b;
-    return psygfx_shape(&d);
+    return ygfx_shape(&d);
 }
 
 static void sec(char* out, size_t cap, double s) {
@@ -122,20 +122,20 @@ static void sec(char* out, size_t cap, double s) {
 }
 
 int main(int argc, char** argv) {
-    psyscr_desc sd;
-    psygfx_desc gd;
-    psytl_desc td;
-    psytb_csv_desc cd;
-    psytr_desc rd;
-    psyrsp_desc pd;
-    psyrsp_sdl_ctx sdl;
-    psyrsp_source sources[1];
-    psyscr_caps caps;
-    psyscr_frame f;
-    psytl_event fired[16];
-    psytr_trial_info ti = { 0 };
-    psyrsp_result res, sim_res[SIM_TRIALS];
-    psyrsp_input sim_ev[16];
+    yscr_desc sd;
+    ygfx_desc gd;
+    ytl_desc td;
+    ytb_csv_desc cd;
+    ytr_desc rd;
+    yrsp_desc pd;
+    yrsp_sdl_ctx sdl;
+    yrsp_source sources[1];
+    yscr_caps caps;
+    yscr_frame f;
+    ytl_event fired[16];
+    ytr_trial_info ti = { 0 };
+    yrsp_result res, sim_res[SIM_TRIALS];
+    yrsp_input sim_ev[16];
     FILE* out;
     char line[1024], meta[2048];
     const char* out_path = "trial_keyboard.csv";
@@ -160,24 +160,24 @@ int main(int argc, char** argv) {
     }
     if (reps == 0) reps = sim ? SIM_TRIALS / 2 : 10;
     if (reps < 1 || reps > 100) { fprintf(stderr, "trial_keyboard: --reps takes 1..100\n"); return 2; }
-    if (sim) sd.backend = PSYSCR_BACKEND_SIM;
+    if (sim) sd.backend = YSCR_BACKEND_SIM;
     sd.windowed = !fullscreen;
 
     /* the display first: the inter-trial interval snaps to its rate */
-    if (!psyscr_open(&scr, &sd)) { fprintf(stderr, "trial_keyboard: %s\n", psyscr_error(&scr)); return 1; }
-    psyscr_get_caps(&scr, &caps);
+    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "trial_keyboard: %s\n", yscr_error(&scr)); return 1; }
+    yscr_get_caps(&scr, &caps);
     rate_num = caps.mode.refresh_num ? caps.mode.refresh_num : 60;
     rate_den = caps.mode.refresh_num ? caps.mode.refresh_den : 1;
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.5f;
-    if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "trial_keyboard: %s\n", psygfx_error(&gfx)); return 1; }
-    fix = shape(PSYGFX_CROSS, 16, 3, 0.2f, 0.2f, 0.2f);
-    circle = shape(PSYGFX_CIRCLE, 120, 0, 0.9f, 0.9f, 0.9f);
-    square = shape(PSYGFX_RECT, 106, 0, 0.9f, 0.9f, 0.9f);
-    fb_right = shape(PSYGFX_ANNULUS, 60, 24, 0.1f, 0.7f, 0.1f);
-    fb_wrong = shape(PSYGFX_ANNULUS, 60, 24, 0.8f, 0.1f, 0.1f);
-    fb_none = shape(PSYGFX_ANNULUS, 60, 24, 0.35f, 0.35f, 0.35f);
+    if (!ygfx_open(&gfx, &gd)) { fprintf(stderr, "trial_keyboard: %s\n", ygfx_error(&gfx)); return 1; }
+    fix = shape(YGFX_CROSS, 16, 3, 0.2f, 0.2f, 0.2f);
+    circle = shape(YGFX_CIRCLE, 120, 0, 0.9f, 0.9f, 0.9f);
+    square = shape(YGFX_RECT, 106, 0, 0.9f, 0.9f, 0.9f);
+    fb_right = shape(YGFX_ANNULUS, 60, 24, 0.1f, 0.7f, 0.1f);
+    fb_wrong = shape(YGFX_ANNULUS, 60, 24, 0.8f, 0.1f, 0.1f);
+    fb_none = shape(YGFX_ANNULUS, 60, 24, 0.35f, 0.35f, 0.35f);
 
     /* the conditions and the order */
     memset(&cd, 0, sizeof cd);
@@ -185,30 +185,30 @@ int main(int argc, char** argv) {
     cd.len = sizeof conditions_csv - 1;
     cd.arena = table_arena;
     cd.arena_size = sizeof table_arena;
-    if (!psytb_csv(&tab, &cd)) { fprintf(stderr, "trial_keyboard: %s\n", psytb_error(&tab)); return 1; }
-    stim_col = psytb_col(&tab, "stimulus");
-    key_col = psytb_col(&tab, "key_answer");
+    if (!ytb_csv(&tab, &cd)) { fprintf(stderr, "trial_keyboard: %s\n", ytb_error(&tab)); return 1; }
+    stim_col = ytb_col(&tab, "stimulus");
+    key_col = ytb_col(&tab, "key_answer");
     memset(&rd, 0, sizeof rd);
     rd.table = &tab;
     rd.reps = reps;
-    rd.order = PSYTR_ORDER_RANDOM;
-    rd.rng = psytr_splitmix;
+    rd.order = YTR_ORDER_RANDOM;
+    rd.rng = ytr_splitmix;
     rd.rng_ctx = &seed;
-    rd.jitters[0] = psytr_frames(psytr_uniform("iti", 0.8, 1.2), rate_num, rate_den);
+    rd.jitters[0] = ytr_frames(ytr_uniform("iti", 0.8, 1.2), rate_num, rate_den);
     rd.n_jitters = 1;
-    if (!psytr_open(&trials, &rd)) { fprintf(stderr, "trial_keyboard: %s\n", psytr_error(&trials)); return 1; }
+    if (!ytr_open(&trials, &rd)) { fprintf(stderr, "trial_keyboard: %s\n", ytr_error(&trials)); return 1; }
 
     /* the timeline: one base for the trial */
     memset(&td, 0, sizeof td);
     td.events = storage;
     td.event_capacity = 64;
     td.n_channels = N_CHANNELS;
-    if (!psytl_open(&tl, &td)) { fprintf(stderr, "trial_keyboard: %s\n", psytl_error(&tl)); return 1; }
+    if (!ytl_open(&tl, &td)) { fprintf(stderr, "trial_keyboard: %s\n", ytl_error(&tl)); return 1; }
 
     /* the response: f or j, within 1.5 s of the onset, none before 0.1 s */
     memset(&sdl, 0, sizeof sdl);
     sdl.raw_keyboard = caps.raw_keyboard;
-    sources[0] = psyrsp_sdl_source(&sdl, PSYRSP_KIND_KEYBOARD);
+    sources[0] = yrsp_sdl_source(&sdl, YRSP_KIND_KEYBOARD);
     memset(&pd, 0, sizeof pd);
     pd.choices = keys;
     pd.n_choices = 2;
@@ -216,14 +216,14 @@ int main(int argc, char** argv) {
     pd.minimum_valid_rt = MIN_RT_S;
     pd.sources = sources;
     pd.n_sources = 1;
-    if (!psyrsp_init(&rsp, &pd)) { fprintf(stderr, "trial_keyboard: %s\n", psyrsp_error(&rsp)); return 1; }
+    if (!yrsp_init(&rsp, &pd)) { fprintf(stderr, "trial_keyboard: %s\n", yrsp_error(&rsp)); return 1; }
 
     out = fopen(out_path, "w");
     if (!out) { fprintf(stderr, "trial_keyboard: cannot write %s\n", out_path); return 1; }
-    psytr_format_meta(&trials, meta, sizeof meta);
+    ytr_format_meta(&trials, meta, sizeof meta);
     meta[strcspn(meta, "\r\n")] = 0;           /* one line under the '#' */
-    psyscr_describe(&scr, line, sizeof line);
-    fprintf(out, "# %s\n# %s\n# psy_response %s; keyboard: %s\n", meta, line, psyrsp_version(),
+    yscr_describe(&scr, line, sizeof line);
+    fprintf(out, "# %s\n# %s\n# ysp_response %s; keyboard: %s\n", meta, line, yrsp_version(),
             sim ? "synthetic (tier SIM)" : sources[0].note);
     fprintf(out, "trial_index,stimulus,key_answer,response,rt,correct,rt_key_duration,onset_tier,onset_src,"
                  "landing_residual,onset_frame,rsp_tier,rsp_flags,n_anticipations,n_duplicates,iti\n");
@@ -232,36 +232,36 @@ int main(int argc, char** argv) {
     for (;;) {
         SDL_Event ev;
         int64_t t_ev, bt = 0;
-        psyrsp_input in;
-        int rc = psyscr_begin(&scr, &f);
-        if (rc == PSYSCR_QUIT) { aborted = 1; break; }
-        if (rc != PSYSCR_OK) { fprintf(stderr, "trial_keyboard: %s\n", psyscr_error(&scr)); failed = 1; break; }
+        yrsp_input in;
+        int rc = yscr_begin(&scr, &f);
+        if (rc == YSCR_QUIT) { aborted = 1; break; }
+        if (rc != YSCR_OK) { fprintf(stderr, "trial_keyboard: %s\n", yscr_error(&scr)); failed = 1; break; }
 
         /* the stimulus frame's record: its onset, final */
         for (i = 0; i < f.n_done; i++)
             if (stim_frame >= 0 && f.done[i].index == stim_frame) {
-                psyrsp_onset o = psyrsp_onset_flip(&f.done[i]);
-                psyrsp_set_onset(&rsp, &o);
+                yrsp_onset o = yrsp_onset_flip(&f.done[i]);
+                yrsp_set_onset(&rsp, &o);
             }
 
         if (!in_trial) {
             /* a new trial: fixation now, the stimulus 0.5 s later */
-            psytl_seq q;
+            ytl_seq q;
             const char* ka;
-            if (psytr_next(&trials, &ti) < 0) break;
-            ka = psytb_text(&tab, ti.condition, key_col);
+            if (ytr_next(&trials, &ti) < 0) break;
+            ka = ytb_text(&tab, ti.condition, key_col);
             snprintf(key_answer, sizeof key_answer, "%s", ka ? ka : "");
-            stim_ch = !strcmp(psytb_text(&tab, ti.condition, stim_col), "circle") ? CIRCLE_ON : SQUARE_ON;
-            iti_ns = psytr_jitter(&trials, ti.index, 0).ns;
-            psytl_clear(&tl, TRIAL);
-            psytl_anchor(&tl, TRIAL, f.onset, 0);
-            q = psytl_seq_on(&tl, TRIAL);
-            psytl_on(&q, FIX_ON);
-            psytl_wait(&q, PSYTL_S(FIXATION_S));
-            psytl_off(&q, FIX_ON);
-            psytl_on(&q, stim_ch);
+            stim_ch = !strcmp(ytb_text(&tab, ti.condition, stim_col), "circle") ? CIRCLE_ON : SQUARE_ON;
+            iti_ns = ytr_jitter(&trials, ti.index, 0).ns;
+            ytl_clear(&tl, TRIAL);
+            ytl_anchor(&tl, TRIAL, f.onset, 0);
+            q = ytl_seq_on(&tl, TRIAL);
+            ytl_on(&q, FIX_ON);
+            ytl_wait(&q, YTL_S(FIXATION_S));
+            ytl_off(&q, FIX_ON);
+            ytl_on(&q, stim_ch);
             if (q.err) { fprintf(stderr, "trial_keyboard: timeline error %d\n", q.err); failed = 1; break; }
-            psyrsp_arm(&rsp, f.onset);
+            yrsp_arm(&rsp, f.onset);
             stim_frame = -1;
             in_trial = responding = 1;
             n_sim_ev = sim_next = 0;
@@ -270,37 +270,37 @@ int main(int argc, char** argv) {
         /* input: every event, so held keys are known between trials too.
          * Another library can turn SDL text input on, which moves keys to
          * the message path: read the path each frame (about 0.2 us). */
-        psyscr_get_caps(&scr, &caps);
+        yscr_get_caps(&scr, &caps);
         sdl.raw_keyboard = caps.raw_keyboard;
-        while (psyscr_poll(&scr, &ev, &t_ev))
-            if (psyrsp_from_sdl(&ev, t_ev, &sdl, &in)) psyrsp_feed(&rsp, &in);
-        while (sim && sim_next < n_sim_ev && sim_ev[sim_next].t <= f.onset) psyrsp_feed(&rsp, &sim_ev[sim_next++]);
+        while (yscr_poll(&scr, &ev, &t_ev))
+            if (yrsp_from_sdl(&ev, t_ev, &sdl, &in)) yrsp_feed(&rsp, &in);
+        while (sim && sim_next < n_sim_ev && sim_ev[sim_next].t <= f.onset) yrsp_feed(&rsp, &sim_ev[sim_next++]);
 
         /* the end of the response window: hide the stimulus on this frame */
-        if (responding && psyrsp_update(&rsp, f.onset) == PSYRSP_ENDED) {
-            psytl_seq q = psytl_seq_on(&tl, TRIAL);
+        if (responding && yrsp_update(&rsp, f.onset) == YRSP_ENDED) {
+            ytl_seq q = ytl_seq_on(&tl, TRIAL);
             int fb;
-            psyrsp_finish(&rsp, &res);
-            fb = !(res.flags & PSYRSP_R_RESPONDED) ? FB_NONE
+            yrsp_finish(&rsp, &res);
+            fb = !(res.flags & YRSP_R_RESPONDED) ? FB_NONE
                  : res.response_name && !strcmp(res.response_name, key_answer) ? FB_RIGHT : FB_WRONG;
-            psytl_base_time(&tl, TRIAL, f.onset, &bt);
-            psytl_at(&q, bt);
-            psytl_off(&q, stim_ch);
-            psytl_on(&q, fb);
-            psytl_wait(&q, PSYTL_S(FEEDBACK_S));
-            psytl_off(&q, fb);
-            psytl_wait(&q, iti_ns);
-            psytl_mark(&q, END_OF_TRIAL, 0);
+            ytl_base_time(&tl, TRIAL, f.onset, &bt);
+            ytl_at(&q, bt);
+            ytl_off(&q, stim_ch);
+            ytl_on(&q, fb);
+            ytl_wait(&q, YTL_S(FEEDBACK_S));
+            ytl_off(&q, fb);
+            ytl_wait(&q, iti_ns);
+            ytl_mark(&q, END_OF_TRIAL, 0);
             if (q.err) { fprintf(stderr, "trial_keyboard: timeline error %d\n", q.err); failed = 1; break; }
             responding = 0;
         }
 
-        n = psytl_evaluate(&tl, &(psytl_frame){ f.onset, f.period, f.index }, fired, 16);
+        n = ytl_evaluate(&tl, &(ytl_frame){ f.onset, f.period, f.index }, fired, 16);
         for (i = 0; i < n && i < 16; i++) {
-            if (fired[i].kind == PSYTL_ONSET && fired[i].target == stim_ch) {
+            if (fired[i].kind == YTL_ONSET && fired[i].target == stim_ch) {
                 /* the stimulus landed on this frame: its planned onset */
-                psyrsp_onset o = psyrsp_onset_landing(&fired[i]);
-                psyrsp_set_onset(&rsp, &o);
+                yrsp_onset o = yrsp_onset_landing(&fired[i]);
+                yrsp_set_onset(&rsp, &o);
                 stim_frame = fired[i].frame;
                 landing_residual = fired[i].residual;
                 if (sim) {   /* the participant's presses, from this onset */
@@ -308,68 +308,68 @@ int main(int argc, char** argv) {
                     n_sim_ev = 0;
                     for (k = 0; k < (int)(sizeof sim_script / sizeof sim_script[0]); k++) {
                         const sim_press* p = &sim_script[k];
-                        uint32_t sc = (uint32_t)psyrsp_scancode(p->which == 1 ? key_answer
+                        uint32_t sc = (uint32_t)yrsp_scancode(p->which == 1 ? key_answer
                                                                 : !strcmp(key_answer, "f") ? "j" : "f");
                         int rep;
                         if (p->trial != ti.index) continue;
                         for (rep = 0; rep <= p->twice && n_sim_ev + 2 <= 16; rep++) {
-                            psyrsp_input* e = &sim_ev[n_sim_ev++];
+                            yrsp_input* e = &sim_ev[n_sim_ev++];
                             memset(e, 0, sizeof *e);
-                            e->t = f.onset + PSYTL_S(p->at) + (int64_t)rep * PSYTL_MS(9);
-                            e->kind = PSYRSP_KIND_KEYBOARD;
-                            e->type = PSYRSP_PRESS;
+                            e->t = f.onset + YTL_S(p->at) + (int64_t)rep * YTL_MS(9);
+                            e->kind = YRSP_KIND_KEYBOARD;
+                            e->type = YRSP_PRESS;
                             e->control = sc;
                             e->code = (uint32_t)(sc == 9 ? 'f' : 'j');
-                            e->stamp = PSYRSP_TIER_SIM;
+                            e->stamp = YRSP_TIER_SIM;
                             e->value = 1;
                             sim_ev[n_sim_ev] = *e;
-                            sim_ev[n_sim_ev].type = PSYRSP_RELEASE;
+                            sim_ev[n_sim_ev].type = YRSP_RELEASE;
                             sim_ev[n_sim_ev].value = 0;
-                            sim_ev[n_sim_ev++].t = e->t + PSYTL_S(p->hold);
+                            sim_ev[n_sim_ev++].t = e->t + YTL_S(p->hold);
                         }
                     }
                 }
             }
-            if (fired[i].kind == PSYTL_MARK && fired[i].code == END_OF_TRIAL) {
+            if (fired[i].kind == YTL_MARK && fired[i].code == END_OF_TRIAL) {
                 /* the trial is over: the record of its stimulus is in */
                 char rt[32], dur[32], lres[32];
                 int correct;
-                psyrsp_finish(&rsp, &res);
-                correct = (res.flags & PSYRSP_R_RESPONDED) && res.response_name &&
+                yrsp_finish(&rsp, &res);
+                correct = (res.flags & YRSP_R_RESPONDED) && res.response_name &&
                           !strcmp(res.response_name, key_answer);
                 sec(rt, sizeof rt, res.rt);
                 sec(dur, sizeof dur, res.rt_key_duration);
                 sec(lres, sizeof lres, (double)landing_residual / 1e9);
                 fprintf(out, "%d,%s,%s,%s,%s,%d,%s,%u,%u,%s,%lld,%u,%u,%d,%d,%.9f\n", ti.index,
-                        psytb_text(&tab, ti.condition, stim_col), key_answer,
+                        ytb_text(&tab, ti.condition, stim_col), key_answer,
                         res.response_name ? res.response_name : "", rt, correct, dur, (unsigned)res.onset_tier,
                         (unsigned)res.onset_src, lres, (long long)res.onset_frame, (unsigned)res.stamp_tier,
                         (unsigned)res.flags, res.n_anticipations, res.n_duplicates, (double)iti_ns / 1e9);
                 fflush(out);
-                printf("trial %2d %-6s rt %s response %s %s\n", ti.index, psytb_text(&tab, ti.condition, stim_col),
+                printf("trial %2d %-6s rt %s response %s %s\n", ti.index, ytb_text(&tab, ti.condition, stim_col),
                        rt[0] ? rt : "-", res.response_name ? res.response_name : "-",
-                       !(res.flags & PSYRSP_R_RESPONDED) ? "(too slow)" : correct ? "correct" : "wrong");
-                psytr_update(&trials, (res.flags & PSYRSP_R_RESPONDED) ? correct : PSYTR_INVALID, NULL);
+                       !(res.flags & YRSP_R_RESPONDED) ? "(too slow)" : correct ? "correct" : "wrong");
+                ytr_update(&trials, (res.flags & YRSP_R_RESPONDED) ? correct : YTR_INVALID, NULL);
                 if (ti.index < SIM_TRIALS) sim_res[ti.index] = res;
                 rows++;
                 in_trial = 0;
             }
         }
-        psygfx_apply(binds, (int)(sizeof binds / sizeof binds[0]), psytl_values(&tl));
-        psyscr_mark(&scr, PSYSCR_PHASE_EVALUATE);
-        psygfx_begin(&gfx, &f);
-        psygfx_draw(&gfx, &fix);
-        psygfx_draw(&gfx, &circle);
-        psygfx_draw(&gfx, &square);
-        psygfx_draw(&gfx, &fb_right);
-        psygfx_draw(&gfx, &fb_wrong);
-        psygfx_draw(&gfx, &fb_none);
-        psygfx_end(&gfx);
-        psyscr_flip(&scr);
+        ygfx_apply(binds, (int)(sizeof binds / sizeof binds[0]), ytl_values(&tl));
+        yscr_mark(&scr, YSCR_PHASE_EVALUATE);
+        ygfx_begin(&gfx, &f);
+        ygfx_draw(&gfx, &fix);
+        ygfx_draw(&gfx, &circle);
+        ygfx_draw(&gfx, &square);
+        ygfx_draw(&gfx, &fb_right);
+        ygfx_draw(&gfx, &fb_wrong);
+        ygfx_draw(&gfx, &fb_none);
+        ygfx_end(&gfx);
+        yscr_flip(&scr);
     }
     fclose(out);
-    psygfx_close(&gfx);
-    psyscr_close(&scr);
+    ygfx_close(&gfx);
+    yscr_close(&scr);
     printf("%d trials written to %s%s\n", rows, out_path, aborted ? " (stopped with Shift+Esc)" : "");
 
     if (sim && !failed && reps != SIM_TRIALS / 2) printf("--sim: the self-check needs the default --reps\n");
@@ -378,16 +378,16 @@ int main(int argc, char** argv) {
         int bad = 0;
         if (rows != SIM_TRIALS) { fprintf(stderr, "trial_keyboard: --sim: %d rows, not %d\n", rows, SIM_TRIALS); bad = 1; }
         for (i = 0; i < rows && i < SIM_TRIALS; i++) {
-            const psyrsp_result* r = &sim_res[i];
+            const yrsp_result* r = &sim_res[i];
             double want_rt = i == 0 ? 0.45 : i == 1 ? 0.52 : i == 2 ? 0.40 : i == 4 ? 0.38 : i == 5 ? 0.61 : NAN;
             int ok = 1;
-            if (i == 3) ok = !(r->flags & PSYRSP_R_RESPONDED) && (r->flags & PSYRSP_R_TIMEOUT);
-            else ok = (r->flags & PSYRSP_R_RESPONDED) && fabs(r->rt - want_rt) < 1e-6;
+            if (i == 3) ok = !(r->flags & YRSP_R_RESPONDED) && (r->flags & YRSP_R_TIMEOUT);
+            else ok = (r->flags & YRSP_R_RESPONDED) && fabs(r->rt - want_rt) < 1e-6;
             if (i == 0) ok = ok && fabs(r->rt_key_duration - 0.1) < 1e-6;
             if (i == 1) ok = ok && r->n_anticipations == 1;
             if (i == 2) ok = ok && r->n_duplicates == 1 && r->n_responses == 1;
-            if (i != 3) ok = ok && r->onset_tier == PSYSCR_TIER_SIM && r->onset_src == PSYRSP_ONSET_FLIP &&
-                             r->stamp_tier == PSYRSP_TIER_SIM;
+            if (i != 3) ok = ok && r->onset_tier == YSCR_TIER_SIM && r->onset_src == YRSP_ONSET_FLIP &&
+                             r->stamp_tier == YRSP_TIER_SIM;
             if (!ok) {
                 fprintf(stderr, "trial_keyboard: --sim: trial %d: rt %.9f flags 0x%x n_anticipations %d "
                                 "n_duplicates %d onset tier %d src %d\n", i, r->rt, (unsigned)r->flags,

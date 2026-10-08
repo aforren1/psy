@@ -1,11 +1,11 @@
-/* video_play.c - play a movie in a window: psy_video.h's USAGE example, and
- * the frame-thread cost of psyvid_update() (decode-ahead, the decision and
+/* video_play.c - play a movie in a window: ysp/video.h's USAGE example, and
+ * the frame-thread cost of yvid_update() (decode-ahead, the decision and
  * the upload) per display frame.
  *
  * With no --file it writes a frame sequence of generated frames first (a
  * low-contrast gradient, a moving bar and the frame index as 16 blocks), so
  * it needs no clip. With --file it plays a frame sequence or an MPEG-1 file
- * (pl_mpeg; --index makes the .psyvi beside it first).
+ * (pl_mpeg; --index makes the .yspvi beside it first).
  *
  * Usage: video_play [--sim] [--file PATH [--index]] [--size WxH] [--frames N]
  *                   [--fps N] [--qoi] [--yuv] [--loop] [--seconds S]
@@ -21,28 +21,28 @@
  *   --csv       one line per display frame: index, decision, why, frame, the
  *               update's ns
  *   --hw        Media Foundation's decoder for an MP4 file (desc.hw_decode)
- *   --gpu       decode and draw on the GPU (desc.gpu_path PSYVID_PATH_GPU;
+ *   --gpu       decode and draw on the GPU (desc.gpu_path YVID_PATH_GPU;
  *               the screen opens with desc.d3d11_video)
- * It prints psyvid_update()'s cost on frames that uploaded a new frame and
+ * It prints yvid_update()'s cost on frames that uploaded a new frame and
  * on repeats separately, the draw and flip's cost, and the process's CPU,
- * after frame 120. Shift+Esc ends it (psy_screen.h's default abort).
+ * after frame 120. Shift+Esc ends it (ysp/screen.h's default abort).
  * Exit code: 0; 1 when the screen, the gfx or the movie did not open, or a
  * frame update failed; 2 for a bad argument.
  */
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS   /* sscanf() and fopen() under /W4 /WX */
 #endif
-#define PSY_VIDEO_IMPLEMENTATION
-#include "psy_video.h"
+#define YSP_VIDEO_IMPLEMENTATION
+#include "ysp/video.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-static psyscr_screen scr;
-static psygfx_gfx gfx;
-static psyvid_movie mv;
+static yscr_screen scr;
+static ygfx_gfx gfx;
+static yvid_movie mv;
 
 /* The process's CPU time, ns: the decode thread and the decoder's own
  * threads count too, which a per-call timer does not see. */
@@ -73,22 +73,22 @@ static void make_frame(uint8_t* rgba, int w, int h, int i, int n) {
 }
 
 static int write_seq(const char* path, int w, int h, int n, int fps, int qoi, int yuv) {
-    psyvid_seq sq;
-    psyvid_seq_desc d;
+    yvid_seq sq;
+    yvid_seq_desc d;
     uint8_t* rgba = (uint8_t*)malloc((size_t)w * h * 4);
     uint8_t* yp = (uint8_t*)malloc((size_t)w * h + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2));
     int i, x, y, rc = 0;
     if (!rgba || !yp) return 1;
     memset(&d, 0, sizeof d);
     d.path = path; d.w = w; d.h = h; d.fps_num = fps; d.fps_den = 1;
-    d.format = yuv ? PSYVID_FMT_I420 : PSYVID_FMT_RGBA8;
-    d.compression = qoi && !yuv ? PSYVID_SEQ_QOI : PSYVID_SEQ_RAW;
+    d.format = yuv ? YVID_FMT_I420 : YVID_FMT_RGBA8;
+    d.compression = qoi && !yuv ? YVID_SEQ_QOI : YVID_SEQ_RAW;
     if (yuv) {
-        d.matrix = PSYVID_MATRIX_BT709; d.range = PSYVID_RANGE_LIMITED; d.transfer = PSYVID_TRC_BT1886;
-        d.primaries = PSYVID_PRIM_BT709; d.siting = PSYVID_SITING_LEFT;
+        d.matrix = YVID_MATRIX_BT709; d.range = YVID_RANGE_LIMITED; d.transfer = YVID_TRC_BT1886;
+        d.primaries = YVID_PRIM_BT709; d.siting = YVID_SITING_LEFT;
     }
     d.max_frames = n;
-    if (!psyvid_seq_create(&sq, &d)) { fprintf(stderr, "video_play: %s\n", psyvid_seq_error(&sq)); free(rgba); free(yp); return 1; }
+    if (!yvid_seq_create(&sq, &d)) { fprintf(stderr, "video_play: %s\n", yvid_seq_error(&sq)); free(rgba); free(yp); return 1; }
     for (i = 0; i < n && rc == 0; i++) {
         const void* planes[3];
         int32_t strides[3];
@@ -105,9 +105,9 @@ static int write_seq(const char* path, int w, int h, int n, int fps, int qoi, in
             planes[0] = rgba; planes[1] = NULL; planes[2] = NULL;
             strides[0] = w * 4; strides[1] = 0; strides[2] = 0;
         }
-        if (psyvid_seq_write(&sq, planes, strides, NULL) != PSYVID_OK) rc = 1;
+        if (yvid_seq_write(&sq, planes, strides, NULL) != YVID_OK) rc = 1;
     }
-    if (psyvid_seq_close(&sq) != PSYVID_OK) rc = 1;
+    if (yvid_seq_close(&sq) != YVID_OK) rc = 1;
     free(rgba);
     free(yp);
     return rc;
@@ -119,17 +119,17 @@ static int cmp_i64(const void* a, const void* b) {
 }
 
 int main(int argc, char** argv) {
-    psyscr_desc sd;
-    psygfx_desc gd;
-    psyvid_desc vd;
-    psyvid_stim_desc st;
-    psygfx_stim film;
-    psyscr_frame f;
+    yscr_desc sd;
+    ygfx_desc gd;
+    yvid_desc vd;
+    yvid_stim_desc st;
+    ygfx_stim film;
+    yscr_frame f;
     const char* file = NULL;
     const char* csv = NULL;
-    const char* gen = "video_play_demo.psyseq";
+    const char* gen = "video_play_demo.yspseq";
     int w = 320, h = 180, n = 60, fps = 30, qoi = 0, yuv = 0, loop = 0, index = 0, ahead = 0;
-    int ww = 640, wh = 360, i, rc = PSYVID_OK, failed = 0, hw = 0, gpu = 0;
+    int ww = 640, wh = 360, i, rc = YVID_OK, failed = 0, hw = 0, gpu = 0;
     unsigned display = 0;
     double seconds = 0;
     int64_t* cost = NULL;
@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
     memset(&sd, 0, sizeof sd);
     sd.windowed = true;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--sim")) sd.backend = PSYSCR_BACKEND_SIM;
+        if (!strcmp(argv[i], "--sim")) sd.backend = YSCR_BACKEND_SIM;
         else if (!strcmp(argv[i], "--file") && i + 1 < argc) file = argv[++i];
         else if (!strcmp(argv[i], "--index")) index = 1;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc && sscanf(argv[i + 1], "%dx%d", &w, &h) == 2) i++;
@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--gpu")) gpu = 1;
         else if (!strcmp(argv[i], "--hw") && i + 1 < argc) {
             const char* v = argv[++i];
-            hw = !strcmp(v, "sw") ? PSYVID_HW_OFF : !strcmp(v, "dxva") ? PSYVID_HW_DXVA : -1;
+            hw = !strcmp(v, "sw") ? YVID_HW_OFF : !strcmp(v, "dxva") ? YVID_HW_DXVA : -1;
             if (hw < 0) { fprintf(stderr, "video_play: --hw sw or dxva\n"); return 2; }
         }
         else {
@@ -178,55 +178,55 @@ int main(int argc, char** argv) {
         file = gen;
     } else if (index) {
         char err[300];
-        int64_t k = psyvid_index_make(file, NULL, NULL, err, sizeof err);
+        int64_t k = yvid_index_make(file, NULL, NULL, err, sizeof err);
         if (k < 0) { fprintf(stderr, "video_play: index: %s\n", err); return 1; }
         printf("video_play: indexed %lld frames of %s\n", (long long)k, file);
     }
 
     /* In C99 the opens are compound literals with designated initializers:
-     *   psyvid_open(&mv, &gfx, &(psyvid_desc){ .path = file, .loop = loop });
+     *   yvid_open(&mv, &gfx, &(yvid_desc){ .path = file, .loop = loop });
      * Written out field by field so the file also builds as C++17. */
     sd.window_w = ww;
     sd.window_h = wh;
     sd.display = display;
     sd.d3d11_video = gpu != 0;
-    if (!psyscr_open(&scr, &sd)) { fprintf(stderr, "video_play: %s\n", psyscr_error(&scr)); return 1; }
+    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "video_play: %s\n", yscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.45f;
-    if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "video_play: %s\n", psygfx_error(&gfx)); return 1; }
+    if (!ygfx_open(&gfx, &gd)) { fprintf(stderr, "video_play: %s\n", ygfx_error(&gfx)); return 1; }
     memset(&vd, 0, sizeof vd);
     vd.path = file;
     vd.loop = loop != 0;
     vd.ahead = ahead;
-    vd.hw_decode = (psyvid_hw)hw;
-    if (gpu) vd.gpu_path = PSYVID_PATH_GPU;
-    if (!psyvid_open(&mv, &gfx, &vd)) { fprintf(stderr, "video_play: %s\n", psyvid_error(&mv)); return 1; }
+    vd.hw_decode = (yvid_hw)hw;
+    if (gpu) vd.gpu_path = YVID_PATH_GPU;
+    if (!yvid_open(&mv, &gfx, &vd)) { fprintf(stderr, "video_play: %s\n", yvid_error(&mv)); return 1; }
     memset(&st, 0, sizeof st);
-    film = psyvid_stim(&mv, &st);
-    psyscr_describe(&scr, line, sizeof line);
+    film = yvid_stim(&mv, &st);
+    yscr_describe(&scr, line, sizeof line);
     printf("%s\n", line);
     if (csv) {
         out = fopen(csv, "w");
         if (!out) { fprintf(stderr, "video_play: cannot write %s\n", csv); return 1; }
         fprintf(out, "display,vblank,onset,decision,why,frame,movie_t,update_ns,last_index,last_onset,last_dropped,last_flags,n_done\n");
     }
-    psyvid_play_at(&mv, PSYVID_ASAP);
+    yvid_play_at(&mv, YVID_ASAP);
 
-    while (psyscr_begin(&scr, &f) == PSYSCR_OK) {   /* Shift+Esc ends it */
-        int64_t t0 = (int64_t)psyrt_now_ns(), dt;
-        psyvid_record r;
-        rc = psyvid_update(&mv, &f);
-        dt = (int64_t)psyrt_now_ns() - t0;
-        if (rc < 0) { fprintf(stderr, "video_play: %s (%s)\n", psyvid_strerror(rc), psyvid_error(&mv)); failed = 1; break; }
+    while (yscr_begin(&scr, &f) == YSCR_OK) {   /* Shift+Esc ends it */
+        int64_t t0 = (int64_t)yrt_now_ns(), dt;
+        yvid_record r;
+        rc = yvid_update(&mv, &f);
+        dt = (int64_t)yrt_now_ns() - t0;
+        if (rc < 0) { fprintf(stderr, "video_play: %s (%s)\n", yvid_strerror(rc), yvid_error(&mv)); failed = 1; break; }
         if (!t_start) t_start = f.onset;
         if (f.index == 120) {
-            heap0 = psyvid_heap_calls();
+            heap0 = yvid_heap_calls();
             cpu0 = cpu_ns();
-            wall0 = (int64_t)psyrt_now_ns();
+            wall0 = (int64_t)yrt_now_ns();
         }
-        if (psyvid_last(&mv, &r) == PSYVID_OK && r.display == f.index) {
-            int shown = r.decision == PSYVID_SHOWN;
+        if (yvid_last(&mv, &r) == YVID_OK && r.display == f.index) {
+            int shown = r.decision == YVID_SHOWN;
             int64_t** cv = shown ? &cost : &rcost;
             int64_t* nv = shown ? &n_cost : &n_rcost;
             int64_t* cp = shown ? &cap_cost : &cap_rcost;
@@ -248,11 +248,11 @@ int main(int argc, char** argv) {
         {
             /* on the GPU path a decoder shares the screen's device and
              * context, so the GL and present calls may wait for it */
-            int64_t d0 = (int64_t)psyrt_now_ns();
-            psygfx_begin(&gfx, &f);
-            psygfx_draw(&gfx, &film);
-            psygfx_end(&gfx);
-            psyscr_flip(&scr);
+            int64_t d0 = (int64_t)yrt_now_ns();
+            ygfx_begin(&gfx, &f);
+            ygfx_draw(&gfx, &film);
+            ygfx_end(&gfx);
+            yscr_flip(&scr);
             if (f.index >= 120) {
                 if (n_dcost == cap_dcost) {
                     int64_t* nc;
@@ -261,26 +261,26 @@ int main(int argc, char** argv) {
                     if (!nc) break;
                     dcost = nc;
                 }
-                dcost[n_dcost++] = (int64_t)psyrt_now_ns() - d0;
+                dcost[n_dcost++] = (int64_t)yrt_now_ns() - d0;
             }
         }
-        if (rc == PSYVID_ENDED) break;
+        if (rc == YVID_ENDED) break;
         if (seconds > 0 && (double)(f.onset - t_start) * 1e-9 >= seconds) break;
     }
-    psyscr_wait_flip(&scr, NULL);
+    yscr_wait_flip(&scr, NULL);
     {
-        psyscr_frame g2;
+        yscr_frame g2;
         /* one more frame so the last flip's record reaches the movie */
-        if (!failed && psyscr_begin(&scr, &g2) == PSYSCR_OK) {
+        if (!failed && yscr_begin(&scr, &g2) == YSCR_OK) {
             int k;
-            for (k = 0; k < g2.n_done; k++) psyvid_flip_done(&mv, &g2.done[k]);
-            psygfx_begin(&gfx, &g2); psygfx_end(&gfx); psyscr_flip(&scr);
+            for (k = 0; k < g2.n_done; k++) yvid_flip_done(&mv, &g2.done[k]);
+            ygfx_begin(&gfx, &g2); ygfx_end(&gfx); yscr_flip(&scr);
         }
     }
-    psyvid_describe(&mv, line, sizeof line);
+    yvid_describe(&mv, line, sizeof line);
     printf("%s\n", line);
     if (wall0) {
-        int64_t dc = cpu_ns() - cpu0, dw = (int64_t)psyrt_now_ns() - wall0;
+        int64_t dc = cpu_ns() - cpu0, dw = (int64_t)yrt_now_ns() - wall0;
         printf("video_play: process CPU after frame 120: %.1f%% of one core (%.3f s over %.3f s)\n",
                100.0 * (double)dc / (double)dw, (double)dc / 1e9, (double)dw / 1e9);
     }
@@ -293,17 +293,17 @@ int main(int argc, char** argv) {
         mean /= (double)nv;
         qsort(cv, (size_t)nv, sizeof *cv, cmp_i64);
         printf("video_play: %s on the frame thread, %s, %lld frames after 120: mean %.3f ms, p50 %.3f, p99 %.3f, max %.3f\n",
-               i == 2 ? "draw + flip" : "psyvid_update()", i == 2 ? "every display frame" : i ? "repeats" : "with an upload", (long long)nv, mean / 1e6, (double)cv[nv / 2] / 1e6, (double)cv[(nv * 99) / 100] / 1e6,
+               i == 2 ? "draw + flip" : "yvid_update()", i == 2 ? "every display frame" : i ? "repeats" : "with an upload", (long long)nv, mean / 1e6, (double)cv[nv / 2] / 1e6, (double)cv[(nv * 99) / 100] / 1e6,
                (double)cv[nv - 1] / 1e6);
     }
-    printf("video_play: heap calls after frame 120: %llu\n", (unsigned long long)(psyvid_heap_calls() - heap0));
+    printf("video_play: heap calls after frame 120: %llu\n", (unsigned long long)(yvid_heap_calls() - heap0));
     if (out) fclose(out);
     free(cost);
     free(rcost);
     free(dcost);
-    psyvid_close(&mv);
-    psygfx_close(&gfx);
-    psyscr_close(&scr);
+    yvid_close(&mv);
+    ygfx_close(&gfx);
+    yscr_close(&scr);
     if (file == gen) remove(gen);
     return failed ? 1 : 0;
 }

@@ -1,0 +1,18 @@
+# An sdist must carry everything the build needs. setup.py compiles
+# ysp/parallel.h straight into the extension, and that header includes ysp/rt.h.
+# Both live in include/ysp/ under the repository root, which an sdist cannot reach, so stage a
+# copy of the two in include/ysp/ next to setup.py first:
+#
+#     mkdir -p include/ysp && cp ../../../include/ysp/parallel.h ../../../include/ysp/rt.h include/ysp/
+#     python -m build --sdist
+#
+# CI copies the same two headers in the "Stage headers into the package" step
+# of .github/workflows/ci.yml before cibuildwheel runs. The staged copies are
+# gitignored; setup.py prefers the repository root when it is present, so a
+# copy cannot shadow a newer header in a development tree.
+include include/ysp/parallel.h
+include include/ysp/rt.h
+# setup.py names the extension source by absolute path, which sdist does not
+# pick up on its own.
+include ysp_parallel_ext.c
+include example.py

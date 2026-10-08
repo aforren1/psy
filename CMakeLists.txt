@@ -1,80 +1,132 @@
 cmake_minimum_required(VERSION 3.20)
-project(psy LANGUAGES C CXX)
+project(ysp LANGUAGES C CXX)
 
-# Consumers: add_subdirectory(psy) then target_link_libraries(app PRIVATE psy::psy).
-# The target carries the include path plus what an IMPLEMENTATION translation
-# unit needs to link: pthreads on POSIX (async workers), setupapi on Windows
-# (serial-port enumeration), libm on Linux (the adaptive-method headers; a
-# C driver does not get it for free there). A header needs nothing else but
-# psy_rt.h, which the include path above already resolves.
+# Consumers: add_subdirectory(ysp), then link the group whose headers the
+# program includes:
+#   ysp::core     rt, timeline, table
+#   ysp::methods  stair, quest, aep, trials
+#   ysp::devices  serial, parallel, input, response
+#   ysp::rig      screen, gfx, color, outline, rdk, video, audio
+# or ysp::ysp, all four. Each group carries the include path, the groups its
+# headers include, and what an IMPLEMENTATION translation unit needs to link,
+# so that a program pays only for the headers it uses: a methods-only program
+# does not link setupapi or SDL3.
 find_package(Threads REQUIRED)
-add_library(psy INTERFACE)
-add_library(psy::psy ALIAS psy)
-target_include_directories(psy INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(psy INTERFACE Threads::Threads
-    $<$<PLATFORM_ID:Windows>:setupapi>
-    $<$<PLATFORM_ID:Linux>:m>)
+set(YSP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# Nothing below applies when psy is pulled in as a subproject.
+# pthreads for ysp/rt.h's workers on POSIX. libm on Linux, where a C driver
+# does not get it for free: the timeline's easings and the table's parsing
+# call into it already, so every group gets it from here.
+add_library(ysp_core INTERFACE)
+add_library(ysp::core ALIAS ysp_core)
+target_include_directories(ysp_core INTERFACE ${YSP_INCLUDE_DIR})
+target_link_libraries(ysp_core INTERFACE Threads::Threads $<$<PLATFORM_ID:Linux>:m>)
+
+# ysp/quest.h and ysp/aep.h include ysp/rt.h for their opt-in async layer, and
+# ysp/trials.h includes ysp/table.h.
+add_library(ysp_methods INTERFACE)
+add_library(ysp::methods ALIAS ysp_methods)
+target_include_directories(ysp_methods INTERFACE ${YSP_INCLUDE_DIR})
+target_link_libraries(ysp_methods INTERFACE ysp::core)
+
+# The transports include ysp/rt.h; setupapi is serial-port enumeration.
+add_library(ysp_devices INTERFACE)
+add_library(ysp::devices ALIAS ysp_devices)
+target_include_directories(ysp_devices INTERFACE ${YSP_INCLUDE_DIR})
+target_link_libraries(ysp_devices INTERFACE ysp::core $<$<PLATFORM_ID:Windows>:setupapi>)
+
+# ysp/screen.h includes ysp/input.h. dl because ysp/gfx.h's headless
+# presenter loads libEGL with dlopen on POSIX, as miniaudio loads its
+# backends. SDL3, miniaudio and pl_mpeg come from ysp_link_rig_deps below.
+add_library(ysp_rig INTERFACE)
+add_library(ysp::rig ALIAS ysp_rig)
+target_include_directories(ysp_rig INTERFACE ${YSP_INCLUDE_DIR})
+target_link_libraries(ysp_rig INTERFACE ysp::core ysp::devices ${CMAKE_DL_LIBS})
+
+# The union, so consumers from before the groups keep working.
+add_library(ysp INTERFACE)
+add_library(ysp::ysp ALIAS ysp)
+target_link_libraries(ysp INTERFACE ysp::core ysp::methods ysp::devices ysp::rig)
+
+# The rig's optional dependencies are linked when they are there and skipped
+# when not: YSCR_NO_SDL, YAU_NO_MINIAUDIO and YVID_NO_PL_MPEG build the
+# headers without them, and only the consumer knows which of those it wants.
+# A consumer finds SDL3 and sets YSP_MINIAUDIO_DIR or YSP_PL_MPEG_DIR before
+# add_subdirectory(ysp); this project's own build calls it after its search.
+function(ysp_link_rig_deps sdl_hint)
+    if(TARGET SDL3::SDL3)
+        target_link_libraries(ysp_rig INTERFACE SDL3::SDL3)
+    else()
+        message(STATUS "ysp::rig: SDL3 not found, so it does not link it; ${sdl_hint}")
+    endif()
+    if(YSP_MINIAUDIO_DIR AND EXISTS ${YSP_MINIAUDIO_DIR}/miniaudio.h)
+        add_library(ysp_miniaudio INTERFACE)
+        add_library(ysp::miniaudio ALIAS ysp_miniaudio)
+        target_include_directories(ysp_miniaudio INTERFACE ${YSP_MINIAUDIO_DIR})
+        target_link_libraries(ysp_miniaudio INTERFACE ${CMAKE_DL_LIBS})
+        target_link_libraries(ysp_rig INTERFACE ysp::miniaudio)
+    endif()
+    if(YSP_PL_MPEG_DIR AND EXISTS ${YSP_PL_MPEG_DIR}/pl_mpeg.h)
+        add_library(ysp_pl_mpeg INTERFACE)
+        add_library(ysp::pl_mpeg ALIAS ysp_pl_mpeg)
+        target_include_directories(ysp_pl_mpeg INTERFACE ${YSP_PL_MPEG_DIR})
+        target_link_libraries(ysp_rig INTERFACE ysp::pl_mpeg)
+    endif()
+endfunction()
+
+# Nothing below applies when ysp is pulled in as a subproject.
 if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    ysp_link_rig_deps("call find_package(SDL3) before add_subdirectory(ysp)")
     return()
 endif()
 
-option(PSY_BUILD_EXAMPLES "Build the programs in examples/" ON)
-option(PSY_BUILD_TESTS    "Build the compile checks in tests/compile/" ON)
+option(YSP_BUILD_EXAMPLES "Build the programs in examples/" ON)
+option(YSP_BUILD_TESTS    "Build the compile checks in tests/compile/" ON)
 # Off by default and never added to ctest: a loopback test needs two device
 # names that are wired together, which CI does not have.
-option(PSY_BUILD_LOOPBACK "Build the loopback tests in tests/loopback/ (needs hardware)" OFF)
-# Off by default because it downloads Tracy: builds psy_rt.h's compile check
-# with PSYRT_TRACY against the real TracyC.h, so the macro mapping is checked
+option(YSP_BUILD_LOOPBACK "Build the loopback tests in tests/loopback/ (needs hardware)" OFF)
+# Off by default because it downloads Tracy: builds ysp/rt.h's compile check
+# with YRT_TRACY against the real TracyC.h, so the macro mapping is checked
 # against Tracy itself and not against a copy of it.
-option(PSY_TRACY_CHECK "Fetch Tracy and build the PSYRT_TRACY compile check" OFF)
+option(YSP_TRACY_CHECK "Fetch Tracy and build the YRT_TRACY compile check" OFF)
 # Off by default: text layout for the pack tool and the player (pack/, the
 # vendored Skribidi and HarfBuzz in third_party/, examples/gfx_layout.c and
 # tests/layout/). About 8 MB of sources that no header needs.
-option(PSY_BUILD_LAYOUT "Build the layout library (pack/, third_party/), its test and gfx_layout" OFF)
+option(YSP_BUILD_LAYOUT "Build the layout library (pack/, third_party/), its test and gfx_layout" OFF)
 
-# psy_screen.h needs SDL3 (3.2 or later). Without it only its SDL-free test is
+# ysp/screen.h needs SDL3 (3.2 or later). Without it only its SDL-free test is
 # built; point SDL3_DIR at an SDL3 CMake package to build the rest. ANGLE is
-# loaded at run time, so the build never needs it; PSY_ANGLE_DIR only copies
+# loaded at run time, so the build never needs it; YSP_ANGLE_DIR only copies
 # libEGL.dll and libGLESv2.dll beside the programs that open a window.
 find_package(SDL3 3.2 CONFIG QUIET)
-set(PSY_ANGLE_DIR "" CACHE PATH "ANGLE's libEGL.dll and libGLESv2.dll, copied beside the psy_screen.h programs")
+set(YSP_ANGLE_DIR "" CACHE PATH "ANGLE's libEGL.dll and libGLESv2.dll, copied beside the ysp/screen.h programs")
 
-# psy_audio.h needs miniaudio.h (0.11.25, one file). PSY_MINIAUDIO_DIR names a
-# directory that holds it; else PSY_FETCH_MINIAUDIO downloads the pinned file,
+# ysp/audio.h needs miniaudio.h (0.11.25, one file). YSP_MINIAUDIO_DIR names a
+# directory that holds it; else YSP_FETCH_MINIAUDIO downloads the pinned file,
 # checked by its hash. Off by default because it downloads, as
-# PSY_TRACY_CHECK is; CI turns it on. Without either, only psy_audio.h's
+# YSP_TRACY_CHECK is; CI turns it on. Without either, only ysp/audio.h's
 # miniaudio-free test is built.
-set(PSY_MINIAUDIO_DIR "" CACHE PATH "Directory with miniaudio.h for psy_audio.h")
-option(PSY_FETCH_MINIAUDIO "Download miniaudio.h 0.11.25 for psy_audio.h" OFF)
-if(NOT PSY_MINIAUDIO_DIR AND PSY_FETCH_MINIAUDIO)
+set(YSP_MINIAUDIO_DIR "" CACHE PATH "Directory with miniaudio.h for ysp/audio.h")
+option(YSP_FETCH_MINIAUDIO "Download miniaudio.h 0.11.25 for ysp/audio.h" OFF)
+if(NOT YSP_MINIAUDIO_DIR AND YSP_FETCH_MINIAUDIO)
     include(FetchContent)
     FetchContent_Declare(miniaudio
         URL      https://raw.githubusercontent.com/mackron/miniaudio/0.11.25/miniaudio.h
         URL_HASH SHA256=ac7af4de748b7e26b777f37e01cee313a308a7296a3eb080e2906b320cc55c89
         DOWNLOAD_NO_EXTRACT TRUE)
     FetchContent_MakeAvailable(miniaudio)
-    set(PSY_MINIAUDIO_DIR ${miniaudio_SOURCE_DIR})
-endif()
-if(PSY_MINIAUDIO_DIR AND EXISTS ${PSY_MINIAUDIO_DIR}/miniaudio.h)
-    add_library(psy_miniaudio INTERFACE)
-    add_library(psy::miniaudio ALIAS psy_miniaudio)
-    target_include_directories(psy_miniaudio INTERFACE ${PSY_MINIAUDIO_DIR})
-    target_link_libraries(psy_miniaudio INTERFACE ${CMAKE_DL_LIBS})
-else()
-    message(STATUS "psy_audio.h: miniaudio.h not found; set PSY_MINIAUDIO_DIR or PSY_FETCH_MINIAUDIO=ON")
+    set(YSP_MINIAUDIO_DIR ${miniaudio_SOURCE_DIR})
 endif()
 
-# psy_video.h decodes MPEG-1 with pl_mpeg.h (one MIT file). It has no release
-# tags, so the pin is a commit and the file's SHA-256. PSY_PL_MPEG_DIR names a
-# directory that holds it; else PSY_FETCH_PL_MPEG downloads it, and qoi.h,
-# which psy_video.h's test compares its own QOI encoder with. Off by default
-# because it downloads; CI turns it on. Without it psy_video.h builds with
-# PSYVID_NO_PL_MPEG: frame sequences only.
-set(PSY_PL_MPEG_DIR "" CACHE PATH "Directory with pl_mpeg.h for psy_video.h")
-option(PSY_FETCH_PL_MPEG "Download pl_mpeg.h (c871f2b) and qoi.h (ffb2d2c) for psy_video.h" OFF)
-if(NOT PSY_PL_MPEG_DIR AND PSY_FETCH_PL_MPEG)
+# ysp/video.h decodes MPEG-1 with pl_mpeg.h (one MIT file). It has no release
+# tags, so the pin is a commit and the file's SHA-256. YSP_PL_MPEG_DIR names a
+# directory that holds it; else YSP_FETCH_PL_MPEG downloads it, and qoi.h,
+# which ysp/video.h's test compares its own QOI encoder with. Off by default
+# because it downloads; CI turns it on. Without it ysp/video.h builds with
+# YVID_NO_PL_MPEG: frame sequences only.
+set(YSP_PL_MPEG_DIR "" CACHE PATH "Directory with pl_mpeg.h for ysp/video.h")
+option(YSP_FETCH_PL_MPEG "Download pl_mpeg.h (c871f2b) and qoi.h (ffb2d2c) for ysp/video.h" OFF)
+if(NOT YSP_PL_MPEG_DIR AND YSP_FETCH_PL_MPEG)
     include(FetchContent)
     FetchContent_Declare(pl_mpeg
         URL      https://raw.githubusercontent.com/phoboslab/pl_mpeg/c871f2be022ece7ef4f64230b4fb8e1fb9eb6023/pl_mpeg.h
@@ -85,331 +137,349 @@ if(NOT PSY_PL_MPEG_DIR AND PSY_FETCH_PL_MPEG)
         URL_HASH SHA256=7de6fca1a285b1c20d38f2723dec8b774eb9f144edb9710800a95feeea09375a
         DOWNLOAD_NO_EXTRACT TRUE)
     FetchContent_MakeAvailable(pl_mpeg qoi)
-    set(PSY_PL_MPEG_DIR ${pl_mpeg_SOURCE_DIR})
-    set(PSY_QOI_DIR ${qoi_SOURCE_DIR})
+    set(YSP_PL_MPEG_DIR ${pl_mpeg_SOURCE_DIR})
+    set(YSP_QOI_DIR ${qoi_SOURCE_DIR})
 endif()
-if(PSY_PL_MPEG_DIR AND EXISTS ${PSY_PL_MPEG_DIR}/pl_mpeg.h)
-    add_library(psy_pl_mpeg INTERFACE)
-    add_library(psy::pl_mpeg ALIAS psy_pl_mpeg)
-    target_include_directories(psy_pl_mpeg INTERFACE ${PSY_PL_MPEG_DIR})
-else()
-    message(STATUS "psy_video.h: pl_mpeg.h not found, so no MPEG-1; set PSY_PL_MPEG_DIR or PSY_FETCH_PL_MPEG=ON")
+
+ysp_link_rig_deps("set SDL3_DIR")
+if(NOT TARGET ysp::miniaudio)
+    message(STATUS "ysp/audio.h: miniaudio.h not found; set YSP_MINIAUDIO_DIR or YSP_FETCH_MINIAUDIO=ON")
+endif()
+if(NOT TARGET ysp::pl_mpeg)
+    message(STATUS "ysp/video.h: pl_mpeg.h not found, so no MPEG-1; set YSP_PL_MPEG_DIR or YSP_FETCH_PL_MPEG=ON")
 endif()
 
 # --- library registry ---------------------------------------------------------
-# This list is the single source for what gets built. To add psy_<name>.h:
-# append <name>, set its macro prefix, the platforms it supports, and whether
-# it has a PSY<X>_NO_THREADS build. Compile checks come from
-# tests/compile/psy_<name>.{c,cpp} and examples from examples/<name>_*.c, both
-# found by name and gated by platform. The transport headers include psy_rt.h,
-# which the include path above resolves from the repository root, so the
-# compiler's own header dependencies rebuild every target after a psy_rt.h
+# This list is the single source for what gets built. To add ysp/<name>.h:
+# append <name>, set its macro prefix, its ysp:: group (the consumer block at
+# the top, which its programs link), the platforms it supports, and whether
+# it has a Y<X>_NO_THREADS build. Compile checks come from
+# tests/compile/<name>.{c,cpp} and examples from examples/<name>_*.c, both
+# found by name and gated by platform. The transport headers include ysp/rt.h,
+# which the include path above resolves from include/, so the
+# compiler's own header dependencies rebuild every target after a ysp/rt.h
 # edit. rt comes first so its compile checks run before its dependents'.
-# The list has four groups: the transports (rt, parallel, serial), the
-# adaptive methods (stair, quest, gp), tables and the trial sequencer
-# (table, trials), the timeline (timeline) and color (color), then the rig
-# headers.
-# A header with a tests/adapt/psy_<name>_test.c gets that self-checking
-# program registered with ctest too, and one with PSY_ASYNC_<name> ON gets
+# The list's order, which is not the link groups': the transports (rt,
+# parallel, serial), the adaptive methods (stair, quest, aep), tables and the
+# trial sequencer (table, trials), the timeline (timeline) and color (color),
+# then the rig headers.
+# A header with a tests/adapt/<name>_test.c gets that self-checking
+# program registered with ctest too, and one with YSP_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
-# PSY<X>_ASYNC defined, which is the opt-in layer that pulls in psy_rt.h.
-set(PSY_LIBS rt parallel serial stair quest gp table trials timeline input response color rdk outline screen audio gfx video)
+# Y<X>_ASYNC defined, which is the opt-in layer that pulls in ysp/rt.h.
+set(YSP_LIBS rt parallel serial stair quest aep table trials timeline input response color rdk outline screen audio gfx video)
 
-set(PSY_PREFIX_rt          PSYRT)
-set(PSY_PLATFORMS_rt       Windows Linux Darwin)
-set(PSY_THREADS_rt         ON)
+set(YSP_PREFIX_rt          YRT)
+set(YSP_GROUP_rt           core)
+set(YSP_PLATFORMS_rt       Windows Linux Darwin)
+set(YSP_THREADS_rt         ON)
 
-set(PSY_PREFIX_parallel    PSYP)
-set(PSY_PLATFORMS_parallel Windows Linux)
-set(PSY_THREADS_parallel   ON)
+set(YSP_PREFIX_parallel    YPAR)
+set(YSP_GROUP_parallel     devices)
+set(YSP_PLATFORMS_parallel Windows Linux)
+set(YSP_THREADS_parallel   ON)
 
-set(PSY_PREFIX_serial      PSYS)
-set(PSY_PLATFORMS_serial   Windows Linux Darwin)
-set(PSY_THREADS_serial     ON)
+set(YSP_PREFIX_serial      YSER)
+set(YSP_GROUP_serial       devices)
+set(YSP_PLATFORMS_serial   Windows Linux Darwin)
+set(YSP_THREADS_serial     ON)
 
 # The adaptive-method headers are pure computation: every platform, no
-# worker thread, so no NO_THREADS variant. quest and gp have an opt-in async
-# layer on psy_rt.h's pump, which PSY_ASYNC_<name> builds as a second variant.
-set(PSY_PREFIX_stair       PSYST)
-set(PSY_PLATFORMS_stair    Windows Linux Darwin)
-set(PSY_THREADS_stair      OFF)
+# worker thread, so no NO_THREADS variant. quest and aep have an opt-in async
+# layer on ysp/rt.h's pump, which YSP_ASYNC_<name> builds as a second variant.
+set(YSP_PREFIX_stair       YST)
+set(YSP_GROUP_stair        methods)
+set(YSP_PLATFORMS_stair    Windows Linux Darwin)
+set(YSP_THREADS_stair      OFF)
 
-set(PSY_PREFIX_quest       PSYQ)
-set(PSY_PLATFORMS_quest    Windows Linux Darwin)
-set(PSY_THREADS_quest      OFF)
-set(PSY_ASYNC_quest        ON)
+set(YSP_PREFIX_quest       YQST)
+set(YSP_GROUP_quest        methods)
+set(YSP_PLATFORMS_quest    Windows Linux Darwin)
+set(YSP_THREADS_quest      OFF)
+set(YSP_ASYNC_quest        ON)
 
-set(PSY_PREFIX_gp          PSYGP)
-set(PSY_PLATFORMS_gp       Windows Linux Darwin)
-set(PSY_THREADS_gp         OFF)
-set(PSY_ASYNC_gp           ON)
+set(YSP_PREFIX_aep         YAEP)
+set(YSP_GROUP_aep          methods)
+set(YSP_PLATFORMS_aep      Windows Linux Darwin)
+set(YSP_THREADS_aep        OFF)
+set(YSP_ASYNC_aep          ON)
 
-# Typed tables (CSV and the pack's table block) include nothing; psy_trials.h
-# and later psy_timeline.h and the pack tool read tables through it.
-set(PSY_PREFIX_table       PSYTB)
-set(PSY_PLATFORMS_table    Windows Linux Darwin)
-set(PSY_THREADS_table      OFF)
+# Typed tables (CSV and the pack's table block) include nothing; ysp/trials.h
+# and later ysp/timeline.h and the pack tool read tables through it.
+set(YSP_PREFIX_table       YTB)
+set(YSP_GROUP_table        core)
+set(YSP_PLATFORMS_table    Windows Linux Darwin)
+set(YSP_THREADS_table      OFF)
 
-# The trial sequencer requires psy_table.h beside it (its implementation
-# includes psy_table.h's, as psy_gfx.h's does psy_color.h's), and nothing else.
-set(PSY_PREFIX_trials      PSYTR)
-set(PSY_PLATFORMS_trials   Windows Linux Darwin)
-set(PSY_THREADS_trials     OFF)
+# The trial sequencer requires ysp/table.h beside it (its implementation
+# includes ysp/table.h's, as ysp/gfx.h's does ysp/color.h's), and nothing else.
+set(YSP_PREFIX_trials      YTR)
+set(YSP_GROUP_trials       methods)
+set(YSP_PLATFORMS_trials   Windows Linux Darwin)
+set(YSP_THREADS_trials     OFF)
 
 # The input event: types and inline adapters only, nothing to link. Its test
-# reads psy_screen.h's raw mouse struct and needs none of its deps.
-set(PSY_PREFIX_input       PSYIN)
-set(PSY_PLATFORMS_input    Windows Linux Darwin)
-set(PSY_THREADS_input      OFF)
+# reads ysp/screen.h's raw mouse struct and needs none of its deps.
+set(YSP_PREFIX_input       YIN)
+set(YSP_GROUP_input        devices)
+set(YSP_PLATFORMS_input    Windows Linux Darwin)
+set(YSP_THREADS_input      OFF)
 
-# The response collector requires psy_input.h beside it and nothing else;
-# its test reads the structs of psy_screen.h, psy_audio.h and psy_timeline.h
+# The response collector requires ysp/input.h beside it and nothing else;
+# its test reads the structs of ysp/screen.h, ysp/audio.h and ysp/timeline.h
 # and needs none of their deps.
-set(PSY_PREFIX_response    PSYRSP)
-set(PSY_PLATFORMS_response Windows Linux Darwin)
-set(PSY_THREADS_response   OFF)
+set(YSP_PREFIX_response    YRSP)
+set(YSP_GROUP_response     devices)
+set(YSP_PLATFORMS_response Windows Linux Darwin)
+set(YSP_THREADS_response   OFF)
 
 # The timeline includes nothing either; it takes times as arguments.
-set(PSY_PREFIX_timeline    PSYTL)
-set(PSY_PLATFORMS_timeline Windows Linux Darwin)
-set(PSY_THREADS_timeline   OFF)
+set(YSP_PREFIX_timeline    YTL)
+set(YSP_GROUP_timeline     core)
+set(YSP_PLATFORMS_timeline Windows Linux Darwin)
+set(YSP_THREADS_timeline   OFF)
 
 # The color header is pure computation too: calibration, conversions, gamut.
-set(PSY_PREFIX_color       PSYCOL)
-set(PSY_PLATFORMS_color    Windows Linux Darwin)
-set(PSY_THREADS_color      OFF)
+set(YSP_PREFIX_color       YCOL)
+set(YSP_GROUP_color        rig)
+set(YSP_PLATFORMS_color    Windows Linux Darwin)
+set(YSP_THREADS_color      OFF)
 
 # Random dot kinematograms: pure computation on integers, nothing included.
 # Its examples/rdk_*.c run on the CPU; examples/gfx_rdk*.c draw through gfx.
-set(PSY_PREFIX_rdk         PSYRDK)
-set(PSY_PLATFORMS_rdk      Windows Linux Darwin)
-set(PSY_THREADS_rdk        OFF)
+set(YSP_PREFIX_rdk         YRDK)
+set(YSP_GROUP_rdk          rig)
+set(YSP_PLATFORMS_rdk      Windows Linux Darwin)
+set(YSP_THREADS_rdk        OFF)
 
 # The outline builder is pure computation: fonts, paths, strokes, exact
-# alpha and curve sets. Its test includes psy_gfx.h (no SDL) for the curve
-# set check only; examples/outline_bench.c uses psy_rt.h's clock.
-set(PSY_PREFIX_outline     PSYOL)
-set(PSY_PLATFORMS_outline  Windows Linux Darwin)
-set(PSY_THREADS_outline    OFF)
+# alpha and curve sets. Its test includes ysp/gfx.h (no SDL) for the curve
+# set check only; examples/outline_bench.c uses ysp/rt.h's clock.
+set(YSP_PREFIX_outline     YOL)
+set(YSP_GROUP_outline      rig)
+set(YSP_PLATFORMS_outline  Windows Linux Darwin)
+set(YSP_THREADS_outline    OFF)
 
-# The display header is the one with an external dependency. PSY_DEPS_<name>
-# lists CMake targets it links; when one is missing, only its tests/adapt test
+# The display header is the one with an external dependency. YSP_DEPS_<name>
+# lists the targets its compile checks and examples need, which ysp::rig
+# links when they exist; when one is missing, only its tests/adapt test
 # (which must need none of them) is built.
-set(PSY_PREFIX_screen      PSYSCR)
-set(PSY_PLATFORMS_screen   Windows Linux Darwin)
-set(PSY_THREADS_screen     OFF)
-set(PSY_DEPS_screen        SDL3::SDL3)
+set(YSP_PREFIX_screen      YSCR)
+set(YSP_GROUP_screen       rig)
+set(YSP_PLATFORMS_screen   Windows Linux Darwin)
+set(YSP_THREADS_screen     OFF)
+set(YSP_DEPS_screen        SDL3::SDL3)
 
 # The audio header's one dependency is miniaudio.h, a header (see above).
-set(PSY_PREFIX_audio       PSYAU)
-set(PSY_PLATFORMS_audio    Windows Linux Darwin)
-set(PSY_THREADS_audio      OFF)
-set(PSY_DEPS_audio         psy::miniaudio)
+set(YSP_PREFIX_audio       YAU)
+set(YSP_GROUP_audio        rig)
+set(YSP_PLATFORMS_audio    Windows Linux Darwin)
+set(YSP_THREADS_audio      OFF)
+set(YSP_DEPS_audio         ysp::miniaudio)
 
-# The stimulus header sits on psy_screen.h, so it needs what that needs. Its
+# The stimulus header sits on ysp/screen.h, so it needs what that needs. Its
 # test builds without SDL and finds a GL ES 3.0 renderer at run time.
-set(PSY_PREFIX_gfx         PSYGFX)
-set(PSY_PLATFORMS_gfx      Windows Linux Darwin)
-set(PSY_THREADS_gfx        OFF)
-set(PSY_DEPS_gfx           SDL3::SDL3)
+set(YSP_PREFIX_gfx         YGFX)
+set(YSP_GROUP_gfx          rig)
+set(YSP_PLATFORMS_gfx      Windows Linux Darwin)
+set(YSP_THREADS_gfx        OFF)
+set(YSP_DEPS_gfx           SDL3::SDL3)
 
-# The video header sits on psy_gfx.h and psy_timeline.h; pl_mpeg is optional
+# The video header sits on ysp/gfx.h and ysp/timeline.h; pl_mpeg is optional
 # (see above and the block after the loop). Its test needs neither SDL3 nor
 # pl_mpeg.
-set(PSY_PREFIX_video       PSYVID)
-set(PSY_PLATFORMS_video    Windows Linux Darwin)
-set(PSY_THREADS_video      OFF)
-set(PSY_DEPS_video         SDL3::SDL3)
+set(YSP_PREFIX_video       YVID)
+set(YSP_GROUP_video        rig)
+set(YSP_PLATFORMS_video    Windows Linux Darwin)
+set(YSP_THREADS_video      OFF)
+set(YSP_DEPS_video         SDL3::SDL3)
 
 if(MSVC)
-    set(PSY_WARNINGS /W4 /WX)
+    set(YSP_WARNINGS /W4 /WX)
 else()
-    set(PSY_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Werror)
+    set(YSP_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Werror)
 endif()
 
-function(psy_add_program target src)
+# ysp_add_program(<target> <src> <group>...): the groups are those of the
+# headers the program includes. A program links them and nothing more, as a
+# consumer would, so a library missing from a group fails that group's own
+# programs instead of hiding behind the union.
+function(ysp_add_program target src)
+    if(NOT ARGN)
+        message(FATAL_ERROR "ysp_add_program(${target}): name its ysp:: group")
+    endif()
     add_executable(${target} ${src})
-    target_link_libraries(${target} PRIVATE psy::psy)
-    target_compile_options(${target} PRIVATE ${PSY_WARNINGS})
+    foreach(group IN LISTS ARGN)
+        target_link_libraries(${target} PRIVATE ysp::${group})
+    endforeach()
+    target_compile_options(${target} PRIVATE ${YSP_WARNINGS})
     set_target_properties(${target} PROPERTIES
         C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-    # PSY_CURRENT_DEPS is set by the loop below for the header being built.
-    if(PSY_CURRENT_DEPS)
-        target_link_libraries(${target} PRIVATE ${PSY_CURRENT_DEPS})
+    # The rig's programs may open a window, so they get the run-time DLLs
+    # beside them. The tests among them use neither, which costs a copy.
+    if("rig" IN_LIST ARGN)
         if(WIN32 AND TARGET SDL3::SDL3-shared)
             add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:${target}>)
         endif()
-        if(WIN32 AND PSY_ANGLE_DIR)
+        if(WIN32 AND YSP_ANGLE_DIR)
             add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${PSY_ANGLE_DIR}/libEGL.dll ${PSY_ANGLE_DIR}/libGLESv2.dll $<TARGET_FILE_DIR:${target}>)
+                ${YSP_ANGLE_DIR}/libEGL.dll ${YSP_ANGLE_DIR}/libGLESv2.dll $<TARGET_FILE_DIR:${target}>)
         endif()
     endif()
 endfunction()
 
-if(PSY_BUILD_TESTS)
+if(YSP_BUILD_TESTS)
     enable_testing()
 endif()
 
-foreach(lib IN LISTS PSY_LIBS)
-    if(NOT CMAKE_SYSTEM_NAME IN_LIST PSY_PLATFORMS_${lib})
-        message(STATUS "psy_${lib}.h: not supported on ${CMAKE_SYSTEM_NAME}, skipped")
+foreach(lib IN LISTS YSP_LIBS)
+    if(NOT CMAKE_SYSTEM_NAME IN_LIST YSP_PLATFORMS_${lib})
+        message(STATUS "ysp/${lib}.h: not supported on ${CMAKE_SYSTEM_NAME}, skipped")
         continue()
     endif()
     set(deps_ok TRUE)
-    foreach(dep IN LISTS PSY_DEPS_${lib})
+    foreach(dep IN LISTS YSP_DEPS_${lib})
         if(NOT TARGET ${dep})
             set(deps_ok FALSE)
         endif()
     endforeach()
     if(NOT deps_ok)
-        message(STATUS "psy_${lib}.h: ${PSY_DEPS_${lib}} not found; only its tests/adapt test is built")
+        message(STATUS "ysp/${lib}.h: ${YSP_DEPS_${lib}} not found; only its tests/adapt test is built")
     endif()
-    set(PSY_CURRENT_DEPS ${PSY_DEPS_${lib}})
+    set(group ${YSP_GROUP_${lib}})
+    if(NOT group)
+        message(FATAL_ERROR "ysp/${lib}.h: set YSP_GROUP_${lib}")
+    endif()
 
     # --- compile checks: every header must build clean as C11, as C++17, and
     #     (when it has threading) with it disabled.
-    if(PSY_BUILD_TESTS AND deps_ok)
+    if(YSP_BUILD_TESTS AND deps_ok)
         set(variants c cxx)
-        psy_add_program(compile_psy_${lib}_c   tests/compile/psy_${lib}.c)
-        psy_add_program(compile_psy_${lib}_cxx tests/compile/psy_${lib}.cpp)
-        if(PSY_THREADS_${lib})
-            psy_add_program(compile_psy_${lib}_nothreads tests/compile/psy_${lib}.c)
-            target_compile_definitions(compile_psy_${lib}_nothreads PRIVATE ${PSY_PREFIX_${lib}}_NO_THREADS)
+        ysp_add_program(compile_${lib}_c   tests/compile/${lib}.c   ${group})
+        ysp_add_program(compile_${lib}_cxx tests/compile/${lib}.cpp ${group})
+        if(YSP_THREADS_${lib})
+            ysp_add_program(compile_${lib}_nothreads tests/compile/${lib}.c ${group})
+            target_compile_definitions(compile_${lib}_nothreads PRIVATE ${YSP_PREFIX_${lib}}_NO_THREADS)
             list(APPEND variants nothreads)
         endif()
         foreach(variant IN LISTS variants)
-            add_test(NAME compile_psy_${lib}_${variant} COMMAND compile_psy_${lib}_${variant})
+            add_test(NAME compile_${lib}_${variant} COMMAND compile_${lib}_${variant})
         endforeach()
-        # Extra checks named tests/compile/psy_<lib>_<what>.cpp (psy_screen_com.cpp
+        # Extra checks named tests/compile/<lib>_<what>.cpp (screen_com.cpp
         # checks the COM declarations against the Windows SDK).
-        file(GLOB lib_extra_checks CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/compile/psy_${lib}_*.cpp)
+        file(GLOB lib_extra_checks CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/compile/${lib}_*.cpp)
         foreach(src IN LISTS lib_extra_checks)
             get_filename_component(name ${src} NAME_WE)
-            psy_add_program(compile_${name} ${src})
+            ysp_add_program(compile_${name} ${src} ${group})
             add_test(NAME compile_${name} COMMAND compile_${name})
         endforeach()
-        # psy_timeline.h's op table macros are designated initializers,
+        # ysp/timeline.h's op table macros are designated initializers,
         # which C++ has from C++20 on; g++ warns about every field they
         # leave out, though zero is the default.
-        if(TARGET compile_psy_timeline_ops)
-            set_target_properties(compile_psy_timeline_ops PROPERTIES CXX_STANDARD 20)
+        if(TARGET compile_timeline_ops)
+            set_target_properties(compile_timeline_ops PROPERTIES CXX_STANDARD 20)
             if(NOT MSVC)
-                target_compile_options(compile_psy_timeline_ops PRIVATE -Wno-missing-field-initializers)
+                target_compile_options(compile_timeline_ops PRIVATE -Wno-missing-field-initializers)
             endif()
         endif()
-        # psy_color.h's value macros (PSYCOL_DKL(...)) are the same kind.
-        if(TARGET compile_psy_color_macros)
-            set_target_properties(compile_psy_color_macros PROPERTIES CXX_STANDARD 20)
+        # ysp/color.h's value macros (YCOL_DKL(...)) are the same kind.
+        if(TARGET compile_color_macros)
+            set_target_properties(compile_color_macros PROPERTIES CXX_STANDARD 20)
             if(NOT MSVC)
-                target_compile_options(compile_psy_color_macros PRIVATE -Wno-missing-field-initializers)
+                target_compile_options(compile_color_macros PRIVATE -Wno-missing-field-initializers)
             endif()
         endif()
-        # psy_outline.h's desc structs set by designated initializers.
-        if(TARGET compile_psy_outline_desc)
-            set_target_properties(compile_psy_outline_desc PROPERTIES CXX_STANDARD 20)
+        # ysp/outline.h's desc structs set by designated initializers.
+        if(TARGET compile_outline_desc)
+            set_target_properties(compile_outline_desc PROPERTIES CXX_STANDARD 20)
             if(NOT MSVC)
-                target_compile_options(compile_psy_outline_desc PRIVATE -Wno-missing-field-initializers)
+                target_compile_options(compile_outline_desc PRIVATE -Wno-missing-field-initializers)
             endif()
         endif()
     endif()
 
-    # --- verification tests: tests/adapt/psy_<lib>_test.c is self-checking
+    # --- verification tests: tests/adapt/<lib>_test.c is self-checking
     #     (exit 0 on pass) and needs no hardware, so ctest runs it, and the
     #     sanitizer job in CI runs it instrumented.
-    if(PSY_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/adapt/psy_${lib}_test.c)
-        set(PSY_CURRENT_DEPS "")
-        psy_add_program(test_psy_${lib} tests/adapt/psy_${lib}_test.c)
-        set(PSY_CURRENT_DEPS ${PSY_DEPS_${lib}})
-        add_test(NAME test_psy_${lib} COMMAND test_psy_${lib})
-        if(PSY_ASYNC_${lib})
-            psy_add_program(compile_psy_${lib}_async tests/compile/psy_${lib}.c)
-            target_compile_definitions(compile_psy_${lib}_async PRIVATE ${PSY_PREFIX_${lib}}_ASYNC)
-            add_test(NAME compile_psy_${lib}_async COMMAND compile_psy_${lib}_async)
-            psy_add_program(test_psy_${lib}_async tests/adapt/psy_${lib}_test.c)
-            target_compile_definitions(test_psy_${lib}_async PRIVATE ${PSY_PREFIX_${lib}}_ASYNC)
-            add_test(NAME test_psy_${lib}_async COMMAND test_psy_${lib}_async)
+    if(YSP_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/adapt/${lib}_test.c)
+        ysp_add_program(test_${lib} tests/adapt/${lib}_test.c ${group})
+        add_test(NAME test_${lib} COMMAND test_${lib})
+        if(YSP_ASYNC_${lib})
+            ysp_add_program(compile_${lib}_async tests/compile/${lib}.c ${group})
+            target_compile_definitions(compile_${lib}_async PRIVATE ${YSP_PREFIX_${lib}}_ASYNC)
+            add_test(NAME compile_${lib}_async COMMAND compile_${lib}_async)
+            ysp_add_program(test_${lib}_async tests/adapt/${lib}_test.c ${group})
+            target_compile_definitions(test_${lib}_async PRIVATE ${YSP_PREFIX_${lib}}_ASYNC)
+            add_test(NAME test_${lib}_async COMMAND test_${lib}_async)
         endif()
     endif()
 
-    # --- loopback tests: tests/loopback/psy_<lib>_loopback.c, run by hand with
+    # --- loopback tests: tests/loopback/<lib>_loopback.c, run by hand with
     #     the device names of a wired pair. Built, never registered with ctest.
-    if(PSY_BUILD_LOOPBACK AND deps_ok AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/loopback/psy_${lib}_loopback.c)
-        psy_add_program(psy_${lib}_loopback tests/loopback/psy_${lib}_loopback.c)
+    if(YSP_BUILD_LOOPBACK AND deps_ok AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/loopback/${lib}_loopback.c)
+        ysp_add_program(${lib}_loopback tests/loopback/${lib}_loopback.c ${group})
     endif()
 
     # --- examples: examples/<lib>_*.c, one program each, named after the file.
-    if(PSY_BUILD_EXAMPLES AND deps_ok)
+    if(YSP_BUILD_EXAMPLES AND deps_ok)
         file(GLOB lib_examples CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${lib}_*.c)
         # gfx_layout.c needs the layout library: pack/CMakeLists.txt builds it.
         list(FILTER lib_examples EXCLUDE REGEX "/gfx_layout\\.c$")
         foreach(src IN LISTS lib_examples)
             get_filename_component(name ${src} NAME_WE)
-            psy_add_program(${name} ${src})
+            ysp_add_program(${name} ${src} ${group})
         endforeach()
     endif()
 endforeach()
 
 # The audio loopback test opens WASAPI's loopback capture itself.
-if(TARGET psy_audio_loopback AND WIN32)
-    target_link_libraries(psy_audio_loopback PRIVATE ole32)
+if(TARGET audio_loopback AND WIN32)
+    target_link_libraries(audio_loopback PRIVATE ole32)
 endif()
 
-# psy_input.h and psy_response.h with SDL3: their tests again with the SDL
+# ysp/input.h and ysp/response.h with SDL3: their tests again with the SDL
 # adapter (SDL's headers only, nothing linked), and the keyboard trial
-# example, which sits on psy_gfx.h and so matches no examples/<lib>_*.c
+# example, which sits on ysp/gfx.h and so matches no examples/<lib>_*.c
 # pattern.
-if(TARGET SDL3::Headers AND PSY_BUILD_TESTS)
-    set(PSY_CURRENT_DEPS "")
-    psy_add_program(test_psy_response_sdl tests/adapt/psy_response_test.c)
-    target_compile_definitions(test_psy_response_sdl PRIVATE PSYRSP_TEST_SDL)
-    target_link_libraries(test_psy_response_sdl PRIVATE SDL3::Headers)
-    add_test(NAME test_psy_response_sdl COMMAND test_psy_response_sdl)
-    psy_add_program(test_psy_input_sdl tests/adapt/psy_input_test.c)
-    target_compile_definitions(test_psy_input_sdl PRIVATE PSYIN_TEST_SDL)
-    target_link_libraries(test_psy_input_sdl PRIVATE SDL3::Headers)
-    add_test(NAME test_psy_input_sdl COMMAND test_psy_input_sdl)
+if(TARGET SDL3::Headers AND YSP_BUILD_TESTS)
+    ysp_add_program(test_response_sdl tests/adapt/response_test.c devices)
+    target_compile_definitions(test_response_sdl PRIVATE YRSP_TEST_SDL)
+    target_link_libraries(test_response_sdl PRIVATE SDL3::Headers)
+    add_test(NAME test_response_sdl COMMAND test_response_sdl)
+    ysp_add_program(test_input_sdl tests/adapt/input_test.c devices)
+    target_compile_definitions(test_input_sdl PRIVATE YIN_TEST_SDL)
+    target_link_libraries(test_input_sdl PRIVATE SDL3::Headers)
+    add_test(NAME test_input_sdl COMMAND test_input_sdl)
 endif()
-if(TARGET SDL3::SDL3 AND PSY_BUILD_EXAMPLES)
-    set(PSY_CURRENT_DEPS SDL3::SDL3)
-    psy_add_program(trial_keyboard examples/trial_keyboard.c)
-    set(PSY_CURRENT_DEPS "")
+if(TARGET SDL3::SDL3 AND YSP_BUILD_EXAMPLES)
+    ysp_add_program(trial_keyboard examples/trial_keyboard.c rig methods)
 endif()
 
-# psy_video.h: pl_mpeg when it was found, else the build without MPEG-1. The
-# test has its own scripted decoder; it compares QOI bytes with qoi.h when
-# that was fetched.
-foreach(t compile_psy_video_c compile_psy_video_cxx video_play video_bench)
-    if(TARGET ${t})
-        if(TARGET psy::pl_mpeg)
-            target_link_libraries(${t} PRIVATE psy::pl_mpeg)
-        else()
-            target_compile_definitions(${t} PRIVATE PSYVID_NO_PL_MPEG)
+# ysp/video.h: ysp::rig carries pl_mpeg when it was found, else these build
+# without MPEG-1. The test has its own scripted decoder; it compares QOI
+# bytes with qoi.h when that was fetched.
+if(NOT TARGET ysp::pl_mpeg)
+    foreach(t compile_video_c compile_video_cxx video_play video_bench)
+        if(TARGET ${t})
+            target_compile_definitions(${t} PRIVATE YVID_NO_PL_MPEG)
         endif()
-    endif()
-endforeach()
-if(TARGET test_psy_video AND PSY_QOI_DIR)
-    target_include_directories(test_psy_video PRIVATE ${PSY_QOI_DIR})
-    target_compile_definitions(test_psy_video PRIVATE PSYVID_TEST_QOI_REF)
+    endforeach()
+endif()
+if(TARGET test_video AND YSP_QOI_DIR)
+    target_include_directories(test_video PRIVATE ${YSP_QOI_DIR})
+    target_compile_definitions(test_video PRIVATE YVID_TEST_QOI_REF)
 endif()
 
-# psy_gfx.h's headless presenter loads libEGL with dlopen on POSIX.
-foreach(t test_psy_gfx gfx_bench gfx_rdk_bench)
-    if(TARGET ${t})
-        target_link_libraries(${t} PRIVATE ${CMAKE_DL_LIBS})
-    endif()
-endforeach()
-
-if(PSY_BUILD_LAYOUT)
-    set(PSY_CURRENT_DEPS "")   # the loop above leaves the last header's deps here
+if(YSP_BUILD_LAYOUT)
     add_subdirectory(third_party)
     add_subdirectory(pack)
 endif()
 
-if(PSY_TRACY_CHECK AND PSY_BUILD_TESTS)
+if(YSP_TRACY_CHECK AND YSP_BUILD_TESTS)
     include(FetchContent)
-    # The tag psy_rt.h's STATUS names. On demand and silent: the check runs
+    # The tag ysp/rt.h's STATUS names. On demand and silent: the check runs
     # on CI, where nothing connects and nothing should broadcast.
     set(TRACY_ENABLE       ON CACHE BOOL "" FORCE)   # Tracy's own default is OFF
     set(TRACY_ON_DEMAND    ON CACHE BOOL "" FORCE)
@@ -419,9 +489,8 @@ if(PSY_TRACY_CHECK AND PSY_BUILD_TESTS)
         GIT_TAG        v0.14.1
         GIT_SHALLOW    TRUE)
     FetchContent_MakeAvailable(tracy)
-    set(PSY_CURRENT_DEPS "")   # the loop above leaves the last header's deps here
-    psy_add_program(compile_psy_rt_tracy tests/compile/psy_rt.c)
-    target_compile_definitions(compile_psy_rt_tracy PRIVATE PSYRT_TRACY)
-    target_link_libraries(compile_psy_rt_tracy PRIVATE Tracy::TracyClient)
-    add_test(NAME compile_psy_rt_tracy COMMAND compile_psy_rt_tracy)
+    ysp_add_program(compile_rt_tracy tests/compile/rt.c core)
+    target_compile_definitions(compile_rt_tracy PRIVATE YRT_TRACY)
+    target_link_libraries(compile_rt_tracy PRIVATE Tracy::TracyClient)
+    add_test(NAME compile_rt_tracy COMMAND compile_rt_tracy)
 endif()

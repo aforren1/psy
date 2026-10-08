@@ -1,9 +1,9 @@
-/* quest_qcsf.c - the quick CSF as a psy_quest.h custom model.
+/* quest_qcsf.c - the quick CSF as a ysp/quest.h custom model.
  *
  * Lesmes, Lu, Baek & Albright (2010), "Bayesian adaptive estimation of the
  * contrast sensitivity function: the quick CSF method", J. Vision 10(3):17.
- * The model is four parameters and a formula, which is why psy_quest.h ships
- * it as an example of PSYQ_PF_CUSTOM rather than as a built-in:
+ * The model is four parameters and a formula, which is why ysp/quest.h ships
+ * it as an example of YQST_PF_CUSTOM rather than as a built-in:
  *
  *   log10 S(f) = gmax - log10(2) * ( (log10 f - fmax) / (bw log10(2) / 2) )^2
  *
@@ -17,7 +17,7 @@
  * The stimulus grid is two-dimensional here, which is the whole point: the
  * method chooses BOTH the frequency and the contrast of the next trial.
  *
- * It is also both ways of handing psy_quest.h a model. qcsf_pf() is the
+ * It is also both ways of handing ysp/quest.h a model. qcsf_pf() is the
  * per-cell callback (desc.pf_fn), which the header calls S*P times at open.
  * qcsf_pf_batch() is the batch callback (desc.pf_batch), which it calls once
  * per stimulus with the whole parameter grid as a matrix: 140 calls here
@@ -28,19 +28,19 @@
  *
  * The grid sizes are modest so the program runs in a second. A qCSF grid with
  * the grain Lesmes et al. use needs about 115 MB of likelihood table, which
- * is what psyq_desc.no_table is for; this program prints psyq_memory_size()
+ * is what yqst_desc.no_table is for; this program prints yqst_memory_size()
  * before it opens so the number is in the log either way.
  *
  * Build (from the repository root):
- *     cc -O2 -I. -o quest_qcsf examples/quest_qcsf.c -lm
- *     cl /O2 /I. examples\quest_qcsf.c
+ *     cc -O2 -Iinclude -o quest_qcsf examples/quest_qcsf.c -lm
+ *     cl /O2 /Iinclude examples\quest_qcsf.c
  *
  * Usage: quest_qcsf [trials] [seed]
  *
  * Exit code: 0 always.
  */
-#define PSY_QUEST_IMPLEMENTATION
-#include "psy_quest.h"
+#define YSP_QUEST_IMPLEMENTATION
+#include "ysp/quest.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -136,9 +136,9 @@ static void build_axes(void) {
 int main(int argc, char** argv) {
     int trials = (argc > 1) ? atoi(argv[1]) : 60;
     uint64_t seed = (argc > 2) ? strtoull(argv[2], NULL, 0) : 0xC5F1234ull;
-    psyq_desc d, dcell;
-    static psyq_quest q;
-    static psyq_quest qcell;
+    yqst_desc d, dcell;
+    static yqst_quest q;
+    static yqst_quest qcell;
     double truth[4], est[4] = {0};
     size_t bytes, bytes_cell;
     double worst = 0.0;
@@ -156,16 +156,16 @@ int main(int argc, char** argv) {
     truth[3] = 0.6;
 
     memset(&d, 0, sizeof(d));
-    d.pf = PSYQ_PF_CUSTOM;
+    d.pf = YQST_PF_CUSTOM;
     d.pf_batch = qcsf_pf_batch;   /* the batch entry point; see above */
     d.n_outcomes = 2;
-    d.stim[0] = psyq_values(g_freq, NFREQ);      /* log10 cycles/degree */
-    d.stim[1] = psyq_values(g_con, NCON);        /* log10 contrast      */
+    d.stim[0] = yqst_values(g_freq, NFREQ);      /* log10 cycles/degree */
+    d.stim[1] = yqst_values(g_con, NCON);        /* log10 contrast      */
     d.n_stim = 2;
-    d.param[0] = psyq_values(g_gmax, N_GMAX);
-    d.param[1] = psyq_values(g_fmax, N_FMAX);
-    d.param[2] = psyq_values(g_bw, N_BW);
-    d.param[3] = psyq_values(g_delta, N_DELTA);
+    d.param[0] = yqst_values(g_gmax, N_GMAX);
+    d.param[1] = yqst_values(g_fmax, N_FMAX);
+    d.param[2] = yqst_values(g_bw, N_BW);
+    d.param[3] = yqst_values(g_delta, N_DELTA);
     d.n_param = 4;
     d.stop_trials = trials;
 
@@ -173,40 +173,40 @@ int main(int argc, char** argv) {
     dcell.pf_batch = NULL;
     dcell.pf_fn = qcsf_pf;        /* the same model, one cell per call */
 
-    bytes = psyq_memory_size(&d);
-    bytes_cell = psyq_memory_size(&dcell);
+    bytes = yqst_memory_size(&d);
+    bytes_cell = yqst_memory_size(&dcell);
     printf("quest_qcsf: stimulus grid %d x %d = %d, parameter grid %d x %d x %d x %d = %d,\n",
            NFREQ, NCON, NFREQ * NCON, N_GMAX, N_FMAX, N_BW, N_DELTA,
            N_GMAX * N_FMAX * N_BW * N_DELTA);
     /* The table is one float per cell, plus one more per (stimulus,
      * parameter) for the tabulated outcome entropy, since no axis here is
-     * flagged nuisance. psyq_memory_size() counts all of it. */
+     * flagged nuisance. yqst_memory_size() counts all of it. */
     printf("            2 outcomes, %d table cells (%d floats),"
-           " psyq_memory_size = %llu bytes (%.2f MB)\n",
+           " yqst_memory_size = %llu bytes (%.2f MB)\n",
            NFREQ * NCON * N_GMAX * N_FMAX * N_BW * N_DELTA * 2,
            NFREQ * NCON * N_GMAX * N_FMAX * N_BW * N_DELTA * 3,
            (unsigned long long)bytes, (double)bytes / (1024.0 * 1024.0));
     printf("            %d pf_batch calls at open (one per stimulus), or %d pf_fn calls\n",
            NFREQ * NCON, NFREQ * NCON * N_GMAX * N_FMAX * N_BW * N_DELTA);
-    printf("            psyq_memory_size with pf_fn instead = %llu bytes; the batch path\n"
+    printf("            yqst_memory_size with pf_fn instead = %llu bytes; the batch path\n"
            "            also carries the P x 4 parameter matrix and a P x 2 float staging row\n",
            (unsigned long long)bytes_cell);
     if (bytes == 0) { fputs("quest_qcsf: the desc is invalid\n", stderr); return 0; }
 
-    if (!psyq_open(&q, &d)) { fputs(psyq_error(&q), stderr); return 0; }
+    if (!yqst_open(&q, &d)) { fputs(yqst_error(&q), stderr); return 0; }
 
     /* The two entry points are the same model, so they must give the same
      * selection landscape. Checked here rather than asserted in the manual. */
-    if (!psyq_open(&qcell, &dcell)) { fputs(psyq_error(&qcell), stderr); psyq_close(&q); return 0; }
+    if (!yqst_open(&qcell, &dcell)) { fputs(yqst_error(&qcell), stderr); yqst_close(&q); return 0; }
     for (i = 0; i < NFREQ * NCON; i++) {
-        double a = psyq_expected_entropy(&q, i), b = psyq_expected_entropy(&qcell, i);
+        double a = yqst_expected_entropy(&q, i), b = yqst_expected_entropy(&qcell, i);
         double dd = (a > b) ? a - b : b - a;
         if (dd > worst) worst = dd;
     }
     printf("            batch vs per-cell: same first stimulus (%d vs %d), "
            "worst score difference %.3g bits\n",
-           psyq_next(&q), psyq_next(&qcell), worst);
-    psyq_close(&qcell);
+           yqst_next(&q), yqst_next(&qcell), worst);
+    yqst_close(&qcell);
     printf("truth: peak gain %.3f (sensitivity %.0f), peak frequency %.3f (%.2f c/deg),"
            " bandwidth %.2f oct, truncation %.2f\n\n",
            truth[0], pow(10.0, truth[0]), truth[1], pow(10.0, truth[1]), truth[2], truth[3]);
@@ -214,24 +214,24 @@ int main(int argc, char** argv) {
     printf("trial   c/deg  contrast   k   gain   fpeak     bw  trunc   entropy\n");
     g_rng = seed;
     for (t = 0; t < trials; t++) {
-        int s = psyq_next(&q);
-        int k = psyq_simulate(&q, s, truth, next_u());
-        psyq_update(&q, s, k);
+        int s = yqst_next(&q);
+        int k = yqst_simulate(&q, s, truth, next_u());
+        yqst_update(&q, s, k);
         if (t < 10 || (t + 1) % 10 == 0) {
-            psyq_estimate(&q, PSYQ_EST_MEAN, est);
+            yqst_estimate(&q, YQST_EST_MEAN, est);
             printf("%5d %7.2f %9.4f %3d %6.3f %7.3f %6.2f %6.2f %9.4f\n",
-                   t + 1, pow(10.0, psyq_stim_value(&q, s, 0)),
-                   pow(10.0, psyq_stim_value(&q, s, 1)), k,
-                   est[0], est[1], est[2], est[3], psyq_entropy(&q));
+                   t + 1, pow(10.0, yqst_stim_value(&q, s, 0)),
+                   pow(10.0, yqst_stim_value(&q, s, 1)), k,
+                   est[0], est[1], est[2], est[3], yqst_entropy(&q));
         }
     }
 
-    psyq_estimate(&q, PSYQ_EST_MEAN, est);
+    yqst_estimate(&q, YQST_EST_MEAN, est);
     printf("\nfinal: peak gain %.3f (truth %.3f), peak frequency %.3f (truth %.3f),\n"
            "       bandwidth %.2f (truth %.2f), truncation %.2f (truth %.2f)\n",
            est[0], truth[0], est[1], truth[1], est[2], truth[2], est[3], truth[3]);
     printf("       posterior sd: gain %.3f, frequency %.3f, bandwidth %.2f, truncation %.2f\n",
-           psyq_sd(&q, 0), psyq_sd(&q, 1), psyq_sd(&q, 2), psyq_sd(&q, 3));
+           yqst_sd(&q, 0), yqst_sd(&q, 1), yqst_sd(&q, 2), yqst_sd(&q, 3));
 
     printf("\nrecovered sensitivity, posterior mean parameters against the truth:\n");
     printf("   c/deg    estimate      truth\n");
@@ -240,6 +240,6 @@ int main(int argc, char** argv) {
         printf("%8.2f %11.1f %10.1f\n", pow(10.0, lf),
                pow(10.0, qcsf_log_s(lf, est)), pow(10.0, qcsf_log_s(lf, truth)));
     }
-    psyq_close(&q);
+    yqst_close(&q);
     return 0;
 }

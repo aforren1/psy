@@ -1,0 +1,20 @@
+# An sdist must carry everything the build needs. setup.py compiles
+# ysp/trials.h straight into the extension, and the header lives in
+# include/ysp/ under the repository root, which an sdist cannot reach, so
+# stage a copy in include/ysp/ next to setup.py first:
+#
+#     mkdir -p include/ysp && cp ../../../include/ysp/trials.h include/ysp/
+#     uv build --sdist
+#
+# The staged copies are gitignored; setup.py prefers the repository root when
+# it is present, so a copy cannot shadow a newer header in a development tree.
+# ysp/trials.h includes ysp/table.h, so both are staged:
+#
+#     mkdir -p include/ysp && cp ../../../include/ysp/table.h include/ysp/
+include include/ysp/trials.h
+include include/ysp/table.h
+# setup.py names the extension source by absolute path, which sdist does not
+# pick up on its own.
+include ysp_trials_ext.c
+include example.py
+recursive-include tests *.py

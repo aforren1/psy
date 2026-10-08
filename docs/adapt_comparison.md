@@ -1,25 +1,25 @@
 # The adaptive methods compared on published test problems
 
 This page explains how the three adaptive-method headers compare when they
-run on the same problems. The headers are `psy_stair.h` (staircases),
-`psy_quest.h` (QUEST+ and its special cases) and `psy_gp.h` (the Gaussian
+run on the same problems. The headers are `ysp/stair.h` (staircases),
+`ysp/quest.h` (QUEST+ and its special cases) and `ysp/aep.h` (the Gaussian
 process model and the two-latent psychometric model). The problems come
 from two papers: Watson (2017), which introduced QUEST+, and Owen et al.
 (2021), which introduced AEPsych. The page gives the numbers and says what
 they mean for the choice of a method. It does not tell you how to configure
 a method. The header manuals do that. The design decisions are in
-[psy_adapt.md](psy_adapt.md).
+[adapt.md](adapt.md).
 
 ## What was compared
 
 The script is [tests/compare/methods_compare.py](../tests/compare/methods_compare.py).
 It drives the three Python bindings. The compiled headers were
-psy_stair.h 0.1.1, psy_quest.h 0.4.1 and psy_gp.h 0.13.1. Every GP-model
-and psychometric-model row comes from psy_gp.h 0.13.1. The staircase and
+ysp/stair.h 0.1.1, ysp/quest.h 0.4.1 and ysp/aep.h 0.13.1. Every GP-model
+and psychometric-model row comes from ysp/aep.h 0.13.1. The staircase and
 QUEST+ rows come from the first run, because those headers did not change.
-[What changed between psy_gp.h 0.4.1 and 0.13.1](#what-changed-between-psy_gph-041-and-0131)
-compares the two runs. The current headers are psy_stair.h 0.1.2,
-psy_quest.h 0.5.2 and psy_gp.h 0.14.0. By their CHANGELOGs, none of the
+[What changed between ysp/aep.h 0.4.1 and 0.13.1](#what-changed-between-yspaeph-041-and-0131)
+compares the two runs. The current headers are ysp/stair.h 0.1.2,
+ysp/quest.h 0.5.2 and ysp/aep.h 0.14.0. By their CHANGELOGs, none of the
 later versions changes what a default configuration computes, so the
 tables hold for them.
 
@@ -42,7 +42,7 @@ Mathematica notebook, the code behind the paper. It gives the grids, the
 psychometric functions and the true observers exactly. Two facts in it
 matter here. First, the Weibull is in dB with the slope divided by 20:
 P(correct) = 1 - lapse - (1 - guess - lapse) exp(-10^(slope (x - threshold) / 20)).
-That is `PSYQ_PF_GUMBEL` with the slope axis scaled by 1/20. Second, the
+That is `YQST_PF_GUMBEL` with the slope axis scaled by 1/20. Second, the
 paper's CSF example is not a log-parabola. It is a threshold that is flat at
 t below a corner frequency and linear in frequency above it. The notebook
 also has a spatiotemporal CSF, Thurstone scaling, a blur increment
@@ -63,7 +63,7 @@ threshold lies between -0.97 and -0.58, near the bottom of the box.
 |---|---|---|
 | 1-up-2-down, 1-up-3-down | 1-D | steps 8, 4, 2 dB (4, 2, 1 deg for w4), start at the top of the range, reversal mean after the schedule |
 | weighted 1-up-1-down | 1-D | the same steps, down step scaled to converge on the target p |
-| interleaved staircases | 2-D | weighted 1-up-1-down at fixed contexts, round robin: 8 audiometric frequencies (as `gp_audiometric.c`), 6 contexts for the others |
+| interleaved staircases | 2-D | weighted 1-up-1-down at fixed contexts, round robin: 8 audiometric frequencies (as `aep_audiometric.c`), 6 contexts for the others |
 | QUEST | 1-D | QUEST+ with the threshold axis free and every other parameter fixed at the truth |
 | Psi | 1-D | threshold and slope free (slope grid 2 to 5), guess and lapse fixed |
 | QUEST+ joint | w3, w4 | Watson's grid for the example, every parameter joint |
@@ -130,9 +130,9 @@ Watson's paper and notebook report single simulated runs. They give no
 means, sds or biases over replications. So a check of our means against his
 is not possible. The notebook does save the stimulus and outcome of every
 trial of 17 example runs. The replay check (`--replay`) rebuilds each
-example's grids and model, asks psy.quest for its selection at every trial,
+example's grids and model, asks ysp.quest for its selection at every trial,
 and then feeds Watson's recorded stimulus and outcome. A selection that
-differs counts as a tie when psy.quest's expected entropies of the two
+differs counts as a tie when ysp.quest's expected entropies of the two
 stimuli differ by less than 1e-6 bits.
 
 | Run | Trials | Same | Tie | Different | Final mode, ours and Watson's |
@@ -152,7 +152,7 @@ stimuli differ by less than 1e-6 bits.
 
 Every tie is within 1.7e-8 bits, which is the float table. The circular
 ties are exact: the three categories have equal widths, so stimuli 120 deg
-apart have the same expected entropy. So psy.quest reproduces Watson's
+apart have the same expected entropy. So ysp.quest reproduces Watson's
 reference implementation trial for trial on every example in his notebook.
 
 mQUESTPlus is not in this replay: its demos draw from MATLAB's generator
@@ -225,7 +225,7 @@ the marginal mean is not.
 
 Psi, Psi-marginal and QUEST with the true slope are equal on threshold. So
 the free slope costs nothing here. The psychometric model reaches the
-criterion first, but its slope is half the truth under LSE. psy_gp.h 0.4.1
+criterion first, but its slope is half the truth under LSE. ysp/aep.h 0.4.1
 documents that shrinkage: it comes from the prior on the mean log slope.
 The GP model reaches 2 dB in 25 to 27 trials, against 19 to 20 for QUEST+.
 
@@ -459,7 +459,7 @@ MAE(p) is the mean over 72 directions and 3 categories. Criterion 0.05.
 QUEST+ with the true model finds the boundary on its 20 deg grid in almost
 every replication. The categorical GP is the nonparametric counterpart. Its
 RBF kernel is not periodic, so it does not know that 0 and 360 deg are the
-same direction, and it does not reach 0.05 in 128 trials. psy_gp.h has no
+same direction, and it does not reach 0.05 in 128 trials. ysp/aep.h has no
 periodic kernel. The categorical fit uses central differences and costs
 20 to 30 ms per trial.
 
@@ -481,12 +481,12 @@ The truth is not the paper's surface. The paper fit AEPsych's 2022 model on
 raw inputs. Here AEPsych 0.8.0 fits `GPClassificationModel(dim=6,
 inducing_size=100)` with k-means++ inducing points on the unit cube, because
 its lengthscale prior assumes the unit cube. A second truth comes from
-psy.gp's GP model (RBF ARD, probit). The binding holds at most 512 trials,
-so that fit uses the first 512 of the 1001 trials. With psy_gp.h 0.13.1
+ysp.aep's GP model (RBF ARD, probit). The binding holds at most 512 trials,
+so that fit uses the first 512 of the 1001 trials. With ysp/aep.h 0.13.1
 the two truths differ by 0.033 in MAE(p) over 2000 Sobol points. Their
 0.75 thresholds along contrast differ by 0.22 log10 units on average, and
 by up to 1.39, at the 104 of 200 random contexts where both cross. At 24
-contexts only one of them crosses. (Under 0.4.1 the psy.gp truth gave
+contexts only one of them crosses. (Under 0.4.1 the ysp.aep truth gave
 0.033, 0.23 and 1.35.) So two reasonable fits to the same data disagree
 about the threshold by 0.22 log10 units, which is more than twice the 0.1
 criterion.
@@ -502,7 +502,7 @@ and 300 replications. One replication at 500 trials took 8 to 16 minutes
 per method on the loaded machine, so 10 replications of one method would
 have taken more than an hour. The run was cut to 300 trials. Candidates
 are 1000 Halton points with `refine_steps=2`, `fit_every=20`, and
-`guess=0.5` for every psy.gp method. The psychometric model uses contrast
+`guess=0.5` for every ysp.aep method. The psychometric model uses contrast
 (`intensity_dim=0`) as intensity. "Sobol (random)" is the GP model fed
 Sobol points, which is the paper's baseline. MAE(p) is over 2000 Sobol
 points. The threshold MAE brackets 200 contrast points at each of 200
@@ -524,7 +524,7 @@ comes from the loaded parallel run, 8 workers, not from a serial pass.
 
 No method reaches 0.1 log10 units in 300 trials.
 
-Under psy_gp.h 0.4.1, every GP-model run in replication 4 failed,
+Under ysp/aep.h 0.4.1, every GP-model run in replication 4 failed,
 including the Sobol baseline, and EAVC failed in replication 5 too: the
 fit ran the mean down until p was 0.5 everywhere (see
 [Problems found](#problems-found)). Under 0.13.1 no replication fails that
@@ -557,9 +557,9 @@ cost 0.1 to 0.3 s per trial on the loaded machine, and the cost grows with
 the trial count: a GP model replication at 500 trials under 0.4.1
 averaged 0.6 to 1.0 s per trial.
 
-## What changed between psy_gp.h 0.4.1 and 0.13.1
+## What changed between ysp/aep.h 0.4.1 and 0.13.1
 
-The tables above are from psy_gp.h 0.13.1, with the same seeds, response
+The tables above are from ysp/aep.h 0.13.1, with the same seeds, response
 streams and replication counts as the first run on 0.4.1. The new header
 puts a prior on the latent mean, rejects a fit step that makes the
 objective worse, keeps a floor under the lengthscales, and guards EAVC when
@@ -658,7 +658,7 @@ types; treat them as a factor-of-two guide.
 
 ## Problems found
 
-The first run, on psy_gp.h 0.4.1, found four defects. The rerun on 0.13.1,
+The first run, on ysp/aep.h 0.4.1, found four defects. The rerun on 0.13.1,
 with the same seeds, shows all four fixed:
 
 | Defect under 0.4.1 | Case | Under 0.13.1 |
@@ -689,9 +689,9 @@ What remains:
   audiogram: 9.5 dB (metabolic+sensory, beta 2, replication 14) and 7.6 dB
   (older-normal, beta 0.5, replication 10). They are the same in both
   versions and keep a crossing in every column.
-- `PSYGP_MAX_TRIALS` is 512 in the default binding build, so the psy.gp
+- `YAEP_MAX_TRIALS` is 512 in the default binding build, so the ysp.aep
   truth for csf6 uses only 512 of the 1001 trials. A build with
-  `PSY_GP_MAX_TRIALS=1024` (see the psy_gp binding's README) lets the same
+  `YSP_AEP_MAX_TRIALS=1024` (see the ysp_aep binding's README) lets the same
   fit use all of them. The run above did not use one.
 
 ## Reproduce
@@ -701,8 +701,8 @@ From the repository root:
 ```sh
 uv venv venv-methods
 source venv-methods/bin/activate        # Windows: venv-methods\Scripts\activate
-uv pip install ./bindings/python/psy_stair ./bindings/python/psy_quest \
-    ./bindings/python/psy_gp numpy scipy
+uv pip install ./bindings/python/ysp_stair ./bindings/python/ysp_quest \
+    ./bindings/python/ysp_aep numpy scipy
 python tests/compare/methods_compare.py --out results
 python tests/compare/methods_compare.py --replay path/to/QuestPlus.nb
 ```
@@ -713,11 +713,11 @@ The csf6 problem runs only when named, because it takes about an hour:
 python tests/compare/methods_compare.py --only csf6 --csf6-trials 300 --out results-csf6
 ```
 
-It downloads the data into `--cache` (default `$PSY_COMPARE_CACHE` or
-`~/.cache/psy-compare`). The AEPsych truth needs AEPsych in the
+It downloads the data into `--cache` (default `$YSP_COMPARE_CACHE` or
+`~/.cache/ysp-compare`). The AEPsych truth needs AEPsych in the
 interpreter. Build it once with `--build-truth aepsych` in an environment
-that has AEPsych, and later runs read it from the cache. `--truth psygp`
-uses psy.gp's fit instead. When both truths are in the cache, the run
+that has AEPsych, and later runs read it from the cache. `--truth yaep`
+uses ysp.aep's fit instead. When both truths are in the cache, the run
 reports how much they differ.
 
 The first run writes one raw CSV per problem and `tables.txt` to `results`. It took

@@ -1,5 +1,5 @@
-/* gfx_text.c - Slug text from real fonts: psy_outline.h builds the curve
- * sets at setup, psy_gfx.h draws them.
+/* gfx_text.c - Slug text from real fonts: ysp/outline.h builds the curve
+ * sets at setup, ysp/gfx.h draws them.
  *
  * Six pages in a 1200 x 760 window:
  *   1  a word that grows from 6 to 600 px per em while it turns, with its
@@ -7,9 +7,9 @@
  *      turns, rays between), over a ladder of small static sizes;
  *   2  the same text by exact area and by .rays, side by side, a 13x
  *      nearest-neighbor magnifier of each, the documented errors and the
- *      errors measured here at setup against psyol_raster()'s exact
+ *      errors measured here at setup against yol_raster()'s exact
  *      coverage; a subpixel drift;
- *   3  outlines and faux bold from psyol_stroke(), a hard shadow (the run
+ *   3  outlines and faux bold from yol_stroke(), a hard shadow (the run
  *      drawn twice), a glow and a blurred-letter stimulus from the blur
  *      pass (sigma on a tween or on keys);
  *   4  a page of CJK glyphs (Microsoft YaHei) from a curve set of the glyphs
@@ -17,17 +17,17 @@
  *      drawn directly or composited from a target filled at setup, with
  *      each mode's CPU and GPU time per frame;
  *   5  per-letter animation: a staggered entrance, a wave and an exit
- *      built with psytl_seq (GSAP's stagger), and a wave of tweens;
- *   6  an SVG made in this program, read by psyol_svg() into layers of one
+ *      built with ytl_seq (GSAP's stagger), and a wave of tweens;
+ *   6  an SVG made in this program, read by yol_svg() into layers of one
  *      curve set, drawn as one run; a click picks the layer under the
- *      pointer (psygfx_hit_index).
+ *      pointer (ygfx_hit_index).
  *
  * LAYOUT IS BY ADVANCES ONLY (cmap and hmtx): no shaping, no kerning, no
  * bidi, no line breaking. That is enough for Latin labels and a grid of
  * CJK glyphs, and wrong for most scripts, so Arabic, Devanagari and the
  * like are left out here. Real text goes through Skribidi in the pack
  * tool and the player (rig_spec 5.2), which hand glyph ids and positions
- * to psy_outline.h and psy_gfx.h.
+ * to ysp/outline.h and ysp/gfx.h.
  *
  * Fonts: Segoe UI and Microsoft YaHei from C:/Windows/Fonts, or the files
  * given with --font and --cjk. A font that does not open is named on its
@@ -56,9 +56,9 @@
  *   --topmost      keep the window on top and take the foreground (Windows)
  *   --shots PREFIX show each page for 120 frames, read the output back, write
  *                  PREFIX-pN.ppm, then quit
- *   --cache DIR    keep compiled programs in DIR (psygfx_file_cache_init:
+ *   --cache DIR    keep compiled programs in DIR (ygfx_file_cache_init:
  *                  it writes files there); the default is the per-user
- *                  folder of psygfx_default_cache_dir(), when there is one
+ *                  folder of ygfx_default_cache_dir(), when there is one
  *   --no-cache     compile every program; read and write no cache file
  *   --font PATH    the Latin font (default C:/Windows/Fonts/segoeui.ttf)
  *   --cjk PATH     the CJK font, face 0 (default C:/Windows/Fonts/msyh.ttc)
@@ -66,17 +66,17 @@
  *                  30209, seconds and about 98 MB), not only the page's
  * Exit code: 0; 1 when the screen or the gfx did not open, or a draw or a
  * setup step was refused; 2 for a bad argument. A missing font is not an
- * error. On Windows set PSYSCR_ANGLE_DIR to ANGLE's directory.
+ * error. On Windows set YSCR_ANGLE_DIR to ANGLE's directory.
  */
 #if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS
 #endif
-#define PSY_GFX_IMPLEMENTATION
-#include "psy_gfx.h"
-#define PSY_TIMELINE_IMPLEMENTATION
-#include "psy_timeline.h"
-#define PSY_OUTLINE_IMPLEMENTATION
-#include "psy_outline.h"
+#define YSP_GFX_IMPLEMENTATION
+#include "ysp/gfx.h"
+#define YSP_TIMELINE_IMPLEMENTATION
+#include "ysp/timeline.h"
+#define YSP_OUTLINE_IMPLEMENTATION
+#include "ysp/outline.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -106,18 +106,18 @@ static void take_foreground(SDL_Window* w) {
 
 #define WIN_W 1200
 #define WIN_H 760
-#define S_NS PSYTL_NS_PER_S
+#define S_NS YTL_NS_PER_S
 #define MS_NS (S_NS / 1000)
 #define SHOT_FRAMES 120
 #define COUNT(a) (int)(sizeof(a) / sizeof((a)[0]))
 
-static psyscr_screen scr;
-static psygfx_gfx gfx;
-static psycol_cal cal;
-static psytl_timeline tl;
-static psytl_event tl_events[4];     /* tracks and tweens only: no events */
-static psytl_key tl_keys[4096];      /* the key arena of page 5's sequence */
-static psyol_ctx ol;
+static yscr_screen scr;
+static ygfx_gfx gfx;
+static ycol_cal cal;
+static ytl_timeline tl;
+static ytl_event tl_events[4];     /* tracks and tweens only: no events */
+static ytl_key tl_keys[4096];      /* the key arena of page 5's sequence */
+static yol_ctx ol;
 static void (GLCALL *glFinish_)(void);   /* page 4's GPU time; NULL on SIM */
 
 /* Linear device RGB. The background is near mid-gray on the display. */
@@ -129,7 +129,7 @@ static const float AMBER[3]  = { 0.60f, 0.32f, 0.04f };
 static const float TEAL[3]   = { 0.05f, 0.38f, 0.40f };
 static const float WHITE[3]  = { 1.0f, 1.0f, 1.0f };
 
-/* The label palette (PSYGFX_I_COLOR): an item's color is its index here. */
+/* The label palette (YGFX_I_COLOR): an item's color is its index here. */
 enum { C_INK, C_LIGHT, C_DIM, C_AMBER, C_TEAL, C_RED, N_COLORS };
 static const float label_pal[3 * N_COLORS] = {
     0.55f, 0.55f, 0.55f,  0.66f, 0.66f, 0.66f,  0.34f, 0.34f, 0.34f,
@@ -143,19 +143,19 @@ static const char* reported_what;
 /* Every draw is checked: a refused draw names its page once, and the exit
  * code says so, which makes the --sim run in CI a check of every desc
  * against the header's rules. */
-static void put(const psygfx_stim* s) {
-    int rc = psygfx_draw(&gfx, s);
+static void put(const ygfx_stim* s) {
+    int rc = ygfx_draw(&gfx, s);
     if (rc < 0) {
         refused++;
         if (reported_what != cur_what) {
-            fprintf(stderr, "gfx_text: %s: %s (%s)\n", cur_what, psygfx_strerror(rc), psygfx_error(&gfx));
+            fprintf(stderr, "gfx_text: %s: %s (%s)\n", cur_what, ygfx_strerror(rc), ygfx_error(&gfx));
             reported_what = cur_what;
         }
     }
 }
 static void fail(const char* what) {
     refused++;
-    fprintf(stderr, "gfx_text: %s: %s\n", what, psygfx_error(&gfx));
+    fprintf(stderr, "gfx_text: %s: %s\n", what, ygfx_error(&gfx));
 }
 static void rgb(float* dst, const float* src) { dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; }
 
@@ -208,18 +208,18 @@ typedef struct tfont {
     char        path[400];
     char        why[240];   /* why the file is not used; "" when it is        */
     uint8_t*    bytes;
-    psyol_font  f;
+    yol_font  f;
     int         real;       /* 1: the file, 0: the bitmap font                */
     uint32_t    G;          /* the glyph table's size                         */
     double      asc, dsc;   /* em, both positive                              */
-    psygfx_cset set;
+    ygfx_cset set;
     uint32_t    n_built;    /* glyphs in the set                              */
     uint32_t    n_texels, n_words;   /* its arrays: 16 and 4 bytes each       */
     double      build_ms;
 } tfont;
 
 static tfont ui, cjk;       /* the Latin font, and the CJK page's             */
-static psygfx_cset fx_set;  /* page 3: ui's strokes at gid, bolds at G + gid  */
+static ygfx_cset fx_set;  /* page 3: ui's strokes at gid, bolds at G + gid  */
 
 static int tf_open(tfont* t, const char* path, const char* name) {
     FILE* fp;
@@ -239,7 +239,7 @@ static int tf_open(tfont* t, const char* path, const char* name) {
         return 0;
     }
     fclose(fp);
-    if (psyol_font_open(&t->f, t->bytes, (size_t)n, 0, err, sizeof err) < 0) {
+    if (yol_font_open(&t->f, t->bytes, (size_t)n, 0, err, sizeof err) < 0) {
         free(t->bytes); t->bytes = NULL;
         snprintf(t->why, sizeof t->why, "%s: %s", path, err);
         return 0;
@@ -253,7 +253,7 @@ static int tf_open(tfont* t, const char* path, const char* name) {
 
 /* cmap; the bitmap font has capitals and ASCII punctuation only. */
 static uint32_t tf_gid(const tfont* t, uint32_t c) {
-    if (t->real) return psyol_font_glyph_index(&t->f, c);
+    if (t->real) return yol_font_glyph_index(&t->f, c);
     if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
     return c >= BM_FIRST && c < BM_FIRST + BM_N ? c - BM_FIRST : (uint32_t)('?' - BM_FIRST);
 }
@@ -262,66 +262,66 @@ static uint32_t tf_gid(const tfont* t, uint32_t c) {
 static double tf_adv(const tfont* t, uint32_t gid) {
     double a = 0.5, lsb;
     if (!t->real) return 0.6;
-    if (psyol_font_hmetrics(&t->f, gid, &a, &lsb) < 0) a = 0.5;
+    if (yol_font_hmetrics(&t->f, gid, &a, &lsb) < 0) a = 0.5;
     return a;
 }
 
 /* Appends glyph gid at size path units per em with the pen at x, y. */
-static int tf_path(const tfont* t, uint32_t gid, psyol_path* p, double size, double x, double y) {
+static int tf_path(const tfont* t, uint32_t gid, yol_path* p, double size, double x, double y) {
     int r, c;
     if (t->real) {
-        psyol_glyph_desc gd;
+        yol_glyph_desc gd;
         memset(&gd, 0, sizeof gd);
         gd.size = size; gd.x = x; gd.y = y;
-        return psyol_font_glyph(&ol, &t->f, gid, p, &gd);
+        return yol_font_glyph(&ol, &t->f, gid, p, &gd);
     }
     for (r = 0; r < 7; r++)
         for (c = 0; c < 5; c++)
             if (gid < BM_N && (font5x7[gid][r] & (0x10 >> c)))
-                psyol_rect(p, x + 0.1 * size * c, y + 0.1 * size * (r - 7), 0.1 * size, 0.1 * size, 0, 0);
-    return psyol_path_end(p);
+                yol_rect(p, x + 0.1 * size * c, y + 0.1 * size * (r - 7), 0.1 * size, 0.1 * size, 0, 0);
+    return yol_path_end(p);
 }
 
 /* A curve set of t's glyphs gids[0 .. n - 1] (n 0: the whole font),
  * resolved, with backward lists (the rays are faster with them). */
 static int tf_build(tfont* t, const uint32_t* gids, int n) {
-    psyol_cset s;
-    psyol_cset_desc od;
-    psygfx_cset_desc d;
-    int64_t t0 = psyrt_now_ns();
+    yol_cset s;
+    yol_cset_desc od;
+    ygfx_cset_desc d;
+    int64_t t0 = yrt_now_ns();
     int rc = 0, i;
     memset(&od, 0, sizeof od);
     od.n_glyphs = t->G; od.backward = true;
-    if (psyol_cset_init(&s, &ol, &od) != PSYOL_OK) return -1;
+    if (yol_cset_init(&s, &ol, &od) != YOL_OK) return -1;
     if (t->real) {
-        rc = psyol_cset_add_font(&s, &t->f, gids, (uint32_t)n, 0);
+        rc = yol_cset_add_font(&s, &t->f, gids, (uint32_t)n, 0);
         t->n_built = n ? (uint32_t)n : t->G;
     } else {
-        psyol_path p;
-        psyol_path_init(&p, &ol);
+        yol_path p;
+        yol_path_init(&p, &ol);
         for (i = 1; i < BM_N && rc == 0; i++) {
-            psyol_path_clear(&p);
-            if (tf_path(t, (uint32_t)i, &p, 1, 0, 0) != PSYOL_OK || psyol_cset_add(&s, (uint32_t)i, &p) != PSYOL_OK) rc = -1;
+            yol_path_clear(&p);
+            if (tf_path(t, (uint32_t)i, &p, 1, 0, 0) != YOL_OK || yol_cset_add(&s, (uint32_t)i, &p) != YOL_OK) rc = -1;
         }
-        psyol_path_free(&p);
+        yol_path_free(&p);
         t->n_built = BM_N - 1;
     }
-    if (rc < 0) { fprintf(stderr, "gfx_text: %s: %s\n", t->name, psyol_error(&ol)); psyol_cset_free(&s); return -1; }
+    if (rc < 0) { fprintf(stderr, "gfx_text: %s: %s\n", t->name, yol_error(&ol)); yol_cset_free(&s); return -1; }
     memset(&d, 0, sizeof d);
     d.texels = s.texels; d.n_texels = s.n_texels; d.words = s.words; d.n_words = s.n_words;
-    t->set = psygfx_cset_make(&gfx, &d);
-    t->build_ms = (double)(psyrt_now_ns() - t0) * 1e-6;
+    t->set = ygfx_cset_make(&gfx, &d);
+    t->build_ms = (double)(yrt_now_ns() - t0) * 1e-6;
     t->n_texels = s.n_texels; t->n_words = s.n_words;
     printf("%s: %u glyphs into a curve set in %.0f ms (%u texels, %u words)\n", t->real ? t->name : "the bitmap font",
            t->n_built, t->build_ms, s.n_texels, s.n_words);
-    psyol_cset_free(&s);
+    yol_cset_free(&s);
     return t->set.id ? 0 : -1;
 }
 
 /* Items for a line of ASCII text with the pen at x, y (px, the baseline)
  * and px per em: advances only (see the header comment). Spaces advance
  * and add no item. Returns the count written. */
-static int layout(const tfont* t, psygfx_citem* it, int cap, const char* s, double x, double y, double px, int color) {
+static int layout(const tfont* t, ygfx_citem* it, int cap, const char* s, double x, double y, double px, int color) {
     double pen = x;
     int n = 0;
     for (; *s; s++) {
@@ -351,10 +351,10 @@ static double text_w(const tfont* t, const char* s, double px) {
 
 /* A run whose box is the window and whose items are screen px: the same
  * coordinates in a window-sized target. */
-static psygfx_crun_desc screen_desc(psygfx_cset set, const psygfx_citem* it, int n, double px, const float* color) {
-    psygfx_crun_desc d;
+static ygfx_crun_desc screen_desc(ygfx_cset set, const ygfx_citem* it, int n, double px, const float* color) {
+    ygfx_crun_desc d;
     memset(&d, 0, sizeof d);
-    d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_TOP_LEFT; d.w = WIN_W; d.h = WIN_H;
+    d.place = YGFX_TOP_LEFT; d.anchor = YGFX_TOP_LEFT; d.w = WIN_W; d.h = WIN_H;
     d.set = set; d.items = it; d.n = n; d.size = (float)px;
     rgb(d.color, color);
     return d;
@@ -362,24 +362,24 @@ static psygfx_crun_desc screen_desc(psygfx_cset set, const psygfx_citem* it, int
 
 /* A word whose ink is centered on the screen point x, y (the items' extent
  * is the box: CENTER centers the ink). */
-static psygfx_stim word_run(psygfx_cset set, const psygfx_citem* it, int n, double px, float x, float y, const float* color) {
-    psygfx_crun_desc d;
+static ygfx_stim word_run(ygfx_cset set, const ygfx_citem* it, int n, double px, float x, float y, const float* color) {
+    ygfx_crun_desc d;
     memset(&d, 0, sizeof d);
-    d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_CENTER; d.x = x; d.y = y;
+    d.place = YGFX_TOP_LEFT; d.anchor = YGFX_CENTER; d.x = x; d.y = y;
     d.set = set; d.items = it; d.n = n; d.size = (float)px;
     rgb(d.color, color);
-    return psygfx_crun(&gfx, &d);
+    return ygfx_crun(&gfx, &d);
 }
 
-static psygfx_stim rect(float x0, float y0, float w, float h, const float* color, float radius) {
-    psygfx_shape_desc d;
+static ygfx_stim rect(float x0, float y0, float w, float h, const float* color, float radius) {
+    ygfx_shape_desc d;
     memset(&d, 0, sizeof d);
-    d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_TOP_LEFT;
-    d.shape = PSYGFX_RRECT; d.x = x0; d.y = y0; d.w = w; d.h = h;
+    d.place = YGFX_TOP_LEFT; d.anchor = YGFX_TOP_LEFT;
+    d.shape = YGFX_RRECT; d.x = x0; d.y = y0; d.w = w; d.h = h;
     d.shape_p[0] = d.shape_p[1] = d.shape_p[2] = d.shape_p[3] = radius;
-    d.edge = PSYGFX_EDGE_COSINE; d.edge_width = 1.0f;
+    d.edge = YGFX_EDGE_COSINE; d.edge_width = 1.0f;
     rgb(d.color, color);
-    return psygfx_shape(&d);
+    return ygfx_shape(&d);
 }
 
 /* --- labels: static text in a window-sized target, dynamic text per frame - */
@@ -392,10 +392,10 @@ enum { TS_SMALL, TS_BODY, TS_TITLE, N_TS };
 static const float ts_px[N_TS] = { 14, 16, 24 };
 #define LAB_CAP 2400
 #define DYN_CAP 300
-static psygfx_citem lab_it[N_TS][LAB_CAP], dyn_it[N_TS][DYN_CAP];
+static ygfx_citem lab_it[N_TS][LAB_CAP], dyn_it[N_TS][DYN_CAP];
 static int lab_n[N_TS], dyn_n[N_TS];
-static psygfx_stim lab_run[N_TS], dyn_run[N_TS], lab_img;
-static psygfx_tex lab_tex;
+static ygfx_stim lab_run[N_TS], dyn_run[N_TS], lab_img;
+static ygfx_tex lab_tex;
 static const float zero4[4] = { 0, 0, 0, 0 };
 
 static void lab(int ts, double x, double y, int color, const char* s) {
@@ -431,25 +431,25 @@ static void d_num(double v, int dec) {
 }
 
 static int labels_setup(void) {
-    psygfx_target_desc td;
-    psygfx_image_desc id;
-    psygfx_crun_desc d;
+    ygfx_target_desc td;
+    ygfx_image_desc id;
+    ygfx_crun_desc d;
     int k;
     memset(&td, 0, sizeof td);
-    td.w = WIN_W; td.h = WIN_H; td.format = PSYGFX_RGBA16F;
-    lab_tex = psygfx_target(&gfx, &td);
+    td.w = WIN_W; td.h = WIN_H; td.format = YGFX_RGBA16F;
+    lab_tex = ygfx_target(&gfx, &td);
     if (!lab_tex.id) return -1;
     memset(&id, 0, sizeof id);
-    id.tex = lab_tex; id.place = PSYGFX_TOP_LEFT; id.anchor = PSYGFX_TOP_LEFT;
-    lab_img = psygfx_image(&gfx, &id);
+    id.tex = lab_tex; id.place = YGFX_TOP_LEFT; id.anchor = YGFX_TOP_LEFT;
+    lab_img = ygfx_image(&gfx, &id);
     for (k = 0; k < N_TS; k++) {
-        /* made with every item, so psygfx_crun() makes the items' buffers;
+        /* made with every item, so ygfx_crun() makes the items' buffers;
          * count is set before each draw */
         d = screen_desc(ui.set, lab_it[k], LAB_CAP, ts_px[k], WHITE);
-        d.fields = PSYGFX_I_COLOR; d.palette = label_pal; d.n_palette = N_COLORS;
-        lab_run[k] = psygfx_crun(&gfx, &d);
+        d.fields = YGFX_I_COLOR; d.palette = label_pal; d.n_palette = N_COLORS;
+        lab_run[k] = ygfx_crun(&gfx, &d);
         d.items = dyn_it[k]; d.n = DYN_CAP;
-        dyn_run[k] = psygfx_crun(&gfx, &d);
+        dyn_run[k] = ygfx_crun(&gfx, &d);
     }
     return 0;
 }
@@ -463,11 +463,11 @@ enum { CH_GROW, CH_TURN, CH_DRIFT_X, CH_DRIFT_Y, CH_SIGMA,
        N_CH = CH_WC + WAVE_N };
 enum { PAGE_BASE = 1 };
 
-static psygfx_bind binds[128];
+static ygfx_bind binds[128];
 static int n_binds;
 static int64_t page_t0;
 
-static void bind_group(psygfx_group* g, int param, int ch) {
+static void bind_group(ygfx_group* g, int param, int ch) {
     memset(&binds[n_binds], 0, sizeof binds[0]);
     binds[n_binds].group = g; binds[n_binds].param = (uint16_t)param; binds[n_binds].channel = (uint16_t)ch;
     n_binds++;
@@ -481,29 +481,29 @@ static void bind_field(float* field, int ch) {
 /* A tween that runs between two values forever from base time start, so
  * that re-anchoring the page base at 0 replays it. */
 static int yoyo(int ch, float from, float to, double seconds, int ease, int64_t start) {
-    psytl_tween_desc d;
+    ytl_tween_desc d;
     memset(&d, 0, sizeof d);
     d.from = from; d.from_set = true; d.to = to;
-    d.duration = psytl_ns(seconds);
+    d.duration = ytl_ns(seconds);
     d.start = start; d.start_set = true;
-    d.ease = ease; d.cycles = PSYTL_FOREVER; d.yoyo = true;
-    return psytl_tween(&tl, ch, PAGE_BASE, &d);
+    d.ease = ease; d.cycles = YTL_FOREVER; d.yoyo = true;
+    return ytl_tween(&tl, ch, PAGE_BASE, &d);
 }
 
 static int timeline_setup(void) {
     static float initial[N_CH];
-    psytl_desc td;
+    ytl_desc td;
     int k;
     initial[CH_GROW] = 0.06f; initial[CH_SIGMA] = 3;
     for (k = 0; k < LET_N; k++) { initial[CH_LY + k] = 50; initial[CH_LG + k] = 0; initial[CH_LS + k] = 0.6f; }
     memset(&td, 0, sizeof td);
     td.events = tl_events; td.event_capacity = COUNT(tl_events); td.n_channels = N_CH; td.initial = initial;
     td.keys = tl_keys; td.key_capacity = COUNT(tl_keys);
-    if (!psytl_open(&tl, &td)) { fprintf(stderr, "gfx_text: %s\n", psytl_error(&tl)); return -1; }
+    if (!ytl_open(&tl, &td)) { fprintf(stderr, "gfx_text: %s\n", ytl_error(&tl)); return -1; }
     return 0;
 }
 
-static double page_seconds(const psyscr_frame* f) { return (double)(f->onset - page_t0) * 1e-9; }
+static double page_seconds(const yscr_frame* f) { return (double)(f->onset - page_t0) * 1e-9; }
 
 /* =========================================================================== *
  * Pages. Each is one function: PG_SETUP makes its stimuli once, PG_STATIC
@@ -516,54 +516,54 @@ static float mouse_x = -1, mouse_y = -1, click_x = -1, click_y = -1;
 
 /* --- page 1: scale and rotate ------------------------------------------------- */
 
-static psygfx_group grow_g;
-static psygfx_stim grow_word, ladder[12];
-static psygfx_citem grow_it[8], ladder_it[12][8];
+static ygfx_group grow_g;
+static ygfx_stim grow_word, ladder[12];
+static ygfx_citem grow_it[8], ladder_it[12][8];
 static const float ladder_px[12] = { 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24 };
 
 /* The turn rests 1 s on each quarter turn, where the run takes the exact
  * area, and moves 3 s between them, where it takes the rays (v0.8). */
-static const psytl_key turn_keys[9] = {
-    { 0, 0, PSYTL_EASE_COSINE, 0, 0 },          { 3 * S_NS, 90, PSYTL_EASE_LINEAR, 0, 0 },
-    { 4 * S_NS, 90, PSYTL_EASE_COSINE, 0, 0 },  { 7 * S_NS, 180, PSYTL_EASE_LINEAR, 0, 0 },
-    { 8 * S_NS, 180, PSYTL_EASE_COSINE, 0, 0 }, { 11 * S_NS, 270, PSYTL_EASE_LINEAR, 0, 0 },
-    { 12 * S_NS, 270, PSYTL_EASE_COSINE, 0, 0 },{ 15 * S_NS, 360, PSYTL_EASE_LINEAR, 0, 0 },
-    { 16 * S_NS, 360, PSYTL_EASE_LINEAR, 0, 0 },
+static const ytl_key turn_keys[9] = {
+    { 0, 0, YTL_EASE_COSINE, 0, 0 },          { 3 * S_NS, 90, YTL_EASE_LINEAR, 0, 0 },
+    { 4 * S_NS, 90, YTL_EASE_COSINE, 0, 0 },  { 7 * S_NS, 180, YTL_EASE_LINEAR, 0, 0 },
+    { 8 * S_NS, 180, YTL_EASE_COSINE, 0, 0 }, { 11 * S_NS, 270, YTL_EASE_LINEAR, 0, 0 },
+    { 12 * S_NS, 270, YTL_EASE_COSINE, 0, 0 },{ 15 * S_NS, 360, YTL_EASE_LINEAR, 0, 0 },
+    { 16 * S_NS, 360, YTL_EASE_LINEAR, 0, 0 },
 };
 
-static void page_scale(int mode, const psyscr_frame* f) {
+static void page_scale(int mode, const yscr_frame* f) {
     int k;
     if (mode == PG_SETUP) {
-        psygfx_group_desc gd;
-        psygfx_crun_desc d;
-        psytl_track tr;
+        ygfx_group_desc gd;
+        ygfx_crun_desc d;
+        ytl_track tr;
         int n;
         /* The run is made at 100 px per em and the group scales it: a group's
          * scale multiplies what is in units, the size and the pen positions
          * alike, so one channel grows the whole word about its center. */
         memset(&gd, 0, sizeof gd);
-        gd.place = PSYGFX_CENTER; gd.y = 20; gd.scale = 0.06f;
-        grow_g = psygfx_group_make(&gd);
+        gd.place = YGFX_CENTER; gd.y = 20; gd.scale = 0.06f;
+        grow_g = ygfx_group_make(&gd);
         n = layout(&ui, grow_it, 8, "Slug", 0, 0, 100, 0);
         memset(&d, 0, sizeof d);
-        d.place = PSYGFX_CENTER; d.anchor = PSYGFX_CENTER; d.set = ui.set; d.items = grow_it; d.n = n; d.size = 100;
+        d.place = YGFX_CENTER; d.anchor = YGFX_CENTER; d.set = ui.set; d.items = grow_it; d.n = n; d.size = 100;
         d.group = &grow_g;
         rgb(d.color, LIGHT);
-        grow_word = psygfx_crun(&gfx, &d);
-        bind_group(&grow_g, PSYGFX_G_SCALE, CH_GROW);
-        bind_group(&grow_g, PSYGFX_G_ORI, CH_TURN);
-        /* a geometric sweep, 6 to 600 px per em and back (PSYTL_EASE_LOG) */
-        if (yoyo(CH_GROW, 0.06f, 6.0f, 7.0, PSYTL_EASE_LOG, 0) < 0) fail("page 1: the size tween");
+        grow_word = ygfx_crun(&gfx, &d);
+        bind_group(&grow_g, YGFX_G_SCALE, CH_GROW);
+        bind_group(&grow_g, YGFX_G_ORI, CH_TURN);
+        /* a geometric sweep, 6 to 600 px per em and back (YTL_EASE_LOG) */
+        if (yoyo(CH_GROW, 0.06f, 6.0f, 7.0, YTL_EASE_LOG, 0) < 0) fail("page 1: the size tween");
         memset(&tr, 0, sizeof tr);
         tr.keys = turn_keys; tr.n_keys = COUNT(turn_keys); tr.period = 16 * S_NS;
-        if (psytl_set_track(&tl, CH_TURN, PAGE_BASE, &tr) < 0) fail("page 1: the turn track");
+        if (ytl_set_track(&tl, CH_TURN, PAGE_BASE, &tr) < 0) fail("page 1: the turn track");
         /* the ladder: small sizes, static, so they go into the label target */
         {
             double x = 40;
             for (k = 0; k < COUNT(ladder_px); k++) {
                 n = layout(&ui, ladder_it[k], 8, "Slug", x, WIN_H - 92, ladder_px[k], 0);
                 d = screen_desc(ui.set, ladder_it[k], n, ladder_px[k], INK);
-                ladder[k] = psygfx_crun(&gfx, &d);
+                ladder[k] = ygfx_crun(&gfx, &d);
                 x += text_w(&ui, "Slug", ladder_px[k]) + 34;
             }
         }
@@ -573,7 +573,7 @@ static void page_scale(int mode, const psyscr_frame* f) {
         double x = 40;
         char s[16];
         lab(TS_BODY, 40, 100, C_INK, "One run at 100 px per em in a group whose scale and ori are timeline channels:");
-        lab(TS_BODY, 40, 122, C_INK, "the size sweeps 6 to 600 px per em geometrically (PSYTL_EASE_LOG), the turn rests on each quarter turn.");
+        lab(TS_BODY, 40, 122, C_INK, "the size sweeps 6 to 600 px per em geometrically (YTL_EASE_LOG), the turn rests on each quarter turn.");
         lab(TS_SMALL, 40, WIN_H - 122, C_DIM, "Static, unturned, exact area, rendered once into the label target:");
         for (k = 0; k < COUNT(ladder_px); k++) {
             put(&ladder[k]);
@@ -616,35 +616,35 @@ static const char* const cmp_text[4] = {
     "Hamburgefonstiv 0123",
     "Rag&8 Wy",
 };
-static psygfx_citem cmp_it[2][4][80];
-static psygfx_stim cmp_run[2][4], cmp_img, mag_img[2], mag_mark[2], cmp_panel, mag_panel[2];
-static psygfx_group drift_g;
-static psygfx_tex cmp_tex;
+static ygfx_citem cmp_it[2][4][80];
+static ygfx_stim cmp_run[2][4], cmp_img, mag_img[2], mag_mark[2], cmp_panel, mag_panel[2];
+static ygfx_group drift_g;
+static ygfx_tex cmp_tex;
 static int cmp_f32, drift_on = 1, cmp_measured;
 static double cmp_err[4][4];   /* per size: exact-area max, rays mean, rays max, edge pixels */
 
 /* Both runs drawn into the target at setup, read back, and compared with
- * psyol_raster()'s exact coverage in double. Each glyph is rasterized
+ * yol_raster()'s exact coverage in double. Each glyph is rasterized
  * alone and composited as the GPU blends draws (a + b (1 - a)): where two
  * neighbors share a pixel, the union's area is not what OVER gives. */
 static void cmp_measure(void) {
     float* px = (float*)malloc((size_t)CMP_W * CMP_H * 4 * sizeof(float));
     double* ref = (double*)malloc((size_t)CMP_HALF * CMP_H * sizeof(double));
     double* one = (double*)malloc((size_t)CMP_HALF * CMP_H * sizeof(double));
-    psyol_path p;
+    yol_path p;
     int r, k, x, y;
     if (!px || !ref || !one) { free(px); free(ref); free(one); return; }
-    if (psygfx_begin_setup(&gfx) != PSYGFX_OK || psygfx_begin_target(&gfx, cmp_tex, zero4) != PSYGFX_OK) {
+    if (ygfx_begin_setup(&gfx) != YGFX_OK || ygfx_begin_target(&gfx, cmp_tex, zero4) != YGFX_OK) {
         fail("page 2: setup pass"); free(px); free(ref); free(one); return;
     }
     for (k = 0; k < 2; k++) for (r = 0; r < 4; r++) put(&cmp_run[k][r]);
-    psygfx_end_target(&gfx);
-    if (psygfx_end_setup(&gfx) != PSYGFX_OK) fail("page 2: setup pass");
-    if (psygfx_read_target(&gfx, cmp_tex, 0, 0, CMP_W, CMP_H, px) != PSYGFX_OK) {   /* SIM: no pixels */
+    ygfx_end_target(&gfx);
+    if (ygfx_end_setup(&gfx) != YGFX_OK) fail("page 2: setup pass");
+    if (ygfx_read_target(&gfx, cmp_tex, 0, 0, CMP_W, CMP_H, px) != YGFX_OK) {   /* SIM: no pixels */
         free(px); free(ref); free(one);
         return;
     }
-    psyol_path_init(&p, &ol);
+    yol_path_init(&p, &ol);
     for (r = 0; r < 4; r++) {
         int y0 = (int)(cmp_base[r] - 1.05 * cmp_px[r]) - 1, y1 = (int)(cmp_base[r] + 0.32 * cmp_px[r]) + 2, n = 0, bad = 0;
         double emax = 0, rsum = 0, rmax = 0;
@@ -652,15 +652,15 @@ static void cmp_measure(void) {
         if (y1 > CMP_H) y1 = CMP_H;
         memset(ref, 0, (size_t)CMP_HALF * CMP_H * sizeof(double));
         for (k = 0; k < 80 && cmp_it[0][r][k].gate == 1 && !bad; k++) {
-            psyol_raster_desc rd;
-            psyol_box b;
+            yol_raster_desc rd;
+            yol_box b;
             int bw, bh;
-            psyol_path_clear(&p);
+            yol_path_clear(&p);
             tf_path(&ui, (uint32_t)cmp_it[0][r][k].glyph, &p, cmp_px[r], cmp_it[0][r][k].x, cmp_it[0][r][k].y);
             if (!p.n_contours) continue;
             memset(&rd, 0, sizeof rd);
-            rd.scale = 1; rd.format = PSYOL_ALPHA_F64;
-            if (psyol_raster(&ol, &p, &rd, &b) < 0) { bad = 1; break; }
+            rd.scale = 1; rd.format = YOL_ALPHA_F64;
+            if (yol_raster(&ol, &p, &rd, &b) < 0) { bad = 1; break; }
             if (b.x0 < 0) b.x0 = 0;
             if (b.y0 < 0) b.y0 = 0;
             if (b.x1 > CMP_HALF) b.x1 = CMP_HALF;
@@ -668,14 +668,14 @@ static void cmp_measure(void) {
             bw = b.x1 - b.x0; bh = b.y1 - b.y0;
             if (bw <= 0 || bh <= 0) continue;
             rd.x = -b.x0; rd.y = -b.y0; rd.out = one; rd.w = bw; rd.h = bh; rd.stride = bw * (int)sizeof(double);
-            if (psyol_raster(&ol, &p, &rd, NULL) < 0) { bad = 1; break; }
+            if (yol_raster(&ol, &p, &rd, NULL) < 0) { bad = 1; break; }
             for (y = 0; y < bh; y++)
                 for (x = 0; x < bw; x++) {
                     double* d = &ref[(size_t)(y + b.y0) * CMP_HALF + (size_t)(x + b.x0)];
                     *d += one[(size_t)y * bw + x] * (1 - *d);
                 }
         }
-        if (bad) { fprintf(stderr, "gfx_text: page 2: %s\n", psyol_error(&ol)); refused++; continue; }
+        if (bad) { fprintf(stderr, "gfx_text: page 2: %s\n", yol_error(&ol)); refused++; continue; }
         for (y = y0; y < y1; y++)
             for (x = 0; x < CMP_HALF; x++) {
                 double c = ref[(size_t)y * CMP_HALF + x];
@@ -688,61 +688,61 @@ static void cmp_measure(void) {
         printf("page 2, %g px per em: exact area max %.2g, rays mean %.3f max %.3f over %d edge pixels\n", (double)cmp_px[r], emax,
                cmp_err[r][1], rmax, n);
     }
-    psyol_path_free(&p);
+    yol_path_free(&p);
     cmp_measured = 1;
     free(px); free(ref); free(one);
 }
 
-static void page_exact(int mode, const psyscr_frame* f) {
+static void page_exact(int mode, const yscr_frame* f) {
     int k, r;
     if (mode == PG_SETUP) {
-        psygfx_group_desc gd;
-        psygfx_target_desc td;
-        psygfx_image_desc id;
-        psygfx_shape_desc sd;
+        ygfx_group_desc gd;
+        ygfx_target_desc td;
+        ygfx_image_desc id;
+        ygfx_shape_desc sd;
         memset(&gd, 0, sizeof gd);
-        gd.place = PSYGFX_TOP_LEFT;
-        drift_g = psygfx_group_make(&gd);
+        gd.place = YGFX_TOP_LEFT;
+        drift_g = ygfx_group_make(&gd);
         for (k = 0; k < 2; k++)
             for (r = 0; r < 4; r++) {
-                psygfx_crun_desc d;
+                ygfx_crun_desc d;
                 int n = layout(&ui, cmp_it[k][r], 79, cmp_text[r], 8 + k * CMP_HALF, cmp_base[r], cmp_px[r], 0);
                 while (n > 0 && cmp_it[k][r][n - 1].x + 0.8 * cmp_px[r] > (k + 1) * CMP_HALF - 4) n--;   /* stay in the half */
                 cmp_it[k][r][n].gate = 0;   /* the end, for the measurement */
                 memset(&d, 0, sizeof d);
-                d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_TOP_LEFT; d.w = CMP_W; d.h = CMP_H;
+                d.place = YGFX_TOP_LEFT; d.anchor = YGFX_TOP_LEFT; d.w = CMP_W; d.h = CMP_H;
                 d.set = ui.set; d.items = cmp_it[k][r]; d.n = n; d.size = cmp_px[r]; d.group = &drift_g;
                 d.rays = k == 1;
                 rgb(d.color, WHITE);
-                cmp_run[k][r] = psygfx_crun(&gfx, &d);
+                cmp_run[k][r] = ygfx_crun(&gfx, &d);
             }
-        bind_group(&drift_g, PSYGFX_G_X, CH_DRIFT_X);
-        bind_group(&drift_g, PSYGFX_G_Y, CH_DRIFT_Y);
-        if (yoyo(CH_DRIFT_X, -0.5f, 0.5f, 2.3, PSYTL_EASE_COSINE, 0) < 0 || yoyo(CH_DRIFT_Y, -0.5f, 0.5f, 3.7, PSYTL_EASE_COSINE, 0) < 0)
+        bind_group(&drift_g, YGFX_G_X, CH_DRIFT_X);
+        bind_group(&drift_g, YGFX_G_Y, CH_DRIFT_Y);
+        if (yoyo(CH_DRIFT_X, -0.5f, 0.5f, 2.3, YTL_EASE_COSINE, 0) < 0 || yoyo(CH_DRIFT_Y, -0.5f, 0.5f, 3.7, YTL_EASE_COSINE, 0) < 0)
             fail("page 2: the drift tweens");
         /* RGBA32F keeps the coverage to f32 for the measurement; RGBA16F
          * where the renderer cannot blend into it */
         memset(&td, 0, sizeof td);
-        td.w = CMP_W; td.h = CMP_H; td.format = PSYGFX_RGBA32F;
-        cmp_tex = psygfx_target(&gfx, &td);
+        td.w = CMP_W; td.h = CMP_H; td.format = YGFX_RGBA32F;
+        cmp_tex = ygfx_target(&gfx, &td);
         cmp_f32 = cmp_tex.id != 0;
-        if (!cmp_tex.id) { td.format = PSYGFX_RGBA16F; cmp_tex = psygfx_target(&gfx, &td); }
+        if (!cmp_tex.id) { td.format = YGFX_RGBA16F; cmp_tex = ygfx_target(&gfx, &td); }
         if (!cmp_tex.id) { fail("page 2: target"); return; }
         memset(&id, 0, sizeof id);
-        id.tex = cmp_tex; id.place = PSYGFX_TOP_LEFT; id.anchor = PSYGFX_TOP_LEFT; id.x = CMP_X; id.y = CMP_Y;
+        id.tex = cmp_tex; id.place = YGFX_TOP_LEFT; id.anchor = YGFX_TOP_LEFT; id.x = CMP_X; id.y = CMP_Y;
         rgb(id.tint, LIGHT); id.tint[3] = 1;
-        cmp_img = psygfx_image(&gfx, &id);
+        cmp_img = ygfx_image(&gfx, &id);
         for (k = 0; k < 2; k++) {
             id.x = (float)(CMP_X + k * CMP_HALF); id.y = MAG_Y;
             id.src[0] = 30; id.src[1] = 50; id.src[2] = MAG_W; id.src[3] = MAG_H;
             id.w = MAG_W * MAG_Z; id.h = MAG_H * MAG_Z;
-            mag_img[k] = psygfx_image(&gfx, &id);   /* nearest: one block per pixel */
+            mag_img[k] = ygfx_image(&gfx, &id);   /* nearest: one block per pixel */
             mag_panel[k] = rect((float)(CMP_X + k * CMP_HALF), MAG_Y, MAG_W * MAG_Z, MAG_H * MAG_Z, DARK, 0);
             memset(&sd, 0, sizeof sd);
-            sd.place = PSYGFX_TOP_LEFT; sd.anchor = PSYGFX_TOP_LEFT; sd.shape = PSYGFX_RECT; sd.w = MAG_W + 2; sd.h = MAG_H + 2;
-            sd.stroke = 1; sd.stroke_align = PSYGFX_STROKE_INSIDE; sd.edge = PSYGFX_EDGE_COSINE; sd.edge_width = 1;
+            sd.place = YGFX_TOP_LEFT; sd.anchor = YGFX_TOP_LEFT; sd.shape = YGFX_RECT; sd.w = MAG_W + 2; sd.h = MAG_H + 2;
+            sd.stroke = 1; sd.stroke_align = YGFX_STROKE_INSIDE; sd.edge = YGFX_EDGE_COSINE; sd.edge_width = 1;
             rgb(sd.color, AMBER);
-            mag_mark[k] = psygfx_shape(&sd);
+            mag_mark[k] = ygfx_shape(&sd);
         }
         cmp_panel = rect(CMP_X - 6, CMP_Y - 6, CMP_W + 12, CMP_H + 12, DARK, 6);
         cmp_measure();
@@ -754,7 +754,7 @@ static void page_exact(int mode, const psyscr_frame* f) {
         lab(TS_BODY, CMP_X + CMP_HALF, 72, C_LIGHT, "crun_desc.rays: two rays from each pixel center");
         lab(TS_SMALL, CMP_X, MAG_Y + MAG_H * MAG_Z + 18, C_DIM, "13x, nearest: one block per pixel of the target above (8, 12, 24, 48 px per em)");
         if (cmp_measured) {
-            snprintf(s, sizeof s, "Measured here at setup against psyol_raster(), exact in double (%s, no drift):",
+            snprintf(s, sizeof s, "Measured here at setup against yol_raster(), exact in double (%s, no drift):",
                      cmp_f32 ? "RGBA32F" : "RGBA16F: to about 1e-3");
             lab(TS_SMALL, CMP_X, 616, C_INK, s);
             for (r = 0; r < 4; r++) {
@@ -767,7 +767,7 @@ static void page_exact(int mode, const psyscr_frame* f) {
         }
         /* the documented rows come from the test's synthetic glyphs, so a
          * different number on a real font here is not a regression */
-        lab(TS_SMALL, 720, 616, C_DIM, "Documented in psy_gfx.h, on the test's synthetic");
+        lab(TS_SMALL, 720, 616, C_DIM, "Documented in ysp/gfx.h, on the test's synthetic");
         lab(TS_SMALL, 736, 634, C_DIM, "glyphs across three renderers, not on this font:");
         lab(TS_SMALL, 736, 651, C_DIM, "exact area within 1.8e-5; rays mean edge error 0.029,");
         lab(TS_SMALL, 736, 668, C_DIM, "0.019, 0.009, 0.004 at 8, 12, 24, 48 px per em; up");
@@ -776,9 +776,9 @@ static void page_exact(int mode, const psyscr_frame* f) {
         return;
     }
     if (!drift_on) drift_g.x = drift_g.y = 0;
-    if (psygfx_begin_target(&gfx, cmp_tex, zero4) == PSYGFX_OK) {
+    if (ygfx_begin_target(&gfx, cmp_tex, zero4) == YGFX_OK) {
         for (k = 0; k < 2; k++) for (r = 0; r < 4; r++) put(&cmp_run[k][r]);
-        psygfx_end_target(&gfx);
+        ygfx_end_target(&gfx);
     } else {
         fail("page 2: target pass");
     }
@@ -813,61 +813,61 @@ static void page_exact(int mode, const psyscr_frame* f) {
 
 static const char* const W_OUT = "Outline";
 static const char* const W_BOLD = "Weight";
-static psygfx_citem fx_it[6][16];
-static psygfx_stim fx_out, fx_fill, fx_out2, fx_reg, fx_bold, fx_shadow, fx_word, fx_glow_word, fx_white, bl_white;
-static psygfx_blur glow, blurl;
+static ygfx_citem fx_it[6][16];
+static ygfx_stim fx_out, fx_fill, fx_out2, fx_reg, fx_bold, fx_shadow, fx_word, fx_glow_word, fx_white, bl_white;
+static ygfx_blur glow, blurl;
 static float sigma_manual;   /* > 0: the keys set sigma, not the tween */
 
 /* Strokes and bolds of the glyphs of W_OUT and W_BOLD, at ids gid and G +
  * gid of one set. Each glyph is resolved first, so the stroke follows its
  * outline and not overlapping contours (or the bitmap font's squares). */
 static int fx_setup(void) {
-    psyol_cset s;
-    psyol_cset_desc od;
-    psyol_path g, o;
-    psygfx_cset_desc d;
+    yol_cset s;
+    yol_cset_desc od;
+    yol_path g, o;
+    ygfx_cset_desc d;
     static unsigned char seen[65536];
     const char* words[2] = { W_OUT, W_BOLD };
     int w, rc = 0;
-    int64_t t0 = psyrt_now_ns();
+    int64_t t0 = yrt_now_ns();
     memset(&od, 0, sizeof od);
     od.n_glyphs = 2 * ui.G; od.backward = true;
-    if (ui.G > 32768 || psyol_cset_init(&s, &ol, &od) != PSYOL_OK) return -1;
-    psyol_path_init(&g, &ol); psyol_path_init(&o, &ol);
+    if (ui.G > 32768 || yol_cset_init(&s, &ol, &od) != YOL_OK) return -1;
+    yol_path_init(&g, &ol); yol_path_init(&o, &ol);
     for (w = 0; w < 2 && rc == 0; w++) {
         const char* c;
         for (c = words[w]; *c && rc == 0; c++) {
             uint32_t gid = tf_gid(&ui, (unsigned char)*c);
-            psyol_stroke_desc sd;
+            yol_stroke_desc sd;
             if (seen[gid] & (1 << w)) continue;
             seen[gid] |= (unsigned char)(1 << w);
-            psyol_path_clear(&g);
-            if (tf_path(&ui, gid, &g, 1, 0, 0) < 0 || psyol_resolve(&ol, &g, &g) < 0) { rc = -1; break; }
+            yol_path_clear(&g);
+            if (tf_path(&ui, gid, &g, 1, 0, 0) < 0 || yol_resolve(&ol, &g, &g) < 0) { rc = -1; break; }
             memset(&sd, 0, sizeof sd);
             /* outlined text: CSS -webkit-text-stroke: 0.035em; faux bold:
              * the fill and a 0.045 em stroke, 0.0225 em out on each side */
             sd.width = w == 0 ? 0.035 : 0.045;
-            sd.mode = w == 0 ? PSYOL_STROKE : PSYOL_BOLD;
-            psyol_path_clear(&o);
-            if (psyol_stroke(&ol, &g, &o, &sd) < 0 || psyol_cset_add(&s, w == 0 ? gid : ui.G + gid, &o) < 0) rc = -1;
+            sd.mode = w == 0 ? YOL_STROKE : YOL_BOLD;
+            yol_path_clear(&o);
+            if (yol_stroke(&ol, &g, &o, &sd) < 0 || yol_cset_add(&s, w == 0 ? gid : ui.G + gid, &o) < 0) rc = -1;
         }
     }
-    psyol_path_free(&g); psyol_path_free(&o);
-    if (rc < 0) { fprintf(stderr, "gfx_text: page 3 strokes: %s\n", psyol_error(&ol)); psyol_cset_free(&s); return -1; }
+    yol_path_free(&g); yol_path_free(&o);
+    if (rc < 0) { fprintf(stderr, "gfx_text: page 3 strokes: %s\n", yol_error(&ol)); yol_cset_free(&s); return -1; }
     memset(&d, 0, sizeof d);
     d.texels = s.texels; d.n_texels = s.n_texels; d.words = s.words; d.n_words = s.n_words;
-    fx_set = psygfx_cset_make(&gfx, &d);
+    fx_set = ygfx_cset_make(&gfx, &d);
     printf("page 3: strokes and bolds of %d glyphs in %.0f ms\n", (int)(strlen(W_OUT) + strlen(W_BOLD)),
-           (double)(psyrt_now_ns() - t0) * 1e-6);
-    psyol_cset_free(&s);
+           (double)(yrt_now_ns() - t0) * 1e-6);
+    yol_cset_free(&s);
     return fx_set.id ? 0 : -1;
 }
 
-static void page_effects(int mode, const psyscr_frame* f) {
+static void page_effects(int mode, const yscr_frame* f) {
     const float L = 300, R = 900, Y1 = 150, Y2 = 280, Y3 = 420, Y4 = 560, PX = 72;
     if (mode == PG_SETUP) {
-        psygfx_blur_desc bd;
-        psygfx_crun_desc d;
+        ygfx_blur_desc bd;
+        ygfx_crun_desc d;
         int n, k;
         if (fx_setup() < 0) { fail("page 3: the stroke set"); return; }
         n = layout(&ui, fx_it[0], 16, W_OUT, 0, 0, PX, 0);
@@ -886,44 +886,44 @@ static void page_effects(int mode, const psyscr_frame* f) {
         fx_glow_word = word_run(ui.set, fx_it[5], n, PX, L, Y4, DARK);
         /* the glow: the word white in an R16F layer, blurred once, at setup */
         memset(&bd, 0, sizeof bd);
-        bd.w = 320; bd.h = 150; bd.format = PSYGFX_R16F; bd.sigma = 6;
-        if (psygfx_blur_make(&gfx, &glow, &bd) != PSYGFX_OK) { fail("page 3: glow"); return; }
+        bd.w = 320; bd.h = 150; bd.format = YGFX_R16F; bd.sigma = 6;
+        if (ygfx_blur_make(&gfx, &glow, &bd) != YGFX_OK) { fail("page 3: glow"); return; }
         memset(&d, 0, sizeof d);
-        d.place = PSYGFX_CENTER; d.anchor = PSYGFX_CENTER; d.set = ui.set; d.items = fx_it[5]; d.n = n; d.size = PX;
+        d.place = YGFX_CENTER; d.anchor = YGFX_CENTER; d.set = ui.set; d.items = fx_it[5]; d.n = n; d.size = PX;
         rgb(d.color, WHITE);
-        fx_white = psygfx_crun(&gfx, &d);
+        fx_white = ygfx_crun(&gfx, &d);
         /* the blurred letters: Sloan letters drawn once, blurred each frame */
         {
-            static psygfx_citem sl[8];
+            static ygfx_citem sl[8];
             int m = layout(&ui, sl, 8, "DKNRZ", 0, 0, 96, 0);
             bd.w = 520; bd.h = 200; bd.sigma = 3;
-            if (psygfx_blur_make(&gfx, &blurl, &bd) != PSYGFX_OK) { fail("page 3: blur"); return; }
+            if (ygfx_blur_make(&gfx, &blurl, &bd) != YGFX_OK) { fail("page 3: blur"); return; }
             d.items = sl; d.n = m; d.size = 96;
-            bl_white = psygfx_crun(&gfx, &d);
+            bl_white = ygfx_crun(&gfx, &d);
         }
-        if (psygfx_begin_setup(&gfx) != PSYGFX_OK) { fail("page 3: setup pass"); return; }
-        if (psygfx_begin_target(&gfx, glow.layer, zero4) == PSYGFX_OK) { put(&fx_white); psygfx_end_target(&gfx); }
-        if (psygfx_blur_apply(&gfx, &glow) != PSYGFX_OK) fail("page 3: glow blur");
-        if (psygfx_begin_target(&gfx, blurl.layer, zero4) == PSYGFX_OK) { put(&bl_white); psygfx_end_target(&gfx); }
-        if (psygfx_end_setup(&gfx) != PSYGFX_OK) fail("page 3: setup pass");
-        glow.image.place = PSYGFX_TOP_LEFT; glow.image.ax = glow.image.ay = 0.5f; glow.image.x = L; glow.image.y = Y4;
+        if (ygfx_begin_setup(&gfx) != YGFX_OK) { fail("page 3: setup pass"); return; }
+        if (ygfx_begin_target(&gfx, glow.layer, zero4) == YGFX_OK) { put(&fx_white); ygfx_end_target(&gfx); }
+        if (ygfx_blur_apply(&gfx, &glow) != YGFX_OK) fail("page 3: glow blur");
+        if (ygfx_begin_target(&gfx, blurl.layer, zero4) == YGFX_OK) { put(&bl_white); ygfx_end_target(&gfx); }
+        if (ygfx_end_setup(&gfx) != YGFX_OK) fail("page 3: setup pass");
+        glow.image.place = YGFX_TOP_LEFT; glow.image.ax = glow.image.ay = 0.5f; glow.image.x = L; glow.image.y = Y4;
         rgb(glow.image.tint, AMBER);
-        blurl.image.place = PSYGFX_TOP_LEFT; blurl.image.ax = blurl.image.ay = 0.5f; blurl.image.x = R; blurl.image.y = 490;
+        blurl.image.place = YGFX_TOP_LEFT; blurl.image.ax = blurl.image.ay = 0.5f; blurl.image.x = R; blurl.image.y = 490;
         rgb(blurl.image.tint, LIGHT);
         bind_field(&blurl.sigma, CH_SIGMA);
-        if (yoyo(CH_SIGMA, 0.5f, 10.0f, 3.0, PSYTL_EASE_COSINE, 0) < 0) fail("page 3: the sigma tween");
+        if (yoyo(CH_SIGMA, 0.5f, 10.0f, 3.0, YTL_EASE_COSINE, 0) < 0) fail("page 3: the sigma tween");
         return;
     }
     if (mode == PG_STATIC) {
-        lab(TS_SMALL, L - 250, Y1 + 50, C_DIM, "psyol_stroke(PSYOL_STROKE, 0.035 em): the band as a fill");
+        lab(TS_SMALL, L - 250, Y1 + 50, C_DIM, "yol_stroke(YOL_STROKE, 0.035 em): the band as a fill");
         lab(TS_SMALL, R - 250, Y1 + 50, C_DIM, "the same band over the fill: an outlined letter");
         lab(TS_SMALL, L - 250, Y2 + 50, C_DIM, "regular");
-        lab(TS_SMALL, R - 250, Y2 + 50, C_DIM, "psyol_stroke(PSYOL_BOLD, 0.045 em): faux bold");
+        lab(TS_SMALL, R - 250, Y2 + 50, C_DIM, "yol_stroke(YOL_BOLD, 0.045 em): faux bold");
         lab(TS_SMALL, L - 250, Y3 + 50, C_DIM, "a hard shadow: the run drawn twice, 4 px apart");
         lab(TS_SMALL, L - 250, Y4 + 62, C_DIM, "a glow: an R16F layer blurred once at setup, sigma 6 px");
         lab(TS_SMALL, R - 250, 620, C_DIM, "a blurred-letter stimulus: Sloan letters drawn once into");
         lab(TS_SMALL, R - 250, 637, C_DIM, "an R16F layer, blurred each frame (Gaussian, linear light)");
-        lab(TS_SMALL, 40, 690, C_DIM, "Curve runs refuse edges, strokes and fx: outlines and bold are fills from psy_outline.h, soft edges come from the blur pass.");
+        lab(TS_SMALL, 40, 690, C_DIM, "Curve runs refuse edges, strokes and fx: outlines and bold are fills from ysp/outline.h, soft edges come from the blur pass.");
         return;
     }
     put(&fx_fill); put(&fx_out); put(&fx_out2);
@@ -931,7 +931,7 @@ static void page_effects(int mode, const psyscr_frame* f) {
     put(&fx_shadow); put(&fx_word);
     put(&glow.image); put(&fx_glow_word);
     if (sigma_manual > 0) blurl.sigma = sigma_manual;
-    if (psygfx_blur_apply(&gfx, &blurl) != PSYGFX_OK) fail("page 3: blur");
+    if (ygfx_blur_apply(&gfx, &blurl) != YGFX_OK) fail("page 3: blur");
     put(&blurl.image);
     d_reset();
     d_str("sigma "); d_num(blurl.sigma, 2); d_str(sigma_manual > 0 ? " px (keys - and =; T: the tween)" : " px (a tween; keys - and = set it)");
@@ -947,11 +947,11 @@ static void page_effects(int mode, const psyscr_frame* f) {
 #define CJK_Y0 112
 #define CJK_X1 1176
 #define CJK_Y1 620
-static psygfx_citem cjk_items[4000];
+static ygfx_citem cjk_items[4000];
 static int cjk_n;
-static psygfx_buf cjk_buf;
-static psygfx_stim cjk_run, cjk_shifted, cjk_img;
-static psygfx_tex cjk_tex;
+static ygfx_buf cjk_buf;
+static ygfx_stim cjk_run, cjk_shifted, cjk_img;
+static ygfx_tex cjk_tex;
 static int cjk_mode;          /* 0 alternate, 1 direct, 2 cached */
 static int cjk_drawn_cached;  /* what this frame drew */
 static double cjk_ms[2][2][64];   /* [direct, cached][cpu, gpu] ring */
@@ -986,33 +986,33 @@ static void cjk_layout(const tfont* t, int han) {
     }
 }
 
-static void page_cjk(int mode, const psyscr_frame* f) {
+static void page_cjk(int mode, const yscr_frame* f) {
     if (mode == PG_SETUP) {
         const tfont* t = cjk.set.id ? &cjk : &ui;
-        psygfx_crun_desc d;
-        psygfx_target_desc td;
-        psygfx_image_desc id;
+        ygfx_crun_desc d;
+        ygfx_target_desc td;
+        ygfx_image_desc id;
         if (!cjk.set.id) cjk_layout(&ui, 0);   /* else fonts_setup() laid it out */
         /* a page in a buffer, uploaded once: no copy per frame */
-        cjk_buf = psygfx_buffer(&gfx, (size_t)cjk_n * sizeof(psygfx_citem));
-        if (!cjk_buf.id || psygfx_buffer_update(&gfx, cjk_buf, 0, cjk_items, (size_t)cjk_n * sizeof(psygfx_citem)) < 0) { fail("page 4: buffer"); return; }
+        cjk_buf = ygfx_buffer(&gfx, (size_t)cjk_n * sizeof(ygfx_citem));
+        if (!cjk_buf.id || ygfx_buffer_update(&gfx, cjk_buf, 0, cjk_items, (size_t)cjk_n * sizeof(ygfx_citem)) < 0) { fail("page 4: buffer"); return; }
         d = screen_desc(t->set, NULL, cjk_n, CJK_PX, INK);
         d.buf = cjk_buf;
-        cjk_run = psygfx_crun(&gfx, &d);
+        cjk_run = ygfx_crun(&gfx, &d);
         /* the same run moved so the page's top-left is the target's */
         d.x = -CJK_X0; d.y = -(CJK_Y0 - 6);
-        cjk_shifted = psygfx_crun(&gfx, &d);
+        cjk_shifted = ygfx_crun(&gfx, &d);
         memset(&td, 0, sizeof td);
-        td.w = CJK_X1 - CJK_X0 + 4; td.h = CJK_Y1 - CJK_Y0 + 12; td.format = PSYGFX_RGBA16F;
-        cjk_tex = psygfx_target(&gfx, &td);
+        td.w = CJK_X1 - CJK_X0 + 4; td.h = CJK_Y1 - CJK_Y0 + 12; td.format = YGFX_RGBA16F;
+        cjk_tex = ygfx_target(&gfx, &td);
         if (!cjk_tex.id) { fail("page 4: target"); return; }
         memset(&id, 0, sizeof id);
-        id.tex = cjk_tex; id.place = PSYGFX_TOP_LEFT; id.anchor = PSYGFX_TOP_LEFT; id.x = CJK_X0; id.y = CJK_Y0 - 6;   /* whole px */
-        cjk_img = psygfx_image(&gfx, &id);
-        if (psygfx_begin_setup(&gfx) != PSYGFX_OK || psygfx_begin_target(&gfx, cjk_tex, zero4) != PSYGFX_OK) { fail("page 4: setup pass"); return; }
+        id.tex = cjk_tex; id.place = YGFX_TOP_LEFT; id.anchor = YGFX_TOP_LEFT; id.x = CJK_X0; id.y = CJK_Y0 - 6;   /* whole px */
+        cjk_img = ygfx_image(&gfx, &id);
+        if (ygfx_begin_setup(&gfx) != YGFX_OK || ygfx_begin_target(&gfx, cjk_tex, zero4) != YGFX_OK) { fail("page 4: setup pass"); return; }
         put(&cjk_shifted);
-        psygfx_end_target(&gfx);
-        if (psygfx_end_setup(&gfx) != PSYGFX_OK) fail("page 4: setup pass");
+        ygfx_end_target(&gfx);
+        if (ygfx_end_setup(&gfx) != YGFX_OK) fail("page 4: setup pass");
         return;
     }
     if (mode == PG_STATIC) {
@@ -1077,13 +1077,13 @@ static void cjk_bench(void) {
         for (m = 0; m < 2; m++) {
             int64_t t0;
             glFinish_();
-            t0 = psyrt_now_ns();
-            if (psygfx_begin_setup(&gfx) != PSYGFX_OK || psygfx_begin_target(&gfx, lab_tex, zero4) != PSYGFX_OK) { fail("page 4: timing"); return; }
+            t0 = yrt_now_ns();
+            if (ygfx_begin_setup(&gfx) != YGFX_OK || ygfx_begin_target(&gfx, lab_tex, zero4) != YGFX_OK) { fail("page 4: timing"); return; }
             put(m ? &cjk_img : &cjk_run);
-            psygfx_end_target(&gfx);
-            psygfx_end_setup(&gfx);
+            ygfx_end_target(&gfx);
+            ygfx_end_setup(&gfx);
             glFinish_();
-            if (rep >= 4) sum[m] += (double)(psyrt_now_ns() - t0) * 1e-6;   /* the first ones warm up */
+            if (rep >= 4) sum[m] += (double)(yrt_now_ns() - t0) * 1e-6;   /* the first ones warm up */
         }
     cjk_setup_n = 20;
     for (m = 0; m < 2; m++) cjk_setup_ms[m] = sum[m] / cjk_setup_n;
@@ -1093,22 +1093,22 @@ static void cjk_bench(void) {
 
 /* --- page 5: per-letter animation -------------------------------------------- */
 
-static psygfx_citem let_it[LET_N], wave_it[WAVE_N];
-static psygfx_stim let_run, wave_run;
+static ygfx_citem let_it[LET_N], wave_it[WAVE_N];
+static ygfx_stim let_run, wave_run;
 static const float wave_pal[6] = { 0.62f, 0.62f, 0.62f, 0.60f, 0.32f, 0.04f };
 
-static void page_letters(int mode, const psyscr_frame* f) {
+static void page_letters(int mode, const yscr_frame* f) {
     int k;
     if (mode == PG_SETUP) {
-        psygfx_crun_desc d;
-        psytl_seq q;
-        psytl_tween_desc t;
+        ygfx_crun_desc d;
+        ytl_seq q;
+        ytl_tween_desc t;
         int n = layout(&ui, let_it, LET_N, "psychophysics", 0, 0, 96, 0), m;
         memset(&d, 0, sizeof d);
-        d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_CENTER; d.x = 600; d.y = 300;
-        d.set = ui.set; d.items = let_it; d.n = n; d.size = 96; d.fields = PSYGFX_I_GATE | PSYGFX_I_SCALE;
+        d.place = YGFX_TOP_LEFT; d.anchor = YGFX_CENTER; d.x = 600; d.y = 300;
+        d.set = ui.set; d.items = let_it; d.n = n; d.size = 96; d.fields = YGFX_I_GATE | YGFX_I_SCALE;
         rgb(d.color, LIGHT);
-        let_run = psygfx_crun(&gfx, &d);
+        let_run = ygfx_crun(&gfx, &d);
         for (k = 0; k < n; k++) {
             bind_field(&let_it[k].y, CH_LY + k);
             bind_field(&let_it[k].gate, CH_LG + k);
@@ -1120,47 +1120,47 @@ static void page_letters(int mode, const psyscr_frame* f) {
          *   .to(chars, { y: -40, opacity: 0, duration: 0.5, ease: "power1.in", stagger: 0.04 }, 5.6)
          * Each letter's field is a channel; a sequence lowers each one's
          * tweens to one keyed track. */
-        q = psytl_seq_on(&tl, PAGE_BASE);
+        q = ytl_seq_on(&tl, PAGE_BASE);
         for (k = 0; k < n; k++) {
-            psytl_at(&q, (int64_t)k * 60 * MS_NS);
+            ytl_at(&q, (int64_t)k * 60 * MS_NS);
             memset(&t, 0, sizeof t);
-            t.from = 50; t.from_set = true; t.to = 0; t.duration = 600 * MS_NS; t.ease = PSYTL_EASE_QUAD_OUT;
-            psytl_to(&q, CH_LY + k, &t);
+            t.from = 50; t.from_set = true; t.to = 0; t.duration = 600 * MS_NS; t.ease = YTL_EASE_QUAD_OUT;
+            ytl_to(&q, CH_LY + k, &t);
             t.from = 0.6f; t.to = 1;
-            psytl_to(&q, CH_LS + k, &t);
+            ytl_to(&q, CH_LS + k, &t);
             t.from = 0; t.to = 1; t.duration = 400 * MS_NS;
-            psytl_to(&q, CH_LG + k, &t);
-            psytl_at(&q, 1600 * MS_NS + (int64_t)k * 80 * MS_NS);
+            ytl_to(&q, CH_LG + k, &t);
+            ytl_at(&q, 1600 * MS_NS + (int64_t)k * 80 * MS_NS);
             memset(&t, 0, sizeof t);
-            t.to = -18; t.duration = 400 * MS_NS; t.ease = PSYTL_EASE_COSINE; t.yoyo = true; t.cycles = 3;
-            psytl_to(&q, CH_LY + k, &t);
-            psytl_at(&q, 5600 * MS_NS + (int64_t)k * 40 * MS_NS);
+            t.to = -18; t.duration = 400 * MS_NS; t.ease = YTL_EASE_COSINE; t.yoyo = true; t.cycles = 3;
+            ytl_to(&q, CH_LY + k, &t);
+            ytl_at(&q, 5600 * MS_NS + (int64_t)k * 40 * MS_NS);
             memset(&t, 0, sizeof t);
-            t.to = -40; t.duration = 500 * MS_NS; t.ease = PSYTL_EASE_QUAD_IN;
-            psytl_to(&q, CH_LY + k, &t);
+            t.to = -40; t.duration = 500 * MS_NS; t.ease = YTL_EASE_QUAD_IN;
+            ytl_to(&q, CH_LY + k, &t);
             t.to = 0;
-            psytl_to(&q, CH_LG + k, &t);
+            ytl_to(&q, CH_LG + k, &t);
         }
-        if (q.err < 0) { fprintf(stderr, "gfx_text: page 5: the sequence's call %d: %s\n", q.err_call, psytl_strerror(q.err)); refused++; }
+        if (q.err < 0) { fprintf(stderr, "gfx_text: page 5: the sequence's call %d: %s\n", q.err_call, ytl_strerror(q.err)); refused++; }
         /* a wave that never ends: a yoyo tween per letter, each started 70 ms
          * after the one before; the color is a palette position */
         m = layout(&ui, wave_it, WAVE_N, "a wave, forever", 0, 0, 56, 0);
         memset(&d, 0, sizeof d);
-        d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_CENTER; d.x = 600; d.y = 540;
-        d.set = ui.set; d.items = wave_it; d.n = m; d.size = 56; d.fields = PSYGFX_I_COLOR;
+        d.place = YGFX_TOP_LEFT; d.anchor = YGFX_CENTER; d.x = 600; d.y = 540;
+        d.set = ui.set; d.items = wave_it; d.n = m; d.size = 56; d.fields = YGFX_I_COLOR;
         d.palette = wave_pal; d.n_palette = 2;
-        wave_run = psygfx_crun(&gfx, &d);
+        wave_run = ygfx_crun(&gfx, &d);
         for (k = 0; k < m; k++) {
             bind_field(&wave_it[k].y, CH_WY + k);
             bind_field(&wave_it[k].color, CH_WC + k);
-            if (yoyo(CH_WY + k, 0, -14, 0.6, PSYTL_EASE_COSINE, (int64_t)k * 70 * MS_NS) < 0 ||
-                yoyo(CH_WC + k, 0, 1, 1.2, PSYTL_EASE_COSINE, (int64_t)k * 70 * MS_NS) < 0) fail("page 5: the wave tweens");
+            if (yoyo(CH_WY + k, 0, -14, 0.6, YTL_EASE_COSINE, (int64_t)k * 70 * MS_NS) < 0 ||
+                yoyo(CH_WC + k, 0, 1, 1.2, YTL_EASE_COSINE, (int64_t)k * 70 * MS_NS) < 0) fail("page 5: the wave tweens");
         }
         return;
     }
     if (mode == PG_STATIC) {
-        lab(TS_SMALL, 40, 100, C_INK, "Each letter's y, gate and scale are timeline channels bound with psygfx_bind.field to the run's items:");
-        lab(TS_SMALL, 40, 118, C_INK, "a staggered entrance, a wave and an exit built with psytl_seq (GSAP's stagger), replayed every 7.5 s by an anchor.");
+        lab(TS_SMALL, 40, 100, C_INK, "Each letter's y, gate and scale are timeline channels bound with ygfx_bind.field to the run's items:");
+        lab(TS_SMALL, 40, 118, C_INK, "a staggered entrance, a wave and an exit built with ytl_seq (GSAP's stagger), replayed every 7.5 s by an anchor.");
         lab(TS_SMALL, 40, 420, C_INK, "Below: a yoyo tween per letter on y and on the palette position, started 70 ms apart.");
         lab(TS_SMALL, 40, 680, C_DIM, "Items in .items are copied at each draw (17 us of CPU for 40 glyphs, documented), so a run that animates per letter costs little.");
         return;
@@ -1178,10 +1178,10 @@ static void page_letters(int mode, const psyscr_frame* f) {
 #define ART_SC 1.5f
 #define ART_X 40
 #define ART_Y 80
-static psyol_cset art_src;   /* .keep: the hit test reads these arrays until exit */
-static psygfx_cset art_set;
-static psygfx_citem art_it[ART_MAX], art_hl[1];
-static psygfx_stim art_run, art_hl_run, art_panel;
+static yol_cset art_src;   /* .keep: the hit test reads these arrays until exit */
+static ygfx_cset art_set;
+static ygfx_citem art_it[ART_MAX], art_hl[1];
+static ygfx_stim art_run, art_hl_run, art_panel;
 static float art_pal[3 * ART_MAX];
 static int art_n, art_pick = -1;
 static uint32_t art_rgba[ART_MAX];
@@ -1195,7 +1195,7 @@ static const char* const art_names[] = {
 
 static double srgb_to_linear(double v) { return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4); }
 
-static void page_svg(int mode, const psyscr_frame* f) {
+static void page_svg(int mode, const yscr_frame* f) {
     int k;
     if (mode == PG_SETUP) {
         static const char svg[] =
@@ -1219,31 +1219,31 @@ static void page_svg(int mode, const psyscr_frame* f) {
             "            stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n"
             "  <line x1=\"20\" y1=\"294\" x2=\"460\" y2=\"294\" stroke=\"#46563f\" stroke-width=\"3\"/>\n"
             "</svg>\n";
-        static psyol_svg_layer layers[ART_MAX];
-        psyol_svg_desc sd;
-        psyol_cset_desc od;
-        psygfx_cset_desc cd;
-        psygfx_crun_desc d;
-        psyol_path o;
+        static yol_svg_layer layers[ART_MAX];
+        yol_svg_desc sd;
+        yol_cset_desc od;
+        ygfx_cset_desc cd;
+        ygfx_crun_desc d;
+        yol_path o;
         char err[200];
         memset(&sd, 0, sizeof sd);
         sd.layers = layers; sd.max_layers = ART_MAX;
-        art_n = psyol_svg(&ol, svg, sizeof svg - 1, &sd, art_vb, err, sizeof err);
+        art_n = yol_svg(&ol, svg, sizeof svg - 1, &sd, art_vb, err, sizeof err);
         if (art_n <= 0) { fprintf(stderr, "gfx_text: page 6: %s\n", err); refused++; art_n = 0; return; }
         /* fills and strokes at ids 0 .. n - 1, their outlines (the pick's
          * highlight) at n .. 2n - 1 */
         memset(&od, 0, sizeof od);
         od.n_glyphs = (uint32_t)(2 * art_n); od.backward = true;
-        if (psyol_cset_init(&art_src, &ol, &od) != PSYOL_OK) { fail("page 6: set"); return; }
-        psyol_path_init(&o, &ol);
+        if (yol_cset_init(&art_src, &ol, &od) != YOL_OK) { fail("page 6: set"); return; }
+        yol_path_init(&o, &ol);
         for (k = 0; k < art_n; k++) {
-            psyol_stroke_desc st;
+            yol_stroke_desc st;
             memset(&st, 0, sizeof st);
-            st.width = 4; st.join = PSYOL_JOIN_ROUND;
-            psyol_path_clear(&o);
-            if (psyol_cset_add(&art_src, (uint32_t)k, &layers[k].path) < 0 || psyol_stroke(&ol, &layers[k].path, &o, &st) < 0 ||
-                psyol_cset_add(&art_src, (uint32_t)(art_n + k), &o) < 0) {
-                fprintf(stderr, "gfx_text: page 6: layer %d: %s\n", k, psyol_error(&ol)); refused++;
+            st.width = 4; st.join = YOL_JOIN_ROUND;
+            yol_path_clear(&o);
+            if (yol_cset_add(&art_src, (uint32_t)k, &layers[k].path) < 0 || yol_stroke(&ol, &layers[k].path, &o, &st) < 0 ||
+                yol_cset_add(&art_src, (uint32_t)(art_n + k), &o) < 0) {
+                fprintf(stderr, "gfx_text: page 6: layer %d: %s\n", k, yol_error(&ol)); refused++;
             }
             art_rgba[k] = layers[k].rgba; art_src_kind[k] = layers[k].source; art_elem[k] = layers[k].element;
             art_pal[3 * k] = (float)srgb_to_linear((layers[k].rgba >> 24 & 255) / 255.0);
@@ -1251,42 +1251,42 @@ static void page_svg(int mode, const psyscr_frame* f) {
             art_pal[3 * k + 2] = (float)srgb_to_linear((layers[k].rgba >> 8 & 255) / 255.0);
             memset(&art_it[k], 0, sizeof art_it[k]);
             art_it[k].glyph = (float)k; art_it[k].color = (float)k; art_it[k].contrast = (float)(layers[k].rgba & 255) / 255.0f;
-            psyol_path_free(&layers[k].path);
+            yol_path_free(&layers[k].path);
         }
-        psyol_path_free(&o);
+        yol_path_free(&o);
         memset(&cd, 0, sizeof cd);
         cd.texels = art_src.texels; cd.n_texels = art_src.n_texels; cd.words = art_src.words; cd.n_words = art_src.n_words; cd.keep = true;
-        art_set = psygfx_cset_make(&gfx, &cd);
+        art_set = ygfx_cset_make(&gfx, &cd);
         if (!art_set.id) { fail("page 6: set"); return; }
         memset(&d, 0, sizeof d);
-        d.place = PSYGFX_TOP_LEFT; d.anchor = PSYGFX_TOP_LEFT; d.x = ART_X; d.y = ART_Y;
+        d.place = YGFX_TOP_LEFT; d.anchor = YGFX_TOP_LEFT; d.x = ART_X; d.y = ART_Y;
         d.w = (float)art_vb[2] * ART_SC; d.h = (float)art_vb[3] * ART_SC;
         d.set = art_set; d.items = art_it; d.n = art_n; d.size = ART_SC;
-        d.fields = PSYGFX_I_COLOR | PSYGFX_I_CONTRAST; d.palette = art_pal; d.n_palette = art_n;
-        art_run = psygfx_crun(&gfx, &d);
+        d.fields = YGFX_I_COLOR | YGFX_I_CONTRAST; d.palette = art_pal; d.n_palette = art_n;
+        art_run = ygfx_crun(&gfx, &d);
         memset(art_hl, 0, sizeof art_hl);
         d.items = art_hl; d.n = 1; d.fields = 0; d.palette = NULL; d.n_palette = 0;
         d.color[0] = d.color[1] = d.color[2] = 0.80f;   /* light, against every layer's color */
-        art_hl_run = psygfx_crun(&gfx, &d);
+        art_hl_run = ygfx_crun(&gfx, &d);
         art_panel = rect(ART_X - 6, ART_Y - 6, (float)art_vb[2] * ART_SC + 12, (float)art_vb[3] * ART_SC + 12, DARK, 6);
         return;
     }
     if (mode == PG_STATIC) {
         char s[160];
-        lab(TS_SMALL, 40, 64, C_INK, "An SVG made in this program, read by psyol_svg() into solid layers (a fill, then its stroke), each one glyph of one curve set: one run.");
+        lab(TS_SMALL, 40, 64, C_INK, "An SVG made in this program, read by yol_svg() into solid layers (a fill, then its stroke), each one glyph of one curve set: one run.");
         lab(TS_BODY, 790, 100, C_LIGHT, "layer   source   color");
         for (k = 0; k < art_n; k++) {
             const char* nm = art_elem[k] >= 0 && art_elem[k] < COUNT(art_names) ? art_names[art_elem[k]] : "?";
-            snprintf(s, sizeof s, "%2d   %s   #%06x  %s", k, art_src_kind[k] == PSYOL_SVG_STROKE ? "stroke" : "fill", (unsigned)(art_rgba[k] >> 8), nm);
+            snprintf(s, sizeof s, "%2d   %s   #%06x  %s", k, art_src_kind[k] == YOL_SVG_STROKE ? "stroke" : "fill", (unsigned)(art_rgba[k] >> 8), nm);
             lab(TS_SMALL, 800, 124 + 19 * k, C_INK, s);
         }
-        lab(TS_SMALL, 40, ART_Y + 470, C_DIM, "Click a shape: psygfx_hit_index() gives the topmost layer under the pointer, by the winding");
-        lab(TS_SMALL, 40, ART_Y + 488, C_DIM, "from the set kept on the CPU (.keep); its outline (psyol_stroke, 4 units) is drawn over it.");
+        lab(TS_SMALL, 40, ART_Y + 470, C_DIM, "Click a shape: ygfx_hit_index() gives the topmost layer under the pointer, by the winding");
+        lab(TS_SMALL, 40, ART_Y + 488, C_DIM, "from the set kept on the CPU (.keep); its outline (yol_stroke, 4 units) is drawn over it.");
         return;
     }
     if (!art_n) return;
     if (click_x >= 0) {
-        art_pick = psygfx_hit_index(&gfx, &art_run, click_x, click_y);
+        art_pick = ygfx_hit_index(&gfx, &art_run, click_x, click_y);
         click_x = click_y = -1;
     }
     put(&art_panel);
@@ -1306,7 +1306,7 @@ static void page_svg(int mode, const psyscr_frame* f) {
  * Pages and the loop
  * =========================================================================== */
 
-typedef void (*page_fn)(int mode, const psyscr_frame* f);
+typedef void (*page_fn)(int mode, const yscr_frame* f);
 typedef struct text_page { const char* name; const char* keys; page_fn fn; double loop_s; } text_page;
 static const text_page pages[] = {
     { "Scale and rotate", "", page_scale, 0 },
@@ -1323,7 +1323,7 @@ static void page_static(int p) {
     char s[720];
     int k;
     for (k = 0; k < N_TS; k++) lab_n[k] = 0;
-    if (psygfx_begin_setup(&gfx) != PSYGFX_OK || psygfx_begin_target(&gfx, lab_tex, zero4) != PSYGFX_OK) { fail("labels: setup pass"); return; }
+    if (ygfx_begin_setup(&gfx) != YGFX_OK || ygfx_begin_target(&gfx, lab_tex, zero4) != YGFX_OK) { fail("labels: setup pass"); return; }
     cur_what = pages[p].name;
     snprintf(s, sizeof s, "%d/%d   %s", p + 1, N_PAGES, pages[p].name);
     lab(TS_TITLE, 24, 36, C_LIGHT, s);
@@ -1340,30 +1340,30 @@ static void page_static(int p) {
         lab_run[k].count = (uint32_t)lab_n[k];
         put(&lab_run[k]);
     }
-    psygfx_end_target(&gfx);
-    if (psygfx_end_setup(&gfx) != PSYGFX_OK) fail("labels: setup pass");
+    ygfx_end_target(&gfx);
+    if (ygfx_end_setup(&gfx) != YGFX_OK) fail("labels: setup pass");
 }
 
-static void show_page(int p, const psyscr_frame* f) {
+static void show_page(int p, const yscr_frame* f) {
     char title[160];
     page_t0 = f->onset;
-    psytl_anchor(&tl, PAGE_BASE, f->onset, 0);   /* every animation restarts */
+    ytl_anchor(&tl, PAGE_BASE, f->onset, 0);   /* every animation restarts */
     click_x = click_y = -1;                       /* a click belongs to its page */
     /* SDL and printf may allocate: only here, on a page change */
     snprintf(title, sizeof title, "gfx_text %d/%d: %s", p + 1, N_PAGES, pages[p].name);
-    if (psyscr_window(&scr)) SDL_SetWindowTitle(psyscr_window(&scr), title);
+    if (yscr_window(&scr)) SDL_SetWindowTitle(yscr_window(&scr), title);
     printf("page %d/%d: %s\n", p + 1, N_PAGES, pages[p].name);
     fflush(stdout);
     page_static(p);
     if (p == 5 && art_n && art_pick < 0)   /* a pick to show before any click: the sun */
-        art_pick = psygfx_hit_index(&gfx, &art_run, ART_X + 390 * ART_SC, ART_Y + 72 * ART_SC);
+        art_pick = ygfx_hit_index(&gfx, &art_run, ART_X + 390 * ART_SC, ART_Y + 72 * ART_SC);
 }
 
 /* sRGB's primaries and white at gamma 2.2. Not a measurement. */
 static int cal_setup(void) {
     static const float xy[4][2] = { { 0.64f, 0.33f }, { 0.30f, 0.60f }, { 0.15f, 0.06f }, { 0.3127f, 0.3290f } };
-    if (psycol_cal_nominal(&cal, xy, 80.0f, 2.2) < 0) return -1;
-    psycol_cal_save(&cal, NULL, 0);   /* seals the CRC, which open() checks */
+    if (ycol_cal_nominal(&cal, xy, 80.0f, 2.2) < 0) return -1;
+    ycol_cal_save(&cal, NULL, 0);   /* seals the CRC, which open() checks */
     return 0;
 }
 
@@ -1419,15 +1419,15 @@ static int fonts_setup(const char* font_path, const char* cjk_path) {
 }
 
 int main(int argc, char** argv) {
-    psyscr_desc sd;
-    psygfx_desc gd;
-    psyscr_frame f;
+    yscr_desc sd;
+    ygfx_desc gd;
+    yscr_frame f;
     const char* shots = NULL;
     const char* font_path = DEFAULT_FONT;
     const char* cjk_path = DEFAULT_CJK;
-    static psygfx_file_cache pcache;
+    static ygfx_file_cache pcache;
     static char cache_dir[512];
-    const psygfx_cache* cache = NULL;
+    const ygfx_cache* cache = NULL;
     int no_cache = 0;
     uint8_t* shot_px = NULL;
     int64_t frames = -1, on_page = 0;
@@ -1437,13 +1437,13 @@ int main(int argc, char** argv) {
     memset(&sd, 0, sizeof sd);
     sd.windowed = true; sd.window_w = WIN_W; sd.window_h = WIN_H;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--sim")) { sd.backend = PSYSCR_BACKEND_SIM; sim = 1; }
-        else if (!strcmp(argv[i], "--composition")) sd.backend = PSYSCR_BACKEND_COMPOSITION;
+        if (!strcmp(argv[i], "--sim")) { sd.backend = YSCR_BACKEND_SIM; sim = 1; }
+        else if (!strcmp(argv[i], "--composition")) sd.backend = YSCR_BACKEND_COMPOSITION;
         else if (!strcmp(argv[i], "--topmost")) topmost = 1;
         else if (!strcmp(argv[i], "--page") && i + 1 < argc) cur = atoi(argv[++i]) - 1;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = atoll(argv[++i]); if (frames < 1) cur = -1; }
         else if (!strcmp(argv[i], "--shots") && i + 1 < argc) shots = argv[++i];
-        else if (!strcmp(argv[i], "--cache") && i + 1 < argc) { cache = psygfx_file_cache_init(&pcache, argv[++i]); if (!cache) cur = -1; }
+        else if (!strcmp(argv[i], "--cache") && i + 1 < argc) { cache = ygfx_file_cache_init(&pcache, argv[++i]); if (!cache) cur = -1; }
         else if (!strcmp(argv[i], "--no-cache")) no_cache = 1;
         else if (!strcmp(argv[i], "--font") && i + 1 < argc) font_path = argv[++i];
         else if (!strcmp(argv[i], "--cjk") && i + 1 < argc) cjk_path = argv[++i];
@@ -1458,34 +1458,34 @@ int main(int argc, char** argv) {
     /* The per-user folder unless told otherwise, so that a second run loads
      * the programs instead of compiling them (PROGRAM CACHE). */
     if (no_cache) cache = NULL;
-    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
-        cache = psygfx_file_cache_init(&pcache, cache_dir);
+    else if (!cache && ygfx_default_cache_dir(cache_dir, sizeof cache_dir) == YGFX_OK)
+        cache = ygfx_file_cache_init(&pcache, cache_dir);
     if (cal_setup() < 0) { fprintf(stderr, "gfx_text: the nominal calibration failed\n"); return 1; }
-    if (!psyscr_open(&scr, &sd)) { fprintf(stderr, "gfx_text: %s\n", psyscr_error(&scr)); return 1; }
+    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_text: %s\n", yscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
     rgb(gd.background, BG);
     gd.cal = &cal;
     gd.width = WIN_W; gd.height = WIN_H;   /* the simulated display's size */
     gd.cache = cache;
-    if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_text: %s\n", psygfx_error(&gfx)); psyscr_close(&scr); return 1; }
-    psyscr_describe(&scr, line, sizeof line);
+    if (!ygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_text: %s\n", ygfx_error(&gfx)); yscr_close(&scr); return 1; }
+    yscr_describe(&scr, line, sizeof line);
     printf("%s\n", line);
-    psygfx_describe(&gfx, line, sizeof line);
+    ygfx_describe(&gfx, line, sizeof line);
     printf("%s\n", line);
-    glFinish_ = (void (GLCALL*)(void))psyscr_gl_proc(&scr, "glFinish");
+    glFinish_ = (void (GLCALL*)(void))yscr_gl_proc(&scr, "glFinish");
 #if defined(_WIN32)
-    if (topmost && psyscr_window(&scr)) take_foreground(psyscr_window(&scr));
+    if (topmost && yscr_window(&scr)) take_foreground(yscr_window(&scr));
 #else
     if (topmost) printf("--topmost acts on Win32 windows; ignored here\n");
 #endif
 
     /* Setup: every curve set, target, blur and stimulus of every page,
      * before the first frame; nothing in the frame loop allocates. */
-    if (psyol_init(&ol, NULL) != PSYOL_OK || timeline_setup() < 0 || fonts_setup(font_path, cjk_path) < 0 || labels_setup() < 0) {
-        fprintf(stderr, "gfx_text: setup: %s\n", psygfx_error(&gfx));
-        psygfx_close(&gfx);
-        psyscr_close(&scr);
+    if (yol_init(&ol, NULL) != YOL_OK || timeline_setup() < 0 || fonts_setup(font_path, cjk_path) < 0 || labels_setup() < 0) {
+        fprintf(stderr, "gfx_text: setup: %s\n", ygfx_error(&gfx));
+        ygfx_close(&gfx);
+        yscr_close(&scr);
         return 1;
     }
     for (p = 0; p < N_PAGES; p++) {
@@ -1494,20 +1494,20 @@ int main(int argc, char** argv) {
     }
     cjk_bench();
     {
-        psygfx_programs ps;
-        psygfx_program_stats(&gfx, &ps);
+        ygfx_programs ps;
+        ygfx_program_stats(&gfx, &ps);
         printf("programs: %u from the cache, %u compiled; open %.0f ms\n", ps.loaded, ps.compiled, (double)ps.open_ns * 1e-6);
     }
     if (shots) shot_px = (uint8_t*)malloc((size_t)WIN_W * WIN_H * 4);
 
     next = cur;
-    while (psyscr_begin(&scr, &f) == PSYSCR_OK) {
-        psytl_frame tf;
+    while (yscr_begin(&scr, &f) == YSCR_OK) {
+        ytl_frame tf;
         int timing, k;
         int64_t t0 = 0, t1 = 0, t2 = 0;
-        if (psyscr_window(&scr)) {
+        if (yscr_window(&scr)) {
             SDL_Event ev;
-            while (psyscr_poll(&scr, &ev, NULL)) {   /* psyscr_begin() reports Shift+Esc and close itself */
+            while (yscr_poll(&scr, &ev, NULL)) {   /* yscr_begin() reports Shift+Esc and close itself */
                 if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) quit = 1;
                 else if (ev.type == SDL_EVENT_MOUSE_MOTION) { mouse_x = ev.motion.x; mouse_y = ev.motion.y; }   /* px at density 1 */
                 else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) { click_x = ev.button.x; click_y = ev.button.y; }
@@ -1529,16 +1529,16 @@ int main(int argc, char** argv) {
         if (!started || next != cur) { cur = next; show_page(cur, &f); on_page = 0; started = 1; }
         if (pages[cur].loop_s > 0 && page_seconds(&f) >= pages[cur].loop_s) {
             page_t0 = f.onset;
-            psytl_anchor(&tl, PAGE_BASE, f.onset, 0);   /* rewinds: the sequence replays exactly */
+            ytl_anchor(&tl, PAGE_BASE, f.onset, 0);   /* rewinds: the sequence replays exactly */
         }
         tf.onset = f.onset; tf.period = f.period; tf.index = f.index;
-        psytl_evaluate(&tl, &tf, NULL, 0);
-        psygfx_apply(binds, n_binds, psytl_values(&tl));
-        psyscr_mark(&scr, PSYSCR_PHASE_EVALUATE);
+        ytl_evaluate(&tl, &tf, NULL, 0);
+        ygfx_apply(binds, n_binds, ytl_values(&tl));
+        yscr_mark(&scr, YSCR_PHASE_EVALUATE);
 
         timing = cur == 3 && glFinish_ != NULL;
-        if (timing) { glFinish_(); t0 = psyrt_now_ns(); }
-        psygfx_begin(&gfx, &f);
+        if (timing) { glFinish_(); t0 = yrt_now_ns(); }
+        ygfx_begin(&gfx, &f);
         for (k = 0; k < N_TS; k++) dyn_n[k] = 0;
         cur_what = pages[cur].name;
         pages[cur].fn(PG_FRAME, &f);
@@ -1548,23 +1548,23 @@ int main(int argc, char** argv) {
             dyn_run[k].count = (uint32_t)dyn_n[k];
             put(&dyn_run[k]);
         }
-        psygfx_end(&gfx);
+        ygfx_end(&gfx);
         if (timing) {
-            t1 = psyrt_now_ns();
+            t1 = yrt_now_ns();
             glFinish_();
-            t2 = psyrt_now_ns();
+            t2 = yrt_now_ns();
             if (f.index % 30 > 2 || cjk_mode) cjk_record(cjk_drawn_cached, (double)(t1 - t0) * 1e-6, (double)(t2 - t0) * 1e-6);
         }
         on_page++;
         if (shot_px && on_page == SHOT_FRAMES) {   /* the back buffer, before the flip */
             char path[512];
             snprintf(path, sizeof path, "%s-p%d.ppm", shots, cur + 1);
-            if (psygfx_read_output(&gfx, 0, 0, WIN_W, WIN_H, shot_px) < 0 || write_ppm(path, shot_px, WIN_W, WIN_H) < 0)
+            if (ygfx_read_output(&gfx, 0, 0, WIN_W, WIN_H, shot_px) < 0 || write_ppm(path, shot_px, WIN_W, WIN_H) < 0)
                 fprintf(stderr, "gfx_text: could not write %s\n", path);
             else
                 printf("wrote %s\n", path);
         }
-        psyscr_flip(&scr);
+        yscr_flip(&scr);
 
         if (sim || (shots && on_page == SHOT_FRAMES)) {   /* each page once */
             if (++pages_done == N_PAGES) break;
@@ -1576,13 +1576,13 @@ int main(int argc, char** argv) {
         if (cjk_total[i])
             printf("page 4, %s: CPU %.3f ms, GPU %.3f ms per frame (mean of %ld frames, glFinish-bracketed)\n", i ? "cached" : "direct",
                    cjk_sum[i][0] / (double)cjk_total[i], cjk_sum[i][1] / (double)cjk_total[i], cjk_total[i]);
-    if (psygfx_clipped(&gfx)) printf("%llu draws may have left the gamut\n", (unsigned long long)psygfx_clipped(&gfx));
+    if (ygfx_clipped(&gfx)) printf("%llu draws may have left the gamut\n", (unsigned long long)ygfx_clipped(&gfx));
     free(shot_px);
-    psygfx_close(&gfx);
-    if (art_src.words) psyol_cset_free(&art_src);
-    psyol_free(&ol);
+    ygfx_close(&gfx);
+    if (art_src.words) yol_cset_free(&art_src);
+    yol_free(&ol);
     free(ui.bytes); free(cjk.bytes);
-    psyscr_close(&scr);
+    yscr_close(&scr);
     if (refused) { fprintf(stderr, "gfx_text: %ld refused draws or setup errors\n", refused); return 1; }
     return 0;
 }

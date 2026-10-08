@@ -1,22 +1,22 @@
-# psy_outline.h mutants (docs/psy_outline.md, "Mutations"). The test runs
-# with PSYOL_TEST_QUICK set, so the Windows fonts are not read.
-header = "psy_outline.h"
+# ysp/outline.h mutants (docs/outline.md, "Mutations"). The test runs
+# with YOL_TEST_QUICK set, so the Windows fonts are not read.
+header = "ysp/outline.h"
 
 [test.outline]
-source = "tests/adapt/psy_outline_test.c"
+source = "tests/adapt/outline_test.c"
 compiler = "gcc"
 flags = ["-std=c11", "-O2", "-w"]
 libs = ["-lm"]
 timeout = 300
-env = { PSYOL_TEST_QUICK = "1" }
+env = { YOL_TEST_QUICK = "1" }
 
 [[mutant]]
 id = "01"
 name = "line piece direction"
 test = "outline"
 why = "A line's direction sets the winding it adds; reversed, every fill with lines comes out wrong."
-find = 'return psyol__add_piece(w, cur, (int8_t)(s[5] > s[1] ? 1 : -1), set, 1);'
-replace = 'return psyol__add_piece(w, cur, (int8_t)(s[5] > s[1] ? -1 : 1), set, 1);'
+find = 'return yol__add_piece(w, cur, (int8_t)(s[5] > s[1] ? 1 : -1), set, 1);'
+replace = 'return yol__add_piece(w, cur, (int8_t)(s[5] > s[1] ? -1 : 1), set, 1);'
 
 [[mutant]]
 id = "02"
@@ -39,8 +39,8 @@ id = "04"
 name = "no quartic crossings"
 test = "outline"
 why = "Curve crossings must split the strips, or the order inside a strip is wrong and so is the fill."
-find = '    n = psyol__roots4(c, 0, 1, fmax(1e-13, 1e-13 * m), r, 8, 0);'
-replace = '    n = 0 * psyol__roots4(c, 0, 1, fmax(1e-13, 1e-13 * m), r, 8, 0);'
+find = '    n = yol__roots4(c, 0, 1, fmax(1e-13, 1e-13 * m), r, 8, 0);'
+replace = '    n = 0 * yol__roots4(c, 0, 1, fmax(1e-13, 1e-13 * m), r, 8, 0);'
 
 [[mutant]]
 id = "05"
@@ -61,7 +61,7 @@ test = "outline"
 expect = "survived"
 note = "Equivalent for results: an extra event line only adds a strip. Cost only."
 why = "A root on Q's conic but off its arc is not a crossing."
-find = '        if (fabs(psyol__qx(Q, u) - x) > 1e-7 * w->ext) continue;'
+find = '        if (fabs(yol__qx(Q, u) - x) > 1e-7 * w->ext) continue;'
 replace = '        if (0) continue;'
 
 [[mutant]]
@@ -115,7 +115,7 @@ id = "12"
 name = "even-odd as nonzero"
 test = "outline"
 why = "fill-rule evenodd must leave nested same-direction contours as rings."
-find = '    int a = rule == PSYOL_EVENODD ? (w0 & 1) : (w0 != 0);'
+find = '    int a = rule == YOL_EVENODD ? (w0 & 1) : (w0 != 0);'
 replace = '    int a = w0 != 0;'
 
 [[mutant]]
@@ -123,8 +123,8 @@ id = "13"
 name = "difference as union"
 test = "outline"
 why = "INSET is the fill minus the stroke."
-find = '    if (op == PSYOL__OP_DIFF) return a && w1 == 0;'
-replace = '    if (op == PSYOL__OP_DIFF) return a || w1 != 0;'
+find = '    if (op == YOL__OP_DIFF) return a && w1 == 0;'
+replace = '    if (op == YOL__OP_DIFF) return a || w1 != 0;'
 
 [[mutant]]
 id = "14"
@@ -165,8 +165,8 @@ id = "18"
 name = "U8 truncates"
 test = "outline"
 why = "U8 stores floor(255 c + 0.5), not a truncation."
-find = '                case PSYOL_ALPHA_U8: o[x] = (uint8_t)floor(v * 255.0 + 0.5); break;'
-replace = '                case PSYOL_ALPHA_U8: o[x] = (uint8_t)floor(v * 255.0); break;'
+find = '                case YOL_ALPHA_U8: o[x] = (uint8_t)floor(v * 255.0 + 0.5); break;'
+replace = '                case YOL_ALPHA_U8: o[x] = (uint8_t)floor(v * 255.0); break;'
 
 [[mutant]]
 id = "19"
@@ -222,11 +222,11 @@ name = "composite 2 x 2 transposed"
 test = "outline"
 why = "A composite's 2 x 2 is xscale, scale01, scale10, yscale."
 find = '''
-                t[0] = psyol__s16(d + q) / 16384.0; t[1] = psyol__s16(d + q + 2) / 16384.0;
-                t[2] = psyol__s16(d + q + 4) / 16384.0;'''
+                t[0] = yol__s16(d + q) / 16384.0; t[1] = yol__s16(d + q + 2) / 16384.0;
+                t[2] = yol__s16(d + q + 4) / 16384.0;'''
 replace = '''
-                t[0] = psyol__s16(d + q) / 16384.0; t[2] = psyol__s16(d + q + 2) / 16384.0;
-                t[1] = psyol__s16(d + q + 4) / 16384.0;'''
+                t[0] = yol__s16(d + q) / 16384.0; t[2] = yol__s16(d + q + 2) / 16384.0;
+                t[1] = yol__s16(d + q + 4) / 16384.0;'''
 
 [[mutant]]
 id = "26"
@@ -249,14 +249,14 @@ id = "28"
 name = "hmtx past the long metrics"
 test = "outline"
 why = "A glyph past numberOfHMetrics takes the last long metric's advance."
-find = '        adv = psyol__u16(f->data + f->hmtx_ + 4 * (n - 1));'
-replace = '        adv = psyol__u16(f->data + f->hmtx_ + 4 * (n - 2));'
+find = '        adv = yol__u16(f->data + f->hmtx_ + 4 * (n - 1));'
+replace = '        adv = yol__u16(f->data + f->hmtx_ + 4 * (n - 2));'
 
 [[mutant]]
 id = "29"
 name = "y flipped twice"
 test = "outline"
-why = "Glyphs come y down, psy_gfx.h's convention."
+why = "Glyphs come y down, ysp/gfx.h's convention."
 find = '    return g->sy > 0 ? g->py + v : g->py - v;'
 replace = '    return g->sy > 0 ? g->py - v : g->py + v;'
 
@@ -265,7 +265,7 @@ id = "30"
 name = "bound: composite depth"
 test = "outline"
 why = "A composite that names itself must stop at depth 8."
-find = '        if (depth >= PSYOL__COMPOSITE_DEPTH) return'
+find = '        if (depth >= YOL__COMPOSITE_DEPTH) return'
 replace = '        if (0) return'
 
 [[mutant]]
@@ -273,7 +273,7 @@ id = "31"
 name = "bound: composite visits"
 test = "outline"
 why = "64 components of 64 components must stop at 4096 visits, not run 4096 times longer."
-find = '    if (++*visits > PSYOL__COMPOSITE_VISITS) return'
+find = '    if (++*visits > YOL__COMPOSITE_VISITS) return'
 replace = '    if (0) return'
 
 [[mutant]]
@@ -281,23 +281,23 @@ id = "32"
 name = "bound: CFF stack"
 test = "outline"
 why = "The charstring operand stack is 48 deep."
-find = '            if (s->n >= PSYOL__CFF_STACK) return psyol__err(c, PSYOL_ERR_FORMAT, "glyph %u: charstring stack overflow", s->gid);'
-replace = '            if (s->n >= 2 * PSYOL__CFF_STACK) return psyol__err(c, PSYOL_ERR_FORMAT, "glyph %u: charstring stack overflow", s->gid);'
+find = '            if (s->n >= YOL__CFF_STACK) return yol__err(c, YOL_ERR_FORMAT, "glyph %u: charstring stack overflow", s->gid);'
+replace = '            if (s->n >= 2 * YOL__CFF_STACK) return yol__err(c, YOL_ERR_FORMAT, "glyph %u: charstring stack overflow", s->gid);'
 
 [[mutant]]
 id = "33"
 name = "bound: subroutine depth"
 test = "outline"
 why = "Subroutines nest at most 10 deep (the test's glyph 14 nests 11)."
-find = '            if (depth >= PSYOL__CFF_CALLS) return'
-replace = '            if (depth >= PSYOL__CFF_CALLS + 1) return'
+find = '            if (depth >= YOL__CFF_CALLS) return'
+replace = '            if (depth >= YOL__CFF_CALLS + 1) return'
 
 [[mutant]]
 id = "34"
 name = "bound: charstring tokens"
 test = "outline"
 why = "Subroutines that fan out 4^9 calls must stop at 65536 tokens."
-find = '        if (++s->tokens > PSYOL__CFF_TOKENS) return'
+find = '        if (++s->tokens > YOL__CFF_TOKENS) return'
 replace = '        if (0) return'
 
 [[mutant]]
@@ -306,7 +306,7 @@ name = "bound: stems"
 test = "outline"
 why = "More than 96 stems is refused before the hintmask length overflows."
 find = '''
-            if (s->nstems > PSYOL__CFF_STEMS) return psyol__err(c, PSYOL_ERR_FORMAT, "glyph %u: more than %d stems", s->gid, PSYOL__CFF_STEMS);
+            if (s->nstems > YOL__CFF_STEMS) return yol__err(c, YOL_ERR_FORMAT, "glyph %u: more than %d stems", s->gid, YOL__CFF_STEMS);
             s->n = 0; break;'''
 replace = '            s->n = 0; break;'
 
@@ -315,7 +315,7 @@ id = "36"
 name = "bound: glyph points (glyf)"
 test = "outline"
 why = "A composite of two 40000-point glyphs is refused at 2^17 points."
-find = '        if ((int64_t)(p->n_pts - g->pts0) + 2 * (int64_t)np + 2 * (int64_t)nc > PSYOL__GLYPH_POINTS)'
+find = '        if ((int64_t)(p->n_pts - g->pts0) + 2 * (int64_t)np + 2 * (int64_t)nc > YOL__GLYPH_POINTS)'
 replace = '        if (0)'
 
 [[mutant]]
@@ -323,7 +323,7 @@ id = "37"
 name = "bound: glyph points (CFF)"
 test = "outline"
 why = "4000 large cubics are refused at 2^17 points."
-find = '        if (s->p->n_pts - s->g->pts0 > PSYOL__GLYPH_POINTS) return'
+find = '        if (s->p->n_pts - s->g->pts0 > YOL__GLYPH_POINTS) return'
 replace = '        if (0) return'
 
 [[mutant]]
@@ -331,7 +331,7 @@ id = "38"
 name = "bound: sweep work"
 test = "outline"
 why = "An outline with about 90000 crossings is refused, not swept for minutes."
-find = '            if (work > PSYOL__SWEEP_WORK) return'
+find = '            if (work > YOL__SWEEP_WORK) return'
 replace = '            if (0) return'
 
 [[mutant]]
@@ -349,7 +349,7 @@ id = "40"
 name = "no 30-degree split"
 test = "outline"
 why = "A near cusp turns 180 degrees in a tiny range of t; without the split the stroke covers pixel centers it should not."
-find = '        int kk, nk = (int)ceil(fabs(turn) / (PSYOL__PI / 6));'
+find = '        int kk, nk = (int)ceil(fabs(turn) / (YOL__PI / 6));'
 replace = '        int kk, nk = 0; (void)turn;'
 
 [[mutant]]
@@ -369,7 +369,7 @@ id = "42"
 name = "element orientation not normalized"
 test = "outline"
 why = "Every stroke element must be positive, or the nonzero union cancels covered regions."
-find = '    if (e->n_contours > 0 && psyol__contour_area(e, e->n_contours - 1) < 0) psyol__contour_reverse(e, e->n_contours - 1);'
+find = '    if (e->n_contours > 0 && yol__contour_area(e, e->n_contours - 1) < 0) yol__contour_reverse(e, e->n_contours - 1);'
 replace = ''
 
 [[mutant]]
@@ -377,7 +377,7 @@ id = "43"
 name = "inner join dropped"
 test = "outline"
 why = "With segments shorter than the half width the bands leave the inner triangle at a join uncovered."
-find = '    if (fabs(cr) > 1e-12) { rc = psyol__poly(s, r, 3); if (rc < 0) return rc; }'
+find = '    if (fabs(cr) > 1e-12) { rc = yol__poly(s, r, 3); if (rc < 0) return rc; }'
 replace = ''
 
 [[mutant]]
@@ -393,8 +393,8 @@ id = "45"
 name = "disk too coarse"
 test = "outline"
 why = "Round joins and caps must keep their circles within the tolerance."
-find = '    n = (int)ceil(2 * PSYOL__PI / psyol__arc_step(s->tol / r));'
-replace = '    n = (int)ceil(PSYOL__PI / psyol__arc_step(s->tol / r));'
+find = '    n = (int)ceil(2 * YOL__PI / yol__arc_step(s->tol / r));'
+replace = '    n = (int)ceil(YOL__PI / yol__arc_step(s->tol / r));'
 
 [[mutant]]
 id = "46"
@@ -417,8 +417,8 @@ id = "48"
 name = "ties by descending reference"
 test = "outline"
 why = "Ties sort by ascending texel reference: the format's test vector."
-find = 'static int psyol__kv_lt(const psyol__kv* a, const psyol__kv* b) { return a->k < b->k || (a->k == b->k && a->v < b->v); }'
-replace = 'static int psyol__kv_lt(const psyol__kv* a, const psyol__kv* b) { return a->k < b->k || (a->k == b->k && a->v > b->v); }'
+find = 'static int yol__kv_lt(const yol__kv* a, const yol__kv* b) { return a->k < b->k || (a->k == b->k && a->v < b->v); }'
+replace = 'static int yol__kv_lt(const yol__kv* a, const yol__kv* b) { return a->k < b->k || (a->k == b->k && a->v > b->v); }'
 
 [[mutant]]
 id = "49"
@@ -432,9 +432,9 @@ replace = '                cc[k].ymin = fmin(ya, yc); cc[k].ymax = fmax(ya, yc);
 id = "50"
 name = "resolved flag on keep_overlaps"
 test = "outline"
-why = "psy_gfx.h trusts the RESOLVED flag; it must never be set on overlapping contours."
-find = '(nh && resolved ? PSYOL__CSET_RESOLVED : 0u)'
-replace = '(nh ? PSYOL__CSET_RESOLVED : 0u)'
+why = "ysp/gfx.h trusts the RESOLVED flag; it must never be set on overlapping contours."
+find = '(nh && resolved ? YOL__CSET_RESOLVED : 0u)'
+replace = '(nh ? YOL__CSET_RESOLVED : 0u)'
 
 [[mutant]]
 id = "51"
@@ -450,7 +450,7 @@ name = "round sector on the wrong side"
 test = "outline"
 why = "A round join is the sector on the outer side; the inner sector leaves the corner's outside bare."
 find = '''
-    if (cos(am) * mx + sin(am) * my < 0) dt = dt > 0 ? dt - 2 * PSYOL__PI : dt + 2 * PSYOL__PI;
+    if (cos(am) * mx + sin(am) * my < 0) dt = dt > 0 ? dt - 2 * YOL__PI : dt + 2 * YOL__PI;
 '''
 replace = ''
 
@@ -460,10 +460,10 @@ name = "round sector too coarse"
 test = "outline"
 why = "The sector's arc must stay within the tolerance, as a disk's does."
 find = '''
-    step = psyol__arc_step(s->tol / r);
+    step = yol__arc_step(s->tol / r);
     n = (int)ceil(fabs(dt) / step);'''
 replace = '''
-    step = psyol__arc_step(s->tol / r);
+    step = yol__arc_step(s->tol / r);
     n = (int)ceil(fabs(dt) / (3 * step));'''
 
 [[mutant]]
@@ -509,8 +509,8 @@ id = "58"
 name = "svg: transform order"
 test = "outline"
 why = "Transform functions compose left to right: translate(10) scale(2) puts x = 1 at 12."
-find = '        *t = psyol_xf_mul(*t, m);'
-replace = '        *t = psyol_xf_mul(m, *t);'
+find = '        *t = yol_xf_mul(*t, m);'
+replace = '        *t = yol_xf_mul(m, *t);'
 
 [[mutant]]
 id = "59"
@@ -549,16 +549,16 @@ id = "63"
 name = "svg: depth bound removed"
 test = "outline"
 why = "70 nested groups are refused at depth 64, not followed into the stack."
-find = '        if (depth >= PSYOL__SVG_DEPTH) return psyol__sverr(v, PSYOL_ERR_FORMAT, "elements nested deeper than %d", PSYOL__SVG_DEPTH);'
-replace = '        if (0) return psyol__sverr(v, PSYOL_ERR_FORMAT, "elements nested deeper than %d", PSYOL__SVG_DEPTH);'
+find = '        if (depth >= YOL__SVG_DEPTH) return yol__sverr(v, YOL_ERR_FORMAT, "elements nested deeper than %d", YOL__SVG_DEPTH);'
+replace = '        if (0) return yol__sverr(v, YOL_ERR_FORMAT, "elements nested deeper than %d", YOL__SVG_DEPTH);'
 
 [[mutant]]
 id = "64"
 name = "svg: attribute bound off by one"
 test = "outline"
 why = "The 65th attribute must be refused, not written past the array."
-find = '        if (v->nat == PSYOL__SVG_ATTRS) return'
-replace = '        if (v->nat == PSYOL__SVG_ATTRS + 8) return'
+find = '        if (v->nat == YOL__SVG_ATTRS) return'
+replace = '        if (v->nat == YOL__SVG_ATTRS + 8) return'
 
 [[mutant]]
 id = "65"
@@ -575,7 +575,7 @@ id = "66"
 name = "placement shift dropped"
 test = "outline"
 why = "HarfBuzz moves a TrueType outline by lsb - xMin; without the shift a glyph whose xMin differs from its lsb sits off HarfBuzz's position (Arial napostrophe by 1 unit, Times New Roman gid 327 by 190)."
-find = 'm0[4] = (double)-psyol__phantom_x(f, glyph, 0);'
+find = 'm0[4] = (double)-yol__phantom_x(f, glyph, 0);'
 replace = 'm0[4] = 0;'
 
 [[mutant]]
@@ -583,5 +583,5 @@ id = "67"
 name = "USE_MY_METRICS ignored"
 test = "outline"
 why = "A composite takes the phantom points of its USE_MY_METRICS component; with its own instead, 12 of Arial's 13 mismatched composites would move where HarfBuzz does not move them."
-find = 'if (fl & 0x200) x = psyol__phantom_x(f, cg, depth + 1);'
-replace = 'if (0) x = psyol__phantom_x(f, cg, depth + 1);'
+find = 'if (fl & 0x200) x = yol__phantom_x(f, cg, depth + 1);'
+replace = 'if (0) x = yol__phantom_x(f, cg, depth + 1);'

@@ -1,4 +1,4 @@
-/* screen_flipstats.c - measure psy_screen.h's swap path on this machine.
+/* screen_flipstats.c - measure ysp/screen.h's swap path on this machine.
  *
  *     screen_flipstats [--sim | --backend dxgi|composition] [--windowed] [--topmost]
  *                      [--cover N] [--frames N] [--load N]
@@ -35,7 +35,7 @@
  *   --fence      with --trigger: move a trigger when the GPU is late
  *   --trigger-offset US  the trigger channel's offset from the onset
  *   --trigger-cpu N      pin the trigger worker to logical CPU N
- *   --trigger-rt-cores   leave the trigger worker where psy_rt.h puts it
+ *   --trigger-rt-cores   leave the trigger worker where ysp/rt.h puts it
  *                        (the P-cores on a hybrid CPU), not on the E-cores
  *   --trigger-spin US    the trigger worker's spin window
  *   --d3d11-video  the device with video support and multithread
@@ -51,7 +51,7 @@
  * Prints the describe line, then one table: prediction error of on-time
  * frames, late targets, drops, early flips, estimated records, paths, the
  * phases and the header's own cost per frame. The header cost comes from
- * psy_rt.h's trace ring (this file defines PSYRT_TRACE_RING): the begin zone
+ * ysp/rt.h's trace ring (this file defines YRT_TRACE_RING): the begin zone
  * minus its wait, the flip zone minus the present call and any hold.
  *
  * Exit: 0 when the run completed, 1 when the screen did not open, 2 usage.
@@ -60,9 +60,9 @@
 /* fopen() is C4996 under /W4 /WX, and fopen_s() is not portable. */
 #define _CRT_SECURE_NO_WARNINGS
 #endif
-#define PSYRT_TRACE_RING
-#define PSY_SCREEN_IMPLEMENTATION
-#include "psy_screen.h"
+#define YRT_TRACE_RING
+#define YSP_SCREEN_IMPLEMENTATION
+#include "ysp/screen.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,10 +90,10 @@ typedef struct gl_api {
     void (GLAPI_CALL *Viewport)(int, int, int, int);
 } gl_api;
 
-static void load_gl(const psyscr_screen* s, gl_api* gl) {
-    gl->ClearColor = (void (GLAPI_CALL*)(float, float, float, float))psyscr_gl_proc(s, "glClearColor");
-    gl->Clear = (void (GLAPI_CALL*)(unsigned int))psyscr_gl_proc(s, "glClear");
-    gl->Viewport = (void (GLAPI_CALL*)(int, int, int, int))psyscr_gl_proc(s, "glViewport");
+static void load_gl(const yscr_screen* s, gl_api* gl) {
+    gl->ClearColor = (void (GLAPI_CALL*)(float, float, float, float))yscr_gl_proc(s, "glClearColor");
+    gl->Clear = (void (GLAPI_CALL*)(unsigned int))yscr_gl_proc(s, "glClear");
+    gl->Viewport = (void (GLAPI_CALL*)(int, int, int, int))yscr_gl_proc(s, "glViewport");
 }
 
 /* --- spinning load threads ---------------------------------------------- */
@@ -148,11 +148,11 @@ static void row(const char* name, double* v, int n) {
            v[n / 2], v[(int)((double)n * 0.99)], v[n - 1], v[0]);
 }
 
-static psyrt_event g_ev[4096];
-static unsigned char g_ring_mem[PSYRT_RING_BYTES(8192)];
-static psyrt_ring g_ring;
+static yrt_event g_ev[4096];
+static unsigned char g_ring_mem[YRT_RING_BYTES(8192)];
+static yrt_ring g_ring;
 
-static psyscr_record g_rec[MAX_FRAMES];
+static yscr_record g_rec[MAX_FRAMES];
 static int64_t g_pred[MAX_FRAMES];
 static int64_t g_vb_prev;
 static int g_same_vb, g_done_n;   /* frames planned at or before the last one's vblank; records via f.done */
@@ -173,9 +173,9 @@ static unsigned char g_trig_cpu[MAX_FRAMES];   /* where the callback ran: only W
 #endif
 static int g_ntl;
 static int g_tr_n, g_tr_moved, g_tr_gpu_moved, g_tr_early, g_tr_late, g_tr_pending, g_tr_gpu_caught;
-static void trig_fn(void* ctx, const psyscr_trigger_info* i) {
+static void trig_fn(void* ctx, const yscr_trigger_info* i) {
     (void)ctx;
-    if (g_ntl < MAX_FRAMES && !(i->flags & PSYSCR_TRIG_FLUSHED)) {
+    if (g_ntl < MAX_FRAMES && !(i->flags & YSCR_TRIG_FLUSHED)) {
         /* fired - deadline = wake (the worker's own lateness) + lock wait +
          * dispatch (the rest of the header's path) */
         g_trig_late_us[g_ntl] = (double)(i->fired_ns - i->deadline_ns) / 1000.0;
@@ -188,19 +188,19 @@ static void trig_fn(void* ctx, const psyscr_trigger_info* i) {
         g_ntl++;
     }
 }
-static void flip_fn(void* ctx, const psyscr_record* r, const psyscr_trigger_result* t, int n) {
+static void flip_fn(void* ctx, const yscr_record* r, const yscr_trigger_result* t, int n) {
     int k;
     (void)ctx;
     for (k = 0; k < n; k++) {
         g_tr_n++;
-        if (t[k].flags & PSYSCR_TRIG_MOVED) g_tr_moved++;
-        if (t[k].flags & PSYSCR_TRIG_GPU_MOVED) {
+        if (t[k].flags & YSCR_TRIG_MOVED) g_tr_moved++;
+        if (t[k].flags & YSCR_TRIG_GPU_MOVED) {
             g_tr_gpu_moved++;
             if (t[k].mismatch == 0 && r->dropped > 0) g_tr_gpu_caught++;   /* moved, and the frame was late */
         }
-        if (t[k].flags & PSYSCR_TRIG_FIRED_EARLY) g_tr_early++;
-        if (t[k].flags & PSYSCR_TRIG_FIRED_LATE) g_tr_late++;   /* a move that was not needed */
-        if (t[k].flags & PSYSCR_TRIG_PENDING) g_tr_pending++;
+        if (t[k].flags & YSCR_TRIG_FIRED_EARLY) g_tr_early++;
+        if (t[k].flags & YSCR_TRIG_FIRED_LATE) g_tr_late++;   /* a move that was not needed */
+        if (t[k].flags & YSCR_TRIG_PENDING) g_tr_pending++;
     }
 }
 static int g_timeouts;   /* begin() timeouts survived: the swap path stalled */
@@ -227,20 +227,20 @@ static void zone_add(const char* nm, double us) {
 
 static void drain(void) {
     int n, i;
-    while ((n = psyrt_ring_drain(&g_ring, g_ev, 4096)) > 0) {
+    while ((n = yrt_ring_drain(&g_ring, g_ev, 4096)) > 0) {
         for (i = 0; i < n; i++) {
-            const psyrt_event* e = &g_ev[i];
-            if (e->source == PSYRT_SRC_SCREEN && e->kind == PSYSCR_EV_FLIP) {
-                psyscr_record r;
+            const yrt_event* e = &g_ev[i];
+            if (e->source == YRT_SRC_SCREEN && e->kind == YSCR_EV_FLIP) {
+                yscr_record r;
                 int k;
                 memset(&r, 0, sizeof r);
                 r.onset = (int64_t)e->t_ns;
                 r.target = e->u.i64[0];
                 r.dropped = e->u.u16[4];
-                r.path = (uint8_t)PSYSCR_EV_PATH_OF(e->u.u16[5]);
-                r.flags = (uint16_t)PSYSCR_EV_FLAGS_OF(e->u.u16[5]);
-                r.tier = (uint8_t)PSYSCR_EV_TIER_OF(e->u.u16[5]);
-                for (k = 0; k < PSYSCR_N_PHASES; k++) r.phase_ns[k] = e->u.u32[3 + k];
+                r.path = (uint8_t)YSCR_EV_PATH_OF(e->u.u16[5]);
+                r.flags = (uint16_t)YSCR_EV_FLAGS_OF(e->u.u16[5]);
+                r.tier = (uint8_t)YSCR_EV_TIER_OF(e->u.u16[5]);
+                for (k = 0; k < YSCR_N_PHASES; k++) r.phase_ns[k] = e->u.u32[3 + k];
                 r.index = e->u.u32[9];
                 r.residual = r.onset - r.target;
                 if (g_nrec < MAX_FRAMES) g_rec[g_nrec++] = r;
@@ -248,24 +248,24 @@ static void drain(void) {
                     fprintf(g_csv, "%lld,%u,%lld,%lld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", (long long)r.index, e->aux,
                             (long long)r.target, (long long)r.onset, r.dropped, r.path, r.flags, r.tier,
                             r.phase_ns[0], r.phase_ns[1], r.phase_ns[2], r.phase_ns[3], r.phase_ns[4], r.phase_ns[5]);
-            } else if (e->source == PSYRT_SRC_RT && e->kind == PSYRT_KIND_ZONE && e->u.zone.loc) {
+            } else if (e->source == YRT_SRC_RT && e->kind == YRT_KIND_ZONE && e->u.zone.loc) {
                 const char* nm = e->u.zone.loc->name;
                 double us = (double)e->u.zone.dur_ns / 1000.0;
                 if (g_count_zones) zone_add(nm, us);
-                if (!strcmp(nm, "psyscr.wait")) g_last_wait = us;
-                else if (!strcmp(nm, "psyscr.present")) g_last_present = us;
-                else if (!strcmp(nm, "psyscr.hold")) g_last_hold = us;
-                else if (!strcmp(nm, "psyscr.begin")) {
+                if (!strcmp(nm, "yscr.wait")) g_last_wait = us;
+                else if (!strcmp(nm, "yscr.present")) g_last_present = us;
+                else if (!strcmp(nm, "yscr.hold")) g_last_hold = us;
+                else if (!strcmp(nm, "yscr.begin")) {
                     if (g_ncb < MAX_FRAMES) g_cost_begin[g_ncb++] = us - g_last_wait;
                     g_last_wait = 0;
-                } else if (!strcmp(nm, "psyscr.flip")) {
+                } else if (!strcmp(nm, "yscr.flip")) {
                     if (g_ncf < MAX_FRAMES) g_cost_flip[g_ncf++] = us - g_last_present - g_last_hold;
                     g_last_present = 0;
                     g_last_hold = 0;
                 }
-            } else if (e->source == PSYRT_SRC_RT && e->kind == PSYRT_KIND_LOSS) {
+            } else if (e->source == YRT_SRC_RT && e->kind == YRT_KIND_LOSS) {
                 fprintf(stderr, "ring lost %llu records\n", (unsigned long long)e->u.u64[0]);
-            } else if (e->source == PSYRT_SRC_SCREEN && e->kind == PSYSCR_EV_PATH) {
+            } else if (e->source == YRT_SRC_SCREEN && e->kind == YSCR_EV_PATH) {
                 printf("  path change at %.3f s: %u -> %u\n", (double)e->t_ns * 1e-9, e->u.u16[0], e->u.u16[1]);
             }
         }
@@ -276,8 +276,8 @@ static uint32_t rng_state = 12345u;
 static uint32_t rnd(void) { rng_state = rng_state * 1664525u + 1013904223u; return rng_state >> 8; }
 
 static void busy_ms(double ms) {
-    int64_t end = (int64_t)psyrt_now_ns() + (int64_t)(ms * 1e6);
-    while ((int64_t)psyrt_now_ns() < end) { }
+    int64_t end = (int64_t)yrt_now_ns() + (int64_t)(ms * 1e6);
+    while ((int64_t)yrt_now_ns() < end) { }
 }
 
 #if defined(_WIN32)
@@ -302,11 +302,11 @@ static HWND cover_open(SDL_Window* w) {
     memset(&wc, 0, sizeof wc);
     wc.lpfnWndProc = cover_proc;
     wc.hInstance = GetModuleHandleW(NULL);
-    wc.lpszClassName = L"psyscr_cover";
+    wc.lpszClassName = L"yscr_cover";
     wc.hbrBackground = (HBRUSH)(COLOR_BTNSHADOW + 1);   /* a system color: no gdi32 to link */
     RegisterClassW(&wc);
     GetWindowRect(h, &r);
-    return CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"psyscr_cover", L"", WS_POPUP | WS_VISIBLE,
+    return CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"yscr_cover", L"", WS_POPUP | WS_VISIBLE,
                            r.left + 100, r.top + 100, 200, 120, NULL, NULL, wc.hInstance, NULL);
 }
 #endif
@@ -323,7 +323,7 @@ static int quit_requested(void) {
 int main(int argc, char** argv) {
     int sim = 0, windowed = 0, frames = 600, load = 0, hold = 0, patch = 0;
     int group = 0, allocs = 0, i, n_screens = 1, quit = 0, ran = 0, topmost = 0, cover = 0;
-    psyscr_backend backend = PSYSCR_BACKEND_AUTO;
+    yscr_backend backend = YSCR_BACKEND_AUTO;
 #if defined(_WIN32)
     HWND cover_window = NULL;
 #endif
@@ -334,15 +334,15 @@ int main(int argc, char** argv) {
     int trig_cpu = 0;
     double trig_spin_us = 0;
     uint16_t code_risk = 0;
-    psyscr_trigger_desc tdesc;
+    yscr_trigger_desc tdesc;
     const char* csv = NULL;
-    static psyscr_screen scr[2];
-    psyscr_screen* sp[2] = { &scr[0], &scr[1] };
-    psyscr_desc d;
+    static yscr_screen scr[2];
+    yscr_screen* sp[2] = { &scr[0], &scr[1] };
+    yscr_desc d;
     gl_api gl[2];
     char line[512];
-    psyrt_policy pol;
-    psyrt_ring_desc rd;
+    yrt_policy pol;
+    yrt_ring_desc rd;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--sim")) sim = 1;
@@ -351,8 +351,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--cover") && i + 1 < argc) cover = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--backend") && i + 1 < argc) {
             i++;
-            if (!strcmp(argv[i], "dxgi")) backend = PSYSCR_BACKEND_DXGI_FLIP;
-            else if (!strcmp(argv[i], "composition")) backend = PSYSCR_BACKEND_COMPOSITION;
+            if (!strcmp(argv[i], "dxgi")) backend = YSCR_BACKEND_DXGI_FLIP;
+            else if (!strcmp(argv[i], "composition")) backend = YSCR_BACKEND_COMPOSITION;
             else { fprintf(stderr, "--backend: dxgi or composition\n"); return 2; }
         }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
@@ -385,11 +385,11 @@ int main(int argc, char** argv) {
     if (!sim && !windowed && frames > 7200) frames = 7200;
     if (group) n_screens = 2;
 
-    pol = psyrt_thread_elevate(NULL);
+    pol = yrt_thread_elevate(NULL);
     rd.memory = g_ring_mem;
     rd.bytes = sizeof g_ring_mem;
-    if (!psyrt_ring_open(&g_ring, &rd)) { fprintf(stderr, "%s\n", psyrt_ring_error(&g_ring)); return 1; }
-    psyrt_trace_set_ring(&g_ring);
+    if (!yrt_ring_open(&g_ring, &rd)) { fprintf(stderr, "%s\n", yrt_ring_error(&g_ring)); return 1; }
+    yrt_trace_set_ring(&g_ring);
     if (csv) {
         g_csv = fopen(csv, "w");
         if (g_csv) fprintf(g_csv, "index,display,target_ns,onset_ns,dropped,path,flags,tier,eval,script,draw,upload,swap,gpu\n");
@@ -397,7 +397,7 @@ int main(int argc, char** argv) {
 
     for (i = 0; i < n_screens; i++) {
         memset(&d, 0, sizeof d);
-        d.backend = sim ? PSYSCR_BACKEND_SIM : backend;
+        d.backend = sim ? YSCR_BACKEND_SIM : backend;
         d.windowed = windowed != 0;
         d.window_w = group ? 480 : 800;
         d.window_h = group ? 360 : 600;
@@ -406,9 +406,9 @@ int main(int argc, char** argv) {
         d.patch.on = patch != 0;
         d.d3d11_video = video != 0;
         if (codes) {
-            d.patch.corner = PSYSCR_BOTTOM_LEFT;
-            d.codes[0] = psyscr_slot_pixel_mode();
-            d.codes[1] = psyscr_slot_psync();
+            d.patch.corner = YSCR_BOTTOM_LEFT;
+            d.codes[0] = yscr_slot_pixel_mode();
+            d.codes[1] = yscr_slot_psync();
             d.n_codes = 2;
             d.verify_codes = verify;
         }
@@ -423,26 +423,26 @@ int main(int argc, char** argv) {
             d.trigger_cpu = trig_cpu;
             d.trigger_spin_ns = (uint32_t)(trig_spin_us * 1000.0);
         }
-#if defined(PSYSCR__DXGI)
-        if (row_method >= 0) psyscr__row_clear_max = row_method;
+#if defined(YSCR__DXGI)
+        if (row_method >= 0) yscr__row_clear_max = row_method;
 #else
         (void)row_method;   /* --row picks a D3D11 code path; nothing to pick elsewhere */
 #endif
-        if (!psyscr_open(&scr[i], &d)) {
-            fprintf(stderr, "screen_flipstats: %s\n", psyscr_error(&scr[i]));
-            if (i) psyscr_close(&scr[0]);
+        if (!yscr_open(&scr[i], &d)) {
+            fprintf(stderr, "screen_flipstats: %s\n", yscr_error(&scr[i]));
+            if (i) yscr_close(&scr[0]);
             return 1;
         }
         load_gl(&scr[i], &gl[i]);
 #if defined(_WIN32)
-        if ((topmost || cover) && psyscr_window(&scr[i])) take_foreground(psyscr_window(&scr[i]), topmost && !cover);
+        if ((topmost || cover) && yscr_window(&scr[i])) take_foreground(yscr_window(&scr[i]), topmost && !cover);
 #endif
-        if (trigger) psyscr_on_flip(&scr[i], flip_fn, NULL);
-        psyscr_describe(&scr[i], line, sizeof line);
+        if (trigger) yscr_on_flip(&scr[i], flip_fn, NULL);
+        yscr_describe(&scr[i], line, sizeof line);
         printf("%s\n", line);
         {
-            psyscr_native_info ni;
-            if (psyscr_native(&scr[i], &ni) == PSYSCR_OK)
+            yscr_native_info ni;
+            if (yscr_native(&scr[i], &ni) == YSCR_OK)
                 printf("device: video_support=%d multithread_protected=%d\n", ni.video, ni.mt_protected);
         }
     }
@@ -454,17 +454,17 @@ int main(int argc, char** argv) {
                    ps.BatteryLifePercent == 255 ? -1 : (int)ps.BatteryLifePercent);
     }
 #endif
-#if defined(PSYSCR_MAX_DONE)
+#if defined(YSCR_MAX_DONE)
     {
-        psyscr_native_info nat;
-        int nrc = psyscr_native(&scr[0], &nat);
-        printf("native: %s, device %s, context %s, egl display %s, adapter LUID %08lx:%08lx\n", psyscr_strerror(nrc),
+        yscr_native_info nat;
+        int nrc = yscr_native(&scr[0], &nat);
+        printf("native: %s, device %s, context %s, egl display %s, adapter LUID %08lx:%08lx\n", yscr_strerror(nrc),
                nat.d3d11_device ? "set" : "null", nat.d3d11_context ? "set" : "null", nat.egl_display ? "set" : "null",
                (unsigned long)(uint32_t)nat.luid_high, (unsigned long)nat.luid_low);
     }
 #endif
     printf("frame thread: %s; load threads %d; overrun %.1f ms in 1 of 30; hold %d; patch %d; frames %d\n",
-           psyrt_policy_name(pol), load, overrun, hold, patch, frames);
+           yrt_policy_name(pol), load, overrun, hold, patch, frames);
     start_load(load);
 #if defined(_MSC_VER) && defined(_DEBUG)
     if (allocs) _CrtSetAllocHook(alloc_hook);
@@ -476,42 +476,42 @@ int main(int argc, char** argv) {
     g_count_zones = 1;
 
     for (i = 0; i < frames && !quit; i++) {
-        psyscr_frame f[2];
+        yscr_frame f[2];
         int64_t t;
         int k, rc;
         g_count_allocs = allocs && i >= 30;
 #if defined(_WIN32)
-        if (cover && i == cover && psyscr_window(&scr[0])) cover_window = cover_open(psyscr_window(&scr[0]));
+        if (cover && i == cover && yscr_window(&scr[0])) cover_window = cover_open(yscr_window(&scr[0]));
 
 #endif
         if (allocs == 2 && g_count_allocs) free(malloc(16));   /* --allocs-control: the hook must see this */
-        rc = n_screens == 1 ? psyscr_begin(&scr[0], &f[0]) : psyscr_begin_group(sp, n_screens, f);
-        if (rc == PSYSCR_QUIT) break;
+        rc = n_screens == 1 ? yscr_begin(&scr[0], &f[0]) : yscr_begin_group(sp, n_screens, f);
+        if (rc == YSCR_QUIT) break;
         /* A stall of the swap path is the system's; count it and go on, so
          * one stall does not end a long run. i stays the header's frame
          * index, which only a flip advances. */
-        if (rc == PSYSCR_ERR_TIMEOUT && g_timeouts < 10) { g_timeouts++; i--; continue; }
-        if (rc < 0) { fprintf(stderr, "begin: %s\n", psyscr_strerror(rc)); break; }
+        if (rc == YSCR_ERR_TIMEOUT && g_timeouts < 10) { g_timeouts++; i--; continue; }
+        if (rc < 0) { fprintf(stderr, "begin: %s\n", yscr_strerror(rc)); break; }
         if (i > 0 && f[0].vblank <= g_vb_prev) g_same_vb++;
         g_vb_prev = f[0].vblank;
-#if defined(PSYSCR_MAX_DONE)
+#if defined(YSCR_MAX_DONE)
         g_done_n += f[0].n_done;
 #endif
         for (k = 0; k < n_screens; k++) {
             int w = scr[k].caps.mode.w, h = scr[k].caps.mode.h;
             if (codes) {
                 uint32_t pat[8];
-                psyscr_psync_pattern(pat, (uint8_t)i);
-                psyscr_code(&scr[k], 0, psyscr_pixel_mode_bits((uint32_t)i));
-                psyscr_code_row(&scr[k], 1, pat, 8, 1);
+                yscr_psync_pattern(pat, (uint8_t)i);
+                yscr_code(&scr[k], 0, yscr_pixel_mode_bits((uint32_t)i));
+                yscr_code_row(&scr[k], 1, pat, 8, 1);
             }
-            if (trigger && k == 0) psyscr_trigger(&scr[k], 0, (uint32_t)i);
+            if (trigger && k == 0) yscr_trigger(&scr[k], 0, (uint32_t)i);
             if (!gl[k].Clear) continue;
-            psyscr_bind(&scr[k]);
+            yscr_bind(&scr[k]);
             gl[k].Viewport(0, 0, w, h);
             gl[k].ClearColor(0.2f, 0.2f, 0.2f, 1.0f);
             gl[k].Clear(0x4000u);
-            if (patch) psyscr_set_patch(&scr[k], (i & 1) ? 0.3f : 0.2f);
+            if (patch) yscr_set_patch(&scr[k], (i & 1) ? 0.3f : 0.2f);
 
             if (miss_every >= 10 && i >= 60 && i % miss_every >= miss_every - 3) {
                 int q;
@@ -528,10 +528,10 @@ int main(int argc, char** argv) {
             g_expect[i] = f[0].onset + (int64_t)ahead * f[0].period;
             t = g_expect[i] + (int64_t)(u * (double)f[0].period);
         }
-        rc = n_screens == 1 ? psyscr_flip_at(&scr[0], t, NULL) : psyscr_flip_group_at(sp, n_screens, t);
+        rc = n_screens == 1 ? yscr_flip_at(&scr[0], t, NULL) : yscr_flip_group_at(sp, n_screens, t);
         /* the present call returned a few us before this (header cost in flip) */
-        if (i < MAX_FRAMES) g_tret[i] = (int64_t)psyrt_now_ns();
-        if (rc < 0) { fprintf(stderr, "flip: %s\n", psyscr_strerror(rc)); break; }
+        if (i < MAX_FRAMES) g_tret[i] = (int64_t)yrt_now_ns();
+        if (rc < 0) { fprintf(stderr, "flip: %s\n", yscr_strerror(rc)); break; }
         ran++;
         g_count_allocs = 0;
         drain();
@@ -541,14 +541,14 @@ int main(int argc, char** argv) {
 #if defined(_WIN32)
     if (cover_window) DestroyWindow(cover_window);
 #endif
-    code_risk = psyscr_code_risk(&scr[0]);
+    code_risk = yscr_code_risk(&scr[0]);
     for (i = 0; i < n_screens; i++) {
-        psyscr_describe(&scr[i], line, sizeof line);
+        yscr_describe(&scr[i], line, sizeof line);
         printf("%s\n", line);
-        psyscr_close(&scr[i]);
+        yscr_close(&scr[i]);
     }
     drain();
-    psyrt_trace_set_ring(NULL);
+    yrt_trace_set_ring(NULL);
     if (g_csv) fclose(g_csv);
 
     {
@@ -564,21 +564,21 @@ int main(int argc, char** argv) {
         int ov_n = 0, ov_late = 0, ov_ontime = 0, ov_unflagged = 0, ov_blamed = 0, false_flags = 0;
         int64_t period = scr[0].caps.period_ns;
         for (i = 0; i < g_nrec; i++) {
-            const psyscr_record* r = &g_rec[i];
+            const yscr_record* r = &g_rec[i];
             int64_t idx = r->index;
             if (r->path < 5) paths[r->path]++;
             if (r->tier < 5) tiers[r->tier]++;
-            if (r->flags & PSYSCR_FLIP_SKIPPED) skipped++;
-            if (r->flags & PSYSCR_FLIP_CANCELED) canceled++;
-            if (r->flags & PSYSCR_FLIP_ONSET_PLANNED) planned++;
-            if (r->flags & (PSYSCR_FLIP_SKIPPED | PSYSCR_FLIP_CANCELED)) continue;
-            if (r->flags & PSYSCR_FLIP_LATE_TARGET) late++;
-            if (r->flags & PSYSCR_FLIP_EARLY) early++;
-            if (r->flags & PSYSCR_FLIP_ESTIMATED) est++;
-            if (r->flags & PSYSCR_FLIP_GRID_UNSTABLE) unstable++;
-            if (r->flags & PSYSCR_FLIP_OCCLUDED) occl++;
+            if (r->flags & YSCR_FLIP_SKIPPED) skipped++;
+            if (r->flags & YSCR_FLIP_CANCELED) canceled++;
+            if (r->flags & YSCR_FLIP_ONSET_PLANNED) planned++;
+            if (r->flags & (YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED)) continue;
+            if (r->flags & YSCR_FLIP_LATE_TARGET) late++;
+            if (r->flags & YSCR_FLIP_EARLY) early++;
+            if (r->flags & YSCR_FLIP_ESTIMATED) est++;
+            if (r->flags & YSCR_FLIP_GRID_UNSTABLE) unstable++;
+            if (r->flags & YSCR_FLIP_OCCLUDED) occl++;
             if (r->dropped) dropped++;
-            if (idx >= 0 && idx < ran && !hold && !(r->flags & (PSYSCR_FLIP_LATE_TARGET | PSYSCR_FLIP_ESTIMATED)) &&
+            if (idx >= 0 && idx < ran && !hold && !(r->flags & (YSCR_FLIP_LATE_TARGET | YSCR_FLIP_ESTIMATED)) &&
                 r->dropped == 0 && n_screens == 1) {
                 double err = (double)(r->onset - g_pred[idx]) / 1000.0;
                 a[na++] = err < 0 ? -err : err;
@@ -588,12 +588,12 @@ int main(int argc, char** argv) {
             /* latency: the present call's return to the reported onset, the
              * start of scanout of the frame (not light) */
             if (!hold && n_screens == 1 && idx >= 0 && idx < ran && idx < MAX_FRAMES && g_tret[idx] &&
-                !(r->flags & PSYSCR_FLIP_ESTIMATED) && r->path < 5) {
+                !(r->flags & YSCR_FLIP_ESTIMATED) && r->path < 5) {
                 int64_t l = r->onset - g_tret[idx];
                 lat[r->path][nlat[r->path]++] = (double)l / 1e6;
                 if (l <= period) first[r->path]++;   /* the first vblank after the return */
             }
-            if (hold && idx >= 0 && idx < ran && !(r->flags & (PSYSCR_FLIP_LATE_TARGET | PSYSCR_FLIP_ESTIMATED))) {
+            if (hold && idx >= 0 && idx < ran && !(r->flags & (YSCR_FLIP_LATE_TARGET | YSCR_FLIP_ESTIMATED))) {
                 int64_t dv = r->onset - g_expect[idx];
                 hold_n++;
                 if (dv < -period / 2) hold_early++;
@@ -602,19 +602,19 @@ int main(int argc, char** argv) {
             }
             if (overrun > 0 && idx >= 0 && idx < ran && !hold && n_screens == 1) {
                 int missed = r->onset - g_pred[idx] > period / 2;
-                int flagged = (r->flags & PSYSCR_FLIP_LATE_TARGET) != 0;
+                int flagged = (r->flags & YSCR_FLIP_LATE_TARGET) != 0;
                 if (g_overran[idx]) {
                     ov_n++;
                     if (flagged) ov_late++;
                     else if (!missed) ov_ontime++;
                     if (missed && !flagged) ov_unflagged++;
-                    if (flagged && r->phase_ns[PSYSCR_PHASE_DRAW] >= (uint32_t)(overrun * 1e6)) ov_blamed++;
+                    if (flagged && r->phase_ns[YSCR_PHASE_DRAW] >= (uint32_t)(overrun * 1e6)) ov_blamed++;
                 } else if (missed || flagged || r->dropped) {
                     false_flags++;
                 }
             }
-            b[nb++] = (double)r->phase_ns[PSYSCR_PHASE_DRAW] / 1000.0;
-            c[nc++] = (double)r->phase_ns[PSYSCR_PHASE_SWAP] / 1000.0;
+            b[nb++] = (double)r->phase_ns[YSCR_PHASE_DRAW] / 1000.0;
+            c[nc++] = (double)r->phase_ns[YSCR_PHASE_SWAP] / 1000.0;
         }
         for (i = 0; i < g_ncb; i++) dd[nd++] = g_cost_begin[i];
         for (i = 0; i < g_ncf; i++) e[ne++] = g_cost_flip[i];
@@ -624,7 +624,7 @@ int main(int argc, char** argv) {
         if (g_timeouts) printf("begin timeouts (the swap path freed no slot in time): %d\n", g_timeouts);
         if (codes) {
             uint32_t chk = 0, bad = 0;
-            psyscr_code_verify(&scr[0], &chk, &bad);
+            yscr_code_verify(&scr[0], &chk, &bad);
             printf("codes: risk 0x%04x, read back %u, differed %u\n", (unsigned)code_risk, chk, bad);
         }
         if (trigger) {

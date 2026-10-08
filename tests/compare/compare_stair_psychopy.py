@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Replay fixed response sequences through psy.stair and PsychoPy's
+"""Replay fixed response sequences through ysp.stair and PsychoPy's
 StairHandler and report the first trial at which their proposals differ.
 
 Not part of CI: PsychoPy is a heavy install. This is the acceptance test for
-psy_stair.h that docs/psy_adapt.md ("Verification") reports.
+ysp/stair.h that docs/adapt.md ("Verification") reports.
 
-    uv pip install ./bindings/python/psy_stair numpy psychopy
+    uv pip install ./bindings/python/ysp_stair numpy psychopy
     python tests/compare/compare_stair_psychopy.py
 
 On Windows `uv pip install psychopy` can fail building pywinhook; the
@@ -15,7 +15,7 @@ msgpack-numpy, packaging, psutil, ujson, requests, openpyxl, matplotlib,
 pillow, astunparse, esprima, numpy, scipy, questplus).
 
 Both sides see the same responses at every trial and are asked for the next
-level before each one. PsychoPy stops on reversals AND trials; psy_stair
+level before each one. PsychoPy stops on reversals AND trials; ysp_stair
 stops on reversals OR trials. So each case runs a fixed number of trials,
 with PsychoPy's nTrials set to that number and its nReversals left at the
 schedule length, which it cannot finish before the last trial. Exits 1 on any
@@ -26,7 +26,7 @@ import sys
 
 import numpy as np
 
-import psy.stair as st
+import ysp.stair as st
 
 try:
     from psychopy import logging as pp_logging
@@ -38,7 +38,7 @@ except ImportError as exc:  # pragma: no cover - depends on the environment
 pp_logging.console.setLevel(pp_logging.CRITICAL)
 
 # LIN steps are exact on both sides. LOG and DB are not: PsychoPy multiplies
-# the level by 10^step each time, psy_stair adds step to log10(level) and takes
+# the level by 10^step each time, ysp_stair adds step to log10(level) and takes
 # the antilog, so the two agree to a few ulp per step, not bit for bit.
 REL_TOL = 1e-9
 
@@ -90,7 +90,7 @@ def run_case(case, responses):
     lev_ok = len(our_rev_lev) == len(their_rev_lev) and all(
         abs(x - y) <= REL_TOL * max(abs(y), 1e-300) for x, y in zip(our_rev_lev, their_rev_lev))
     # The customary PsychoPy estimate is the arithmetic mean of the last few
-    # reversal intensities. psy_stair's EST_REVERSALS is that mean in the
+    # reversal intensities. ysp_stair's EST_REVERSALS is that mean in the
     # step's units, so it is comparable directly for LIN only.
     est_ours = ours.estimate(st.EST_REVERSALS)
     est_theirs = float(np.mean(their_rev_lev[-EST_WINDOW:])) if their_rev_lev else math.nan
@@ -108,7 +108,7 @@ def main():
         responses = (rng.random(N_TRIALS) < case[-1]).astype(int).tolist()
         results.append(run_case(case, responses))
 
-    print(f"psy.stair vs psychopy.data.StairHandler, {N_TRIALS} trials per case, seed {SEED}")
+    print(f"ysp.stair vs psychopy.data.StairHandler, {N_TRIALS} trials per case, seed {SEED}")
     print(f"proposal tolerance: relative {REL_TOL:g}")
     print()
     hdr = f"{'case':36s} {'first diff':>10s} {'max rel diff':>13s} {'reversals':>11s} {'rev trials':>10s} {'rev levels':>10s} {'est ours':>10s} {'est pp':>10s}"
@@ -129,7 +129,7 @@ def main():
         if r["first_diff"] is not None:
             t0 = r["first_diff"]
             print(f"\n{r['name']}: trials {max(0, t0 - 3)}..{t0 + 2}")
-            print(f"{'trial':>5s} {'psy.stair':>12s} {'psychopy':>12s} {'resp':>4s}")
+            print(f"{'trial':>5s} {'ysp.stair':>12s} {'psychopy':>12s} {'resp':>4s}")
             for t, a, b, resp in r["rows"][max(0, t0 - 3):t0 + 3]:
                 print(f"{t:5d} {a:12.6g} {b:12.6g} {resp:4d}")
     print()

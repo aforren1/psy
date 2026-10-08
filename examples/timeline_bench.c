@@ -1,6 +1,6 @@
-/* timeline_bench.c - time psytl_evaluate() and the loads on this machine.
+/* timeline_bench.c - time ytl_evaluate() and the loads on this machine.
  *
- * psy_timeline.h's manual states costs as operation counts: a binary search
+ * ysp/timeline.h's manual states costs as operation counts: a binary search
  * per base that is not stopped, a copy and a report insertion per fired
  * event, a key lookup per keyed channel that is O(1) while time moves
  * forward. What those cost depends on the machine and the compiler, so this
@@ -26,7 +26,7 @@
  * time, the same shuffled one at a time (the quadratic case the manual
  * names), and the prune and clear of all of them.
  *
- * Per-frame times are psy_rt.h clock reads around each evaluate, so each
+ * Per-frame times are ysp/rt.h clock reads around each evaluate, so each
  * includes one clock read's overhead, printed first. The "floor" line is
  * the movie's frame count with nothing between the clock reads: its max
  * is what the machine and the OS cost a frame with no header code, the
@@ -35,24 +35,24 @@
  * and only the mean resolves below that.
  *
  * Build (from the repository root):
- *     cc -O2 -I. -o timeline_bench examples/timeline_bench.c -lm
- *     cl /O2 /I. examples\timeline_bench.c
+ *     cc -O2 -Iinclude -o timeline_bench examples/timeline_bench.c -lm
+ *     cl /O2 /Iinclude examples\timeline_bench.c
  *
  * Usage: timeline_bench [refresh_hz]     (default 60, 1 to 2000)
  * Exit code: 0, or 1 if a call failed or the argument is bad.
  */
-#define PSYRT_NO_THREADS
-#define PSY_RT_IMPLEMENTATION
-#include "psy_rt.h"
+#define YRT_NO_THREADS
+#define YSP_RT_IMPLEMENTATION
+#include "ysp/rt.h"
 
-#define PSY_TIMELINE_IMPLEMENTATION
-#include "psy_timeline.h"
+#define YSP_TIMELINE_IMPLEMENTATION
+#include "ysp/timeline.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define S PSYTL_NS_PER_S
+#define S YTL_NS_PER_S
 #define N_ANNOT 10000
 #define N_KEYED 32
 #define N_KEYS 256
@@ -63,9 +63,9 @@
 #define SCRIPT_FRAMES 100000
 #define CAPACITY 20000
 
-static psytl_event storage[CAPACITY];
-static psytl_event batch[CAPACITY];
-static psytl_key keys[N_KEYED][N_KEYS];
+static ytl_event storage[CAPACITY];
+static ytl_event batch[CAPACITY];
+static ytl_key keys[N_KEYED][N_KEYS];
 /* A histogram at 1 ns, not one sample per frame: two hours at 2000 Hz is
  * 14 million frames. Times of HIST_NS and above count only in the max. */
 static uint32_t g_hist[HIST_NS];
@@ -73,7 +73,7 @@ static uint32_t g_max;
 static int64_t g_n;
 static double g_sum;
 static int64_t g_hz = 60;
-static psytl_timeline tl;
+static ytl_timeline tl;
 
 static uint64_t g_rng = 20261004u;
 static uint64_t next_u64(void) {
@@ -121,20 +121,20 @@ static void report(const char* name, int64_t fired) {
 }
 
 static bool open_tl(int n_channels) {
-    psytl_desc d;
+    ytl_desc d;
     memset(&d, 0, sizeof(d));
     d.events = storage;
     d.event_capacity = CAPACITY;
     d.n_channels = n_channels;
-    if (!psytl_open(&tl, &d)) {
-        fprintf(stderr, "%s\n", psytl_error(&tl));
+    if (!ytl_open(&tl, &d)) {
+        fprintf(stderr, "%s\n", ytl_error(&tl));
         return false;
     }
     return true;
 }
 
-static psytl_event ev(int64_t t, int base, int kind, int target) {
-    psytl_event e;
+static ytl_event ev(int64_t t, int base, int kind, int target) {
+    ytl_event e;
     memset(&e, 0, sizeof(e));
     e.time = t;
     e.base = (uint8_t)base;
@@ -144,16 +144,16 @@ static psytl_event ev(int64_t t, int base, int kind, int target) {
 }
 
 static int frame(int64_t k, int64_t* fired_total) {
-    psytl_frame f;
-    psytl_event fired[16];
+    ytl_frame f;
+    ytl_event fired[16];
     uint64_t t0, t1;
     int n;
     f.onset = grid(k);
     f.period = grid(k + 1) - grid(k);
     f.index = k;
-    t0 = psyrt_now_ns();
-    n = psytl_evaluate(&tl, &f, fired, 16);
-    t1 = psyrt_now_ns();
+    t0 = yrt_now_ns();
+    n = ytl_evaluate(&tl, &f, fired, 16);
+    t1 = yrt_now_ns();
     if (n < 0) return -1;
     *fired_total += n;
     return (int)(t1 - t0);
@@ -165,32 +165,32 @@ static int frame(int64_t k, int64_t* fired_total) {
 static void bench_floor(void) {
     int64_t i, n = 2 * 3600 * g_hz;
     for (i = 0; i < n; i++) {
-        uint64_t t0 = psyrt_now_ns();
-        uint64_t t1 = psyrt_now_ns();
+        uint64_t t0 = yrt_now_ns();
+        uint64_t t1 = yrt_now_ns();
         record((int)(t1 - t0));
     }
     report("floor", 0);
 }
 
 static int bench_trial(void) {
-    static const psytl_key ramp[] = {
-        { S / 2,          0.0f, PSYTL_EASE_COSINE, 0, 0 },
-        { S / 2 + S / 10, 0.5f, PSYTL_EASE_LINEAR, 0, 0 },
-        { 11 * S / 10,    0.5f, PSYTL_EASE_COSINE, 0, 0 },
-        { 6 * S / 5,      0.0f, PSYTL_EASE_LINEAR, 0, 0 },
+    static const ytl_key ramp[] = {
+        { S / 2,          0.0f, YTL_EASE_COSINE, 0, 0 },
+        { S / 2 + S / 10, 0.5f, YTL_EASE_LINEAR, 0, 0 },
+        { 11 * S / 10,    0.5f, YTL_EASE_COSINE, 0, 0 },
+        { 6 * S / 5,      0.0f, YTL_EASE_LINEAR, 0, 0 },
     };
-    psytl_event e[5];
+    ytl_event e[5];
     int64_t k = 0, fired = 0;
     int trial, i, per_trial = (int)(g_hz * 4 / 3);   /* 1.33 s */
     if (!open_tl(3)) return 1;
-    e[0] = ev(0, 1, PSYTL_ONSET, 0);
-    e[1] = ev(S / 2, 1, PSYTL_OFFSET, 0);
-    e[2] = ev(S / 2, 1, PSYTL_ONSET, 1);
-    e[3] = ev(S / 2, 1, PSYTL_TRIGGER, 0);
-    e[4] = ev(6 * S / 5, 1, PSYTL_OFFSET, 1);
-    if (psytl_add_n(&tl, e, 5) < 0 || psytl_set_keys(&tl, 2, 1, ramp, 4) < 0) return 1;
+    e[0] = ev(0, 1, YTL_ONSET, 0);
+    e[1] = ev(S / 2, 1, YTL_OFFSET, 0);
+    e[2] = ev(S / 2, 1, YTL_ONSET, 1);
+    e[3] = ev(S / 2, 1, YTL_TRIGGER, 0);
+    e[4] = ev(6 * S / 5, 1, YTL_OFFSET, 1);
+    if (ytl_add_n(&tl, e, 5) < 0 || ytl_set_keys(&tl, 2, 1, ramp, 4) < 0) return 1;
     for (trial = 0; trial < 1000; trial++) {
-        psytl_anchor(&tl, 1, grid(k), 0);
+        ytl_anchor(&tl, 1, grid(k), 0);
         for (i = 0; i < per_trial; i++) {
             int dt = frame(k++, &fired);
             if (dt < 0) return 1;
@@ -206,26 +206,26 @@ static int bench_movie(const char* name, int32_t num, int32_t den) {
     int64_t fired = 0;
     int i, j, movie_frames = (int)(2 * 3600 * g_hz);
     if (!open_tl(N_KEYED + N_SET_CH)) return 1;
-    for (i = 0; i < N_ANNOT; i++) batch[i] = ev(rand_below(len), 2, PSYTL_MARK, 0);
+    for (i = 0; i < N_ANNOT; i++) batch[i] = ev(rand_below(len), 2, YTL_MARK, 0);
     for (j = 0; j < N_SET_CH; j++) {
         for (i = 0; i < N_SET_EV; i++) {
-            psytl_event* e = &batch[N_ANNOT + j * N_SET_EV + i];
-            *e = ev(rand_below(len), 2, PSYTL_SET, N_KEYED + j);
+            ytl_event* e = &batch[N_ANNOT + j * N_SET_EV + i];
+            *e = ev(rand_below(len), 2, YTL_SET, N_KEYED + j);
             e->value = (float)i;
         }
     }
-    if (psytl_add_n(&tl, batch, N_ANNOT + N_SET_CH * N_SET_EV) < 0) return 1;
+    if (ytl_add_n(&tl, batch, N_ANNOT + N_SET_CH * N_SET_EV) < 0) return 1;
     for (j = 0; j < N_KEYED; j++) {
         for (i = 0; i < N_KEYS; i++) {
             keys[j][i].time = len * i / (N_KEYS - 1);
             keys[j][i].value = (float)(i % 7) + 1.0f;
             keys[j][i].ease = (uint8_t)(i % 6);
         }
-        if (psytl_set_keys(&tl, j, 2, keys[j], N_KEYS) < 0) return 1;
+        if (ytl_set_keys(&tl, j, 2, keys[j], N_KEYS) < 0) return 1;
     }
-    psytl_anchor(&tl, 2, grid(0), 0);
-#if PSYTL_VERSION_MAJOR > 0 || PSYTL_VERSION_MINOR >= 4
-    if (psytl_rate(&tl, 2, grid(0), num, den) < 0) return 1;
+    ytl_anchor(&tl, 2, grid(0), 0);
+#if YTL_VERSION_MAJOR > 0 || YTL_VERSION_MINOR >= 4
+    if (ytl_rate(&tl, 2, grid(0), num, den) < 0) return 1;
 #else
     if (num != den) return 0;
 #endif
@@ -245,50 +245,50 @@ static int bench_movie(const char* name, int32_t num, int32_t den) {
 #define TR_SAMPLES (600 * TR_RATE + 1)
 #define TR_KEYS (600 * 1000 + 1)
 static float tr_samples[TR_SAMPLES];
-static psytl_key tr_keys[TR_KEYS];
+static ytl_key tr_keys[TR_KEYS];
 
 static int bench_tracks(void) {
-    static const psytl_key square[] = {
-        { 0,          1.0f, PSYTL_EASE_STEP, 0, 0 },
-        { 2 * S / 30, 0.0f, PSYTL_EASE_STEP, 0, 0 },
+    static const ytl_key square[] = {
+        { 0,          1.0f, YTL_EASE_STEP, 0, 0 },
+        { 2 * S / 30, 0.0f, YTL_EASE_STEP, 0, 0 },
     };
-    static const psytl_curve ease_io = { 0.42f, 0.0f, 0.58f, 1.0f };
-    static psytl_key bez[4][64];
-    psytl_track tr;
+    static const ytl_curve ease_io = { 0.42f, 0.0f, 0.58f, 1.0f };
+    static ytl_key bez[4][64];
+    ytl_track tr;
     int64_t fired = 0, n = 600 * g_hz;
     int i, j;
     if (!open_tl(7)) return 1;
     for (i = 0; i < TR_SAMPLES; i++) tr_samples[i] = (float)(i % 97) * 0.25f;
     for (i = 0; i < TR_KEYS; i++) {
-        tr_keys[i].time = (int64_t)i * PSYTL_NS_PER_MS;
+        tr_keys[i].time = (int64_t)i * YTL_NS_PER_MS;
         tr_keys[i].value = (float)(i % 89);
     }
     memset(&tr, 0, sizeof(tr));
     tr.samples = tr_samples;
     tr.n_samples = TR_SAMPLES;
     tr.rate = TR_RATE;
-    tr.interp = PSYTL_INTERP_CUBIC;
-    if (psytl_set_track(&tl, 0, 1, &tr) < 0) return 1;
-    if (psytl_set_keys(&tl, 1, 1, tr_keys, TR_KEYS) < 0) return 1;
+    tr.interp = YTL_INTERP_CUBIC;
+    if (ytl_set_track(&tl, 0, 1, &tr) < 0) return 1;
+    if (ytl_set_keys(&tl, 1, 1, tr_keys, TR_KEYS) < 0) return 1;
     memset(&tr, 0, sizeof(tr));
     tr.keys = square;
     tr.n_keys = 2;
     tr.period = 4 * S / 30;
-    if (psytl_set_track(&tl, 2, 1, &tr) < 0) return 1;
+    if (ytl_set_track(&tl, 2, 1, &tr) < 0) return 1;
     for (j = 0; j < 4; j++) {
         for (i = 0; i < 64; i++) {
             bez[j][i].time = (int64_t)i * 600 * S / 63;
             bez[j][i].value = (float)((i + j) % 5);
-            bez[j][i].ease = PSYTL_EASE_BEZIER;
+            bez[j][i].ease = YTL_EASE_BEZIER;
         }
         memset(&tr, 0, sizeof(tr));
         tr.keys = bez[j];
         tr.n_keys = 64;
         tr.curves = &ease_io;
         tr.n_curves = 1;
-        if (psytl_set_track(&tl, 3 + j, 1, &tr) < 0) return 1;
+        if (ytl_set_track(&tl, 3 + j, 1, &tr) < 0) return 1;
     }
-    psytl_anchor(&tl, 1, grid(0), 0);
+    ytl_anchor(&tl, 1, grid(0), 0);
     for (i = 0; i < n; i++) {
         int dt = frame(i, &fired);
         if (dt < 0) return 1;
@@ -303,14 +303,14 @@ static int bench_script(void) {
     int i, max_live = 0;
     if (!open_tl(0)) return 1;
     for (i = 0; i < SCRIPT_FRAMES; i++) {
-        psytl_event e = ev(grid(i) + rand_below(2 * S), 0, PSYTL_MARK, 0);
+        ytl_event e = ev(grid(i) + rand_below(2 * S), 0, YTL_MARK, 0);
         int dt, live;
-        if (psytl_add(&tl, &e) < 0) return 1;
+        if (ytl_add(&tl, &e) < 0) return 1;
         dt = frame(i, &fired);
         if (dt < 0) return 1;
         record(dt);
-        if (i % 60 == 59) psytl_prune(&tl, PSYTL_BASE_RT);
-        psytl_events(&tl, PSYTL_BASE_RT, &live);
+        if (i % 60 == 59) ytl_prune(&tl, YTL_BASE_RT);
+        ytl_events(&tl, YTL_BASE_RT, &live);
         if (live > max_live) max_live = live;
     }
     report("script", fired);
@@ -321,48 +321,48 @@ static int bench_script(void) {
 static int bench_loads(void) {
     uint64_t t0;
     int i, removed;
-    for (i = 0; i < N_ANNOT; i++) batch[i] = ev((int64_t)i * S / 10, 2, PSYTL_MARK, 0);
+    for (i = 0; i < N_ANNOT; i++) batch[i] = ev((int64_t)i * S / 10, 2, YTL_MARK, 0);
 
     if (!open_tl(0)) return 1;
-    t0 = psyrt_now_ns();
-    if (psytl_add_n(&tl, batch, N_ANNOT) < 0) return 1;
+    t0 = yrt_now_ns();
+    if (ytl_add_n(&tl, batch, N_ANNOT) < 0) return 1;
     printf("load    %d sorted, one add_n:        %9.3f ms\n", N_ANNOT,
-           (double)(psyrt_now_ns() - t0) / 1e6);
+           (double)(yrt_now_ns() - t0) / 1e6);
 
     if (!open_tl(0)) return 1;
-    t0 = psyrt_now_ns();
-    for (i = 0; i < N_ANNOT; i++) if (psytl_add(&tl, &batch[i]) < 0) return 1;
+    t0 = yrt_now_ns();
+    for (i = 0; i < N_ANNOT; i++) if (ytl_add(&tl, &batch[i]) < 0) return 1;
     printf("load    %d sorted, one add each:     %9.3f ms\n", N_ANNOT,
-           (double)(psyrt_now_ns() - t0) / 1e6);
+           (double)(yrt_now_ns() - t0) / 1e6);
 
     for (i = N_ANNOT - 1; i > 0; i--) {
         int j = (int)rand_below(i + 1);
-        psytl_event tmp = batch[i];
+        ytl_event tmp = batch[i];
         batch[i] = batch[j];
         batch[j] = tmp;
     }
     if (!open_tl(0)) return 1;
-    t0 = psyrt_now_ns();
-    for (i = 0; i < N_ANNOT; i++) if (psytl_add(&tl, &batch[i]) < 0) return 1;
+    t0 = yrt_now_ns();
+    for (i = 0; i < N_ANNOT; i++) if (ytl_add(&tl, &batch[i]) < 0) return 1;
     printf("load    %d shuffled, one add each:   %9.3f ms\n", N_ANNOT,
-           (double)(psyrt_now_ns() - t0) / 1e6);
+           (double)(yrt_now_ns() - t0) / 1e6);
 
-    psytl_anchor(&tl, 2, 0, 0);
+    ytl_anchor(&tl, 2, 0, 0);
     {
-        psytl_frame f;
+        ytl_frame f;
         f.onset = N_ANNOT / 2 * S / 10;
         f.period = 0;
         f.index = 0;
-        psytl_evaluate(&tl, &f, NULL, 0);
+        ytl_evaluate(&tl, &f, NULL, 0);
     }
-    t0 = psyrt_now_ns();
-    removed = psytl_prune(&tl, PSYTL_ALL_BASES);
+    t0 = yrt_now_ns();
+    removed = ytl_prune(&tl, YTL_ALL_BASES);
     printf("prune   %d fired of %d:              %9.3f ms\n", removed, N_ANNOT,
-           (double)(psyrt_now_ns() - t0) / 1e6);
-    t0 = psyrt_now_ns();
-    removed = psytl_clear(&tl, 2);
+           (double)(yrt_now_ns() - t0) / 1e6);
+    t0 = yrt_now_ns();
+    removed = ytl_clear(&tl, 2);
     printf("clear   %d:                          %9.3f ms\n", removed,
-           (double)(psyrt_now_ns() - t0) / 1e6);
+           (double)(yrt_now_ns() - t0) / 1e6);
     return 0;
 }
 
@@ -377,13 +377,13 @@ int main(int argc, char** argv) {
         }
     }
     for (i = 0; i < 1000; i++) {
-        t0 = psyrt_now_ns();
-        t1 = psyrt_now_ns();
+        t0 = yrt_now_ns();
+        t1 = yrt_now_ns();
         if (t1 - t0 < best) best = t1 - t0;
     }
-    printf("psy_timeline %s; handle %u bytes; clock read %llu ns at best; %lld Hz, "
+    printf("ysp_timeline %s; handle %u bytes; clock read %llu ns at best; %lld Hz, "
            "frame budget %.3f ms\n",
-           psytl_version(), (unsigned)sizeof(psytl_timeline), (unsigned long long)best,
+           ytl_version(), (unsigned)sizeof(ytl_timeline), (unsigned long long)best,
            (long long)g_hz, 1e3 / (double)g_hz);
     bench_floor();
     if (bench_trial() || bench_movie("movie", 1, 1) || bench_movie("rate", 1001, 1000) || bench_tracks() || bench_script() || bench_loads()) {

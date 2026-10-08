@@ -1,9 +1,9 @@
-/* screen_input.c - how good psy_screen.h's input timestamps are here.
+/* screen_input.c - how good ysp/screen.h's input timestamps are here.
  *
- *   1. The restamp's clock correlation: psyrt_correlate() of SDL_GetTicksNS
- *      against the psy_rt clock, 1000 times: width and cost.
- *   2. Windows only: key events injected with SendInput() at known psy_rt
- *      times, read back with psyscr_poll(), with SDL's message-loop keyboard
+ *   1. The restamp's clock correlation: yrt_correlate() of SDL_GetTicksNS
+ *      against the ysp_rt clock, 1000 times: width and cost.
+ *   2. Windows only: key events injected with SendInput() at known ysp_rt
+ *      times, read back with yscr_poll(), with SDL's message-loop keyboard
  *      and then with SDL_HINT_WINDOWS_RAW_KEYBOARD. When the window cannot
  *      take the keyboard focus (a program started in the background does
  *      not get it), WM_KEYDOWN is posted to the window instead, which tests
@@ -19,28 +19,28 @@
  * Usage: screen_input [--timer-res] [--panic] [--reports] [--hand [s]] [--devices]
  *                     [--mice [s]] [injections]
  *   injections   per path, default 200 (50 with --reports)
- *   --timer-res  call psyrt_timer_resolution_begin() first (timeBeginPeriod)
+ *   --timer-res  call yrt_timer_resolution_begin() first (timeBeginPeriod)
  *   --panic      arm the panic watchdog (its keyboard hook sees every key of
  *                the session) and test the raw path only: the hook's cost
  *   --reports    on the raw path, count SDL's key reports per injected press:
  *                virtual-key against scan-code injection, a tap against a
- *                100 ms hold (the double report, docs/psy_response.md)
+ *                100 ms hold (the double report, docs/response.md)
  *   --hand [s]   keys pressed by hand for s seconds (default 30): reports per
  *                press, and from which path. Click the window first
  *   --mice [s]   desc.raw_mice by hand for s seconds (default 30): each
  *                click and wheel notch with its mouse, then one line per
  *                mouse. Two physical mice should come apart
- *   --devices    the input devices psy_screen.h logs to its ring
- *                (PSYSCR_EV_DEVICE): kind, id and name; then 5 s of key and
+ *   --devices    the input devices ysp/screen.h logs to its ring
+ *                (YSCR_EV_DEVICE): kind, id and name; then 5 s of key and
  *                mouse events with the device id each one carries
 
  * Esc or closing the window ends the run at once.
  * Exit code: 0, 1 when the screen did not open, 2 for a bad argument.
  */
 /* --panic arms the watchdog in this program's window (a test seam). */
-#define PSYSCR__PANIC_WINDOWED 1
-#define PSY_SCREEN_IMPLEMENTATION
-#include "psy_screen.h"
+#define YSCR__PANIC_WINDOWED 1
+#define YSP_SCREEN_IMPLEMENTATION
+#include "ysp/screen.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,23 +81,23 @@ static void inject_f24(WORD flags) {
  * (1), or a WM_KEYDOWN posted to the window (2), which needs no keyboard
  * focus and reaches the message loop only. Returns 1 when Esc or close
  * ended the run. */
-static int run_path(psyscr_screen* s, int mode, int count) {
+static int run_path(yscr_screen* s, int mode, int count) {
     static double delta[4096], subms[4096];
     static const char* const names[3] = { "SendInput, message loop", "SendInput, raw input",
                                           "posted WM_KEYDOWN, message loop" };
     int nd = 0, injected = 0, waiting = 0, quit = 0;
     int64_t t_inj = 0, give_up = 0;
     uint32_t rng = 777u + (uint32_t)mode;
-    int64_t end = (int64_t)psyrt_now_ns() + (int64_t)count * 60000000 + 5000000000LL;
-    HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(psyscr_window(s)),
+    int64_t end = (int64_t)yrt_now_ns() + (int64_t)count * 60000000 + 5000000000LL;
+    HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(yscr_window(s)),
                                              SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
     SDL_SetHint(SDL_HINT_WINDOWS_RAW_KEYBOARD, mode == 1 ? "1" : "0");
-    while (injected < count && !quit && (int64_t)psyrt_now_ns() < end) {
-        psyscr_frame f;
+    while (injected < count && !quit && (int64_t)yrt_now_ns() < end) {
+        yscr_frame f;
         SDL_Event ev;
         int64_t t_ev;
-        if (psyscr_begin(s, &f) != PSYSCR_OK) { quit = 1; break; }
-        while (psyscr_poll(s, &ev, &t_ev)) {
+        if (yscr_begin(s, &f) != YSCR_OK) { quit = 1; break; }
+        while (yscr_poll(s, &ev, &t_ev)) {
             if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED ||
                 (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE)) quit = 1;
             if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_F24 && waiting && nd < 4096) {
@@ -107,12 +107,12 @@ static int run_path(psyscr_screen* s, int mode, int count) {
                 waiting = 0;
             }
         }
-        if (waiting && psyrt_now_ns() > (uint64_t)give_up) waiting = 0;   /* lost: not counted */
-        if (!waiting && !quit && (mode == 2 || SDL_GetKeyboardFocus() == psyscr_window(s))) {
+        if (waiting && yrt_now_ns() > (uint64_t)give_up) waiting = 0;   /* lost: not counted */
+        if (!waiting && !quit && (mode == 2 || SDL_GetKeyboardFocus() == yscr_window(s))) {
             /* a random phase inside the frame, so the frame loop is no clock */
             rng = rng * 1664525u + 1013904223u;
-            psyrt_sleep_until(psyrt_now_ns() + (rng >> 8) % 8000000u, 0);
-            t_inj = (int64_t)psyrt_now_ns();
+            yrt_sleep_until(yrt_now_ns() + (rng >> 8) % 8000000u, 0);
+            t_inj = (int64_t)yrt_now_ns();
             if (mode == 2) {
                 PostMessageW(hwnd, WM_KEYDOWN, VK_F24, 1 | (0x76u << 16));
                 PostMessageW(hwnd, WM_KEYUP, VK_F24, 1 | (0x76u << 16) | (3u << 30));
@@ -124,7 +124,7 @@ static int run_path(psyscr_screen* s, int mode, int count) {
             waiting = 1;
             injected++;
         }
-        psyscr_flip(s);
+        yscr_flip(s);
     }
     printf("%s: %d injected, %d received\n", names[mode], injected, nd);
     row("restamped event - injection, ms", delta, nd);
@@ -152,19 +152,19 @@ static void inject_key(int scan, int up) {
     SendInput(1, &in, sizeof in);
 }
 
-static int run_reports(psyscr_screen* s, int scan, int hold_ms, int count, report_tally* r) {
+static int run_reports(yscr_screen* s, int scan, int hold_ms, int count, report_tally* r) {
     int state = 0, quit = 0, downs_this = 0;
-    int64_t t_next = (int64_t)psyrt_now_ns() + 100000000, t_down = 0, t_first = 0;
-    int64_t end = (int64_t)psyrt_now_ns() + (int64_t)count * 400000000LL + 3000000000LL;
+    int64_t t_next = (int64_t)yrt_now_ns() + 100000000, t_down = 0, t_first = 0;
+    int64_t end = (int64_t)yrt_now_ns() + (int64_t)count * 400000000LL + 3000000000LL;
     memset(r, 0, sizeof *r);
     SDL_SetHint(SDL_HINT_WINDOWS_RAW_KEYBOARD, "1");
-    while (!quit && (int64_t)psyrt_now_ns() < end && (r->presses < count || state != 0 ||
-                                                       (int64_t)psyrt_now_ns() < t_next)) {
-        psyscr_frame f;
+    while (!quit && (int64_t)yrt_now_ns() < end && (r->presses < count || state != 0 ||
+                                                       (int64_t)yrt_now_ns() < t_next)) {
+        yscr_frame f;
         SDL_Event ev;
         int64_t t_ev, now;
-        if (psyscr_begin(s, &f) != PSYSCR_OK) { quit = 1; break; }
-        while (psyscr_poll(s, &ev, &t_ev)) {
+        if (yscr_begin(s, &f) != YSCR_OK) { quit = 1; break; }
+        while (yscr_poll(s, &ev, &t_ev)) {
             if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED ||
                 (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE)) quit = 1;
             if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.scancode == SDL_SCANCODE_F24) {
@@ -177,8 +177,8 @@ static int run_reports(psyscr_screen* s, int scan, int hold_ms, int count, repor
             }
             if (ev.type == SDL_EVENT_KEY_UP && ev.key.scancode == SDL_SCANCODE_F24) r->ups++;
         }
-        now = (int64_t)psyrt_now_ns();
-        if (state == 0 && r->presses < count && now >= t_next && SDL_GetKeyboardFocus() == psyscr_window(s)) {
+        now = (int64_t)yrt_now_ns();
+        if (state == 0 && r->presses < count && now >= t_next && SDL_GetKeyboardFocus() == yscr_window(s)) {
             downs_this = 0;
             inject_key(scan, 0);
             r->presses++;
@@ -190,13 +190,13 @@ static int run_reports(psyscr_screen* s, int scan, int hold_ms, int count, repor
             state = 0;
             t_next = now + 150000000;
         }
-        psyscr_flip(s);
+        yscr_flip(s);
     }
     if (state == 1) inject_key(scan, 1);
     return quit;
 }
 
-static int reports_mode(psyscr_screen* s, int count) {
+static int reports_mode(yscr_screen* s, int count) {
     static const char* const inj[2] = { "virtual key (wVk, scan 0)", "scan code (KEYEVENTF_SCANCODE)" };
     report_tally r;
     int scan, h, quit = 0;
@@ -219,19 +219,19 @@ static int reports_mode(psyscr_screen* s, int count) {
  * start), the reports SDL gives within 50 ms, and from which path: the
  * raw path carries the keyboard's device id (which != 0), the message
  * path 0. A physical key that reports once shows 1 report per press. */
-static int hand_mode(psyscr_screen* s, int seconds) {
+static int hand_mode(yscr_screen* s, int seconds) {
     static int64_t last_down[SDL_SCANCODE_COUNT];
     int presses = 0, second = 0, raw = 0, msg = 0, repeats = 0, quit = 0;
-    int64_t end = (int64_t)psyrt_now_ns() + (int64_t)seconds * 1000000000LL;
+    int64_t end = (int64_t)yrt_now_ns() + (int64_t)seconds * 1000000000LL;
     memset(last_down, 0, sizeof last_down);
     SDL_SetHint(SDL_HINT_WINDOWS_RAW_KEYBOARD, "1");
     printf("press keys by hand for %d s (letters, space; Esc ends early)\n", seconds);
-    while (!quit && (int64_t)psyrt_now_ns() < end) {
-        psyscr_frame f;
+    while (!quit && (int64_t)yrt_now_ns() < end) {
+        yscr_frame f;
         SDL_Event ev;
         int64_t t_ev;
-        if (psyscr_begin(s, &f) != PSYSCR_OK) { quit = 1; break; }
-        while (psyscr_poll(s, &ev, &t_ev)) {
+        if (yscr_begin(s, &f) != YSCR_OK) { quit = 1; break; }
+        while (yscr_poll(s, &ev, &t_ev)) {
             if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED ||
                 (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE)) quit = 1;
             if (ev.type == SDL_EVENT_KEY_DOWN && (int)ev.key.scancode < SDL_SCANCODE_COUNT) {
@@ -251,7 +251,7 @@ static int hand_mode(psyscr_screen* s, int seconds) {
                 }
             }
         }
-        psyscr_flip(s);
+        yscr_flip(s);
     }
     printf("%d presses, %d second reports within 50 ms, %d OS repeats; reports with a device id %d, "
            "without %d\n", presses, second, repeats, raw, msg);
@@ -263,23 +263,23 @@ static int hand_mode(psyscr_screen* s, int seconds) {
 
 /* --devices: the ring's device records, then which device each key or
  * click comes from, to map a data file's device column. */
-static unsigned char g_ring_mem[PSYRT_RING_BYTES(1024)];
-static psyrt_ring g_ring;
-static psyrt_event g_ev[1024];
+static unsigned char g_ring_mem[YRT_RING_BYTES(1024)];
+static yrt_ring g_ring;
+static yrt_event g_ev[1024];
 
-static void devices_mode(psyscr_screen* s) {
+static void devices_mode(yscr_screen* s) {
     static const char* const kinds[6] = { "?", "keyboard", "mouse", "gamepad", "touch", "pen" };
     static const char* const changes[3] = { "present", "added", "removed" };
     int i, n;
-    int64_t end = (int64_t)psyrt_now_ns() + 5000000000LL;
+    int64_t end = (int64_t)yrt_now_ns() + 5000000000LL;
     printf("press keys or click in the window for 5 s (Esc ends early)\n");
-    while ((int64_t)psyrt_now_ns() < end) {
-        psyscr_frame f;
+    while ((int64_t)yrt_now_ns() < end) {
+        yscr_frame f;
         SDL_Event ev;
         int64_t t;
         int quit = 0;
-        if (psyscr_begin(s, &f) != PSYSCR_OK) break;
-        while (psyscr_poll(s, &ev, &t)) {
+        if (yscr_begin(s, &f) != YSCR_OK) break;
+        while (yscr_poll(s, &ev, &t)) {
             if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
                 printf("  key %-10s from keyboard %u\n", SDL_GetScancodeName(ev.key.scancode), (unsigned)ev.key.which);
                 if (ev.key.key == SDLK_ESCAPE) quit = 1;
@@ -288,16 +288,16 @@ static void devices_mode(psyscr_screen* s) {
                 printf("  click %u from mouse %u\n", (unsigned)ev.button.button, (unsigned)ev.button.which);
             if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) quit = 1;
         }
-        psyscr_flip(s);
+        yscr_flip(s);
         if (quit) break;
     }
-    n = psyrt_ring_drain(&g_ring, g_ev, 1024);
+    n = yrt_ring_drain(&g_ring, g_ev, 1024);
     printf("devices in the ring:\n");
     for (i = 0; i < n; i++) {
-        const psyrt_event* e = &g_ev[i];
-        if (e->source != PSYRT_SRC_SCREEN || e->kind != PSYSCR_EV_DEVICE) continue;
+        const yrt_event* e = &g_ev[i];
+        if (e->source != YRT_SRC_SCREEN || e->kind != YSCR_EV_DEVICE) continue;
         printf("  %-8s %-7s id %-12llu %s\n", kinds[e->u.u32[0] < 6 ? e->u.u32[0] : 0],
-               changes[e->u.u32[1] < 3 ? e->u.u32[1] : 0], (unsigned long long)e->u.u64[1], PSYSCR_DEV_NAME_OF(e));
+               changes[e->u.u32[1] < 3 ? e->u.u32[1] : 0], (unsigned long long)e->u.u64[1], YSCR_DEV_NAME_OF(e));
     }
     {   /* the ring cuts names at 23 bytes; SDL's full names */
         SDL_KeyboardID* kb = SDL_GetKeyboards(&n);
@@ -318,44 +318,44 @@ static void devices_mode(psyscr_screen* s) {
  * name. Device 0 is shown too: Windows gives no device handle to the
  * pointer it synthesizes from a precision touchpad, nor to injected input. Two physical mice
  * that come apart show as two devices. */
-static void mice_mode(psyscr_screen* s, int seconds) {
+static void mice_mode(yscr_screen* s, int seconds) {
     struct { uint32_t device; long reports, clicks, wheel; long long ax, ay; int unlisted; } dev[16];
     int i, n, nd = 0, physical = 0;
-    int64_t end = (int64_t)psyrt_now_ns() + (int64_t)seconds * 1000000000LL;
+    int64_t end = (int64_t)yrt_now_ns() + (int64_t)seconds * 1000000000LL;
     memset(dev, 0, sizeof dev);
     printf("move and click each mouse in the window for %d s (Esc ends early)\n", seconds);
-    while ((int64_t)psyrt_now_ns() < end) {
-        psyscr_frame f;
+    while ((int64_t)yrt_now_ns() < end) {
+        yscr_frame f;
         SDL_Event ev;
-        psyin_event m;
+        yin_event m;
         int quit = 0;
-        if (psyscr_begin(s, &f) != PSYSCR_OK) break;
+        if (yscr_begin(s, &f) != YSCR_OK) break;
         /* one loop: SDL's events and the bridge's doorbells (v0.4.0) */
-        while (psyscr_poll(s, &ev, NULL)) {
+        while (yscr_poll(s, &ev, NULL)) {
             int k;
             if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE) quit = 1;
             if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) quit = 1;
-            if (ev.type != psyscr_input_event_type() || !psyscr_event_input(s, &ev, &m)) continue;
-            if (m.kind != PSYIN_KIND_MOUSE) continue;
+            if (ev.type != yscr_input_event_type() || !yscr_event_input(s, &ev, &m)) continue;
+            if (m.kind != YIN_KIND_MOUSE) continue;
             for (k = 0; k < nd && dev[k].device != m.device; k++) { }
             if (k == nd) {
                 if (nd == 16) continue;
                 dev[nd++].device = m.device;
             }
             dev[k].reports++;
-            dev[k].unlisted = (m.flags & PSYIN_UNLISTED) != 0;
-            if (m.type == PSYIN_PRESS) {
+            dev[k].unlisted = (m.flags & YIN_UNLISTED) != 0;
+            if (m.type == YIN_PRESS) {
                 dev[k].clicks++;
                 printf("  mouse %-10u button %u down\n", (unsigned)m.device, (unsigned)m.control);
-            } else if (m.control == PSYIN_AXIS_DELTA) {
+            } else if (m.control == YIN_AXIS_DELTA) {
                 dev[k].ax += (long long)(m.x < 0 ? -m.x : m.x);
                 dev[k].ay += (long long)(m.y < 0 ? -m.y : m.y);
-            } else if (m.control == PSYIN_AXIS_WHEEL && m.type == PSYIN_SAMPLE) {
+            } else if (m.control == YIN_AXIS_WHEEL && m.type == YIN_SAMPLE) {
                 dev[k].wheel += (long)m.value;
                 printf("  mouse %-10u wheel %+d\n", (unsigned)m.device, (int)m.value);
             }
         }
-        psyscr_flip(s);
+        yscr_flip(s);
         if (quit) break;
     }
     printf("per device (counts are raw, unaccelerated):\n");
@@ -377,8 +377,8 @@ static void mice_mode(psyscr_screen* s, int seconds) {
 }
 
 int main(int argc, char** argv) {
-    psyscr_screen s;
-    psyscr_desc d;
+    yscr_screen s;
+    yscr_desc d;
     int i, count = 200, timer_res = 0, panic = 0, reports = 0, hand = 0, devices = 0, mice = 0;
     char line[512];
     for (i = 1; i < argc; i++) {
@@ -404,7 +404,7 @@ int main(int argc, char** argv) {
             }
         }
     }
-    if (timer_res) printf("timeBeginPeriod(1): %s\n", psyrt_timer_resolution_begin() ? "granted" : "refused");
+    if (timer_res) printf("timeBeginPeriod(1): %s\n", yrt_timer_resolution_begin() ? "granted" : "refused");
     memset(&s, 0, sizeof s);
     memset(&d, 0, sizeof d);
     d.windowed = true;
@@ -413,55 +413,55 @@ int main(int argc, char** argv) {
     d.panic = panic != 0;
     d.raw_mice = mice > 0;
     if (devices) {
-        psyrt_ring_desc rd;
+        yrt_ring_desc rd;
         memset(&rd, 0, sizeof rd);
         rd.memory = g_ring_mem;
         rd.bytes = sizeof g_ring_mem;
-        if (!psyrt_ring_open(&g_ring, &rd)) { fprintf(stderr, "screen_input: %s\n", psyrt_ring_error(&g_ring)); return 1; }
+        if (!yrt_ring_open(&g_ring, &rd)) { fprintf(stderr, "screen_input: %s\n", yrt_ring_error(&g_ring)); return 1; }
         d.ring = &g_ring;
     }
-    if (!psyscr_open(&s, &d)) { fprintf(stderr, "screen_input: %s\n", psyscr_error(&s)); return 1; }
-    psyscr_describe(&s, line, sizeof line);
+    if (!yscr_open(&s, &d)) { fprintf(stderr, "screen_input: %s\n", yscr_error(&s)); return 1; }
+    yscr_describe(&s, line, sizeof line);
     printf("%s\n", line);
     if (devices) {
         devices_mode(&s);
-        psyscr_close(&s);
+        yscr_close(&s);
         return 0;
     }
     if (mice) {
         mice_mode(&s, mice);
-        psyscr_close(&s);
+        yscr_close(&s);
         return 0;
     }
 #if defined(_WIN32)
     if (hand) {
         hand_mode(&s, hand);
-        psyscr_close(&s);
+        yscr_close(&s);
         return 0;
     }
 #endif
     for (i = 0; i < 1000; i++) {
-        psyrt_corr_desc cd;
-        psyrt_corr c;
+        yrt_corr_desc cd;
+        yrt_corr c;
         uint64_t t0;
         memset(&cd, 0, sizeof cd);
         cd.read = SDL_GetTicksNS;
-        t0 = psyrt_now_ns();
-        psyrt_correlate(&cd, &c);
-        g_b[i] = (double)(psyrt_now_ns() - t0) / 1e3;
+        t0 = yrt_now_ns();
+        yrt_correlate(&cd, &c);
+        g_b[i] = (double)(yrt_now_ns() - t0) / 1e3;
         g_a[i] = (double)c.width_ns / 1e3;
     }
-    printf("correlation of SDL_GetTicksNS with the psy_rt clock, 16 tries each:\n");
+    printf("correlation of SDL_GetTicksNS with the ysp_rt clock, 16 tries each:\n");
     row("width us", g_a, 1000);
-    row("cost of one psyrt_correlate us", g_b, 1000);
+    row("cost of one yrt_correlate us", g_b, 1000);
 #if defined(_WIN32)
     {
         /* SendInput reaches only the foreground window. Windows gives the
          * foreground to a program started from the background after the
          * program sends one input event: a zero-size mouse move. */
-        int64_t until = (int64_t)psyrt_now_ns() + 2000000000LL;
+        int64_t until = (int64_t)yrt_now_ns() + 2000000000LL;
         {
-            HWND hw = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(psyscr_window(&s)),
+            HWND hw = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(yscr_window(&s)),
                                                    SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
             INPUT in;
             memset(&in, 0, sizeof in);
@@ -470,12 +470,12 @@ int main(int argc, char** argv) {
             SendInput(1, &in, sizeof in);
             SetForegroundWindow(hw);
         }
-        while (SDL_GetKeyboardFocus() != psyscr_window(&s) && (int64_t)psyrt_now_ns() < until) {
-            psyscr_frame f;
-            if (psyscr_begin(&s, &f) != PSYSCR_OK) break;
-            psyscr_flip(&s);
+        while (SDL_GetKeyboardFocus() != yscr_window(&s) && (int64_t)yrt_now_ns() < until) {
+            yscr_frame f;
+            if (yscr_begin(&s, &f) != YSCR_OK) break;
+            yscr_flip(&s);
         }
-        if (SDL_GetKeyboardFocus() == psyscr_window(&s)) {
+        if (SDL_GetKeyboardFocus() == yscr_window(&s)) {
             if (reports) reports_mode(&s, count < 200 ? count : 50);
             else if (panic) run_path(&s, 1, count);
             else if (!run_path(&s, 0, count)) run_path(&s, 1, count);
@@ -487,7 +487,7 @@ int main(int argc, char** argv) {
 #else
     printf("key injection is Windows only here\n");
 #endif
-    psyscr_close(&s);
-    if (timer_res) psyrt_timer_resolution_end();
+    yscr_close(&s);
+    if (timer_res) yrt_timer_resolution_end();
     return 0;
 }

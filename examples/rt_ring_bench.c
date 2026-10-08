@@ -1,4 +1,4 @@
-/* rt_ring_bench.c - what psy_rt.h's event ring, trace macros and clock
+/* rt_ring_bench.c - what ysp/rt.h's event ring, trace macros and clock
  * correlation cost on THIS machine.
  *
  * Sections, each printed as a table:
@@ -19,14 +19,14 @@
  * max over blocks. B3 times each push alone, clock read included, because
  * one slow push is what it looks for.
  *
- * The macro mode is this file's: PSYRT_TRACE_RING by default. Build it with
+ * The macro mode is this file's: YRT_TRACE_RING by default. Build it with
  * -DRT_BENCH_NOTHING for the default (empty) macros, or with
  * -DRT_BENCH_TRACY -DTRACY_ENABLE, Tracy's public/ directory on the include
  * path and TracyClient.cpp linked, for the Tracy C API.
  *
  * Build (from the repository root):
- *     cc -O2 -pthread -I. -o rt_ring_bench examples/rt_ring_bench.c
- *     cl /O2 /I. examples\rt_ring_bench.c
+ *     cc -O2 -pthread -Iinclude -o rt_ring_bench examples/rt_ring_bench.c
+ *     cl /O2 /Iinclude examples\rt_ring_bench.c
  * or:  cmake -B build && cmake --build build
  *
  * Usage: rt_ring_bench [pushes] [max_producers] [b3_ms] [all]
@@ -38,20 +38,20 @@
  * thread that does not start, which is reported.
  */
 #if defined(RT_BENCH_TRACY)
-    #define PSYRT_TRACY
+    #define YRT_TRACY
 #elif !defined(RT_BENCH_NOTHING)
-    #define PSYRT_TRACE_RING
+    #define YRT_TRACE_RING
 #endif
-#define PSY_RT_IMPLEMENTATION
-#include "psy_rt.h"
+#define YSP_RT_IMPLEMENTATION
+#include "ysp/rt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef PSYRT_NO_THREADS
+#ifdef YRT_NO_THREADS
 int main(void) {
-    puts("rt_ring_bench: built with PSYRT_NO_THREADS; the contention sections need threads.");
+    puts("rt_ring_bench: built with YRT_NO_THREADS; the contention sections need threads.");
     return 0;
 }
 #else
@@ -119,23 +119,23 @@ static uint32_t bench_fadd(uint32_t* p) { return __atomic_fetch_add(p, 1u, __ATO
 
 /* ------------------------------------------------------------- the rings */
 
-static unsigned char g_mem[PSYRT_RING_BYTES(65536)];
-static psyrt_ring g_ring;
-static psyrt_event g_out[4096];
+static unsigned char g_mem[YRT_RING_BYTES(65536)];
+static yrt_ring g_ring;
+static yrt_event g_out[4096];
 
 static void ring_open(uint32_t records) {
-    psyrt_ring_desc d;
+    yrt_ring_desc d;
     memset(&d, 0, sizeof(d));
     d.memory = g_mem;
-    d.bytes = PSYRT_RING_BYTES(records);
-    if (!psyrt_ring_open(&g_ring, &d)) {
-        fprintf(stderr, "rt_ring_bench: %s\n", psyrt_ring_error(&g_ring));
+    d.bytes = YRT_RING_BYTES(records);
+    if (!yrt_ring_open(&g_ring, &d)) {
+        fprintf(stderr, "rt_ring_bench: %s\n", yrt_ring_error(&g_ring));
         exit(1);
     }
 }
 
 static void drain_all(void) {
-    while (psyrt_ring_drain(&g_ring, g_out, 4096) > 0) { }
+    while (yrt_ring_drain(&g_ring, g_out, 4096) > 0) { }
 }
 
 /* The baseline: the same records behind one lock. */
@@ -145,7 +145,7 @@ typedef struct mring {
 #else
     pthread_mutex_t lock;
 #endif
-    psyrt_event* slots;
+    yrt_event* slots;
     uint32_t head, tail, cap, dropped;
 } mring;
 
@@ -158,7 +158,7 @@ static void mring_open(uint32_t cap) {
 #else
     pthread_mutex_init(&g_mring.lock, NULL);
 #endif
-    g_mring.slots = (psyrt_event*)(void*)g_mem;
+    g_mring.slots = (yrt_event*)(void*)g_mem;
     g_mring.cap = cap;
 }
 
@@ -178,12 +178,12 @@ static void mring_unlock(void) {
 #endif
 }
 
-static int mring_push(const psyrt_event* ev) {
+static int mring_push(const yrt_event* ev) {
     mring_lock();
     if (g_mring.head - g_mring.tail >= g_mring.cap) {
         g_mring.dropped++;
         mring_unlock();
-        return PSYRT_ERR_FULL;
+        return YRT_ERR_FULL;
     }
     g_mring.slots[g_mring.head % g_mring.cap] = *ev;
     g_mring.head++;
@@ -191,7 +191,7 @@ static int mring_push(const psyrt_event* ev) {
     return 0;
 }
 
-static int mring_drain(psyrt_event* out, int cap) {
+static int mring_drain(yrt_event* out, int cap) {
     int k = 0;
     mring_lock();
     while (k < cap && g_mring.tail != g_mring.head) {
@@ -204,20 +204,20 @@ static int mring_drain(psyrt_event* out, int cap) {
 
 static int g_use_mutex = 0;
 
-static int any_push(const psyrt_event* ev) {
-    return g_use_mutex ? mring_push(ev) : psyrt_ring_push(&g_ring, ev);
+static int any_push(const yrt_event* ev) {
+    return g_use_mutex ? mring_push(ev) : yrt_ring_push(&g_ring, ev);
 }
 
-static int any_drain(psyrt_event* out, int cap) {
-    return g_use_mutex ? mring_drain(out, cap) : psyrt_ring_drain(&g_ring, out, cap);
+static int any_drain(yrt_event* out, int cap) {
+    return g_use_mutex ? mring_drain(out, cap) : yrt_ring_drain(&g_ring, out, cap);
 }
 
-static psyrt_event make_event(uint32_t i) {
-    psyrt_event e;
+static yrt_event make_event(uint32_t i) {
+    yrt_event e;
     memset(&e, 0, sizeof(e));
     e.t_ns = (uint64_t)i + 1u;
     e.tid = 1u;
-    e.source = (uint16_t)PSYRT_SRC_USER;
+    e.source = (uint16_t)YRT_SRC_USER;
     e.kind = 1;
     e.aux = i;
     e.u.u64[0] = i;
@@ -231,17 +231,17 @@ static uint64_t* g_blk;   /* per-block samples, sized in main */
 static void b1(size_t pushes) {
     size_t nb = pushes / BLOCK, b;
     int k, pass;
-    psyrt_event e = make_event(0), z;
+    yrt_event e = make_event(0), z;
     memset(&z, 0, sizeof(z));
-    z.source = (uint16_t)PSYRT_SRC_USER;
+    z.source = (uint16_t)YRT_SRC_USER;
     header("B1. push, one thread, ring of 4096 drained between blocks", "ns");
     for (pass = 0; pass < 2; pass++) {
         ring_open(4096);
         for (b = 0; b < nb; b++) {
-            uint64_t t0 = psyrt_now_ns();
-            if (pass == 0) for (k = 0; k < BLOCK; k++) (void)psyrt_ring_push(&g_ring, &e);
-            else           for (k = 0; k < BLOCK; k++) (void)psyrt_ring_push(&g_ring, &z);
-            g_blk[b] = psyrt_now_ns() - t0;
+            uint64_t t0 = yrt_now_ns();
+            if (pass == 0) for (k = 0; k < BLOCK; k++) (void)yrt_ring_push(&g_ring, &e);
+            else           for (k = 0; k < BLOCK; k++) (void)yrt_ring_push(&g_ring, &z);
+            g_blk[b] = yrt_now_ns() - t0;
             drain_all();
         }
         row(pass == 0 ? "push, t_ns and tid set" : "push, t_ns and tid 0 (stamped)",
@@ -252,7 +252,7 @@ static void b1(size_t pushes) {
 /* ------------------------------------------------------------------- B2 */
 
 typedef struct prod {
-    psyrt_worker w;
+    yrt_worker w;
     const int* go;
     const int* stop;     /* NULL = run all `pushes` */
     int done;
@@ -265,34 +265,34 @@ typedef struct prod {
 
 static prod g_prod[MAX_P];
 
-static void prod_job(void* ctx, const psyrt_job_info* info) {
+static void prod_job(void* ctx, const yrt_job_info* info) {
     prod* p = (prod*)ctx;
-    psyrt_event e = make_event(7);
+    yrt_event e = make_event(7);
     size_t b, nb = p->pushes / BLOCK;
     int k;
     (void)info;
     while (!b_load(p->go)) { }
     for (b = 0; b < nb; b++) {
-        uint64_t t0 = psyrt_now_ns();
+        uint64_t t0 = yrt_now_ns();
         if (p->stop && b_load(p->stop)) break;
         for (k = 0; k < BLOCK; k++)
-            if (any_push(&e) == PSYRT_ERR_FULL) p->refused++;
-        p->blk[b] = psyrt_now_ns() - t0;
-        if (p->pause_ns) (void)psyrt_spin_until(psyrt_now_ns() + p->pause_ns);
+            if (any_push(&e) == YRT_ERR_FULL) p->refused++;
+        p->blk[b] = yrt_now_ns() - t0;
+        if (p->pause_ns) (void)yrt_spin_until(yrt_now_ns() + p->pause_ns);
     }
     p->nblk = b;
     b_store(&p->done, 1);
 }
 
 static int start_workers(prod* ps, int n, bool elevate) {
-    psyrt_worker_desc wd;
+    yrt_worker_desc wd;
     int i;
     memset(&wd, 0, sizeof(wd));
     wd.no_elevate = !elevate;
     for (i = 0; i < n; i++) {
         memset(&ps[i].w, 0, sizeof(ps[i].w));
-        if (!psyrt_worker_start(&ps[i].w, &wd)) {
-            fprintf(stderr, "rt_ring_bench: worker: %s\n", psyrt_worker_error(&ps[i].w));
+        if (!yrt_worker_start(&ps[i].w, &wd)) {
+            fprintf(stderr, "rt_ring_bench: worker: %s\n", yrt_worker_error(&ps[i].w));
             return i;
         }
     }
@@ -316,20 +316,20 @@ static void b2(size_t pushes, int max_p) {
             g_prod[i].go = &go;
             g_prod[i].pushes = per;
             g_prod[i].blk = g_blk + (size_t)i * (per / BLOCK + 1);
-            (void)psyrt_worker_submit(&g_prod[i].w, 0, prod_job, &g_prod[i]);
+            (void)yrt_worker_submit(&g_prod[i].w, 0, prod_job, &g_prod[i]);
         }
-        psyrt_sleep_ns(20000000ull);
-        t0 = psyrt_now_ns();
+        yrt_sleep_ns(20000000ull);
+        t0 = yrt_now_ns();
         b_store(&go, 1);
         do {
             all = 1;
             for (i = 0; i < started; i++) if (!b_load(&g_prod[i].done)) all = 0;
-            while (psyrt_ring_drain(&g_ring, g_out, 4096) > 0) { }
+            while (yrt_ring_drain(&g_ring, g_out, 4096) > 0) { }
         } while (!all);
-        el = psyrt_now_ns() - t0;
+        el = yrt_now_ns() - t0;
         drain_all();
         for (i = 0; i < started; i++) {
-            psyrt_worker_stop(&g_prod[i].w);
+            yrt_worker_stop(&g_prod[i].w);
             refused += g_prod[i].refused;
             if (m + g_prod[i].nblk <= sizeof(merged) / sizeof(merged[0])) {
                 memcpy(merged + m, g_prod[i].blk, g_prod[i].nblk * sizeof(uint64_t));
@@ -346,36 +346,36 @@ static void b2(size_t pushes, int max_p) {
 /* ------------------------------------------------------------------- B3 */
 
 typedef struct elev {
-    psyrt_worker w;
+    yrt_worker w;
     const int* go;
     int done;
     int count;
     uint64_t* lat;
     long refused;
-    psyrt_policy policy;
+    yrt_policy policy;
     int control;         /* time the two clock reads only, no push */
 } elev;
 
 static elev g_elev;
 
-static void elev_job(void* ctx, const psyrt_job_info* info) {
+static void elev_job(void* ctx, const yrt_job_info* info) {
     elev* e = (elev*)ctx;
-    psyrt_event ev = make_event(1);
+    yrt_event ev = make_event(1);
     uint64_t next;
     int i;
     (void)info;
     while (!b_load(e->go)) { }
-    next = psyrt_now_ns();
+    next = yrt_now_ns();
     for (i = 0; i < e->count; i++) {
         uint64_t t0, t1;
         int rc;
         next += 1000000ull;
-        (void)psyrt_sleep_until(next, 0);
-        t0 = psyrt_now_ns();
+        (void)yrt_sleep_until(next, 0);
+        t0 = yrt_now_ns();
         rc = e->control ? 0 : any_push(&ev);
-        t1 = psyrt_now_ns();
+        t1 = yrt_now_ns();
         e->lat[i] = t1 - t0;
-        if (rc == PSYRT_ERR_FULL) e->refused++;
+        if (rc == YRT_ERR_FULL) e->refused++;
     }
     b_store(&e->done, 1);
 }
@@ -399,14 +399,14 @@ static void b3_run(int mutex, int control, int ms, int hammers, uint64_t* lat,
         g_prod[i].pause_ns = 400000u;            /* bursts of 64, 1.1 M/s from 7:
                                                   * the ring holds 3.6 ms of it */
         g_prod[i].blk = g_blk + (size_t)i * ((size_t)ms * 2000u / BLOCK + 1);
-        (void)psyrt_worker_submit(&g_prod[i].w, 0, prod_job, &g_prod[i]);
+        (void)yrt_worker_submit(&g_prod[i].w, 0, prod_job, &g_prod[i]);
     }
     {
-        psyrt_worker_desc wd;
+        yrt_worker_desc wd;
         memset(&wd, 0, sizeof(wd));
         wd.spin_ns = 1;
-        if (!psyrt_worker_start(&g_elev.w, &wd)) {
-            fprintf(stderr, "rt_ring_bench: elevated worker: %s\n", psyrt_worker_error(&g_elev.w));
+        if (!yrt_worker_start(&g_elev.w, &wd)) {
+            fprintf(stderr, "rt_ring_bench: elevated worker: %s\n", yrt_worker_error(&g_elev.w));
             return;
         }
     }
@@ -414,9 +414,9 @@ static void b3_run(int mutex, int control, int ms, int hammers, uint64_t* lat,
     g_elev.count = ms;
     g_elev.lat = lat;
     g_elev.control = control;
-    g_elev.policy = psyrt_worker_policy(&g_elev.w);
-    (void)psyrt_worker_submit(&g_elev.w, 0, elev_job, &g_elev);
-    psyrt_sleep_ns(20000000ull);
+    g_elev.policy = yrt_worker_policy(&g_elev.w);
+    (void)yrt_worker_submit(&g_elev.w, 0, elev_job, &g_elev);
+    yrt_sleep_ns(20000000ull);
     b_store(&go, 1);
     while (!b_load(&g_elev.done)) {
         /* A drain that returns nothing while tickets are out is waiting on
@@ -427,7 +427,7 @@ static void b3_run(int mutex, int control, int ms, int hammers, uint64_t* lat,
              * from here; a stall counts only if the drainer kept polling
              * through it, every 20 us or more often. */
             uint32_t head = *(volatile uint32_t*)&g_ring.head;
-            uint64_t now = psyrt_now_ns();
+            uint64_t now = yrt_now_ns();
             if (stall_t0 && now - last_poll > max_gap) max_gap = now - last_poll;
             last_poll = now;
             if (n == 0 && head != g_ring.tail) {
@@ -449,11 +449,11 @@ static void b3_run(int mutex, int control, int ms, int hammers, uint64_t* lat,
         for (i = 0; i < started; i++) if (!b_load(&g_prod[i].done)) all = 0;
         if (all) break;
     }
-    for (i = 0; i < started; i++) { psyrt_worker_stop(&g_prod[i].w); hrefused += g_prod[i].refused; }
-    psyrt_worker_stop(&g_elev.w);
+    for (i = 0; i < started; i++) { yrt_worker_stop(&g_prod[i].w); hrefused += g_prod[i].refused; }
+    yrt_worker_stop(&g_elev.w);
     while (any_drain(g_out, 4096) > 0) { }
     snprintf(label, sizeof(label), "%s, %s, refused %ld of %d (others %ld)", what,
-             psyrt_policy_name(g_elev.policy), g_elev.refused, ms, hrefused);
+             yrt_policy_name(g_elev.policy), g_elev.refused, ms, hrefused);
     row(label, lat, (size_t)ms, 1.0);
     if (!mutex && !control)
         printf("|   drain stalled behind an unpublished push, drainer polling throughout: "
@@ -473,12 +473,12 @@ static void b3(int ms) {
 
 /* ------------------------------------------------------------------ B3b */
 
-typedef struct spinner { psyrt_worker w; const int* quit; } spinner;
+typedef struct spinner { yrt_worker w; const int* quit; } spinner;
 static spinner g_spin[64];
 
 static volatile uint64_t g_spin_sink;
 
-static void spin_job(void* ctx, const psyrt_job_info* info) {
+static void spin_job(void* ctx, const yrt_job_info* info) {
     spinner* s = (spinner*)ctx;
     (void)info;
     while (!b_load(s->quit)) g_spin_sink++;
@@ -488,17 +488,17 @@ typedef struct lowp { const int* quit; uint64_t pushes; } lowp;
 static lowp g_low;
 
 /* The below-normal producer is a pump's idle callback: the pump is the one
- * psy_rt.h thread that runs below normal. One push, then 50 us of spin, so it
+ * ysp/rt.h thread that runs below normal. One push, then 50 us of spin, so it
  * is always runnable and competes for a core like real background work. */
 static bool low_idle(void* ctx) {
     lowp* l = (lowp*)ctx;
-    psyrt_event ev = make_event(2);
+    yrt_event ev = make_event(2);
     int k;
     if (b_load(l->quit)) return false;
     for (k = 0; k < 20; k++) {
-        (void)psyrt_ring_push(&g_ring, &ev);
+        (void)yrt_ring_push(&g_ring, &ev);
         l->pushes++;
-        (void)psyrt_spin_until(psyrt_now_ns() + 50000u);
+        (void)yrt_spin_until(yrt_now_ns() + 50000u);
     }
     return true;
 }
@@ -518,12 +518,12 @@ static int ncpu(void) {
 
 static void b3b(int ms) {
     static uint64_t lat[200000];
-    static psyrt_pump pump;
-    psyrt_pump_desc pd;
+    static yrt_pump pump;
+    yrt_pump_desc pd;
     int quit = 0, go = 0, i, ns = 2 * ncpu(), stalls = 0;
-    psyrt_policy low_policy;
+    yrt_policy low_policy;
     uint64_t longest = 0, stall_start = 0, next;
-    psyrt_worker_desc wd;
+    yrt_worker_desc wd;
     char label[128];
     if (ns > 64) ns = 64;
     if (ms > 200000) ms = 200000;
@@ -533,8 +533,8 @@ static void b3b(int ms) {
     wd.no_elevate = true;
     for (i = 0; i < ns; i++) {
         g_spin[i].quit = &quit;
-        if (!psyrt_worker_start(&g_spin[i].w, &wd)) { ns = i; break; }
-        (void)psyrt_worker_submit(&g_spin[i].w, 0, spin_job, &g_spin[i]);
+        if (!yrt_worker_start(&g_spin[i].w, &wd)) { ns = i; break; }
+        (void)yrt_worker_submit(&g_spin[i].w, 0, spin_job, &g_spin[i]);
     }
     memset(&g_low, 0, sizeof(g_low));
     g_low.quit = &quit;
@@ -546,49 +546,49 @@ static void b3b(int ms) {
     pd.ctx = &g_low;
     pd.below_normal = true;
     memset(&pump, 0, sizeof(pump));
-    if (!psyrt_pump_start(&pump, &pd)) fprintf(stderr, "pump: %s\n", psyrt_pump_error(&pump));
-    low_policy = psyrt_pump_policy(&pump);
+    if (!yrt_pump_start(&pump, &pd)) fprintf(stderr, "pump: %s\n", yrt_pump_error(&pump));
+    low_policy = yrt_pump_policy(&pump);
     memset(&g_elev, 0, sizeof(g_elev));
     memset(&wd, 0, sizeof(wd));
     wd.spin_ns = 1;
-    if (!psyrt_worker_start(&g_elev.w, &wd)) return;
+    if (!yrt_worker_start(&g_elev.w, &wd)) return;
     g_elev.go = &go;
     g_elev.count = ms;
     g_elev.lat = lat;
-    g_elev.policy = psyrt_worker_policy(&g_elev.w);
-    (void)psyrt_worker_submit(&g_elev.w, 0, elev_job, &g_elev);
+    g_elev.policy = yrt_worker_policy(&g_elev.w);
+    (void)yrt_worker_submit(&g_elev.w, 0, elev_job, &g_elev);
     b_store(&go, 1);
     /* The drainer: a frame loop's, once per 16.7 ms. A drain that finds
      * claimed records but can return none is waiting on a stalled push. */
-    next = psyrt_now_ns();
+    next = yrt_now_ns();
     while (!b_load(&g_elev.done)) {
         uint32_t head, tail;
         int n;
         next += 16666667ull;
-        (void)psyrt_sleep_until(next, 0);
-        n = psyrt_ring_drain(&g_ring, g_out, 4096);
+        (void)yrt_sleep_until(next, 0);
+        n = yrt_ring_drain(&g_ring, g_out, 4096);
         head = *(volatile uint32_t*)&g_ring.head;
         tail = g_ring.tail;
         if (n == 0 && head != tail) {
-            if (!stall_start) { stall_start = psyrt_now_ns(); stalls++; }
+            if (!stall_start) { stall_start = yrt_now_ns(); stalls++; }
         } else if (stall_start) {
-            uint64_t d = psyrt_now_ns() - stall_start;
+            uint64_t d = yrt_now_ns() - stall_start;
             if (d > longest) longest = d;
             stall_start = 0;
         }
     }
     b_store(&quit, 1);
-    psyrt_worker_stop(&g_elev.w);
-    psyrt_pump_stop(&pump);
-    for (i = 0; i < ns; i++) psyrt_worker_stop(&g_spin[i].w);
+    yrt_worker_stop(&g_elev.w);
+    yrt_pump_stop(&pump);
+    for (i = 0; i < ns; i++) yrt_worker_stop(&g_spin[i].w);
     drain_all();
     snprintf(label, sizeof(label), "%d spinners on %d CPUs, %s, refused %ld of %d", ns, ncpu(),
-             psyrt_policy_name(g_elev.policy), g_elev.refused, ms);
+             yrt_policy_name(g_elev.policy), g_elev.refused, ms);
     row(label, lat, (size_t)ms, 1.0);
     printf("\nbelow-normal producer: %llu pushes, policy %s; drains stalled behind an "
            "unpublished push: %d, longest %.1f ms; ring refusals in all: %lu\n",
-           (unsigned long long)g_low.pushes, psyrt_policy_name(low_policy),
-           stalls, (double)longest / 1e6, (unsigned long)psyrt_ring_dropped(&g_ring));
+           (unsigned long long)g_low.pushes, yrt_policy_name(low_policy),
+           stalls, (double)longest / 1e6, (unsigned long)yrt_ring_dropped(&g_ring));
 }
 
 /* An injected stall: claim a ticket the way a push does, hold it for
@@ -602,25 +602,25 @@ static void b3c(void) {
     for (s = 0; s < sizeof(stalls_ms) / sizeof(stalls_ms[0]); s++) {
         uint32_t t, pushes = 0, refused = 0;
         uint64_t now, end, next_push, next_drain;
-        psyrt_event ev = make_event(3);
+        yrt_event ev = make_event(3);
         unsigned char* slot;
         ring_open(4096);
-        /* the claim half of psyrt_ring_push(), then nothing */
+        /* the claim half of yrt_ring_push(), then nothing */
         (void)bench_fadd(&g_ring.used);
         t = bench_fadd(&g_ring.head);
         slot = g_ring.slots + (size_t)(t & g_ring.mask) * 64u;
-        now = psyrt_now_ns();
+        now = yrt_now_ns();
         end = now + (uint64_t)stalls_ms[s] * 1000000ull;
         next_push = now;
         next_drain = now;
-        while ((now = psyrt_now_ns()) < end) {
+        while ((now = yrt_now_ns()) < end) {
             if (now >= next_push) {
-                if (psyrt_ring_push(&g_ring, &ev) == PSYRT_ERR_FULL) refused++;
+                if (yrt_ring_push(&g_ring, &ev) == YRT_ERR_FULL) refused++;
                 pushes++;
                 next_push += 166667ull;
             }
             if (now >= next_drain) {
-                (void)psyrt_ring_drain(&g_ring, g_out, 4096);
+                (void)yrt_ring_drain(&g_ring, g_out, 4096);
                 next_drain += 16666667ull;
             }
         }
@@ -639,17 +639,17 @@ static void b4(void) {
     static const int caps[] = { 64, 1024, 4096 };
     size_t c;
     int rep, k;
-    psyrt_event e = make_event(5);
+    yrt_event e = make_event(5);
     header("B4. drain, 4096 records per repetition, 200 repetitions", "ns/rec");
     for (c = 0; c < sizeof(caps) / sizeof(caps[0]); c++) {
         char label[64];
         ring_open(4096);
         for (rep = 0; rep < 200; rep++) {
             uint64_t t0;
-            for (k = 0; k < 4096; k++) (void)psyrt_ring_push(&g_ring, &e);
-            t0 = psyrt_now_ns();
-            while (psyrt_ring_drain(&g_ring, g_out, caps[c]) > 0) { }
-            g_blk[rep] = psyrt_now_ns() - t0;
+            for (k = 0; k < 4096; k++) (void)yrt_ring_push(&g_ring, &e);
+            t0 = yrt_now_ns();
+            while (yrt_ring_drain(&g_ring, g_out, caps[c]) > 0) { }
+            g_blk[rep] = yrt_now_ns() - t0;
         }
         snprintf(label, sizeof(label), "batch of %d", caps[c]);
         row(label, g_blk, 200, 4096);
@@ -664,9 +664,9 @@ static volatile uint64_t g_sink;
 #define B5_LOOP(label, body) do { \
         size_t b_; int k_; \
         for (b_ = 0; b_ < nb; b_++) { \
-            uint64_t t0_ = psyrt_now_ns(); \
+            uint64_t t0_ = yrt_now_ns(); \
             for (k_ = 0; k_ < BLOCK; k_++) { body; } \
-            g_blk[b_] = psyrt_now_ns() - t0_; \
+            g_blk[b_] = yrt_now_ns() - t0_; \
             if (attached) drain_all(); \
         } \
         row(label, g_blk, nb, BLOCK); \
@@ -677,39 +677,39 @@ static void b5_pass(size_t n, int attached) {
     double fill = 0.5;
     (void)fill;
     ring_open(4096);
-    psyrt_trace_set_ring(attached ? &g_ring : NULL);
+    yrt_trace_set_ring(attached ? &g_ring : NULL);
     B5_LOOP("empty loop", g_sink++);
-    B5_LOOP("zone pair", { PSYRT_ZONE(z, "bench"); g_sink++; PSYRT_ZONE_END(z); });
-    B5_LOOP("plot", { PSYRT_PLOT("bench", fill); g_sink++; });
-    B5_LOOP("message, literal", { PSYRT_MESSAGE("bench message"); g_sink++; });
-    B5_LOOP("message, formatted", { PSYRT_MESSAGEF("trial %d", k_); g_sink++; });
-    B5_LOOP("frame mark", { PSYRT_FRAME_MARK(); g_sink++; });
-    psyrt_trace_set_ring(NULL);
+    B5_LOOP("zone pair", { YRT_ZONE(z, "bench"); g_sink++; YRT_ZONE_END(z); });
+    B5_LOOP("plot", { YRT_PLOT("bench", fill); g_sink++; });
+    B5_LOOP("message, literal", { YRT_MESSAGE("bench message"); g_sink++; });
+    B5_LOOP("message, formatted", { YRT_MESSAGEF("trial %d", k_); g_sink++; });
+    B5_LOOP("frame mark", { YRT_FRAME_MARK(); g_sink++; });
+    yrt_trace_set_ring(NULL);
 }
 
 static void b5(size_t n) {
     size_t nb = n / BLOCK;
     int attached = 0;
-#if defined(PSYRT_TRACE_RING)
-    header("B5. macros, PSYRT_TRACE_RING, trace ring attached", "ns");
+#if defined(YRT_TRACE_RING)
+    header("B5. macros, YRT_TRACE_RING, trace ring attached", "ns");
     b5_pass(n, 1);
-    header("B5. macros, PSYRT_TRACE_RING, no trace ring attached", "ns");
+    header("B5. macros, YRT_TRACE_RING, no trace ring attached", "ns");
     b5_pass(n, 0);
-#elif defined(PSYRT_TRACY)
-    header("B5. macros, PSYRT_TRACY", "ns");
+#elif defined(YRT_TRACY)
+    header("B5. macros, YRT_TRACY", "ns");
     b5_pass(n, 0);
-    B5_LOOP("Tracy clock pairing: plot", ___tracy_emit_plot("psyrt_ns", (double)psyrt_now_ns()));
+    B5_LOOP("Tracy clock pairing: plot", ___tracy_emit_plot("yrt_ns", (double)yrt_now_ns()));
     B5_LOOP("Tracy clock pairing: message", {
         char m_[32];
-        int l_ = snprintf(m_, sizeof(m_), "psyrt %llu", (unsigned long long)psyrt_now_ns());
+        int l_ = snprintf(m_, sizeof(m_), "yrt %llu", (unsigned long long)yrt_now_ns());
         TracyCMessage(m_, (size_t)l_); });
 #else
     header("B5. macros, default (nothing)", "ns");
     b5_pass(n, 0);
 #endif
     header("B5. clock and thread id", "ns");
-    B5_LOOP("psyrt_now_ns", g_sink += psyrt_now_ns());
-    B5_LOOP("psyrt_thread_id", g_sink += psyrt_thread_id());
+    B5_LOOP("yrt_now_ns", g_sink += yrt_now_ns());
+    B5_LOOP("yrt_thread_id", g_sink += yrt_thread_id());
 }
 
 /* ------------------------------------------------------------------- B6 */
@@ -731,16 +731,16 @@ static uint64_t realtime(void) {
 
 static void b6_clock(const char* label, uint64_t (*rd)(void), bool edge, int calls) {
     static uint64_t w[1000], cost[1000];
-    psyrt_corr_desc d;
-    psyrt_corr c;
+    yrt_corr_desc d;
+    yrt_corr c;
     int i, ok = 0;
     memset(&d, 0, sizeof(d));
     d.read = rd;
     d.edge = edge;
     for (i = 0; i < calls && i < 1000; i++) {
-        uint64_t t0 = psyrt_now_ns();
-        if (psyrt_correlate(&d, &c) <= 0) continue;
-        cost[ok] = psyrt_now_ns() - t0;
+        uint64_t t0 = yrt_now_ns();
+        if (yrt_correlate(&d, &c) <= 0) continue;
+        cost[ok] = yrt_now_ns() - t0;
         w[ok] = c.width_ns;
         ok++;
     }
@@ -753,12 +753,12 @@ static void b6_clock(const char* label, uint64_t (*rd)(void), bool edge, int cal
 }
 
 static void b6(void) {
-    printf("\nB6. psyrt_correlate, default tries\n\n"
+    printf("\nB6. yrt_correlate, default tries\n\n"
            "| %-44s | min width ns | median | p99 | median call us |\n"
            "|---|---|---|---|---|\n", "clock");
-    b6_clock("psyrt_now_ns (itself), 100 calls", psyrt_now_ns, false, 100);
+    b6_clock("yrt_now_ns (itself), 100 calls", yrt_now_ns, false, 100);
 #if defined(_WIN32)
-    b6_clock("QueryInterruptTimePrecise, 100 calls", psyrt_interrupt_time_100ns, false, 100);
+    b6_clock("QueryInterruptTimePrecise, 100 calls", yrt_interrupt_time_100ns, false, 100);
     b6_clock("GetTickCount64, edge mode, 10 calls", tick64, true, 10);
 #else
     b6_clock("CLOCK_MONOTONIC_RAW, 100 calls", mono_raw, false, 100);
@@ -773,7 +773,7 @@ int main(int argc, char** argv) {
     int max_p = (argc > 2) ? atoi(argv[2]) : 8;
     int b3_ms = (argc > 3) ? atoi(argv[3]) : 2000;
     int all = (argc > 4) && strcmp(argv[4], "all") == 0;
-    psyrt_report rep;
+    yrt_report rep;
     char line[256];
     size_t blk_n;
 
@@ -786,13 +786,13 @@ int main(int argc, char** argv) {
     g_blk = (uint64_t*)calloc(blk_n, sizeof(uint64_t));
     if (!g_blk) { fputs("rt_ring_bench: out of memory\n", stderr); return 1; }
 
-    psyrt_report_get(&rep, PSYRT_POLICY_NORMAL);
-    psyrt_describe(&rep, line, sizeof(line));
-    printf("rt_ring_bench: psy_rt %s, %d CPUs, macro mode %s\n%s\n", psyrt_version(), ncpu(),
-#if defined(PSYRT_TRACE_RING)
-           "PSYRT_TRACE_RING",
-#elif defined(PSYRT_TRACY)
-           "PSYRT_TRACY",
+    yrt_report_get(&rep, YRT_POLICY_NORMAL);
+    yrt_describe(&rep, line, sizeof(line));
+    printf("rt_ring_bench: ysp_rt %s, %d CPUs, macro mode %s\n%s\n", yrt_version(), ncpu(),
+#if defined(YRT_TRACE_RING)
+           "YRT_TRACE_RING",
+#elif defined(YRT_TRACY)
+           "YRT_TRACY",
 #else
            "default (nothing)",
 #endif
@@ -808,4 +808,4 @@ int main(int argc, char** argv) {
     free(g_blk);
     return 0;
 }
-#endif /* PSYRT_NO_THREADS */
+#endif /* YRT_NO_THREADS */

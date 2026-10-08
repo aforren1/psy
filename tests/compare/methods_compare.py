@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-method comparison of psy.stair, psy.quest and psy.gp on the test
+"""Cross-method comparison of ysp.stair, ysp.quest and ysp.aep on the test
 problems of Watson 2017 (QUEST+) and Owen et al. 2021 (AEPsych).
 
 See docs/adapt_comparison.md for what is compared, why, and the results.
@@ -11,7 +11,7 @@ compare_gp_aepsych.py); a K-outcome response is the smallest k whose
 cumulative probability exceeds u. The GP methods on a problem share their
 init points (scrambled Sobol, seeded per replication).
 
-Usage (from the repository root, in a venv with psy-stair, psy-quest, psy-gp,
+Usage (from the repository root, in a venv with ysp-stair, ysp-quest, ysp-aep,
 numpy and scipy):
 
     python tests/compare/methods_compare.py --out DIR             # everything
@@ -27,7 +27,7 @@ Watson's QUEST+ Mathematica notebook, which is not in this repository.
 Problem keys: w1 to w4 (Watson's 1-D examples), audio-<phenotype>-b<beta>,
 novel-det, novel-dis, csf, circ, and csf6 (Letham et al. 2022's real-data
 CSF), which runs only when --only names it. csf6 downloads its data into
---cache and builds its truth there (--truth aepsych|psygp, --build-truth).
+--cache and builds its truth there (--truth aepsych|yaep, --build-truth).
 Not a CI test.
 """
 import argparse
@@ -203,7 +203,7 @@ def novel_field(kind, prob_id):
 
 def piecewise_curve(ctx, thr):
     """Thresholds at a few contexts read as a curve: linear between them and
-    the end segments extended, as gp_audiometric.c's stair_curve."""
+    the end segments extended, as aep_audiometric.c's stair_curve."""
     ctx, thr = np.asarray(ctx, float), np.asarray(thr, float)
 
     def curve(c):
@@ -215,16 +215,16 @@ def piecewise_curve(ctx, thr):
 
 
 def stair_estimate(s):
-    import psy.stair as st
+    import ysp.stair as st
     v = s.estimate(st.EST_REVERSALS)
     return v if v == v else s.estimate(st.EST_LAST)
 
 
 def run_stair2d(fd, rep, n_trials=N2D, every=5):
     """Interleaved weighted 1-up-1-down staircases at fixed contexts, round
-    robin, one per context, as gp_audiometric.c. Scored through the informed
+    robin, one per context, as aep_audiometric.c. Scored through the informed
     model (Field2D.shifted)."""
-    import psy.stair as st
+    import ysp.stair as st
     u = stream(fd.prob_id, rep, n_trials)
     nc = len(fd.stair_ctx)
     ss = [st.Staircase(start=fd.stair_start, n_up=1, n_down=1, step_type=st.STEP_LIN,
@@ -252,7 +252,7 @@ def run_stair2d(fd, rep, n_trials=N2D, every=5):
 
 def run_gp2d(fd, rep, model, acq, n_trials=N2D, every=5, grid=(11, 21), refine=2,
              fit_every=20):
-    import psy.gp as pg
+    import ysp.aep as pg
     u = stream(fd.prob_id, rep, n_trials)
     init = fd.lo + (fd.hi - fd.lo) * sobol_init(fd.prob_id, rep, 2, N_INIT)
     g = pg.GP(lo=list(fd.lo), hi=list(fd.hi), intensity_dim=1, acq=acq,
@@ -285,7 +285,7 @@ def run_gp2d(fd, rep, model, acq, n_trials=N2D, every=5, grid=(11, 21), refine=2
 # Specifications from Watson's QUEST+ notebook (QuestPlus.nb, the reference
 # implementation behind the paper): the Weibull in dB,
 #   P(correct) = 1 - lapse - (1 - guess - lapse) exp(-10^(slope (x - thr) / 20)),
-# which is psy_quest.h's PF_GUMBEL with its slope axis scaled by 1/20; and the
+# which is ysp/quest.h's PF_GUMBEL with its slope axis scaled by 1/20; and the
 # cumulative normal with a symmetric lapse,
 #   P(right) = lapse + (1 - 2 lapse) Phi((x - mean) / sd).
 # Watson's estimate is the joint posterior mode on the grid (the first
@@ -312,7 +312,7 @@ LAPSES = [0.0, 0.01, 0.02, 0.03, 0.04]
 
 class Problem1D:
     """A Watson example: the stimulus axis, the truth, the configurations of
-    psy.quest that apply, and what the other methods need."""
+    ysp.quest that apply, and what the other methods need."""
 
     def __init__(self, key, prob_id, title, stim, truth, n_paper, p_fn, thr_name,
                  thr_param, quest_cfgs, paper_cfg, guess, lapse, criterion, units,
@@ -396,7 +396,7 @@ def watson_problems():
 
 
 def quest_axes(prob, cfg):
-    import psy.quest as pq
+    import ysp.quest as pq
     out = []
     for a in cfg["params"]:
         if isinstance(a, str) and a == "nuis":
@@ -409,7 +409,7 @@ def quest_axes(prob, cfg):
 
 
 def make_quest1d(prob, cfg, stop):
-    import psy.quest as pq
+    import ysp.quest as pq
     kw = dict(stop_trials=stop)
     if cfg.get("custom"):
         kw.update(pf_batch=normal_batch)
@@ -423,7 +423,7 @@ def slope_scale(prob, cfg):
 
 
 def run_quest1d(prob, rep, name):
-    import psy.quest as pq
+    import ysp.quest as pq
     cfg = prob.quest_cfgs[name]
     q = make_quest1d(prob, cfg, prob.n_trials)
     u = stream(prob.prob_id, rep, prob.n_trials)
@@ -455,7 +455,7 @@ STAIR_RULES = {
 def run_stair1d(prob, rep, name):
     """Scored against the true level at the rule's own convergence p (for the
     weighted rule that is the threshold)."""
-    import psy.stair as st
+    import ysp.stair as st
     r = STAIR_RULES[name]
     kw = dict(start=prob.stair_start, n_up=r["n_up"], n_down=r["n_down"],
               step_type=st.STEP_LIN, steps=prob.stair_steps, min=prob.lo, max=prob.hi,
@@ -482,7 +482,7 @@ def stair_truth(prob, name):
     r = STAIR_RULES[name]
     if r.get("weighted"):
         return prob.thr_true
-    import psy.stair as st
+    import ysp.stair as st
     return prob.x_at(st.convergence_p(r["n_up"], r["n_down"]))
 
 
@@ -502,7 +502,7 @@ def equiv_slope(prob, k):
 
 
 def run_gp1d(prob, rep, model, acq, fit_every=10, grid=81):
-    import psy.gp as pg
+    import ysp.aep as pg
     u = stream(prob.prob_id, rep, prob.n_trials)
     init = prob.lo + (prob.hi - prob.lo) * sobol_init(prob.prob_id, rep, 1, N_INIT)
     g = pg.GP(lo=[prob.lo], hi=[prob.hi], acq=acq, target_p=prob.target_p,
@@ -540,11 +540,11 @@ def run_gp1d(prob, rep, model, acq, fit_every=10, grid=81):
 # behind the paper) saves the stimulus and outcome of every trial of its
 # example runs. --replay reads the notebook, rebuilds each example's grids and
 # psychometric function (written here from the formulas, not copied), and
-# replays each run through psy.quest: at every trial it asks psy.quest for its
+# replays each run through ysp.quest: at every trial it asks ysp.quest for its
 # selection before it feeds Watson's recorded stimulus and outcome. The paper
 # reports single runs, not means and sds over replications, so this trial by
 # trial agreement is the check that is available. A selection that differs is
-# a TIE when psy.quest's own expected entropies of the two stimuli differ by
+# a TIE when ysp.quest's own expected entropies of the two stimuli differ by
 # less than TIE_BITS (the float table moves a score by about 5e-8 bits).
 
 TIE_BITS = 1e-6
@@ -795,7 +795,7 @@ def notebook_runs(path):
 
 
 def replay_run(cfg_name, est, trials):
-    import psy.quest as pq
+    import ysp.quest as pq
     kind, stim_axes, par_axes, K = WATSON_CONFIGS[cfg_name]
     q = pq.Quest([pq.values(a) for a in stim_axes], [pq.values(a) for a in par_axes],
                  pf_batch=pf_watson(kind), n_outcomes=K, stop_trials=100000)
@@ -827,7 +827,7 @@ def replay_main(path):
     runs = notebook_runs(path)
     print(f"replay of Watson's saved runs from {path}: {len(runs)} runs")
     print(f"{'run':46s} {'configuration':26s} {'trials':>6s} {'same':>5s} {'tie':>4s} "
-          f"{'diff':>5s}  mode, psy.quest / Watson")
+          f"{'diff':>5s}  mode, ysp.quest / Watson")
     bad = 0
     rows = []
 
@@ -843,7 +843,7 @@ def replay_main(path):
               f"{'' if r['ok_mode'] else '  MODE DIFFERS'}{ties}")
         if r["first_diff"]:
             t, a, b, dh = r["first_diff"]
-            print(f"    first difference at trial {t}: psy.quest {fmt(a)}, Watson {fmt(b)}, "
+            print(f"    first difference at trial {t}: ysp.quest {fmt(a)}, Watson {fmt(b)}, "
                   f"dEH {dh:+.3g} bits")
     print("PASS" if bad == 0 else f"{bad} run(s) with a non-tie difference or a different mode")
     return rows
@@ -870,7 +870,7 @@ def csf_field(prob_id):
 
 def run_quest_csf(fd, rep, n_trials=N2D, every=5):
     """Watson's spatial CSF example: his grids, his model, entropy selection."""
-    import psy.quest as pq
+    import ysp.quest as pq
     q = pq.Quest([pq.values(_rng(0, 40, 2)), pq.values(_rng(-50, 0, 2))],
                  [pq.values(CSF_T), pq.values(CSF_C0), pq.values(CSF_CF)],
                  pf_batch=pf_watson("scsf"), stop_trials=n_trials)
@@ -912,7 +912,7 @@ def circ_truth_table():
 
 
 def run_quest_circ(rep):
-    import psy.quest as pq
+    import ysp.quest as pq
     kind, stim_axes, par_axes, K = WATSON_CONFIGS["circular categorization"]
     q = pq.Quest([pq.values(a) for a in stim_axes], [pq.values(a) for a in par_axes],
                  pf_batch=pf_watson(kind), n_outcomes=K, stop_trials=CIRC_N)
@@ -939,7 +939,7 @@ def run_quest_circ(rep):
 
 
 def run_gp_circ(rep, acq):
-    import psy.gp as pg
+    import ysp.aep as pg
     truth = circ_truth_table()
     u = stream(CIRC_PROB_ID, rep, CIRC_N)
     init = 2 * math.pi * sobol_init(CIRC_PROB_ID, rep, 1, N_INIT)
@@ -980,7 +980,7 @@ def run_gp_circ(rep, acq):
 # A truth surface is stored as a kernel expansion that numpy can evaluate:
 # mu(x) = c + sum_j a_j s exp(-|((x - Z_j) / l)|^2 / 2), in box units. For
 # AEPsych, Z are its 100 k-means++ inducing points and a = K_ZZ^-1 (mu(Z) - c),
-# which reproduces its predictive mean (checked at build time). For psy.gp, Z
+# which reproduces its predictive mean (checked at build time). For ysp.aep, Z
 # are the training inputs and a = K^-1 (mu(X) - m), which reproduces its
 # Laplace posterior mean the same way.
 
@@ -1003,8 +1003,8 @@ CSF6_NEVAL = 2000      # Sobol points for MAE(p)
 
 
 def csf6_cache_dir(path=None):
-    d = path or os.environ.get("PSY_COMPARE_CACHE") or os.path.join(
-        os.path.expanduser("~"), ".cache", "psy-compare")
+    d = path or os.environ.get("YSP_COMPARE_CACHE") or os.path.join(
+        os.path.expanduser("~"), ".cache", "ysp-compare")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -1081,11 +1081,11 @@ def build_truth_aepsych(x, y, seed=0):
     return t
 
 
-def build_truth_psygp(x, y, max_n=None):
-    """psy.gp's GP model (RBF ARD, probit), fitted to the trials until the fit
+def build_truth_yaep(x, y, max_n=None):
+    """ysp.aep's GP model (RBF ARD, probit), fitted to the trials until the fit
     stops. The binding holds at most MAX_TRIALS trials, so a longer data set is
     cut to its first MAX_TRIALS rows."""
-    import psy.gp as pg
+    import ysp.aep as pg
     n = min(len(y), max_n or pg.MAX_TRIALS)
     g = pg.GP(lo=list(CSF6_LO), hi=list(CSF6_HI), intensity_dim=0, target_p=CSF6_TARGET,
               n_candidates=64, n_init=0, fit=True, fit_every=0, stop_trials=n, max_trials=n)
@@ -1107,7 +1107,7 @@ def build_truth_psygp(x, y, max_n=None):
     chk = CSF6_LO + (CSF6_HI - CSF6_LO) * qmc.Sobol(6, scramble=True, seed=1).random(512)
     ref = np.frombuffer(g.predict_f_many(chk)[0])
     t["check"] = float(np.max(np.abs(rbf_expansion_mu(chk, t) - ref)))
-    t["source"] = (f"psy.gp {pg.__version__} GP model, RBF ARD, probit, fitted to the first "
+    t["source"] = (f"ysp.aep {pg.__version__} GP model, RBF ARD, probit, fitted to the first "
                    f"{n} of {len(y)} trials (MAX_TRIALS {pg.MAX_TRIALS}); log marginal "
                    f"{g.log_marginal:.1f}; lengthscales {np.round(h['lengthscale'][:6], 3).tolist()}, "
                    f"outputscale {h['outputscale']:.3f}, mean {h['mean']:.3f}")
@@ -1129,7 +1129,7 @@ def csf6_truth(kind, cache):
                              f"truth once with an interpreter that has it: python "
                              f"tests/compare/methods_compare.py --build-truth aepsych --cache {cache}")
     else:
-        t = build_truth_psygp(x, y)
+        t = build_truth_yaep(x, y)
     np.savez(path, **{k: np.asarray(v) for k, v in t.items()})
     print(f"truth {kind}: {t['source']}; expansion check {t['check']:.2e}", flush=True)
     return t
@@ -1214,7 +1214,7 @@ def _predict_chunked(g, xs, chunk=2000):
 
 
 def run_csf6(rep, model, acq, n_trials, cache, truth_kind, n_cand=1000, fit_every=20):
-    import psy.gp as pg
+    import ysp.aep as pg
     key = (cache, truth_kind)
     if key not in CSF6_STATE:
         CSF6_STATE[key] = CSF6(csf6_truth(truth_kind, cache))
@@ -1541,14 +1541,14 @@ def main():
     ap.add_argument("--timing-reps", type=int, default=1, dest="timing_reps",
                     help="replications per method rerun serially in this process for ms/trial")
     ap.add_argument("--replay", default=None, metavar="QuestPlus.nb",
-                    help="replay Watson's saved runs from his notebook through psy.quest and exit")
+                    help="replay Watson's saved runs from his notebook through ysp.quest and exit")
     ap.add_argument("--cache", default=None,
                     help="download cache for the csf6 data and truth surfaces "
-                         "(default $PSY_COMPARE_CACHE or ~/.cache/psy-compare)")
-    ap.add_argument("--truth", default=None, choices=("aepsych", "psygp"),
-                    help="csf6 truth surface: AEPsych's GP classifier (as the paper) or psy.gp's "
+                         "(default $YSP_COMPARE_CACHE or ~/.cache/ysp-compare)")
+    ap.add_argument("--truth", default=None, choices=("aepsych", "yaep"),
+                    help="csf6 truth surface: AEPsych's GP classifier (as the paper) or ysp.aep's "
                          "GP model; default aepsych when it is importable or already cached")
-    ap.add_argument("--build-truth", default=None, choices=("aepsych", "psygp"), dest="build_truth",
+    ap.add_argument("--build-truth", default=None, choices=("aepsych", "yaep"), dest="build_truth",
                     help="build one csf6 truth surface into the cache and exit")
     ap.add_argument("--csf6-trials", type=int, default=500, dest="csf6_trials",
                     help="csf6 session length: 10 Sobol trials, then adaptive ones")
@@ -1582,10 +1582,10 @@ def main():
                     have = True
                 except ImportError:
                     pass
-            cfg["truth"] = "aepsych" if have else "psygp"
+            cfg["truth"] = "aepsych" if have else "yaep"
         t = csf6_truth(cfg["truth"], args.cache)   # build before the workers need it
         print(f"csf6 truth: {t['source']}; expansion check {t['check']:.1e}")
-        other = "psygp" if cfg["truth"] == "aepsych" else "aepsych"
+        other = "yaep" if cfg["truth"] == "aepsych" else "aepsych"
         try:
             d = truth_difference(t, csf6_truth(other, args.cache), CSF6(t))
             CSF6_DIFF.update(d, other=other)
@@ -1601,11 +1601,11 @@ def main():
     cls_of = {(k, m): c for k in keys for m, c in methods_for(k)}
     jobs.sort(key=lambda j: order[cls_of[(j[0], j[1])]])
 
-    import psy.gp
-    import psy.quest
-    import psy.stair
-    print("methods_compare: psy.stair %s, psy.quest %s, psy.gp %s (compiled headers); numpy %s; "
-          "python %s" % (psy.stair.__version__, psy.quest.__version__, psy.gp.__version__,
+    import ysp.aep
+    import ysp.quest
+    import ysp.stair
+    print("methods_compare: ysp.stair %s, ysp.quest %s, ysp.aep %s (compiled headers); numpy %s; "
+          "python %s" % (ysp.stair.__version__, ysp.quest.__version__, ysp.aep.__version__,
                          np.__version__, sys.version.split()[0]))
     print(f"{len(jobs)} jobs on {args.workers} worker processes (one thread each), "
           f"{os.cpu_count()} logical CPUs; replications {reps}; seed {SEED}")

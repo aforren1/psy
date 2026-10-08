@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Run psy.trials and PsychoPy's TrialHandler / TrialHandlerExt on the same
+"""Run ysp.trials and PsychoPy's TrialHandler / TrialHandlerExt on the same
 condition lists and check the properties each order promises, on both.
 
 Not part of CI: PsychoPy is a heavy install. This is the comparison that
-docs/psy_trials.md and the psy_trials.h STATUS block report.
+docs/trials.md and the ysp/trials.h STATUS block report.
 
-    uv pip install ./bindings/python/psy_trials numpy psychopy
+    uv pip install ./bindings/python/ysp_trials numpy psychopy
     python tests/compare/compare_trials_psychopy.py
 
 On Windows `uv pip install psychopy` can fail building pywinhook; psychopy.data
@@ -13,7 +13,7 @@ only needs `uv pip install --no-deps psychopy` plus the few packages it
 imports (see compare_stair_psychopy.py).
 
 The two draw from different generators (PsychoPy: numpy default_rng(seed);
-psy.trials: splitmix64 from the same seed), so random orders are compared by
+ysp.trials: splitmix64 from the same seed), so random orders are compared by
 property, not trial by trial:
 
   sequential   identical order to PsychoPy's, every seed
@@ -21,11 +21,11 @@ property, not trial by trial:
                blocks in repetition order (both sides)
   fullRandom   exact counts per condition (both sides); the first-slot
                frequencies are printed, not tested
-  weights      TrialHandlerExt weight w_c with nReps r against psy.trials
+  weights      TrialHandlerExt weight w_c with nReps r against ysp.trials
                cond_reps = w_c * r: exact counts under fullRandom (both
                sides). The weighted SEQUENTIAL orders differ by design
                (PsychoPy runs a row's w_c copies back to back each
-               repetition; psy.trials cycles the rows), which is printed as
+               repetition; ysp.trials cycles the rows), which is printed as
                information.
 
 Exits 1 when any property fails on either side.
@@ -33,7 +33,7 @@ Exits 1 when any property fails on either side.
 import collections
 import sys
 
-import psy.trials as pt
+import ysp.trials as pt
 
 try:
     from psychopy import logging as pp_logging
@@ -141,10 +141,10 @@ def main():
             "order " + ("identical" if seq == pp else "differs by design") +
             f": ours {''.join(map(str, seq[:12]))}..., psychopy {''.join(map(str, pp[:12]))}...")
 
-    print(f"psy.trials {pt.__version__} vs psychopy.data.TrialHandler / TrialHandlerExt, "
+    print(f"ysp.trials {pt.__version__} vs psychopy.data.TrialHandler / TrialHandlerExt, "
           f"{len(SEEDS)} seeds per row")
     print()
-    hdr = f"{'property':38s} {'design':18s} {'psy.trials':>10s} {'psychopy':>9s} {'result':>6s}  note"
+    hdr = f"{'property':38s} {'design':18s} {'ysp.trials':>10s} {'psychopy':>9s} {'result':>6s}  note"
     print(hdr)
     print("-" * len(hdr))
     for check, design, o, t, res, note in rows:

@@ -1,6 +1,6 @@
-/* rt_pump.c - move a too-slow computation off the frame loop with psyrt_pump.
+/* rt_pump.c - move a too-slow computation off the frame loop with yrt_pump.
  *
- * The shape docs/psy_adapt.md calls for in "Inference on a thread": a trial
+ * The shape docs/adapt.md calls for in "Inference on a thread": a trial
  * loop that must not miss a frame, and an inference step that sometimes does
  * not fit in one. The loop submits the trial's outcome and goes back to
  * drawing; the pump runs the inference; the loop asks "is the result ready?"
@@ -9,22 +9,22 @@
  * The inference here is fake: it sleeps a pseudo-random 1 to 30 ms, which
  * straddles the 16 ms frame on purpose, so the output shows both outcomes.
  * The seed is fixed, so two runs on one machine differ only by the machine.
- * on_idle stands in for psygp_fit_step: one step of background fitting per
+ * on_idle stands in for yaep_fit_step: one step of background fitting per
  * call, while nothing is queued.
  *
  * Nothing here needs hardware, a privilege or a display.
  *
  * Build (from the repository root):
- *     cc -O2 -pthread -I. -o rt_pump examples/rt_pump.c     # Linux / macOS
- *     cl /O2 /I. examples\rt_pump.c                         # Windows (MSVC)
- *     emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -I. \
+ *     cc -O2 -pthread -Iinclude -o rt_pump examples/rt_pump.c     # Linux / macOS
+ *     cl /O2 /Iinclude examples\rt_pump.c                         # Windows (MSVC)
+ *     emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -Iinclude \
  *          -o rt_pump.js examples/rt_pump.c && node rt_pump.js    # wasm
  * or:  cmake -B build && cmake --build build
  *
  * A wasm build without -pthread compiles, cannot start the pump, says so and
  * exits 0. In a browser the frame loop would be requestAnimationFrame rather
- * than psyrt_sleep_until(); the pump side is the same. See WEBASSEMBLY in
- * psy_rt.h.
+ * than yrt_sleep_until(); the pump side is the same. See WEBASSEMBLY in
+ * ysp/rt.h.
  *
  * Usage: rt_pump [frames] [frame_ms]
  *     rt_pump           # 120 frames of 16 ms, about 2 seconds
@@ -34,16 +34,16 @@
  * full ring, which this program counts and reports rather than retrying,
  * because a trial loop cannot wait.
  */
-#define PSY_RT_IMPLEMENTATION
-#include "psy_rt.h"
+#define YSP_RT_IMPLEMENTATION
+#include "ysp/rt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef PSYRT_NO_THREADS
+#ifdef YRT_NO_THREADS
 int main(void) {
-    puts("rt_pump: built with PSYRT_NO_THREADS, so there is no pump to run.");
+    puts("rt_pump: built with YRT_NO_THREADS, so there is no pump to run.");
     return 0;
 }
 #else
@@ -69,8 +69,8 @@ typedef struct published {
 } published;
 
 typedef struct pump_ctx {
-    psyrt_pump* pump;
-    published   pub;       /* guarded by psyrt_pump_lock()                */
+    yrt_pump* pump;
+    published   pub;       /* guarded by yrt_pump_lock()                */
     uint64_t    worst_ns;  /* pump thread only, read after the join       */
     uint64_t    total_ns;
     int         messages;
@@ -91,27 +91,27 @@ static uint32_t xs32(uint32_t* s) {
 }
 
 /* The inference. Runs on the pump thread with neither lock held, takes the
- * lock only for the publish at the end: that is the discipline psy_rt.h's PUMP
+ * lock only for the publish at the end: that is the discipline ysp/rt.h's PUMP
  * section asks for, and it is why the frame loop can hold the lock for as long
  * as it likes without slowing this down. */
 static void on_trial(void* ctx, const void* msg, uint32_t seq) {
     pump_ctx* k = (pump_ctx*)ctx;
     const trial_msg* m = (const trial_msg*)msg;
-    uint64_t t0 = psyrt_now_ns();
+    uint64_t t0 = yrt_now_ns();
     uint64_t took;
-    /* Stand-in for psyq_update + psyq_next, or a GP refit. A sleep rather than
+    /* Stand-in for yqst_update + yqst_next, or a GP refit. A sleep rather than
      * a spin so the numbers are about the pump, not about a busy core. */
-    (void)psyrt_sleep_until(t0 + (uint64_t)m->work_ns_k * 1000ull, 0);
-    took = psyrt_now_ns() - t0;
+    (void)yrt_sleep_until(t0 + (uint64_t)m->work_ns_k * 1000ull, 0);
+    took = yrt_now_ns() - t0;
     if (took > k->worst_ns) k->worst_ns = took;
     k->total_ns += took;
     k->messages++;
 
-    psyrt_pump_lock(k->pump);
+    yrt_pump_lock(k->pump);
     k->pub.last_frame = m->frame;
     k->pub.last_seq   = seq;
     k->pub.level      = 0.5 + 0.001 * (double)m->frame;
-    psyrt_pump_unlock(k->pump);
+    yrt_pump_unlock(k->pump);
 }
 
 /* One step of a background fit, whenever the ring is empty. Returning true
@@ -120,28 +120,28 @@ static void on_trial(void* ctx, const void* msg, uint32_t seq) {
 static bool on_fit_step(void* ctx) {
     pump_ctx* k = (pump_ctx*)ctx;
     bool more;
-    psyrt_pump_lock(k->pump);
+    yrt_pump_lock(k->pump);
     more = !k->pub.fit_done;
-    psyrt_pump_unlock(k->pump);
+    yrt_pump_unlock(k->pump);
     /* Converged: say so and let the thread block, instead of being called in a
      * loop for the rest of the session. */
     if (!more) return false;
     /* A step, not a fit: the manual asks on_idle to return in a few ms so a
      * queued message is never stuck behind it. */
-    (void)psyrt_sleep_until(psyrt_now_ns() + 500000ull, 0);
-    psyrt_pump_lock(k->pump);
+    (void)yrt_sleep_until(yrt_now_ns() + 500000ull, 0);
+    yrt_pump_lock(k->pump);
     k->pub.fit_steps++;
     k->pub.fit_done = k->pub.fit_steps >= 200;
     more = !k->pub.fit_done;
-    psyrt_pump_unlock(k->pump);
+    yrt_pump_unlock(k->pump);
     return more;
 }
 
 int main(int argc, char** argv) {
-    psyrt_pump pump;
-    psyrt_pump_desc d;
+    yrt_pump pump;
+    yrt_pump_desc d;
     pump_ctx k;
-    psyrt_report rep;
+    yrt_report rep;
     char line[256];
     uint32_t rng = 0x5eed1234u;
     uint32_t next_stamp = 1u;
@@ -169,23 +169,23 @@ int main(int argc, char** argv) {
     d.on_msg   = on_trial;
     d.on_idle  = on_fit_step;
     d.ctx      = &k;
-    if (!psyrt_pump_start(&pump, &d)) {
-        fprintf(stderr, "rt_pump: pump start failed: %s\n", psyrt_pump_error(&pump));
+    if (!yrt_pump_start(&pump, &d)) {
+        fprintf(stderr, "rt_pump: pump start failed: %s\n", yrt_pump_error(&pump));
         return 0;            /* documented: this program always exits 0 */
     }
 
     /* The frame loop elevates itself; the pump deliberately did not. Print the
      * pair, because "the result was ready" means something different at each
      * rung. */
-    psyrt_report_get(&rep, psyrt_thread_elevate(NULL));
-    psyrt_describe(&rep, line, sizeof(line));
+    yrt_report_get(&rep, yrt_thread_elevate(NULL));
+    yrt_describe(&rep, line, sizeof(line));
     puts(line);
-    printf("psy_rt %s, pump policy: %s (it never climbs the ladder; see PUMP)\n",
-           psyrt_version(), psyrt_policy_name(psyrt_pump_policy(&pump)));
+    printf("ysp_rt %s, pump policy: %s (it never climbs the ladder; see PUMP)\n",
+           yrt_version(), yrt_policy_name(yrt_pump_policy(&pump)));
     printf("%d frames of %.1f ms, inference 1 to 30 ms, ring of %u\n\n",
            frames, (double)period_ns / 1e6, d.capacity);
 
-    t = psyrt_now_ns();
+    t = yrt_now_ns();
     for (f = 0; f < frames; f++) {
         trial_msg m;
         uint32_t done;
@@ -193,31 +193,31 @@ int main(int argc, char** argv) {
         int rc;
 
         t += period_ns;
-        wake = psyrt_sleep_until(t, PSYRT_DEFAULT_SPIN_NS);
+        wake = yrt_sleep_until(t, YRT_DEFAULT_SPIN_NS);
         if (wake > worst_wake) worst_wake = wake;
 
         /* The whole point: one atomic load per frame tells the loop which
          * results have landed. Everything up to done_seq finished before this
          * frame started. */
-        done = psyrt_pump_done_seq(&pump);
+        done = yrt_pump_done_seq(&pump);
         while (next_stamp <= done) { g_done_frame[next_stamp - 1] = f; next_stamp++; }
 
         /* Read the publication under the lock, as a trial loop would to pick
          * the next level. Holding this lock cannot stall the inference. */
-        psyrt_pump_lock(&pump);
+        yrt_pump_lock(&pump);
         snap = k.pub;
-        psyrt_pump_unlock(&pump);
+        yrt_pump_unlock(&pump);
         if (snap.last_seq != 0u) saw_level++;
 
         m.frame = f;
         m.work_ns_k = 1000u + xs32(&rng) % 29000u;   /* 1 to 30 ms, in us */
-        rc = psyrt_pump_submit(&pump, &m);
-        if (rc == PSYRT_ERR_FULL) {
+        rc = yrt_pump_submit(&pump, &m);
+        if (rc == YRT_ERR_FULL) {
             /* The honest failure: the pump is behind and the loop keeps its
              * message rather than growing an invisible queue. */
             full++;
         } else if (rc < 0) {
-            fprintf(stderr, "rt_pump: submit: %s\n", psyrt_strerror(rc));
+            fprintf(stderr, "rt_pump: submit: %s\n", yrt_strerror(rc));
             break;
         } else {
             g_sub_frame[rc - 1] = f;
@@ -230,13 +230,13 @@ int main(int argc, char** argv) {
     for (tail = 0; tail < 200 && (int)next_stamp <= submitted; tail++) {
         uint32_t done;
         t += period_ns;
-        (void)psyrt_sleep_until(t, PSYRT_DEFAULT_SPIN_NS);
-        done = psyrt_pump_done_seq(&pump);
+        (void)yrt_sleep_until(t, YRT_DEFAULT_SPIN_NS);
+        done = yrt_pump_done_seq(&pump);
         while (next_stamp <= done) { g_done_frame[next_stamp - 1] = frames + tail; next_stamp++; }
     }
     /* The stop drains, so every accepted message did run; anything the tail
      * loop did not see landed after the last frame it watched. */
-    psyrt_pump_stop(&pump);
+    yrt_pump_stop(&pump);
     while ((int)next_stamp <= submitted) {
         g_done_frame[next_stamp - 1] = frames + tail;
         next_stamp++;
@@ -275,8 +275,8 @@ int main(int argc, char** argv) {
      * the work (rt_pump 120 32 doubles the frame instead) and "late" goes to
      * nearly zero. */
 
-    psyrt_thread_cleanup();
+    yrt_thread_cleanup();
     return 0;
 }
 
-#endif /* PSYRT_NO_THREADS */
+#endif /* YRT_NO_THREADS */

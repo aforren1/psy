@@ -27,10 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # On Linux only, also fetch Tracy and build psy_rt.h's PSYRT_TRACY
+      # On Linux only, also fetch Tracy and build ysp/rt.h's YRT_TRACY
       # compile check against the real TracyC.h.
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DPSY_FETCH_MINIAUDIO=ON -DPSY_FETCH_PL_MPEG=ON ${{ matrix.os == 'ubuntu-latest' && '-DPSY_TRACY_CHECK=ON' || '' }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DYSP_FETCH_MINIAUDIO=ON -DYSP_FETCH_PL_MPEG=ON ${{ matrix.os == 'ubuntu-latest' && '-DYSP_TRACY_CHECK=ON' || '' }}
 
       - name: Build
         run: cmake --build build --config Release
@@ -38,7 +38,7 @@ jobs:
       - name: Compile checks
         run: ctest --test-dir build -C Release --output-on-failure
 
-      # psy_trials.h's jitter draws are integer arithmetic and must give the
+      # ysp/trials.h's jitter draws are integer arithmetic and must give the
       # same golden digests under any optimization (ctest above checks the
       # default build; MSVC /fp:fast was checked by hand).
       - name: Jitter digests under -O3 native and -Ofast
@@ -48,7 +48,7 @@ jobs:
           set -eu
           if [ "$RUNNER_OS" = macOS ]; then native=-mcpu=native; else native=-march=native; fi
           for flags in "-O3 $native" "-Ofast" "-Ofast $native"; do
-            cc -std=c11 $flags -I. tests/adapt/psy_trials_jitter_repro.c -o jitter_repro -lm
+            cc -std=c11 $flags -Iinclude tests/adapt/trials_jitter_repro.c -o jitter_repro -lm
             ./jitter_repro
           done
 
@@ -57,7 +57,7 @@ jobs:
       - name: Build loopback tests (build only)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cmake -B build-loopback -DCMAKE_BUILD_TYPE=Release -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_MINIAUDIO=ON
+          cmake -B build-loopback -DCMAKE_BUILD_TYPE=Release -DYSP_BUILD_LOOPBACK=ON -DYSP_FETCH_MINIAUDIO=ON
           cmake --build build-loopback
 
       # No hardware on CI. Each example must fail with its documented exit
@@ -97,12 +97,12 @@ jobs:
           expect 0 "$bin/quest_qcsf"
           expect 0 "$bin/quest_bench"
           expect 0 "$bin/quest_async" 20 1      # 20 trials, one frame each
-          expect 0 "$bin/gp_sim"
-          expect 0 "$bin/gp_bench"
-          expect 0 "$bin/gp_audiometric"   # no args: the small configuration
-          expect 0 "$bin/gp_async"
-          expect 0 "$bin/gp_optimize"
-          expect 0 "$bin/gp_pairwise"
+          expect 0 "$bin/aep_sim"
+          expect 0 "$bin/aep_bench"
+          expect 0 "$bin/aep_audiometric"   # no args: the small configuration
+          expect 0 "$bin/aep_async"
+          expect 0 "$bin/aep_optimize"
+          expect 0 "$bin/aep_pairwise"
           # The trial sequencer's examples simulate their observer.
           expect 0 "$bin/trials_mocs"
           expect 0 "$bin/trials_interleave"
@@ -130,11 +130,11 @@ jobs:
   #                  both or the build fails (-Werror).                    #
   #   sanitizers   - ASan + UBSan over the compile checks and the          #
   #                  examples, which is where the OS calls actually run.   #
-  #   nothreads-cxx- the PSY<X>_NO_THREADS path as C++17. CMake builds it  #
+  #   nothreads-cxx- the Y<X>_NO_THREADS path as C++17. CMake builds it  #
   #                  as C only, and the defines reach the .cpp compile     #
   #                  checks through CMAKE_CXX_FLAGS without a new target.  #
-  #                  A transport macro also sets PSYRT_NO_THREADS, but a   #
-  #                  command-line define reaches psy_rt.h first in the     #
+  #                  A transport macro also sets YRT_NO_THREADS, but a   #
+  #                  command-line define reaches ysp/rt.h first in the     #
   #                  compile check that includes it directly, so name all  #
   #                  three: define both of a pair, or neither.             #
   # --------------------------------------------------------------------- #
@@ -159,7 +159,7 @@ jobs:
             cc: gcc
             cxx: g++
             cflags: ""
-            cxxflags: "-DPSYS_NO_THREADS -DPSYP_NO_THREADS -DPSYRT_NO_THREADS"
+            cxxflags: "-DYSER_NO_THREADS -DYPAR_NO_THREADS -DYRT_NO_THREADS"
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
@@ -174,7 +174,7 @@ jobs:
 
       - name: Configure
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DPSY_FETCH_MINIAUDIO=ON -DPSY_FETCH_PL_MPEG=ON \
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DYSP_FETCH_MINIAUDIO=ON -DYSP_FETCH_PL_MPEG=ON \
             -DCMAKE_C_FLAGS="${{ matrix.cflags }}" \
             -DCMAKE_CXX_FLAGS="${{ matrix.cxxflags }}"
 
@@ -203,7 +203,7 @@ jobs:
           expect 0 build/rt_ring_csv 30 rt_ring.csv
           # The adaptive examples' numerics run instrumented through the
           # tests/adapt/ programs under ctest above; the two cheap examples
-          # cover the example code itself. gp_sim and the benches are too
+          # cover the example code itself. aep_sim and the benches are too
           # slow under ASan in Debug to be worth a second run.
           expect 0 build/stair_sim
           expect 0 build/quest_sim
@@ -239,7 +239,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Configure
-        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DPSY_BUILD_EXAMPLES=OFF -DPSY_FETCH_MINIAUDIO=ON -DPSY_FETCH_PL_MPEG=ON
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DYSP_BUILD_EXAMPLES=OFF -DYSP_FETCH_MINIAUDIO=ON -DYSP_FETCH_PL_MPEG=ON
 
       - name: Build compile checks
         run: cmake --build build
@@ -248,9 +248,9 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   # --------------------------------------------------------------------- #
-  # WebAssembly: the computation headers (stair, quest, gp, trials,        #
+  # WebAssembly: the computation headers (stair, quest, aep, trials,       #
   # timeline, color)                                                       #
-  # claim to need nothing but libm, and psy_rt.h claims a platform branch  #
+  # claim to need nothing but libm, and ysp/rt.h claims a platform branch  #
   # is all wasm needs. Compile the compile checks with emcc, threads off,  #
   # and run them under node. Nothing here is a timing claim.               #
   # --------------------------------------------------------------------- #
@@ -273,44 +273,44 @@ jobs:
           # give wasm a real stack, and an initial memory that holds it;
           # growth covers the arenas. With -pthread emcc turns its growth
           # advisory into an error under -Werror, hence the -Wno.
-          W="-O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. -sSTACK_SIZE=16MB -sINITIAL_MEMORY=64MB -sALLOW_MEMORY_GROWTH=1 -Wno-pthreads-mem-growth"
+          W="-O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -Iinclude -sSTACK_SIZE=16MB -sINITIAL_MEMORY=64MB -sALLOW_MEMORY_GROWTH=1 -Wno-pthreads-mem-growth"
           T="-pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1"
-          # psy_rt.h: with threads (the pump and the worker run under node),
+          # ysp/rt.h: with threads (the pump and the worker run under node),
           # without (they refuse to start, and say so), and compiled out.
-          emcc $W $T -o rt_c.js tests/compile/psy_rt.c && node rt_c.js
-          emcc $W    -o rt_nothr.js tests/compile/psy_rt.c && node rt_nothr.js
-          emcc $W -DPSYRT_NO_THREADS -o rt_off.js tests/compile/psy_rt.c && node rt_off.js
-          emcc $W $T -o rt_test.js tests/adapt/psy_rt_test.c && node rt_test.js
+          emcc $W $T -o rt_c.js tests/compile/rt.c && node rt_c.js
+          emcc $W    -o rt_nothr.js tests/compile/rt.c && node rt_nothr.js
+          emcc $W -DYRT_NO_THREADS -o rt_off.js tests/compile/rt.c && node rt_off.js
+          emcc $W $T -o rt_test.js tests/adapt/rt_test.c && node rt_test.js
           emcc $W $T -o rt_pump.js examples/rt_pump.c && node rt_pump.js 40
           emcc $W $T -o rt_ring_csv.js examples/rt_ring_csv.c && node rt_ring_csv.js 30 > /dev/null
-          for h in stair quest gp table trials timeline color; do
-            emcc $W -o "compile_$h.js" "tests/compile/psy_$h.c" && node "compile_$h.js"
-            emcc $W -o "test_$h.js" "tests/adapt/psy_${h}_test.c" && node "test_$h.js"
+          for h in stair quest aep table trials timeline color; do
+            emcc $W -o "compile_$h.js" "tests/compile/$h.c" && node "compile_$h.js"
+            emcc $W -o "test_$h.js" "tests/adapt/${h}_test.c" && node "test_$h.js"
           done
-          # The async layers on the pump, the point of the psy_rt.h branch.
-          emcc $W $T -DPSYQ_ASYNC  -o test_quest_async.js tests/adapt/psy_quest_test.c && node test_quest_async.js
-          emcc $W $T -DPSYGP_ASYNC -o test_gp_async.js    tests/adapt/psy_gp_test.c    && node test_gp_async.js
-          # psy_audio.h: the core test runs (it has a device thread); the
+          # The async layers on the pump, the point of the ysp/rt.h branch.
+          emcc $W $T -DYQST_ASYNC  -o test_quest_async.js tests/adapt/quest_test.c && node test_quest_async.js
+          emcc $W $T -DYAEP_ASYNC -o test_aep_async.js    tests/adapt/aep_test.c    && node test_aep_async.js
+          # ysp/audio.h: the core test runs (it has a device thread); the
           # header with miniaudio's Web Audio backend is compiled, not run,
           # because node has no Web Audio. miniaudio's EM_ASM needs -std=gnu11.
-          emcc $W $T -o test_audio.js tests/adapt/psy_audio_test.c && node test_audio.js
+          emcc $W $T -o test_audio.js tests/adapt/audio_test.c && node test_audio.js
           curl -sL -o miniaudio.h https://raw.githubusercontent.com/mackron/miniaudio/0.11.25/miniaudio.h
           echo "ac7af4de748b7e26b777f37e01cee313a308a7296a3eb080e2906b320cc55c89  miniaudio.h" | sha256sum -c -
-          emcc -O2 -std=gnu11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. -c -o compile_audio.o tests/compile/psy_audio.c
-          # psy_gfx.h without SDL: the compile check on the simulated display
+          emcc -O2 -std=gnu11 -Wall -Wextra -Wpedantic -Wshadow -Werror -Iinclude -c -o compile_audio.o tests/compile/audio.c
+          # ysp/gfx.h without SDL: the compile check on the simulated display
           # and the test's CPU half run; node has no GL, so its GL half says so.
-          emcc $W -DPSYSCR_NO_SDL -o compile_gfx.js tests/compile/psy_gfx.c && node compile_gfx.js
-          emcc $W -o test_gfx.js tests/adapt/psy_gfx_test.c && node test_gfx.js
-          # psy_video.h on the simulated display: with a decode thread, without
+          emcc $W -DYSCR_NO_SDL -o compile_gfx.js tests/compile/gfx.c && node compile_gfx.js
+          emcc $W -o test_gfx.js tests/adapt/gfx_test.c && node test_gfx.js
+          # ysp/video.h on the simulated display: with a decode thread, without
           # one (it decodes inside the frame call), and with pl_mpeg compiled.
-          emcc $W $T -DPSYSCR_NO_SDL -DPSYVID_NO_PL_MPEG -o compile_video.js tests/compile/psy_video.c && node compile_video.js
-          emcc $W -DPSYSCR_NO_SDL -DPSYVID_NO_PL_MPEG -o compile_video_inline.js tests/compile/psy_video.c && node compile_video_inline.js
-          emcc $W $T -o test_video.js tests/adapt/psy_video_test.c && node test_video.js
+          emcc $W $T -DYSCR_NO_SDL -DYVID_NO_PL_MPEG -o compile_video.js tests/compile/video.c && node compile_video.js
+          emcc $W -DYSCR_NO_SDL -DYVID_NO_PL_MPEG -o compile_video_inline.js tests/compile/video.c && node compile_video_inline.js
+          emcc $W $T -o test_video.js tests/adapt/video_test.c && node test_video.js
           curl -sL -o pl_mpeg.h https://raw.githubusercontent.com/phoboslab/pl_mpeg/c871f2be022ece7ef4f64230b4fb8e1fb9eb6023/pl_mpeg.h
           echo "3a8cb30c83c2a1147719c30fe0c8b93da2987aa43140077c575b39aaa75fc2c9  pl_mpeg.h" | sha256sum -c -
-          emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. -DPSYSCR_NO_SDL -c -o compile_video_plm.o tests/compile/psy_video.c
+          emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -Iinclude -DYSCR_NO_SDL -c -o compile_video_plm.o tests/compile/video.c
 
-      # pack/psy_layout and its test (docs/psy_layout.md), as the player's
+      # pack/layout and its test (docs/layout.md), as the player's
       # WebAssembly build will compile them: the vendored libraries with
       # their warnings off, the glue and the test with ours. No fonts here:
       # the corpus check says it skipped them; the order checks run.
@@ -321,7 +321,7 @@ jobs:
           emcc() { command emcc "$@" || exit $?; }
           em++() { command em++ "$@" || exit $?; }
           T=third_party
-          W="-O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I."
+          W="-O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -Iinclude"
           mkdir -p lo
           em++ -O2 -std=c++17 -fno-exceptions -fno-rtti -w -c $T/harfbuzz/src/harfbuzz.cc -o lo/hb.o
           emcc -O2 -w -DSB_CONFIG_UNITY -I$T/sheenbidi/Headers -I$T/sheenbidi/Source -c $T/sheenbidi/Source/SheenBidi.c -o lo/sb.o
@@ -335,8 +335,8 @@ jobs:
           done
           P=$(for f in skribidi-0001-bidi-run-merge skribidi-0002-l1-trailing-whitespace; do
                 printf 'sha256:%s,' "$(sha256sum $T/patches/$f.patch | cut -c1-64)"; done)
-          emcc $W -isystem $T/skribidi/include -isystem $T/harfbuzz/src -DPSYLAY_PATCHES="\"${P%,}\"" -c pack/psy_layout.c -o lo/psy_layout.o
-          emcc $W -Ipack -isystem $T/skribidi/include -DPSYSCR_NO_SDL -DPSYLAY_TEST_DIR='"tests/layout"' -DPSYLAY_TEST_FONTS='"/no-fonts"' -c tests/layout/psy_layout_test.c -o lo/test.o
+          emcc $W -isystem $T/skribidi/include -isystem $T/harfbuzz/src -DYLAY_PATCHES="\"${P%,}\"" -c pack/layout.c -o lo/ysp_layout.o
+          emcc $W -Ipack -isystem $T/skribidi/include -DYSCR_NO_SDL -DYLAY_TEST_DIR='"tests/layout"' -DYLAY_TEST_FONTS='"/no-fonts"' -c tests/layout/layout_test.c -o lo/test.o
           # HarfBuzz needs the C++ library: link with em++.
           em++ -O2 -sNODERAWFS=1 -sSTACK_SIZE=16MB -sINITIAL_MEMORY=64MB -sALLOW_MEMORY_GROWTH=1 -o lo/test_layout.js lo/*.o
           node lo/test_layout.js
@@ -352,23 +352,23 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        package: [psy_parallel, psy_serial, psy_stair, psy_quest, psy_gp, psy_trials, psy_color, psy_rdk]
+        package: [ysp_parallel, ysp_serial, ysp_stair, ysp_quest, ysp_aep, ysp_trials, ysp_color, ysp_rdk]
         exclude:
-          - os: macos-latest      # psy_parallel.h #errors on macOS
-            package: psy_parallel
+          - os: macos-latest      # ysp/parallel.h #errors on macOS
+            package: ysp_parallel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
       # cibuildwheel builds from the package directory alone, so every header
-      # the extension compiles must sit next to setup.py: the package's header
-      # and psy_rt.h, which the transport headers include and the adaptive
-      # headers' async layers include, and psy_table.h, which psy_trials.h
+      # the extension compiles must sit in include/ysp/ next to setup.py: the package's header
+      # and ysp/rt.h, which the transport headers include and the adaptive
+      # headers' async layers include, and ysp/table.h, which ysp/trials.h
       # includes. A package gets the ones it never reads; staging them
       # unconditionally keeps this step one line.
       - name: Stage headers into the package (isolated build needs them locally)
         shell: bash
-        run: cp ${{ matrix.package }}.h psy_rt.h psy_table.h bindings/python/${{ matrix.package }}/
+        run: p=${{ matrix.package }} && d=bindings/python/$p/include/ysp && mkdir -p $d && cp include/ysp/${p#ysp_}.h include/ysp/rt.h include/ysp/table.h $d/
 
       - name: Build & test wheels
         uses: pypa/cibuildwheel@v4.1.0
@@ -416,53 +416,53 @@ jobs:
         working-directory: bindings/mex
         run: |
           octave-cli -q --eval "
-            % Both MEX files build on psy_rt.h, so both read one clock.
+            % Both MEX files build on ysp/rt.h, so both read one clock.
             % A gap of seconds would mean two clocks, not a slow runner.
-            ts = psy_serial('now_us');
-            tp = psy_parallel('now_us');
+            ts = ysp_serial('now_us');
+            tp = ysp_parallel('now_us');
             printf('library clock: %.0f us (serial), %.0f us (parallel)\n', ts, tp);
             if abs(tp - ts) > 1e6
-              error('psy:smoke', 'the two MEX clocks disagree by %.0f us', tp - ts);
+              error('ysp:smoke', 'the two MEX clocks disagree by %.0f us', tp - ts);
             end
-            ports = psy_parallel('list');
+            ports = ysp_parallel('list');
             printf('detected %d parallel port(s)\n', numel(ports));
             opened = false;
             try
-              h = psy_parallel('open');
-              psy_parallel('close', h);
+              h = ysp_parallel('open');
+              ysp_parallel('close', h);
               opened = true;
             catch e
-              if ~strcmp(e.identifier, 'psy_parallel:open')
-                error('psy:smoke', 'expected psy_parallel:open, got ''%s'': %s', e.identifier, e.message);
+              if ~strcmp(e.identifier, 'ysp_parallel:open')
+                error('ysp:smoke', 'expected ysp_parallel:open, got ''%s'': %s', e.identifier, e.message);
               end
               printf('open failed as expected on CI: %s\n', e.message);
             end
             if opened, disp('opened OK (hardware present)'); end
-            ports = psy_serial('list');
+            ports = ysp_serial('list');
             printf('detected %d serial port(s)\n', numel(ports));
             opened = false;
             try
-              h = psy_serial('open', '/dev/nothing');
-              psy_serial('close', h);
+              h = ysp_serial('open', '/dev/nothing');
+              ysp_serial('close', h);
               opened = true;
             catch e
-              if ~strcmp(e.identifier, 'psy_serial:open')
-                error('psy:smoke', 'expected psy_serial:open, got ''%s'': %s', e.identifier, e.message);
+              if ~strcmp(e.identifier, 'ysp_serial:open')
+                error('ysp:smoke', 'expected ysp_serial:open, got ''%s'': %s', e.identifier, e.message);
               end
               printf('open failed as expected on CI: %s\n', e.message);
             end
             if opened, disp('opened OK (hardware present)'); end
             accepted = false;
             try
-              psy_serial('read', uint64(123456), 1, 0);
+              ysp_serial('read', uint64(123456), 1, 0);
               accepted = true;
             catch e
-              if ~strcmp(e.identifier, 'psy_serial:handle')
-                error('psy:smoke', 'expected psy_serial:handle, got ''%s''', e.identifier);
+              if ~strcmp(e.identifier, 'ysp_serial:handle')
+                error('ysp:smoke', 'expected ysp_serial:handle, got ''%s''', e.identifier);
               end
               printf('unknown handle rejected: %s\n', e.message);
             end
-            if accepted, error('psy:smoke', 'an unknown handle was accepted'); end"
+            if accepted, error('ysp:smoke', 'an unknown handle was accepted'); end"
 
       # The four adaptive bindings simulate their observers, so their test
       # script needs no hardware. Locally it passes in Octave 10 and MATLAB
@@ -478,7 +478,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: octave-mex-bookworm
-          path: bindings/mex/psy_*.mex*
+          path: bindings/mex/ysp_*.mex*
 
   # --------------------------------------------------------------------- #
   # MATLAB: install MATLAB, build every MEX, and smoke-test.              #
@@ -505,56 +505,56 @@ jobs:
           command: |
             addpath('bindings/mex');
             build;
-            % Both MEX files build on psy_rt.h, so both read one clock.
+            % Both MEX files build on ysp/rt.h, so both read one clock.
             % A gap of seconds would mean two clocks, not a slow runner.
-            ts = psy_serial('now_us');
-            tp = psy_parallel('now_us');
+            ts = ysp_serial('now_us');
+            tp = ysp_parallel('now_us');
             fprintf('library clock: %.0f us (serial), %.0f us (parallel)\n', ts, tp);
             if abs(tp - ts) > 1e6
-              error('psy:smoke', 'the two MEX clocks disagree by %.0f us', tp - ts);
+              error('ysp:smoke', 'the two MEX clocks disagree by %.0f us', tp - ts);
             end
-            ports = psy_parallel('list');
+            ports = ysp_parallel('list');
             fprintf('detected %d parallel port(s)\n', numel(ports));
             % Check the identifier, not just that something was raised: a bad
             % argument or a crash in the dispatcher would otherwise pass for
             % the expected no-hardware failure.
             opened = false;
             try
-              h = psy_parallel('open');
-              psy_parallel('close', h);
+              h = ysp_parallel('open');
+              ysp_parallel('close', h);
               opened = true;
             catch e
-              if ~strcmp(e.identifier, 'psy_parallel:open')
-                error('psy:smoke', 'expected psy_parallel:open, got ''%s'': %s', e.identifier, e.message);
+              if ~strcmp(e.identifier, 'ysp_parallel:open')
+                error('ysp:smoke', 'expected ysp_parallel:open, got ''%s'': %s', e.identifier, e.message);
               end
               fprintf('open failed as expected on CI: %s\n', e.message);
             end
             if opened, disp('opened OK (hardware present)'); end
-            ports = psy_serial('list');
+            ports = ysp_serial('list');
             fprintf('detected %d serial port(s)\n', numel(ports));
             opened = false;
             try
-              h = psy_serial('open', '/dev/nothing');
-              psy_serial('close', h);
+              h = ysp_serial('open', '/dev/nothing');
+              ysp_serial('close', h);
               opened = true;
             catch e
-              if ~strcmp(e.identifier, 'psy_serial:open')
-                error('psy:smoke', 'expected psy_serial:open, got ''%s'': %s', e.identifier, e.message);
+              if ~strcmp(e.identifier, 'ysp_serial:open')
+                error('ysp:smoke', 'expected ysp_serial:open, got ''%s'': %s', e.identifier, e.message);
               end
               fprintf('open failed as expected on CI: %s\n', e.message);
             end
             if opened, disp('opened OK (hardware present)'); end
             accepted = false;
             try
-              psy_serial('read', uint64(123456), 1, 0);
+              ysp_serial('read', uint64(123456), 1, 0);
               accepted = true;
             catch e
-              if ~strcmp(e.identifier, 'psy_serial:handle')
-                error('psy:smoke', 'expected psy_serial:handle, got ''%s''', e.identifier);
+              if ~strcmp(e.identifier, 'ysp_serial:handle')
+                error('ysp:smoke', 'expected ysp_serial:handle, got ''%s''', e.identifier);
               end
               fprintf('unknown handle rejected: %s\n', e.message);
             end
-            if accepted, error('psy:smoke', 'an unknown handle was accepted'); end
+            if accepted, error('ysp:smoke', 'an unknown handle was accepted'); end
 
       - name: Adaptive bindings test (test_mex.m)
         uses: matlab-actions/run-command@v3
@@ -569,16 +569,16 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: matlab-mex-linux
-          path: bindings/mex/psy_*.mex*
+          path: bindings/mex/ysp_*.mex*
 
   # --------------------------------------------------------------------- #
-  # psy_screen.h: the one header with an external dependency, SDL3. The   #
+  # ysp/screen.h: the one header with an external dependency, SDL3. The   #
   # headers job builds only its SDL-free test; this job gets SDL3 3.4.0   #
   # pinned (Windows: the release zips, checked by SHA-256; Linux and      #
   # macOS: the release-3.4.0 tag, built once and cached) and builds the   #
   # compile checks, the test and the examples, and on Windows the MinGW   #
   # compile checks too. No runner has a display worth timing, so the      #
-  # examples run on the simulated display. psy_gfx.h, on psy_screen.h,    #
+  # examples run on the simulated display. ysp/gfx.h, on ysp/screen.h,    #
   # builds here too, and its pixel test renders offscreen on software GL: #
   # Mesa llvmpipe on Linux, ANGLE's WARP and SwiftShader on Windows (from #
   # a pinned Electron zip, checked by SHA-256, cached). Nothing here is a  #
@@ -597,7 +597,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # psy_gfx.h's test loads EGL at run time: Mesa's, with llvmpipe.
+      # ysp/gfx.h's test loads EGL at run time: Mesa's, with llvmpipe.
       - name: Mesa EGL (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgl1-mesa-dri
@@ -624,8 +624,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          echo "PSYSCR_ANGLE_DIR=$(cygpath -w ~/angle)" >> "$GITHUB_ENV"
-          echo "PSYGFX_TEST_DEVICES=warp,swiftshader" >> "$GITHUB_ENV"
+          echo "YSCR_ANGLE_DIR=$(cygpath -w ~/angle)" >> "$GITHUB_ENV"
+          echo "YGFX_TEST_DEVICES=warp,swiftshader" >> "$GITHUB_ENV"
 
       - name: SDL3 (Windows, release zips by checksum)
         if: runner.os == 'Windows'
@@ -673,20 +673,20 @@ jobs:
 
       - name: Configure
         shell: bash
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_PL_MPEG=ON ${{ runner.os != 'macOS' && '-DPSY_BUILD_LAYOUT=ON' || '' }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DYSP_BUILD_LOOPBACK=ON -DYSP_FETCH_PL_MPEG=ON ${{ runner.os != 'macOS' && '-DYSP_BUILD_LAYOUT=ON' || '' }}
 
       # The Headers job has no SDL3, so a screen, gfx or video program left
       # out of this list is compiled nowhere on CI. ctest below runs every
       # test that matches its pattern, built or not.
       - name: Build
-        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_rdk gfx_rdk_bench compile_psy_video_c compile_psy_video_cxx compile_psy_video_com test_psy_video video_play video_bench video_check test_psy_response_sdl test_psy_input_sdl trial_keyboard
+        run: cmake --build build --config Release --target compile_screen_c compile_screen_cxx compile_screen_com test_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma screen_loopback compile_gfx_c compile_gfx_cxx test_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_rdk gfx_rdk_bench compile_video_c compile_video_cxx compile_video_com test_video video_play video_bench video_check test_response_sdl test_input_sdl trial_keyboard
 
-      # psy_gfx.h's pixel checks must run where software GL exists; macOS has
+      # ysp/gfx.h's pixel checks must run where software GL exists; macOS has
       # no EGL, so its test runs the CPU checks only.
       - name: Compile checks and test
         shell: bash
         run: |
-          if [ "$RUNNER_OS" != macOS ]; then export PSYGFX_TEST_REQUIRE_GL=1; fi
+          if [ "$RUNNER_OS" != macOS ]; then export YGFX_TEST_REQUIRE_GL=1; fi
           ctest --test-dir build -C Release -R "screen|gfx|video|response_sdl|input_sdl" --output-on-failure
 
       - name: Run examples (simulated display)
@@ -703,11 +703,11 @@ jobs:
           expect 0 "$bin/screen_hello" --sim
           expect 0 "$bin/screen_flipstats" --sim --frames 120
           expect 2 "$bin/screen_hello" --bogus
-          expect 2 "$bin/psy_screen_loopback"       # no args: usage
-          # psy_gfx.h on the simulated display: its null backend draws nothing.
+          expect 2 "$bin/screen_loopback"       # no args: usage
+          # ysp/gfx.h on the simulated display: its null backend draws nothing.
           expect 0 "$bin/gfx_hello" --sim --frames 30
           expect 0 "$bin/gfx_trial" --sim
-          # psy_response.h: the keyboard trial with a synthetic participant; 1 if a trial does not come out as scripted.
+          # ysp/response.h: the keyboard trial with a synthetic participant; 1 if a trial does not come out as scripted.
           expect 0 "$bin/trial_keyboard" --sim --out "$RUNNER_TEMP/trial_keyboard.csv"
           expect 2 "$bin/trial_keyboard" --bogus
           expect 0 "$bin/gfx_load" --sim --gabors 10 --dots 100 --seconds 1
@@ -720,18 +720,18 @@ jobs:
           expect 2 "$bin/gfx_text" --page 9
           expect 2 "$bin/gfx_hello" --bogus
           expect 2 "$bin/gfx_bench" --device bogus
-          # psy_rdk.h through psy_gfx.h: each page, two trials replayed from their logs (1 if a digest differs).
+          # ysp/rdk.h through ysp/gfx.h: each page, two trials replayed from their logs (1 if a digest differs).
           expect 0 "$bin/gfx_rdk" --sim
           expect 2 "$bin/gfx_rdk" --bogus
           expect 2 "$bin/gfx_rdk_bench" --device bogus
-          # psy_video.h: a generated frame sequence, plain, QOI and I420.
+          # ysp/video.h: a generated frame sequence, plain, QOI and I420.
           expect 0 "$bin/video_play" --sim
           expect 0 "$bin/video_play" --sim --qoi --frames 20
           expect 0 "$bin/video_play" --sim --yuv --size 64x48 --frames 20
           expect 0 "$bin/video_bench" --size 64x48 --reps 3
           expect 2 "$bin/video_play" --bogus
 
-      # pack/psy_layout (docs/psy_layout.md): the vendored Skribidi and
+      # pack/layout (docs/layout.md): the vendored Skribidi and
       # HarfBuzz, the glue's test, and gfx_layout on the simulated display.
       # Windows runners have the corpus fonts (another version than the
       # reference's is skipped by its hash); Linux runners have none, so the
@@ -741,7 +741,7 @@ jobs:
         shell: bash
         run: |
           set -eu
-          cmake --build build --config Release --target test_psy_layout gfx_layout
+          cmake --build build --config Release --target test_layout gfx_layout
           ctest --test-dir build -C Release -R layout --output-on-failure
           if [ "$RUNNER_OS" = Windows ]; then bin=build/pack/Release; else bin=build/pack; fi
           "$bin/gfx_layout" --sim
@@ -755,20 +755,20 @@ jobs:
         run: |
           set -eu
           export PATH="/c/mingw64/bin:$PATH"
-          W="-Wall -Wextra -Wpedantic -Wshadow -Werror -O2 -I. -I$SDL3_MINGW/include"
-          gcc -std=c11 $W -o mingw_c.exe tests/compile/psy_screen.c -L"$SDL3_MINGW/lib" -lSDL3
-          g++ -std=c++17 $W -o mingw_cxx.exe tests/compile/psy_screen.cpp -L"$SDL3_MINGW/lib" -lSDL3
-          gcc -std=c11 $W -o mingw_test.exe tests/adapt/psy_screen_test.c
-          g++ -std=c++17 $W -o mingw_com.exe tests/compile/psy_screen_com.cpp -L"$SDL3_MINGW/lib" -lSDL3
-          gcc -std=c11 $W -o mingw_gfx_c.exe tests/compile/psy_gfx.c -L"$SDL3_MINGW/lib" -lSDL3
-          g++ -std=c++17 $W -o mingw_gfx_cxx.exe tests/compile/psy_gfx.cpp -L"$SDL3_MINGW/lib" -lSDL3
-          gcc -std=c11 $W -o mingw_gfx_test.exe tests/adapt/psy_gfx_test.c
+          W="-Wall -Wextra -Wpedantic -Wshadow -Werror -O2 -Iinclude -I$SDL3_MINGW/include"
+          gcc -std=c11 $W -o mingw_c.exe tests/compile/screen.c -L"$SDL3_MINGW/lib" -lSDL3
+          g++ -std=c++17 $W -o mingw_cxx.exe tests/compile/screen.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          gcc -std=c11 $W -o mingw_test.exe tests/adapt/screen_test.c
+          g++ -std=c++17 $W -o mingw_com.exe tests/compile/screen_com.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          gcc -std=c11 $W -o mingw_gfx_c.exe tests/compile/gfx.c -L"$SDL3_MINGW/lib" -lSDL3
+          g++ -std=c++17 $W -o mingw_gfx_cxx.exe tests/compile/gfx.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          gcc -std=c11 $W -o mingw_gfx_test.exe tests/adapt/gfx_test.c
           cp "$SDL3_MINGW/bin/SDL3.dll" .
           # `;`, not `&&`: set -e ignores a failure on the left of &&.
           ./mingw_c.exe; ./mingw_cxx.exe; ./mingw_test.exe; ./mingw_com.exe
-          ./mingw_gfx_c.exe; ./mingw_gfx_cxx.exe; PSYGFX_TEST_REQUIRE_GL=1 ./mingw_gfx_test.exe
-          gcc -std=c11 $W -DPSYVID_NO_PL_MPEG -o mingw_video_c.exe tests/compile/psy_video.c -L"$SDL3_MINGW/lib" -lSDL3
-          g++ -std=c++17 $W -DPSYVID_NO_PL_MPEG -o mingw_video_cxx.exe tests/compile/psy_video.cpp -L"$SDL3_MINGW/lib" -lSDL3
-          gcc -std=c11 $W -o mingw_video_test.exe tests/adapt/psy_video_test.c
-          g++ -std=c++17 $W -o mingw_video_com.exe tests/compile/psy_video_com.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          ./mingw_gfx_c.exe; ./mingw_gfx_cxx.exe; YGFX_TEST_REQUIRE_GL=1 ./mingw_gfx_test.exe
+          gcc -std=c11 $W -DYVID_NO_PL_MPEG -o mingw_video_c.exe tests/compile/video.c -L"$SDL3_MINGW/lib" -lSDL3
+          g++ -std=c++17 $W -DYVID_NO_PL_MPEG -o mingw_video_cxx.exe tests/compile/video.cpp -L"$SDL3_MINGW/lib" -lSDL3
+          gcc -std=c11 $W -o mingw_video_test.exe tests/adapt/video_test.c
+          g++ -std=c++17 $W -o mingw_video_com.exe tests/compile/video_com.cpp -L"$SDL3_MINGW/lib" -lSDL3
           ./mingw_video_c.exe; ./mingw_video_cxx.exe; ./mingw_video_test.exe; ./mingw_video_com.exe

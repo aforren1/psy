@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Mutation runner for the psy headers.
+"""Mutation runner for the ysp headers.
 
 Each mutant is one literal edit of a header, kept in a TOML file next to
 this script. The runner copies the headers and tests/adapt into a work
@@ -32,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 WIN = os.name == "nt"
-QUIET = os.environ.get("PSY_QUIET_FLAG", "C:/tmp/psy-quiet" if WIN else "/tmp/psy-quiet")
-LOCK = os.environ.get("PSY_MEASURE_LOCK", "C:/tmp/psy-measure.lock" if WIN else "/tmp/psy-measure.lock")
+QUIET = os.environ.get("YSP_QUIET_FLAG", "C:/tmp/psy-quiet" if WIN else "/tmp/psy-quiet")
+LOCK = os.environ.get("YSP_MEASURE_LOCK", "C:/tmp/psy-measure.lock" if WIN else "/tmp/psy-measure.lock")
 EXE = ".exe" if WIN else ""
 
 _print_lock = threading.Lock()
@@ -72,7 +72,7 @@ def wait_idle():
 # --- toolchains --------------------------------------------------------------
 
 def find_gcc():
-    g = os.environ.get("PSY_MUT_GCC")
+    g = os.environ.get("YSP_MUT_GCC")
     if g:
         return g
     if WIN and os.path.exists(r"C:\tmp\winlibs\mingw64\bin\gcc.exe"):
@@ -90,7 +90,7 @@ def msvc_env():
     with _msvc_lock:
         if _msvc_env is not None:
             return _msvc_env
-        bat = os.environ.get("PSY_MUT_VCVARS")
+        bat = os.environ.get("YSP_MUT_VCVARS")
         if not bat:
             vswhere = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
                                    "Microsoft Visual Studio", "Installer", "vswhere.exe")
@@ -106,7 +106,7 @@ def msvc_env():
             if sep:
                 env[k] = v
         if "INCLUDE" not in env:
-            raise SystemExit("MSVC environment not found (set PSY_MUT_VCVARS to vcvars64.bat)")
+            raise SystemExit("MSVC environment not found (set YSP_MUT_VCVARS to vcvars64.bat)")
         _msvc_env = env
         return env
 
@@ -215,9 +215,10 @@ def snapshot(work):
     tdir = os.path.join(work, "test")
     os.makedirs(hdr, exist_ok=True)
     os.makedirs(tdir, exist_ok=True)
-    for f in os.listdir(REPO):
+    os.makedirs(os.path.join(hdr, "ysp"), exist_ok=True)
+    for f in os.listdir(os.path.join(REPO, "include", "ysp")):
         if f.endswith(".h"):
-            shutil.copy2(os.path.join(REPO, f), hdr)
+            shutil.copy2(os.path.join(REPO, "include", "ysp", f), os.path.join(hdr, "ysp"))
     adapt = os.path.join(REPO, "tests", "adapt")
     for f in os.listdir(adapt):
         if f.endswith((".h", ".c")):
@@ -245,14 +246,14 @@ def main():
             for m in L.get("mutant", []):
                 if a.only and m["id"] not in a.only:
                     continue
-                r = apply(m, L["header"], lambda f: open(os.path.join(REPO, f), encoding="utf-8").read())
+                r = apply(m, L["header"], lambda f: open(os.path.join(REPO, "include", f), encoding="utf-8").read())
                 if isinstance(r, str):
                     bad += 1
                     say("%s %s: %s" % (os.path.basename(L["path"]), m["id"], r))
         say("anchors: %d not matching" % bad)
         return 1 if bad else 0
 
-    work = a.work or tempfile.mkdtemp(prefix="psy-mutate-")
+    work = a.work or tempfile.mkdtemp(prefix="ysp-mutate-")
     os.makedirs(work, exist_ok=True)
     hdr, tdir = snapshot(work)
     texts = {}

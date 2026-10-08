@@ -1,5 +1,5 @@
 function compare_quest_mquestplus(mqp_dir)
-%COMPARE_QUEST_MQUESTPLUS  psy_quest (MEX) against mQUESTPlus, cell by cell.
+%COMPARE_QUEST_MQUESTPLUS  ysp_quest (MEX) against mQUESTPlus, cell by cell.
 %
 %   compare_quest_mquestplus('/path/to/mQUESTPlus')
 %   compare_quest_mquestplus            % reads the MQUESTPLUS_DIR variable
@@ -14,7 +14,7 @@ function compare_quest_mquestplus(mqp_dir)
 %   compared, then both are updated with mQUESTPlus's stimulus and one outcome
 %   drawn from a fixed stream, and the posteriors are compared cell by cell.
 %   A selection that differs is a TIE when mQUESTPlus's own expected entropy
-%   at our stimulus is within 1e-9 bits of its minimum (psy_quest's default
+%   at our stimulus is within 1e-9 bits of its minimum (ysp_quest's default
 %   tie_tolerance), and a DIFFERENCE otherwise.
 %
 %   The 'max gap' column is the largest such tie, in bits.
@@ -23,12 +23,12 @@ function compare_quest_mquestplus(mqp_dir)
 %   posterior difference above 1e-6 (the float table's precision).
 %
 %   Outcome coding: mQUESTPlus numbers outcomes 1..K, and its PFs put the
-%   incorrect response first; psy_quest's are 0..K-1 with 1 = correct. So
-%   psy outcome = mQUESTPlus outcome - 1 throughout.
+%   incorrect response first; ysp_quest's are 0..K-1 with 1 = correct. So
+%   ysp outcome = mQUESTPlus outcome - 1 throughout.
 %
 %   The Weibull of mQUESTPlus (qpPFWeibull) is QUEST+'s form in dB,
-%   F = 1 - exp(-10^(beta (x - alpha) / 20)); psy_quest's PSYQ_PF_GUMBEL is
-%   F = 1 - exp(-10^(beta (x - alpha))), so the psy slope axis is beta / 20.
+%   F = 1 - exp(-10^(beta (x - alpha) / 20)); ysp_quest's YQST_PF_GUMBEL is
+%   F = 1 - exp(-10^(beta (x - alpha))), so the ysp slope axis is beta / 20.
 %   The normal example runs mQUESTPlus's own qpPFNormal through pf_batch.
 
     if nargin < 1 || isempty(mqp_dir)
@@ -59,12 +59,12 @@ function compare_quest_mquestplus(mqp_dir)
         'stim', -10:10, 'psi', {{-5:5, 1:10, 0:0.01:0.04}}, 'pf', 'normal', ...
         'truth', [1 3 0.02], 'marg', []);
     % qpQuestPlusMarginalizeDemo: slope and lapse marginalized out. The
-    % nuisance axis in the middle makes psy_quest permute its grid.
+    % nuisance axis in the middle makes ysp_quest permute its grid.
     cases{end+1} = struct('name', 'marginalize [2 4]', 'seed', 2004, 'n', 64, ...
         'stim', -40:0, 'psi', {{-40:0, 1:5, 0.5, 0:0.01:0.1}}, 'pf', 'weibull', ...
         'truth', [-18 3 0.5 0.04], 'marg', [2 4]);
 
-    fprintf('\npsy_quest %s against mQUESTPlus (%s)\n\n', psy_quest('version'), mqp_dir);
+    fprintf('\nysp_quest %s against mQUESTPlus (%s)\n\n', ysp_quest('version'), mqp_dir);
     fprintf('%-22s %6s %10s %6s %10s %6s %12s %10s\n', 'example', 'trials', 'identical', 'ties', ...
             'max gap', 'diffs', 'max |dpost|', 'first diff');
     bad = false;
@@ -78,7 +78,7 @@ function compare_quest_mquestplus(mqp_dir)
     end
     fprintf('\n');
     if bad
-        error('compare:disagree', 'psy_quest and mQUESTPlus disagree beyond tolerance');
+        error('compare:disagree', 'ysp_quest and mQUESTPlus disagree beyond tolerance');
     end
     fprintf('agreement within tolerance on every example\n');
 end
@@ -96,7 +96,7 @@ function r = run_case(c)
     if ~isempty(c.marg), args = [args, {'marginalize', c.marg}]; end
     qd = qpInitialize(args{:});
 
-    % psy_quest side, same grids.
+    % ysp_quest side, same grids.
     d = struct();
     d.stim = {c.stim};
     d.stop_trials = c.n + 1;
@@ -114,14 +114,14 @@ function r = run_case(c)
         nu(c.marg) = 1;
         d.nuisance = nu;
     end
-    h = psy_quest('open', d);
-    cleanup = onCleanup(@() psy_quest('close', h));
+    h = ysp_quest('open', d);
+    cleanup = onCleanup(@() ysp_quest('close', h));
 
     r = struct('n', c.n, 'same', 0, 'ties', 0, 'maxgap', 0, 'diffs', 0, 'maxdp', 0, 'first_diff', 0);
     for t = 1:c.n
         stim = qpQuery(qd);
         im = find(qd.stimParamsDomain == stim, 1);
-        ip = psy_quest('next', h);
+        ip = ysp_quest('next', h);
         if ip == im
             r.same = r.same + 1;
         else
@@ -135,12 +135,12 @@ function r = run_case(c)
             end
         end
         % One outcome from the fixed stream, at mQUESTPlus's stimulus.
-        [u, state] = psy_trials('splitmix', state);
+        [u, state] = ysp_trials('splitmix', state);
         pk = qpPF(stim, c.truth);                  % [P(outcome 1) P(outcome 2)]
         out = 1 + (u >= pk(1));
         qd = qpUpdate(qd, stim, out);
-        psy_quest('update', h, im, out - 1);
-        post = psy_quest('posterior', h);
+        ysp_quest('update', h, im, out - 1);
+        post = ysp_quest('posterior', h);
         v = reshape(permute(post, np:-1:1), [], 1);   % C order: last axis fastest
         r.maxdp = max(r.maxdp, max(abs(v - qd.posterior)));
     end

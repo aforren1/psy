@@ -1,10 +1,10 @@
 # The layout corpus: one line of horizontal text per item, no wrapping.
-# Written 2026-10-07 for docs/psy_layout.md (the probe's corpus of
+# Written 2026-10-07 for docs/layout.md (the probe's corpus of
 # docs/layout_probe.md 2.2 was lost; these items cover the same scripts,
 # fonts and features with new sentences). Fields:
 #   id|font file in C:/Windows/Fonts|face|dir (ltr, rtl, auto)|lang|text
 # layout_ref.py writes Chromium's glyphs for these to corpus_ref.txt;
-# psy_layout_test.c compares the glue's with them.
+# layout_test.c compares the glue's with them.
 latin_segoe|segoeui.ttf|0|ltr|en|Avoid tiny Wafers! Today, Yolanda’s office affixed 47 flyers: “Try AV, To, VA” – efficient fjords.
 latin_calibri|calibri.ttf|0|ltr|en|Fluffy waffles filled the office kitchen; Theo found five of them by 9:30 – a fine haul.
 latin_arial|arial.ttf|0|ltr|en|We value quality: Yvonne’s team ranked first in 2023, ahead of AVL & Tycho’s “fastest” crew.

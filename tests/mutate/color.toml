@@ -1,10 +1,10 @@
 
-# psy_color.h mutants (docs/psy_color.md, "Mutations"). Mutant 00 is a
+# ysp/color.h mutants (docs/color.md, "Mutations"). Mutant 00 is a
 # control with no effect; it must survive.
-header = "psy_color.h"
+header = "ysp/color.h"
 
 [test.color]
-source = "tests/adapt/psy_color_test.c"
+source = "tests/adapt/color_test.c"
 compiler = "gcc"
 flags = ["-std=c99", "-O2", "-w"]
 libs = ["-lm"]
@@ -16,16 +16,16 @@ name = "control: no change (must pass)"
 test = "color"
 expect = "survived"
 why = "Control: a change with no effect. The test must pass, so a failure here means the setup is wrong, not the header."
-find = '#define PSYCOL_VERSION_PATCH  0'
-replace = '#define PSYCOL_VERSION_PATCH  0 '
+find = '#define YCOL_VERSION_PATCH  0'
+replace = '#define YCOL_VERSION_PATCH  0 '
 
 [[mutant]]
 id = "01"
 name = "Lab epsilon"
 test = "color"
 why = "CIELAB's linear segment starts at 216/24389; another value moves L* for dark grays. Caught after the test got grays on each side of it."
-find = '#define PSYCOL__CIE_E (216.0 / 24389.0)'
-replace = '#define PSYCOL__CIE_E (216.0 / 24000.0)'
+find = '#define YCOL__CIE_E (216.0 / 24389.0)'
+replace = '#define YCOL__CIE_E (216.0 / 24000.0)'
 
 [[mutant]]
 id = "02"
@@ -80,7 +80,7 @@ id = "08"
 name = "hue in radians"
 test = "color"
 why = "The API gives hue in degrees."
-find = 'h = atan2(in[2], in[1]) / PSYCOL__D2R;'
+find = 'h = atan2(in[2], in[1]) / YCOL__D2R;'
 replace = 'h = atan2(in[2], in[1]);'
 
 [[mutant]]
@@ -112,8 +112,8 @@ id = "12"
 name = "10 degree table ignored"
 test = "color"
 why = "The 10 degree cone fundamentals must be used when asked for, not the 2 degree table."
-find = 'return cones == PSYCOL_CONES_SS10 ? psycol__ss10 : psycol__ss2;'
-replace = 'return cones == PSYCOL_CONES_SS10 ? psycol__ss2 : psycol__ss2;'
+find = 'return cones == YCOL_CONES_SS10 ? ycol__ss10 : ycol__ss2;'
+replace = 'return cones == YCOL_CONES_SS10 ? ycol__ss2 : ycol__ss2;'
 
 [[mutant]]
 id = "13"
@@ -136,7 +136,7 @@ id = "15"
 name = "max_scale symmetric as one-sided"
 test = "color"
 why = "max_scale for a SYMMETRIC excursion must check both signs."
-find = 'if (sides == PSYCOL_SYMMETRIC) r ='
+find = 'if (sides == YCOL_SYMMETRIC) r ='
 replace = 'if (0) r ='
 
 [[mutant]]
@@ -206,7 +206,7 @@ test = "color"
 why = "set_background must update the cone-contrast and DKL spaces. Caught after the test compared with a fresh context."
 find = '''
     for (k = 0; k < 3; k++) cx->bg[k] = cx->desc.background[k] = bg[k];
-    psycol__ctx_bg(cx);'''
+    ycol__ctx_bg(cx);'''
 replace = '    for (k = 0; k < 3; k++) cx->bg[k] = cx->desc.background[k] = bg[k];'
 
 [[mutant]]
@@ -253,8 +253,8 @@ replace = '/ b[2];'
 id = "29"
 name = "gamut eps ignored"
 test = "color"
-why = "The gamut check allows PSYCOL_GAMUT_EPS of rounding error."
-find = 'if (lo < -PSYCOL_GAMUT_EPS || hi > 1.0 + PSYCOL_GAMUT_EPS) g->in = 0;'
+why = "The gamut check allows YCOL_GAMUT_EPS of rounding error."
+find = 'if (lo < -YCOL_GAMUT_EPS || hi > 1.0 + YCOL_GAMUT_EPS) g->in = 0;'
 replace = 'if (lo < 0.0 || hi > 1.0) g->in = 0;'
 
 [[mutant]]
@@ -263,7 +263,7 @@ name = "map in-gamut not returned as is"
 test = "color"
 why = "Mapping must return an in-gamut color unchanged."
 find = '''
-    if (g->in) return psycol__rgb(rgb);
+    if (g->in) return ycol__rgb(rgb);
     switch (method) {'''
 replace = '    switch (method) {'
 
@@ -272,8 +272,8 @@ id = "31"
 name = "BT.2020 alpha"
 test = "color"
 why = "BT.2020's alpha has full precision; 1.099 breaks the curve's continuity at the knee."
-find = '#define PSYCOL__B2020_A 1.09929682680944'
-replace = '#define PSYCOL__B2020_A 1.099'
+find = '#define YCOL__B2020_A 1.09929682680944'
+replace = '#define YCOL__B2020_A 1.099'
 
 [[mutant]]
 id = "32"

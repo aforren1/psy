@@ -1,0 +1,18 @@
+# An sdist must carry everything the build needs. setup.py compiles
+# ysp/quest.h straight into the extension with YQST_ASYNC defined, and under
+# YQST_ASYNC that header includes ysp/rt.h. Both live in include/ysp/ under the repository root,
+# which an sdist cannot reach, so stage a copy of the two in include/ysp/ next
+# to setup.py first:
+#
+#     mkdir -p include/ysp && cp ../../../include/ysp/quest.h ../../../include/ysp/rt.h include/ysp/
+#     uv build --sdist
+#
+# The staged copies are gitignored; setup.py prefers the repository root when
+# it is present, so a copy cannot shadow a newer header in a development tree.
+include include/ysp/quest.h
+include include/ysp/rt.h
+# setup.py names the extension source by absolute path, which sdist does not
+# pick up on its own.
+include ysp_quest_ext.c
+include example.py
+recursive-include tests *.py

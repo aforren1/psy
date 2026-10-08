@@ -1,4 +1,4 @@
-"""Reference values for tests/adapt/psy_color_test.c from colour-science.
+"""Reference values for tests/adapt/color_test.c from colour-science.
 
     uv run --with colour-science --with numpy python tests/compare/color_refs.py
 
@@ -26,7 +26,7 @@ def space(name):
 SRGB, P3, R2020 = space("sRGB"), space("Display P3"), space("ITU-R BT.2020")
 
 # colour's BT.2020 decoding rounds alpha and beta to the 10-bit values
-# (1.099, 0.018); psy_color.h, like CSS Color 4, takes the exact ones.
+# (1.099, 0.018); ysp/color.h, like CSS Color 4, takes the exact ones.
 B2020_A, B2020_B = 1.09929682680944, 0.018053968510807
 
 

@@ -1,14 +1,14 @@
-# psy_table.h mutants: the number parser, the CSV scanner, type inference,
-# interning and the block view. docs/psy_table.md lists the results.
-header = "psy_table.h"
+# ysp/table.h mutants: the number parser, the CSV scanner, type inference,
+# interning and the block view. docs/table.md lists the results.
+header = "ysp/table.h"
 
 [test.table]
-source = "tests/adapt/psy_table_test.c"
+source = "tests/adapt/table_test.c"
 compiler = "gcc"
 flags = ["-std=c11", "-O2", "-w"]
 libs = ["-lm"]
 timeout = 300
-env = { PSYTB_TEST_NUMBERS = "100000" }
+env = { YTB_TEST_NUMBERS = "100000" }
 
 # --- numbers ---------------------------------------------------------------------
 
@@ -59,8 +59,8 @@ id = "n-06"
 name = "19-digit limit off by one"
 test = "table"
 why = "19 significant digits are accepted, 20 are not (they no longer fit a uint64)."
-find = 'if (++nd > PSYTB_MAX_DIGITS) return PSYTB_NUM_DIGITS;'
-replace = 'if (++nd >= PSYTB_MAX_DIGITS) return PSYTB_NUM_DIGITS;'
+find = 'if (++nd > YTB_MAX_DIGITS) return YTB_NUM_DIGITS;'
+replace = 'if (++nd >= YTB_MAX_DIGITS) return YTB_NUM_DIGITS;'
 count = 2
 
 [[mutant]]
@@ -86,8 +86,8 @@ id = "n-09"
 name = "quotient one bit short"
 test = "table"
 why = "With 2^54 < q the rounding still has guard bits; with fewer it does not."
-find = 's = 56 - psytb__bits64(m) + bd;'
-replace = 's = 53 - psytb__bits64(m) + bd;'
+find = 's = 56 - ytb__bits64(m) + bd;'
+replace = 's = 53 - ytb__bits64(m) + bd;'
 
 # --- CSV -------------------------------------------------------------------------
 
@@ -104,9 +104,9 @@ id = "c-02"
 name = "CRLF leaves the LF in the input"
 test = "table"
 why = "A CRLF record end must consume both bytes."
-find = '''    if (i + 1 < sc->n && p[i + 1] == '\n') { sc->pos = i + 2; sc->line++; return PSYTB__END_RECORD; }
+find = '''    if (i + 1 < sc->n && p[i + 1] == '\n') { sc->pos = i + 2; sc->line++; return YTB__END_RECORD; }
     *why = "a CR that is not followed by LF (records end with CRLF or LF)";'''
-replace = '''    if (i + 1 < sc->n && p[i + 1] == '\n') { sc->pos = i + 1; sc->line++; return PSYTB__END_RECORD; }
+replace = '''    if (i + 1 < sc->n && p[i + 1] == '\n') { sc->pos = i + 1; sc->line++; return YTB__END_RECORD; }
     *why = "a CR that is not followed by LF (records end with CRLF or LF)";'''
 
 [[mutant]]
@@ -118,7 +118,7 @@ find = '''    *why = "a CR that is not followed by LF (records end with CRLF or 
     *why_line = sc->line;
     return -1;'''
 replace = '''    sc->pos = i + 1;
-    return PSYTB__END_RECORD;'''
+    return YTB__END_RECORD;'''
 
 [[mutant]]
 id = "c-04"
@@ -126,8 +126,8 @@ name = "the BOM is kept"
 test = "table"
 why = "A BOM would become part of the first column's name, which then is not a name."
 find = '''    if (n >= 3 && in[0] == 0xEF && in[1] == 0xBB && in[2] == 0xBF) sc.pos = 3;
-    if (sc.pos >= n) return psytb__fail_at'''
-replace = '''    if (sc.pos >= n) return psytb__fail_at'''
+    if (sc.pos >= n) return ytb__fail_at'''
+replace = '''    if (sc.pos >= n) return ytb__fail_at'''
 
 [[mutant]]
 id = "c-05"
@@ -165,25 +165,25 @@ replace = 'if (b < 0x80 || b > 0xBF) return i;'
 id = "c-09"
 name = "a 4096-byte field refused"
 test = "table"
-why = "PSYTB_MAX_FIELD bytes fit; one more does not."
-find = 'if (ulen > PSYTB_MAX_FIELD)'
-replace = 'if (ulen >= PSYTB_MAX_FIELD)'
+why = "YTB_MAX_FIELD bytes fit; one more does not."
+find = 'if (ulen > YTB_MAX_FIELD)'
+replace = 'if (ulen >= YTB_MAX_FIELD)'
 
 [[mutant]]
 id = "c-10"
 name = "allow_empty keeps an integer column"
 test = "table"
 why = "An empty cell is NaN, which an integer column cannot hold."
-find = 'if (co->type == PSYTB_INTEGER && co->empty && d->allow_empty) co->type = PSYTB_NUMBER;'
+find = 'if (co->type == YTB_INTEGER && co->empty && d->allow_empty) co->type = YTB_NUMBER;'
 replace = ''
 
 [[mutant]]
 id = "c-11"
 name = "integers inferred as numbers"
 test = "table"
-why = "An all-integer column is INTEGER (psytb_int works on it)."
-find = 'else if (co->any && (co->kinds & 1)) co->type = PSYTB_INTEGER;'
-replace = 'else if (false) co->type = PSYTB_INTEGER;'
+why = "An all-integer column is INTEGER (ytb_int works on it)."
+find = 'else if (co->any && (co->kinds & 1)) co->type = YTB_INTEGER;'
+replace = 'else if (false) co->type = YTB_INTEGER;'
 
 [[mutant]]
 id = "c-12"
@@ -208,7 +208,7 @@ id = "v-02"
 name = "the hash is not checked"
 test = "table"
 why = "A flipped bit in a pack must be refused."
-find = 'if (psytb__block_hash(b, (size_t)size) != psytb__rd64(b + 32))'
+find = 'if (ytb__block_hash(b, (size_t)size) != ytb__rd64(b + 32))'
 replace = 'if (0)'
 
 [[mutant]]
@@ -224,5 +224,5 @@ id = "v-04"
 name = "the pool is not checked as UTF-8"
 test = "table"
 why = "A block's text must be UTF-8 like a parse's."
-find = 'if (psytb__utf8_ex(b + pool, (size_t)(size - pool), true) != size - pool)'
+find = 'if (ytb__utf8_ex(b + pool, (size_t)(size - pool), true) != size - pool)'
 replace = 'if (0)'

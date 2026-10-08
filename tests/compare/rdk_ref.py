@@ -1,11 +1,11 @@
-"""An independent model of psy_rdk.h, written from the manual's
+"""An independent model of ysp/rdk.h, written from the manual's
 REPRODUCIBILITY section: Python integers and fractions, selection by
 sorting, no 128-bit helpers, no radix select.
 
     uv run --with mpmath python tests/compare/rdk_ref.py          digests
     uv run --with mpmath python tests/compare/rdk_ref.py --c      as C
 
-The scenarios are the ones tests/adapt/psy_rdk_test.c runs (rdk_golden);
+The scenarios are the ones tests/adapt/rdk_test.c runs (rdk_golden);
 the test holds the digests this prints. A difference is a bug in one of
 the two, never a tolerance.
 """
@@ -321,7 +321,7 @@ def round_half_away(v):
     return math.floor(v + 0.5) if v >= 0 else -math.floor(-v + 0.5)
 
 
-# --- the golden scenarios (the same table is in psy_rdk_test.c) -------------
+# --- the golden scenarios (the same table is in rdk_test.c) -------------
 
 P = 16666667
 VARY_C, VARY_DIR, VARY_SPEED = 1, 2, 4
@@ -347,7 +347,7 @@ def scenarios():
 
 
 def schedule(k, drop, stall):
-    """Update k's time (k >= 1), as psy_rdk_test.c computes it."""
+    """Update k's time (k >= 1), as rdk_test.c computes it."""
     t = 1000000000 + k * P + ((k * 7919) % 101 - 50) * 1000
     if drop >= 0 and k >= drop:
         t += P

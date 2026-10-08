@@ -4,13 +4,13 @@ This note records a probe that compared three text layout candidates for
 the pack tool, the player (native and WebAssembly) and the designer
 (browser, with text editing): Skribidi, kb_text_shape, and HarfBuzz with
 our own layout code. It also records a probe of HarfBuzz's GPU glyph
-renderer, hb-gpu, against `psy_gfx.h`'s curve runs (section 8). The plan
+renderer, hb-gpu, against `ysp/gfx.h`'s curve runs (section 8). The plan
 that asked for both is [rig_spec.md](rig_spec.md) section 5.2 (Font row),
 section 6 and section 7. The probe code was in a session scratchpad and is
 not kept; the numbers below are the record. The corpus texts and the
 Chromium reference were lost with it; on 2026-10-07 a new corpus of the
 same items and a new Edge reference were made by the same method and kept
-in `tests/layout/` (docs/psy_layout.md, Checks).
+in `tests/layout/` (docs/layout.md, Checks).
 
 ## Recommendation
 
@@ -38,7 +38,7 @@ in `tests/layout/` (docs/psy_layout.md, Checks).
    the fastest candidate. It has no Thai or Japanese phrase breaking, no
    justification and no editing; Skribidi's editor and rich text are about
    6600 lines.
-4. **Keep `psy_gfx.h`'s renderer. Do not adopt hb-gpu. Use HarfBuzz's draw
+4. **Keep `ysp/gfx.h`'s renderer. Do not adopt hb-gpu. Use HarfBuzz's draw
    API as a second outline source in the pack tool** (section 8.4).
 
 ## Conditions
@@ -277,7 +277,7 @@ same line start for every line.
   stayed in the Thai or Chinese font); it broke line 3 differently from
   Edge. Per-codepoint first-in-list matches.
 - Justification: none of the three has it. Chromium has `text-align:
-  justify`. psy would write it: spread the line's spare width over its
+  justify`. ysp would write it: spread the line's spare width over its
   spaces, or between characters for Thai and CJK.
 
 ### 3.2 Breaks inside Thai, Japanese and Chinese words
@@ -302,14 +302,14 @@ break that is not at a word boundary is a style choice, not an error.
   (not otherwise): it fits the box, and 1 of 12 or 19 breaks is not at an
   ICU word boundary.
 
-## 4. Glyph ids and `psy_outline.h`
+## 4. Glyph ids and `ysp/outline.h`
 
 ### 4.1 The same glyph for the same id
 
 For every glyph of every font, the probe built the outline two ways, in em
-units with y down, and compared the segments: `psy_outline.h`'s own reader
-(`psyol_font_glyph`), and HarfBuzz's `hb_font_draw_glyph` fed through
-`psy_outline.h`'s path builder. HarfBuzz is the shaper of Skribidi and of
+units with y down, and compared the segments: `ysp/outline.h`'s own reader
+(`yol_font_glyph`), and HarfBuzz's `hb_font_draw_glyph` fed through
+`ysp/outline.h`'s path builder. HarfBuzz is the shaper of Skribidi and of
 the glue, so its glyph ids index these outlines.
 
 | Font | Glyphs | Equal bit for bit | Differ |
@@ -326,15 +326,15 @@ the glue, so its glyph ids index these outlines.
 `napostrophe` in Arial is a composite whose `glyf` xMin (-38) differs from
 its `hmtx` left side bearing (-39). HarfBuzz moves the outline by the
 difference, as a TrueType rasterizer places its phantom points;
-`psy_outline.h` and fontTools do not. Arial has 13 composites with this
+`ysp/outline.h` and fontTools do not. Arial has 13 composites with this
 mismatch, and Times New Roman 19 glyphs (18 composites); in Arial only
 this one gave a different outline.
-`psy_outline.h` may want HarfBuzz's rule; this probe did not decide it.
+`ysp/outline.h` may want HarfBuzz's rule; this probe did not decide it.
 
 ### 4.2 End to end, against Edge's rendering
 
 Each shaping item's first line (glyph ids and pens from the HarfBuzz
-glue) was drawn by `psyol_raster()` (exact area) at 96 px per em, and
+glue) was drawn by `yol_raster()` (exact area) at 96 px per em, and
 compared with Edge's screenshot of the same text and font at the same
 size, after the best integer shift. A control replaced one glyph id per
 line with the next id.
@@ -362,7 +362,7 @@ applies its own contrast), so a correct line still has up to 1470 pixels
 off by more than 0.5. On Calibri the control's change was small (1121 to
 1228). The exact checks are 2.2 (ids and positions against Edge) and 4.1
 (ids against outlines). The probe did not draw through
-`psyol_cset_add_font()` and `psygfx_crun()`; section 8 does that for single
+`yol_cset_add_font()` and `ygfx_crun()`; section 8 does that for single
 glyphs.
 
 ## 5. Cost
@@ -483,7 +483,7 @@ program, natively and in wasm with the same results:
   us (gcc), 207.3 to 230.7 us (wasm).
 
 kb_text_shape gives grapheme, word and line breaks and nothing else for
-editing. HarfBuzz gives cluster values only. With either, psy would write
+editing. HarfBuzz gives cluster values only. With either, ysp would write
 caret positions from clusters, grapheme boundaries (libunibreak for the
 glue), hit testing, selection rectangles across bidi runs, IME
 composition, undo, and rich text: the work that Skribidi's editor files
@@ -519,7 +519,7 @@ Proposed policy:
 3. Record the Skribidi commit, the patch hash and the HarfBuzz version in
    the pack manifest (rig_spec 5.1, tool version), because static text in a
    pack is laid-out glyph runs and the player lays out dynamic text.
-4. Update only for a fix or a feature psy needs, never on a schedule. Each
+4. Update only for a fix or a feature ysp needs, never on a schedule. Each
    update must pass a corpus check like this probe's: glyph ids, positions
    and line starts for every item, against the previous pin and against
    Chromium. Any difference is listed in the change log; a difference in
@@ -542,24 +542,24 @@ that `hb_gpu_draw()` does not call, so it was off in every run here.
 The probe ran hb-gpu's own GLSL (`hb_gpu_shader_source()` and
 `hb_gpu_draw_shader_source()`, `HB_GPU_ATLAS_2D`) with a minimal instanced
 vertex shader (one quad per glyph, 1.5 px margin, no dilation), in the
-same ANGLE context as `psy_gfx.h`, through `tests/adapt/psy_gfx_headless.h`
-on the Iris Xe (ANGLE from Docker Desktop's folder, as in psy_gfx.md, on
-D3D11). `psy_gfx.h`'s curve sets came
-from `psyol_cset_add_font()` (resolved, backward lists), drawn by
-`psygfx_crun()`, one run per glyph, turned by the run's `ori`.
+same ANGLE context as `ysp/gfx.h`, through `tests/adapt/gfx_headless.h`
+on the Iris Xe (ANGLE from Docker Desktop's folder, as in gfx.md, on
+D3D11). `ysp/gfx.h`'s curve sets came
+from `yol_cset_add_font()` (resolved, backward lists), drawn by
+`ygfx_crun()`, one run per glyph, turned by the run's `ori`.
 
 ### 8.1 Coverage error
 
-Reference: `psyol_raster()` exact box coverage in double of the same
+Reference: `yol_raster()` exact box coverage in double of the same
 outline, at the same pen (a subpixel offset of 0.37, 0.61 px) and turn.
 Glyph sets: 20 Latin glyphs of Segoe UI, 8 CJK glyphs of Microsoft YaHei,
 and 5 CJK and 3 Latin glyphs of Source Han Sans JP (CFF). Read back from
 RGBA32F. Mean error on edge pixels (reference strictly between 0 and 1),
 the range over the three sets, and the largest error on any pixel.
-`psy_gfx.h` takes the rays by itself on a turned run, so its exact-area
+`ysp/gfx.h` takes the rays by itself on a turned run, so its exact-area
 column is the rays at 15 and 45 degrees.
 
-| px per em | Turn, degrees | `psy_gfx.h` exact area | `psy_gfx.h` `.rays` | hb-gpu | hb-gpu, `HB_GPU_NO_MSAA` |
+| px per em | Turn, degrees | `ysp/gfx.h` exact area | `ysp/gfx.h` `.rays` | hb-gpu | hb-gpu, `HB_GPU_NO_MSAA` |
 |---|---|---|---|---|---|
 | 8 | 0 | 1.2e-5 to 1.8e-5 (max 1.1e-4) | 0.036 to 0.058 (max 0.46) | 0.087 to 0.097 (max 0.33) | 0.043 to 0.060 (max 0.38) |
 | 8 | 15 | rays | 0.038 to 0.059 (max 0.36) | 0.12 to 0.13 (max 0.42) | 0.059 to 0.088 (max 0.36) |
@@ -582,8 +582,8 @@ column is the rays at 15 and 45 degrees.
   px with no turn; 5.6 to 11 at 200 px with no turn; 1.5 to 11 turned at
   8 to 48 px; 24 to 51 turned at 200 px (computed from the per-set rows
   of this run). The turned error does not fall with size. Each ray's
-  coverage is a ramp along the ray (Lengyel's form, `psy_gfx.h`'s "V0" in
-  [psy_gfx.md](psy_gfx.md)), not the half-plane coverage of the crossing
+  coverage is a ramp along the ray (Lengyel's form, `ysp/gfx.h`'s "V0" in
+  [gfx.md](gfx.md)), not the half-plane coverage of the crossing
   ("V1"), so a slanted edge is wrong at every size; and its window comes
   from `fwidth()`, which by its definition (|dx| + |dy|) is 1.41 times too
   wide at 45 degrees. Its signed mean error on the YaHei set at 200 px and
@@ -598,26 +598,26 @@ column is the rays at 15 and 45 degrees.
   range (0.011 to 0.019). The grid is 0.25 / 1000 em for a 1000-unit font,
   0.05 px at 200 px; this was derived, not measured. A glyph past +/-8000
   units does not encode.
-- `psy_gfx.h`'s exact area stays within 2.5e-4 here (the 1.8e-5 of
-  psy_gfx.md was measured nearer the origin; f32 positions near 1000 px
+- `ysp/gfx.h`'s exact area stays within 2.5e-4 here (the 1.8e-5 of
+  gfx.md was measured nearer the origin; f32 positions near 1000 px
   have a larger step).
 
 ### 8.2 GPU cost
 
-The pages of psy_gfx.md's text cost table, laid out as `gfx_bench` lays
+The pages of gfx.md's text cost table, laid out as `gfx_bench` lays
 them out (Segoe UI's 94 printable ASCII glyphs at 12 px per em, 14 px
 leading, 26205 glyphs; 7000 YaHei glyphs from U+4E00 at 16 px, 20 px
 leading, 7140 glyphs), 1920 x 1200. 15 interleaved rounds of 20 frames
-between two `glFinish()` calls, under the lock. `psy_gfx.h` frames are
-`psygfx_begin()` to `psygfx_end()` (RGBA16F scene and output pass), less
+between two `glFinish()` calls, under the lock. `ysp/gfx.h` frames are
+`ygfx_begin()` to `ygfx_end()` (RGBA16F scene and output pass), less
 its empty frame; hb-gpu frames are a clear of an RGBA16F target and one
 instanced draw (blend ONE, ONE_MINUS_SRC_ALPHA), less the clear alone.
 
 | Workload | GPU ms per frame, median (range) |
 |---|---|
-| `psy_gfx.h` 12 px Latin page, exact area | 7.91 (7.78 to 8.32) |
-| `psy_gfx.h` 12 px Latin page, `.rays` | 5.70 (5.62 to 5.82) |
-| `psy_gfx.h` 16 px CJK page, exact area | 10.00 (9.77 to 10.37) |
+| `ysp/gfx.h` 12 px Latin page, exact area | 7.91 (7.78 to 8.32) |
+| `ysp/gfx.h` 12 px Latin page, `.rays` | 5.70 (5.62 to 5.82) |
+| `ysp/gfx.h` 16 px CJK page, exact area | 10.00 (9.77 to 10.37) |
 | hb-gpu 12 px Latin page | 20.46 (19.98 to 21.54) |
 | hb-gpu 16 px CJK page | 16.19 (15.87 to 17.08) |
 | hb-gpu 12 px Latin page, `HB_GPU_NO_MSAA` | 4.31 (4.23 to 4.83) |
@@ -626,7 +626,7 @@ instanced draw (blend ONE, ONE_MINUS_SRC_ALPHA), less the clear alone.
 | Data for the CJK page's 7000 glyphs | Size |
 |---|---|
 | hb-gpu blobs | 4432913 texels of 8 bytes, 33.8 MB |
-| `psy_outline.h` curve set | 437032 texels of 16 bytes (6.7 MB) and 3320860 words (12.7 MB), 19.4 MB |
+| `ysp/outline.h` curve set | 437032 texels of 16 bytes (6.7 MB) and 3320860 words (12.7 MB), 19.4 MB |
 
 Encoding cost on the CPU: hb-gpu 12.3 to 15.2 us a Latin glyph and 32.2
 to 33.0 us a CJK glyph; the curve set (resolved) 17.9 to 18.1 and 31.0 us
@@ -637,26 +637,26 @@ to 33.0 us a CJK glyph; the curve set (resolved) 17.9 to 18.1 and 31.0 us
   Latin page and 1.7 times faster than the exact area on the CJK page, at
   the error of 8.1.
 
-### 8.3 What hb-gpu and HarfBuzz offer that psy does not
+### 8.3 What hb-gpu and HarfBuzz offer that ysp does not
 
 - Color glyphs: `hb-gpu-paint` encodes COLRv0 and COLRv1 paint graphs
   (layers, gradients, transforms) for its own fragment shader.
-  `psy_gfx.h` draws solid layers from a palette only. Not measured here;
+  `ysp/gfx.h` draws solid layers from a palette only. Not measured here;
   emoji were out of the corpus.
-- Variable fonts and CFF2: `psy_outline.h` builds the default instance only
+- Variable fonts and CFF2: `ysp/outline.h` builds the default instance only
   and refuses CFF2 by name. HarfBuzz draws any instance of TrueType and
   CFF2 variable fonts.
 
 HarfBuzz as an outline source for the pack tool, with no header depending
-on it: `hb_font_draw_glyph()` with variations set, fed to `psyol_move`,
-`psyol_line`, `psyol_quad`, `psyol_cubic` and `psyol_close` (em units, y
-down, tolerance 1e-4 em), then `psyol_cset_add()`. On static fonts this
+on it: `hb_font_draw_glyph()` with variations set, fed to `yol_move`,
+`yol_line`, `yol_quad`, `yol_cubic` and `yol_close` (em units, y
+down, tolerance 1e-4 em), then `yol_cset_add()`. On static fonts this
 path gives the outlines of 4.1, and the same curve set word for word as
-`psyol_cset_add_font()` over the first 3000 glyphs of Segoe UI, Microsoft
+`yol_cset_add_font()` over the first 3000 glyphs of Segoe UI, Microsoft
 YaHei and Source Han Sans JP (CFF); Arial differs at `napostrophe`. Cost
 per glyph, median of 3 rounds of 3000 glyphs, MinGW gcc, under the lock:
 
-| Font | `psy_outline.h` reader | HarfBuzz draw into the builder | Reader + resolved curve-set record | HarfBuzz + record |
+| Font | `ysp/outline.h` reader | HarfBuzz draw into the builder | Reader + resolved curve-set record | HarfBuzz + record |
 |---|---|---|---|---|
 | Segoe UI | 0.56 us | 0.62 us | 18.09 us | 17.92 us |
 | Microsoft YaHei | 0.93 | 0.93 | 30.95 | 31.03 |
@@ -668,7 +668,7 @@ none refused):
 
 | Font, instance | Glyphs | us a glyph | Against an independent instance |
 |---|---|---|---|
-| Bahnschrift, wght 300 wdth 75 | 961 | 37.9 | fontTools' variable glyph set at the same location: 0 font units, area within 4e-8. fontTools' static instance read by `psy_outline.h`: within 0.5 units (its integer rounding), area within 0.001 |
+| Bahnschrift, wght 300 wdth 75 | 961 | 37.9 | fontTools' variable glyph set at the same location: 0 font units, area within 4e-8. fontTools' static instance read by `ysp/outline.h`: within 0.5 units (its integer rounding), area within 0.001 |
 | Bahnschrift, wght 700 wdth 100 | 961 | 40.9 | static instance: within 0.5 units, area within 0.001 |
 | Segoe UI Variable, wght 700 | 2530 | 21.7 | static instance: within 0.5 units, area within 0.001 |
 | AdobeVFPrototype-Subset (CFF2, HarfBuzz test font), wght 700 | 3 | 127.9 | fontTools' variable glyph set: within 0.0015 units, area within 1e-5 |
@@ -679,11 +679,11 @@ both by up to 98 units; its converter, not HarfBuzz, is the outlier.
 
 ### 8.4 Recommendation for rendering
 
-Keep `psy_gfx.h`'s renderer. By the numbers of 8.1 and 8.2:
+Keep `ysp/gfx.h`'s renderer. By the numbers of 8.1 and 8.2:
 
 - Its exact area has a mean edge error of 5.3e-6 to 4.8e-5 (largest
   2.5e-4) where hb-gpu's is 0.011 to 0.097 at 0 degrees; hb-gpu has no
-  counterpart of `psy_gfx.h`'s value-exact text.
+  counterpart of `ysp/gfx.h`'s value-exact text.
 - Its rays have a smaller mean edge error than hb-gpu in every condition
   tested: by 1.04 to 1.20 times at 8 px with no turn (hb-gpu without its
   4-sample average), up to 51 times turned at 200 px; hb-gpu's turned
@@ -692,12 +692,12 @@ Keep `psy_gfx.h`'s renderer. By the numbers of 8.1 and 8.2:
   ms on the Latin page, 5.88 against 10.00 ms on the CJK page), at 0.043
   to 0.11 mean error at 8 px, against 0.031 to 0.059.
 - Its CJK data is 1.7 times larger (33.8 against 19.4 MB for 7000 glyphs).
-- `psy_gfx.h` stays a public-domain header with f32 data and documented
+- `ysp/gfx.h` stays a public-domain header with f32 data and documented
   exactness in linear light.
 
 Use HarfBuzz as an outline source in the pack tool only: for variable-font
-instances and CFF2, draw with HarfBuzz into `psy_outline.h`'s builder and
-write the same curve-set format. Its outlines equal `psy_outline.h`'s
+instances and CFF2, draw with HarfBuzz into `ysp/outline.h`'s builder and
+write the same curve-set format. Its outlines equal `ysp/outline.h`'s
 reader on static fonts (except one Arial composite), at the same cost,
 and no header depends on HarfBuzz. hb-gpu's COLR paint encoder is a
 candidate to study if color emoji ever enter the plan.
@@ -722,6 +722,6 @@ candidate to study if color emoji ever enter the plan.
 - Untrusted-font robustness of any candidate (no fuzzing).
 - hb-gpu on renderers other than the Iris Xe, on WebGPU, Metal or D3D;
   hb-gpu's dilation vertex helper; its stem darkening; its paint encoder.
-- `psy_gfx.h` curve runs for whole laid-out lines against Edge (8.1 drew
+- `ysp/gfx.h` curve runs for whole laid-out lines against Edge (8.1 drew
   single glyphs).
 - libunibreak 7.0 and 8.0, SheenBidi 3.0.0 and budouxc's newer commits.

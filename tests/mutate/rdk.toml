@@ -1,13 +1,13 @@
 
-# psy_rdk.h mutants (docs/psy_rdk.md, "Mutations"). Mutant 00 is a control
+# ysp/rdk.h mutants (docs/rdk.md, "Mutations"). Mutant 00 is a control
 # with no effect; it must survive. Most mutants run with
-# PSYRDK_TEST_NO_GOLDEN=1: the golden digests would catch every change of
+# YRDK_TEST_NO_GOLDEN=1: the golden digests would catch every change of
 # behavior, so they are left out to show which property check catches the
 # fault. The mutants without it can be caught by the digests only.
-header = "psy_rdk.h"
+header = "ysp/rdk.h"
 
 [test.rdk]
-source = "tests/adapt/psy_rdk_test.c"
+source = "tests/adapt/rdk_test.c"
 compiler = "gcc"
 flags = ["-std=c99", "-O2", "-w"]
 libs = ["-lm"]
@@ -19,14 +19,14 @@ name = "control: no change (must pass)"
 test = "rdk"
 expect = "survived"
 why = "Control: a change with no effect. The test must pass, so a failure here means the setup is wrong, not the header."
-find = '#define PSYRDK_VERSION_PATCH 0'
-replace = '#define PSYRDK_VERSION_PATCH 0 '
+find = '#define YRDK_VERSION_PATCH 0'
+replace = '#define YRDK_VERSION_PATCH 0 '
 
 [[mutant]]
 id = "01"
 name = "circle wrap: point reflection of the overshot point"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "p -> -p puts the dot outside the disc for an update and moves it to another chord; density falls toward the sides parallel to the motion."
 find = '''
             p[0] = (int32_t)nx; p[1] = (int32_t)ny;
@@ -44,7 +44,7 @@ replace = '''
 id = "02"
 name = "circle wrap: re-entry at a uniform point of the circumference"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Entries not weighted by the flux pile dots up near the sides parallel to the motion: the edge band's chi-square."
 find = '''
             p[0] = (int32_t)nx; p[1] = (int32_t)ny;
@@ -52,7 +52,7 @@ find = '''
     }
 }'''
 replace = '''
-            { int32_t es_, ec_; psyrdk_sincos((uint32_t)(i * 2654435761u + u * 40503u), &es_, &ec_);
+            { int32_t es_, ec_; yrdk_sincos((uint32_t)(i * 2654435761u + u * 40503u), &es_, &ec_);
               p[0] = (int32_t)(ec_ - ec_ / 4096); p[1] = (int32_t)(es_ - es_ / 4096); }
             (void)nx; (void)ny;
         }
@@ -63,7 +63,7 @@ replace = '''
 id = "03"
 name = "rect: a step past the right edge kept"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "A dot past the edge must wrap. (The first form of this mutant, <= for <, moves only the lattice points exactly on the edge, about 1e-9 of the steps, and survived: equivalent in practice.)"
 find = 'if (qx >= -hx && qx < hx && qy >= -hy && qy < hy) {'
 replace = 'if (qx >= -hx && qx < hx + hx / 64 && qy >= -hy && qy < hy) {'
@@ -72,7 +72,7 @@ replace = 'if (qx >= -hx && qx < hx + hx / 64 && qy >= -hy && qy < hy) {'
 id = "04"
 name = "chord length without the factor 2"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "A wrap by half the chord leaves the dot mid-disc: density and the chord-line check."
 find = '            L = 2 * h;'
 replace = '            L = h;'
@@ -81,10 +81,10 @@ replace = '            L = h;'
 id = "05"
 name = "circle placement without rejection"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Points from the square land outside the disc."
-find = 'if (f->aperture_ == PSYRDK_RECT || (uint64_t)(x * x) + (uint64_t)(y * y) <= (uint64_t)PSYRDK__S * (uint64_t)PSYRDK__S) {'
-replace = 'if (1 || (uint64_t)(x * x) + (uint64_t)(y * y) <= (uint64_t)PSYRDK__S * (uint64_t)PSYRDK__S) {'
+find = 'if (f->aperture_ == YRDK_RECT || (uint64_t)(x * x) + (uint64_t)(y * y) <= (uint64_t)YRDK__S * (uint64_t)YRDK__S) {'
+replace = 'if (1 || (uint64_t)(x * x) + (uint64_t)(y * y) <= (uint64_t)YRDK__S * (uint64_t)YRDK__S) {'
 
 [[mutant]]
 id = "06"
@@ -93,14 +93,14 @@ test = "rdk"
 expect = "survived"
 why = "Only lattice points exactly on the circle change (probability about 1e-9 a try)."
 note = "Equivalent in practice: no seed of the test reaches the boundary."
-find = '(uint64_t)(y * y) <= (uint64_t)PSYRDK__S * (uint64_t)PSYRDK__S) {'
-replace = '(uint64_t)(y * y) < (uint64_t)PSYRDK__S * (uint64_t)PSYRDK__S) {'
+find = '(uint64_t)(y * y) <= (uint64_t)YRDK__S * (uint64_t)YRDK__S) {'
+replace = '(uint64_t)(y * y) < (uint64_t)YRDK__S * (uint64_t)YRDK__S) {'
 
 [[mutant]]
 id = "07"
 name = "lifetimes not staggered at start"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Equal ages: every dot dies on the same update, a pulse every L."
 find = '            f->death_[i] = t + 1 + (int64_t)pr.hi;'
 replace = '            f->death_[i] = t + f->life_ns_; (void)pr;'
@@ -109,7 +109,7 @@ replace = '            f->death_[i] = t + f->life_ns_; (void)pr;'
 id = "08"
 name = "next death from the update, not the schedule"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "now + L rounds every life up to whole frames: a 5.5-frame lifetime gives 6-frame lives only."
 find = '            f->death_[j] += L * (1 + (now - f->death_[j]) / L);'
 replace = '            f->death_[j] = now + L;'
@@ -118,7 +118,7 @@ replace = '            f->death_[j] = now + L;'
 id = "09"
 name = "CLOCK_FRAMES lifetimes on t"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Under the frame clock a life counts updates; on t a dropped frame shortens it."
 find = '        now = f->t_start_ + (int64_t)u * f->frame_ns_;'
 replace = '        now = t;'
@@ -127,7 +127,7 @@ replace = '        now = t;'
 id = "10"
 name = "EXACT count truncated"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "round(c n), not floor (PsychoPy truncates): 0.5 x 7 dots is 4, not 3."
 find = '    else m = (int)floor((double)c * (double)n + 0.5);'
 replace = '    else m = (int)floor((double)c * (double)n);'
@@ -136,7 +136,7 @@ replace = '    else m = (int)floor((double)c * (double)n);'
 id = "11"
 name = "BERNOULLI threshold c 2^31"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Half the stated coherence: the binomial mean."
 find = 'thr = (uint64_t)floor((double)c * 4294967296.0);'
 replace = 'thr = (uint64_t)floor((double)c * 2147483648.0);'
@@ -146,7 +146,7 @@ id = "12"
 name = "radix selection: > for >= at the boundary bucket"
 test = "rdk"
 expect = "survived"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "When a bucket ends exactly at the m-th key, > moves the boundary to the next nonempty bucket with nothing left to take there: the same set."
 note = "Equivalent: any boundary between the m-th and the (m + 1)-th key gives the same signal dots."
 find = '            if (below + (int)hist[b] >= need) break;'
@@ -156,7 +156,7 @@ replace = '            if (below + (int)hist[b] > need) break;'
 id = "13"
 name = "LEAST_RECENT: runs never reset"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "A run must count consecutive signal updates only."
 find = '                else f->run_[j] = 0;'
 replace = '                else (void)0;'
@@ -165,37 +165,37 @@ replace = '                else (void)0;'
 id = "14"
 name = "WALK: the direction drawn once"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Random walk draws a direction every update; drawn once it is random direction."
 find = '''
             f->ang_[j] = w[1];
-            psyrdk_sincos(w[1], &ns, &nc);'''
+            yrdk_sincos(w[1], &ns, &nc);'''
 replace = '''
-            psyrdk_sincos(f->ang_[j], &ns, &nc);'''
+            yrdk_sincos(f->ang_[j], &ns, &nc);'''
 
 [[mutant]]
 id = "15"
 name = "DIRECTION: the direction changes every update"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Random direction keeps a dot's own direction; a new one each update is a walk."
-find = '            psyrdk__move(f, j, u, f->cs_[2 * j + 1], f->cs_[2 * j], D, w);'
-replace = '            { int32_t a_, b_; psyrdk_sincos(f->ang_[j] ^ (u * 2654435761u), &a_, &b_); psyrdk__move(f, j, u, a_, b_, D, w); }'
+find = '            yrdk__move(f, j, u, f->cs_[2 * j + 1], f->cs_[2 * j], D, w);'
+replace = '            { int32_t a_, b_; yrdk_sincos(f->ang_[j] ^ (u * 2654435761u), &a_, &b_); yrdk__move(f, j, u, a_, b_, D, w); }'
 
 [[mutant]]
 id = "16"
 name = "WALK noise at twice the speed"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Noise dots move at the signal speed (Scase, Braddick and Raymond 1996)."
-find = '            psyrdk__move(f, j, u, ns, nc, D, w);'
-replace = '            psyrdk__move(f, j, u, ns, nc, 2 * D, w);'
+find = '            yrdk__move(f, j, u, ns, nc, D, w);'
+replace = '            yrdk__move(f, j, u, ns, nc, 2 * D, w);'
 
 [[mutant]]
 id = "17"
 name = "ONSET clock: dt from the frame count"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "A dropped frame must move dots by the time that passed, not by one frame."
 find = '        dt = t - f->set_t_[s];'
 replace = '        dt = ((int64_t)u - f->set_u_[s]) * 16666667;'
@@ -204,7 +204,7 @@ replace = '        dt = ((int64_t)u - f->set_u_[s]) * 16666667;'
 id = "18"
 name = "interleaved sets: dt from the last update of any set"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "A set moves by the time since its own last update (MN's three-frame jump)."
 find = '        dt = t - f->set_t_[s];'
 replace = '        dt = t - f->last.t;'
@@ -213,7 +213,7 @@ replace = '        dt = t - f->last.t;'
 id = "19"
 name = "sincos: the second quadrant's cosine sign"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "cos(a + 90 deg) = -sin a."
 find = '    case 1: *s_out = (int32_t)c; *c_out = (int32_t)-s; break;'
 replace = '    case 1: *s_out = (int32_t)c; *c_out = (int32_t)s; break;'
@@ -222,17 +222,17 @@ replace = '    case 1: *s_out = (int32_t)c; *c_out = (int32_t)s; break;'
 id = "20"
 name = "sincos without the residual term"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "The last 14 bits of the angle are 2.4e-5 rad: far above the 4e-9 bound."
-find = '    int64_t te = (int64_t)(((uint64_t)e * PSYRDK__PIH) >> 32);'
+find = '    int64_t te = (int64_t)(((uint64_t)e * YRDK__PIH) >> 32);'
 replace = '    int64_t te = 0 * e;'
 
 [[mutant]]
 id = "21"
 name = "signal direction counterclockwise"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
-why = "Direction turns +x toward +y, clockwise on the screen, as psy_gfx.h's ori."
+env = { YRDK_TEST_NO_GOLDEN = "1" }
+why = "Direction turns +x toward +y, clockwise on the screen, as ysp/gfx.h's ori."
 find = '    sig_angle = f->dir_angle_;'
 replace = '    sig_angle = 0u - f->dir_angle_;'
 
@@ -240,7 +240,7 @@ replace = '    sig_angle = 0u - f->dir_angle_;'
 id = "22"
 name = "Philox: k1 for k0 in the round"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Random123's round: hi1 ^ c1 ^ k0. The known answers."
 find = 'uint32_t n0 = (uint32_t)(p1 >> 32) ^ c1 ^ k0,'
 replace = 'uint32_t n0 = (uint32_t)(p1 >> 32) ^ c1 ^ k1,'
@@ -249,8 +249,8 @@ replace = 'uint32_t n0 = (uint32_t)(p1 >> 32) ^ c1 ^ k1,'
 id = "23"
 name = "output stride ignored"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
-why = "A strided write fills psygfx_inst records in place."
+env = { YRDK_TEST_NO_GOLDEN = "1" }
+why = "A strided write fills ygfx_inst records in place."
 find = '        size_t st = o->xy_stride ? o->xy_stride : 2 * sizeof(float);'
 replace = '        size_t st = 2 * sizeof(float);'
 
@@ -258,7 +258,7 @@ replace = '        size_t st = 2 * sizeof(float);'
 id = "24"
 name = "SAME: a coherence change ignored"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "A coherence bound to a channel must convert the dots at the boundary on the next update."
 find = '        if (f->same_sel_[s] != sel) {'
 replace = '        if (f->same_sel_[s] == UINT64_MAX) {'
@@ -267,7 +267,7 @@ replace = '        if (f->same_sel_[s] == UINT64_MAX) {'
 id = "25"
 name = "noise placement depends on the coherence"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "Frozen noise: a noise dot's draws are a function of (seed, stream, dot, update, slot) only."
 find = '        if (k == 0) { a = w0[2]; b = w0[3]; }'
 replace = '        if (k == 0) { a = w0[2] ^ (uint32_t)(f->coherence * 1000.0f); b = w0[3]; }'
@@ -277,8 +277,8 @@ id = "26"
 name = "placement retries from the wrong slots"
 test = "rdk"
 why = "The retries stay uniform, so no statistic can see it; only the golden digests (and the Python model) catch it."
-find = '            if (k & 1) psyrdk__words(f, dot, u, (uint32_t)((k + 1) / 2), w);'
-replace = '            if (k & 1) psyrdk__words(f, dot, u, (uint32_t)(k + 1), w);'
+find = '            if (k & 1) yrdk__words(f, dot, u, (uint32_t)((k + 1) / 2), w);'
+replace = '            if (k & 1) yrdk__words(f, dot, u, (uint32_t)(k + 1), w);'
 
 [[mutant]]
 id = "27"
@@ -292,7 +292,7 @@ replace = '        r = (r + 359) % K;'
 id = "28"
 name = "radix selection: one dot too few at the boundary"
 test = "rdk"
-env = { PSYRDK_TEST_NO_GOLDEN = "1" }
+env = { YRDK_TEST_NO_GOLDEN = "1" }
 why = "The count below the boundary bucket, off by one: the exact count."
 find = '        need -= below;'
 replace = '        need -= below + (digit == 5);'

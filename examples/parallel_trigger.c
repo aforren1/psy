@@ -1,11 +1,11 @@
-/* parallel_trigger.c - minimal psy_parallel demo / trigger sender
+/* parallel_trigger.c - minimal ysp_parallel demo / trigger sender
  *
- * psy_parallel.h needs its sibling psy_rt.h beside it; both are at the
- * repository root, so -I. / /I. finds the pair.
+ * ysp/parallel.h needs its sibling ysp/rt.h beside it; both are in
+ * include/ysp/, so -Iinclude / /Iinclude finds the pair.
  *
  * Build (from the repository root):
- *     cc -O2 -pthread -I. -o parallel_trigger examples/parallel_trigger.c   # Linux
- *     cl /O2 /I. examples\parallel_trigger.c                                # Windows (MSVC)
+ *     cc -O2 -pthread -Iinclude -o parallel_trigger examples/parallel_trigger.c   # Linux
+ *     cl /O2 /Iinclude examples\parallel_trigger.c                                # Windows (MSVC)
  * or:  cmake -B build && cmake --build build
  *
  * Run (Linux ppdev): load the ppdev driver and give yourself device access:
@@ -17,8 +17,8 @@
  *
  * Exit codes: 0 success, 1 no usable port (or a write failed).
  */
-#define PSY_PARALLEL_IMPLEMENTATION
-#include "psy_parallel.h"
+#define YSP_PARALLEL_IMPLEMENTATION
+#include "ysp/parallel.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,27 +48,27 @@ static void demo_sleep_ms(unsigned ms) {
 int main(int argc, char** argv) {
     unsigned long code = (argc > 1) ? strtoul(argv[1], NULL, 0) : 0x01;
 
-    psyp_port pp;
+    ypar_port pp;
     /* All defaults: ppdev "/dev/parport0" on Linux, inpout @ LPT1 on Windows.
      * For raw x86 port I/O instead (root):
-     *     psyp_desc desc = { .backend = PSYP_BACKEND_DIRECT, .base_addr = PSYP_LPT1 };
+     *     ypar_desc desc = { .backend = YPAR_BACKEND_DIRECT, .base_addr = YPAR_LPT1 };
      */
-    psyp_desc desc = {0};
-    if (!psyp_open(&pp, &desc)) {
-        fprintf(stderr, "psyp_open failed: %s\n", psyp_error(&pp));
+    ypar_desc desc = {0};
+    if (!ypar_open(&pp, &desc)) {
+        fprintf(stderr, "ypar_open failed: %s\n", ypar_error(&pp));
         return 1;
     }
 
-    /* async_policy is the psy_rt.h scheduling rung the trailing-edge worker
+    /* async_policy is the ysp/rt.h scheduling rung the trailing-edge worker
      * obtained. Record it next to any jitter numbers you measure: the same
      * histogram means different things at different rungs. */
     printf("port open (backend %d, base 0x%X, async policy %s)\n",
-           pp.backend, pp.base_addr, psyrt_policy_name(pp.async_policy));
+           pp.backend, pp.base_addr, yrt_policy_name(pp.async_policy));
 
     /* Send a 2 ms trigger pulse carrying `code`. */
-    if (!psyp_pulse(&pp, (uint8_t)code, 2000)) {
-        fprintf(stderr, "pulse failed: %s\n", psyp_error(&pp));
-        psyp_close(&pp);
+    if (!ypar_pulse(&pp, (uint8_t)code, 2000)) {
+        fprintf(stderr, "pulse failed: %s\n", ypar_error(&pp));
+        ypar_close(&pp);
         return 1;
     }
     printf("sent trigger 0x%02lX (2 ms blocking pulse)\n", code & 0xFF);
@@ -76,33 +76,33 @@ int main(int argc, char** argv) {
     /* Non-blocking pulse: returns immediately, a real-time worker thread
      * drops the line after the requested width. The onset is written here on
      * this thread, so it is not delayed by the worker waking up. */
-    if (!psyp_pulse_async(&pp, (uint8_t)code, 2000)) {
-        fprintf(stderr, "async pulse failed: %s\n", psyp_error(&pp));
+    if (!ypar_pulse_async(&pp, (uint8_t)code, 2000)) {
+        fprintf(stderr, "async pulse failed: %s\n", ypar_error(&pp));
     } else {
         printf("queued async trigger 0x%02lX (returned without blocking)\n",
                code & 0xFF);
-        /* Outlast the 2 ms width. psyp_close() stops the worker and flushes
+        /* Outlast the 2 ms width. ypar_close() stops the worker and flushes
          * any pending trailing edge AT ONCE, so closing (or exiting) while a
          * pulse is in flight would cut it short instead of honoring it. Real
          * experiment code spends this time on the next trial, which is the
          * point of the async pulse. */
         demo_sleep_ms(5);
         /* The worker cannot report a failed trailing-edge write through
-         * psyp_error(); it sets this sticky flag instead. */
+         * ypar_error(); it sets this sticky flag instead. */
         if (pp.async_write_failed)
             fprintf(stderr, "async trailing edge failed; lines may be held\n");
     }
 
     /* Read back the input lines. */
-    uint8_t status = psyp_read_status(&pp);
+    uint8_t status = ypar_read_status(&pp);
     printf("status = 0x%02X  busy=%d ack=%d paper=%d select=%d error=%d\n",
            status,
-           (status & PSYP_STATUS_BUSY)   ? 1 : 0,
-           (status & PSYP_STATUS_ACK)    ? 1 : 0,
-           (status & PSYP_STATUS_PAPER)  ? 1 : 0,
-           (status & PSYP_STATUS_SELECT) ? 1 : 0,
-           (status & PSYP_STATUS_ERROR)  ? 1 : 0);
+           (status & YPAR_STATUS_BUSY)   ? 1 : 0,
+           (status & YPAR_STATUS_ACK)    ? 1 : 0,
+           (status & YPAR_STATUS_PAPER)  ? 1 : 0,
+           (status & YPAR_STATUS_SELECT) ? 1 : 0,
+           (status & YPAR_STATUS_ERROR)  ? 1 : 0);
 
-    psyp_close(&pp);
+    ypar_close(&pp);
     return 0;
 }

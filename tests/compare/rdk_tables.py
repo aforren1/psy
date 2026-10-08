@@ -1,9 +1,9 @@
-"""The sine tables of psy_rdk.h, at 50 digits.
+"""The sine tables of ysp/rdk.h, at 50 digits.
 
     uv run --with mpmath python tests/compare/rdk_tables.py
 
-Prints the three C arrays the header holds as literals (psyrdk__sin_coarse,
-psyrdk__sin_fine, psyrdk__cos_fine) and the residual constant. Each entry is
+Prints the three C arrays the header holds as literals (yrdk__sin_coarse,
+yrdk__sin_fine, yrdk__cos_fine) and the residual constant. Each entry is
 floor(v * 2^30 + 1/2) of the exact value, so no platform's libm takes part.
 tests/compare/rdk_ref.py imports table() from here; the C test compares
 the literals with libm in double, which catches a copy error but is not
@@ -39,7 +39,7 @@ def emit(name, vals, per=8):
 
 if __name__ == "__main__":
     c, s, k, pih = table()
-    emit("psyrdk__sin_coarse", c)
-    emit("psyrdk__sin_fine", s)
-    emit("psyrdk__cos_fine", k)
-    print("#define PSYRDK__PIH %dull" % pih)
+    emit("yrdk__sin_coarse", c)
+    emit("yrdk__sin_fine", s)
+    emit("yrdk__cos_fine", k)
+    print("#define YRDK__PIH %dull" % pih)

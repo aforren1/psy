@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""psy.gp and AEPsych fitted to real human data: cross-validated model quality.
+"""ysp.aep and AEPsych fitted to real human data: cross-validated model quality.
 
 No acquisition is involved. The data are the contrast-sensitivity dataset of
 Letham et al. 2022, "Look-ahead acquisition functions for Bernoulli level set
@@ -11,12 +11,12 @@ not part of this repository.
 Every model is fitted to the same training trials and scored on the same
 held-out trials of a 5-fold split (fixed seed):
 
-- psy.gp, GP model: RBF ARD, probit, weak priors on (the default). One
-  psygp_fit() is capped at 40 objective evaluations, so the script repeats
+- ysp.aep, GP model: RBF ARD, probit, weak priors on (the default). One
+  yaep_fit() is capped at 40 objective evaluations, so the script repeats
   whole fits until one moves the log marginal likelihood by < 1e-3 nats (at
   most 30), and reports the rounds and the fraction of folds that converged.
-- psy.gp, GP model, no_hyper_prior (type-II maximum likelihood).
-- psy.gp, psychometric model: intensity_dim = 0 (contrast), a threshold GP and
+- ysp.aep, GP model, no_hyper_prior (type-II maximum likelihood).
+- ysp.aep, psychometric model: intensity_dim = 0 (contrast), a threshold GP and
   a log-slope GP over the other five dimensions, fitted the same way.
 - AEPsych GPClassificationModel at its defaults (fixed output scale 1,
   GreedyVarianceReduction inducing points, 100 of them), on the inputs
@@ -27,7 +27,7 @@ held-out trials of a 5-fold split (fixed seed):
 - Logistic regression on the raw inputs (standardized for the solve), fitted
   by Newton's method with a tiny ridge, so the GP gains have a floor.
 
-psy.gp is compiled with PSYGP_MAX_TRIALS = 512, so a training fold of about
+ysp.aep is compiled with YAEP_MAX_TRIALS = 512, so a training fold of about
 800 trials does not fit in one handle. Every model therefore trains on the
 same random 500-trial subset of its training fold (one subset per fold, fixed
 seed), and is tested on the whole held-out fold of about 200.
@@ -38,10 +38,10 @@ interval is the t interval over the 5 folds (t = 2.776 at 4 degrees of
 freedom). Fit time is wall time for the fit alone, one thread, on this
 machine.
 
-Usage (from the repository root, in a venv with psy-gp, numpy and aepsych):
+Usage (from the repository root, in a venv with ysp-aep, numpy and aepsych):
 
     python tests/compare/compare_gp_csfdata.py
-    python tests/compare/compare_gp_csfdata.py --models psy-gp,logreg --workers 1
+    python tests/compare/compare_gp_csfdata.py --models ysp-aep,logreg --workers 1
 
 Exit code: 0 when every fit succeeded, 1 when any raised, 2 on a bad argument.
 """
@@ -61,7 +61,7 @@ COLUMNS = ("contrast", "pedestal", "temporal_frequency", "spatial_frequency",
            "size", "eccentricity")
 LO = np.array([-1.5, -1.5, 0.0, 0.5, 1.0, 0.0])
 HI = np.array([0.0, 0.0, 20.0, 7.0, 10.0, 10.0])
-MODELS = ("psy-gp", "psy-gp-noprior", "psy-psychometric", "aepsych",
+MODELS = ("ysp-aep", "ysp-aep-noprior", "ysp-psychometric", "aepsych",
           "aepsych-kmeans", "aepsych-scale", "logreg")
 T_975_4 = 2.7764451051977987
 N_TRAIN = 500
@@ -72,7 +72,7 @@ MAX_FIT_ROUNDS = 30
 def cache_dir():
     base = (os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
             or os.path.join(os.path.expanduser("~"), ".cache"))
-    return os.path.join(base, "psy", "compare")
+    return os.path.join(base, "ysp", "compare")
 
 
 def load_data(path=None):
@@ -103,8 +103,8 @@ def folds(n, k, seed):
 # --- the models -----------------------------------------------------------------
 # Each returns (p_test, lengthscales in raw units or None, notes dict).
 
-def fit_psy(Xtr, ytr, Xte, variant):
-    import psy.gp as pg
+def fit_ysp(Xtr, ytr, Xte, variant):
+    import ysp.aep as pg
     desc = dict(lo=list(LO), hi=list(HI), intensity_dim=0, target_p=0.75,
                 acq="lse", n_candidates=64, max_trials=MAX_TRIALS,
                 stop_trials=MAX_TRIALS, fit=True, fit_every=0,
@@ -233,12 +233,12 @@ def job(model, fold, args):
         rng = np.random.default_rng([args.seed, fold])
         sub = np.sort(rng.choice(train, size=min(args.n_train, len(train)), replace=False))
         Xtr, ytr, Xte, yte = X[sub], y[sub], X[test], y[test]
-        if model == "psy-gp":
-            p, hyp, notes = fit_psy(Xtr, ytr, Xte, "prior")
-        elif model == "psy-gp-noprior":
-            p, hyp, notes = fit_psy(Xtr, ytr, Xte, "noprior")
-        elif model == "psy-psychometric":
-            p, hyp, notes = fit_psy(Xtr, ytr, Xte, "psychometric")
+        if model == "ysp-aep":
+            p, hyp, notes = fit_ysp(Xtr, ytr, Xte, "prior")
+        elif model == "ysp-aep-noprior":
+            p, hyp, notes = fit_ysp(Xtr, ytr, Xte, "noprior")
+        elif model == "ysp-psychometric":
+            p, hyp, notes = fit_ysp(Xtr, ytr, Xte, "psychometric")
         elif model == "aepsych":
             p, hyp, notes = fit_aepsych(Xtr, ytr, Xte, "default", args.seed + fold)
         elif model == "aepsych-kmeans":
@@ -277,7 +277,7 @@ def main():
         if m not in MODELS:
             ap.error(f"unknown model {m}; choose from {MODELS}")
     if args.n_train > MAX_TRIALS:
-        ap.error(f"--n-train must be at most {MAX_TRIALS} (psy.gp's PSYGP_MAX_TRIALS)")
+        ap.error(f"--n-train must be at most {MAX_TRIALS} (ysp.aep's YAEP_MAX_TRIALS)")
     X, y, path = load_data(args.data)
     args.data = path
     # Importing aepsych writes ./logs/aepsych_server.log; keep it out of the
@@ -290,12 +290,12 @@ def main():
     print(f"data: {path}, {len(y)} trials, {int(y.sum())} yes; source {DATA_URL}")
     print(f"folds: {args.folds}, seed {args.seed}; every model trains on the same "
           f"random {args.n_train}-trial subset of each training fold "
-          f"(psy.gp PSYGP_MAX_TRIALS = {MAX_TRIALS}) and is tested on the whole "
+          f"(ysp.aep YAEP_MAX_TRIALS = {MAX_TRIALS}) and is tested on the whole "
           f"held-out fold")
     try:
         import importlib.metadata as md
         print("versions:", ", ".join(f"{k} {md.version(k)}" for k in
-                                     ("psy-gp", "aepsych", "torch", "gpytorch")))
+                                     ("ysp-aep", "aepsych", "torch", "gpytorch")))
     except Exception:
         pass
     sys.stdout.flush()

@@ -1,9 +1,9 @@
-/* quest_bench.c - time psyq_next() and psyq_update() on this machine.
+/* quest_bench.c - time yqst_next() and yqst_update() on this machine.
  *
- * psy_quest.h's manual states operation counts, not times: one psyq_next()
- * under PSYQ_SELECT_ENTROPY sweeps the whole likelihood table, S*P*K cells,
+ * ysp/quest.h's manual states operation counts, not times: one yqst_next()
+ * under YQST_SELECT_ENTROPY sweeps the whole likelihood table, S*P*K cells,
  * with a multiply-add per cell and a logarithm per stimulus and outcome; one
- * psyq_update() reads one outcome's row, P cells, twice. What those counts
+ * yqst_update() reads one outcome's row, P cells, twice. What those counts
  * cost depends on the machine, the compiler and whether the table fits in
  * cache, so this program measures them and prints the counts beside the
  * times. The numbers this prints are the numbers to put in a log, not the
@@ -12,7 +12,7 @@
  * Two yardsticks come with them. The memory floor is the same dot product
  * over the same bytes with nothing else in it, so the gap between it and a
  * selection is what the selection costs beyond moving the table. The frame
- * budget is 16 ms: a psyq_next() plus a psyq_update() that fit in one display
+ * budget is 16 ms: a yqst_next() plus a yqst_update() that fit in one display
  * frame can run between trials on the experiment's own thread, with no
  * pacing and no worker.
  *
@@ -23,25 +23,25 @@
  * without the nuisance flags, the full grid with them, the no-table path,
  * and a random 8-stimulus subset per trial.
  *
- * psy_quest.h itself includes no clock: it is pure computation and does no
- * OS calls. The clock here is psy_rt.h's, which is what an experiment would
- * bracket the call with anyway. PSYRT_NO_THREADS drops psy_rt.h's deadline
+ * ysp/quest.h itself includes no clock: it is pure computation and does no
+ * OS calls. The clock here is ysp/rt.h's, which is what an experiment would
+ * bracket the call with anyway. YRT_NO_THREADS drops ysp/rt.h's deadline
  * worker, so nothing but the clock is compiled in and no -pthread is needed.
  *
  * Build (from the repository root):
- *     cc -O2 -I. -o quest_bench examples/quest_bench.c -lm
- *     cl /O2 /I. examples\quest_bench.c
+ *     cc -O2 -Iinclude -o quest_bench examples/quest_bench.c -lm
+ *     cl /O2 /Iinclude examples\quest_bench.c
  *
  * Usage: quest_bench [trials]
  *
  * Exit code: 0 always.
  */
-#define PSYRT_NO_THREADS
-#define PSY_RT_IMPLEMENTATION
-#include "psy_rt.h"
+#define YRT_NO_THREADS
+#define YSP_RT_IMPLEMENTATION
+#include "ysp/rt.h"
 
-#define PSY_QUEST_IMPLEMENTATION
-#include "psy_quest.h"
+#define YSP_QUEST_IMPLEMENTATION
+#include "ysp/quest.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,19 +76,19 @@ static double next_u(void) {
 
 static double bench_rng(void* ctx) { (void)ctx; return next_u(); }
 
-static void base_desc(psyq_desc* d, bool nuisance, bool no_table, int subset, bool psi) {
+static void base_desc(yqst_desc* d, bool nuisance, bool no_table, int subset, bool psi) {
     memset(d, 0, sizeof(*d));
-    d->pf = PSYQ_PF_GUMBEL;
-    d->stim[0] = psyq_values(g_stim, NS);
+    d->pf = YQST_PF_GUMBEL;
+    d->stim[0] = yqst_values(g_stim, NS);
     d->n_stim = 1;
-    d->param[0] = psyq_values(g_alpha, NA);
-    d->param[1] = psyq_values(g_beta, NB);
+    d->param[0] = yqst_values(g_alpha, NA);
+    d->param[1] = yqst_values(g_beta, NB);
     if (psi) {
-        d->param[2] = psyq_fixed(0.5);
-        d->param[3] = psyq_fixed(0.02);
+        d->param[2] = yqst_fixed(0.5);
+        d->param[3] = yqst_fixed(0.02);
     } else {
-        d->param[2] = psyq_values(g_guess, NG);
-        d->param[3] = psyq_values(g_lapse, NL);
+        d->param[2] = yqst_values(g_guess, NG);
+        d->param[3] = yqst_values(g_lapse, NL);
     }
     d->param[2].nuisance = nuisance;
     d->param[3].nuisance = nuisance;
@@ -101,9 +101,9 @@ static void base_desc(psyq_desc* d, bool nuisance, bool no_table, int subset, bo
     }
 }
 
-static psyq_quest g_q;
+static yqst_quest g_q;
 
-/* The floor. psyq_next() under PSYQ_SELECT_ENTROPY is S*K dot products of a
+/* The floor. yqst_next() under YQST_SELECT_ENTROPY is S*K dot products of a
  * contiguous float row against the posterior, so the fastest that pattern can
  * run on this machine, with nothing but the loads and the multiply-adds in
  * it, is what the table sweeps should be compared against. Same shape as the
@@ -140,11 +140,11 @@ static void run_floor(int trials) {
          * computation every time and an optimizer is free to hoist it out of
          * the loop, which measures nothing. */
         post[t % P] = 1.0 / (double)P + (double)t * 1e-9;
-        t0 = psyrt_now_ns();
+        t0 = yrt_now_ns();
         for (s = 0; s < NS; s++)
             for (k = 0; k < 2; k++)
                 sink += floor_dot(post, tab + ((size_t)s * 2 + (size_t)k) * (size_t)P, P);
-        dt = psyrt_now_ns() - t0;
+        dt = yrt_now_ns() - t0;
         if (dt < best) best = dt;
     }
     printf("%-22s pass: %8.3f ms best     %10llu cells, %6.2f ns/cell  (sink %.1f)\n",
@@ -175,7 +175,7 @@ static uint64_t g_upd_ns[MAX_TRIALS];
 
 static void run_one(const char* name, bool nuisance, bool no_table, int subset,
                     int trials, bool psi) {
-    psyq_desc d;
+    yqst_desc d;
     double truth[4];
     long long cells, sweep;
     int t;
@@ -183,36 +183,36 @@ static void run_one(const char* name, bool nuisance, bool no_table, int subset,
     double frame, per_cell;
 
     base_desc(&d, nuisance, no_table, subset, psi);
-    if (!psyq_open(&g_q, &d)) { fprintf(stderr, "%s: %s\n", name, psyq_error(&g_q)); return; }
+    if (!yqst_open(&g_q, &d)) { fprintf(stderr, "%s: %s\n", name, yqst_error(&g_q)); return; }
     truth[0] = -1.7; truth[1] = 3.1; truth[2] = 0.5; truth[3] = 0.02;
 
     for (t = 0; t < trials; t++) {
         uint64_t t0, t1, t2;
         int s, k;
-        t0 = psyrt_now_ns();
-        s = psyq_next(&g_q);
-        t1 = psyrt_now_ns();
-        k = psyq_simulate(&g_q, s, truth, next_u());
-        t2 = psyrt_now_ns();
-        psyq_update(&g_q, s, k);
+        t0 = yrt_now_ns();
+        s = yqst_next(&g_q);
+        t1 = yrt_now_ns();
+        k = yqst_simulate(&g_q, s, truth, next_u());
+        t2 = yrt_now_ns();
+        yqst_update(&g_q, s, k);
         g_next_ns[t] = t1 - t0;
-        g_upd_ns[t] = psyrt_now_ns() - t2;
+        g_upd_ns[t] = yrt_now_ns() - t2;
         sum_next += g_next_ns[t];
         sum_upd += g_upd_ns[t];
     }
     sort_u64(g_next_ns, trials);
     sort_u64(g_upd_ns, trials);
 
-    sweep = (subset > 0 ? subset : psyq_n_stim(&g_q));
-    cells = sweep * (long long)psyq_n_param(&g_q) * psyq_n_outcomes(&g_q);
+    sweep = (subset > 0 ? subset : yqst_n_stim(&g_q));
+    cells = sweep * (long long)yqst_n_param(&g_q) * yqst_n_outcomes(&g_q);
     printf("%-22s next: %8.3f ms median, %8.3f ms mean   %10lld cells, %6.2f ns/cell\n",
            name,
            (double)g_next_ns[trials / 2] / 1e6, (double)sum_next / (double)trials / 1e6,
            cells, (double)g_next_ns[trials / 2] / (double)cells);
     printf("%-22s upd:  %8.3f us median, %8.3f us mean   %10d cells, %6.2f ns/cell\n",
            "", (double)g_upd_ns[trials / 2] / 1e3, (double)sum_upd / (double)trials / 1e3,
-           psyq_n_param(&g_q),
-           (double)g_upd_ns[trials / 2] / (double)psyq_n_param(&g_q));
+           yqst_n_param(&g_q),
+           (double)g_upd_ns[trials / 2] / (double)yqst_n_param(&g_q));
 
     /* The frame budget: one next plus one update, against 16 ms. */
     frame = (double)(g_next_ns[trials / 2] + g_upd_ns[trials / 2]);
@@ -222,25 +222,25 @@ static void run_one(const char* name, bool nuisance, bool no_table, int subset,
            "", frame / 1e6, (frame <= FRAME_NS) ? "FITS  " : "OVER  ",
            (frame > 0.0) ? FRAME_NS / frame : 0.0,
            (per_cell > 0.0) ? FRAME_NS / per_cell / 1e6 : 0.0);
-    psyq_close(&g_q);
+    yqst_close(&g_q);
 }
 
 int main(int argc, char** argv) {
     int trials = (argc > 1) ? atoi(argv[1]) : 40;
-    psyq_desc d;
-    psyrt_clock_info clk;
+    yqst_desc d;
+    yrt_clock_info clk;
 
     if (trials < 3) trials = 3;
     if (trials > MAX_TRIALS) trials = MAX_TRIALS;
     build_axes();
-    psyrt_get_clock_info(&clk);
+    yrt_get_clock_info(&clk);
 
     base_desc(&d, true, false, 0, false);
     printf("quest_bench: Psi-marginal, %d stimuli x (%d x %d x %d x %d) parameters x 2 outcomes\n",
            NS, NA, NB, NG, NL);
-    printf("             %d parameter points, %lld table cells, psyq_memory_size = %.2f MB\n",
+    printf("             %d parameter points, %lld table cells, yqst_memory_size = %.2f MB\n",
            NA * NB * NG * NL, (long long)NS * NA * NB * NG * NL * 2,
-           (double)psyq_memory_size(&d) / (1024.0 * 1024.0));
+           (double)yqst_memory_size(&d) / (1024.0 * 1024.0));
     printf("             %d trials per configuration, clock resolution %llu ns\n\n",
            trials, (unsigned long long)clk.resolution_ns);
     printf("Counts are what the manual states: one next() sweeps S*P*K table cells,\n"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""psy.gp beside AEPsych on the audiometric benchmark of Owen et al. 2021.
+"""ysp.aep beside AEPsych on the audiometric benchmark of Owen et al. 2021.
 
-The protocol of examples/gp_audiometric.c, run through the Python binding and
+The protocol of examples/aep_audiometric.c, run through the Python binding and
 through AEPsych's server-free API in the same process tree, on one response
 stream:
 
@@ -12,11 +12,11 @@ stream:
   [-20, 120] dB HL.
 - The session: 5 Sobol trials, then 145 adaptive ones, target p = 0.75.
   Both libraries get the SAME 5 init points (AEPsych's SobolGenerator with the
-  replication's seed, which psy.gp is fed through update()) and the SAME
+  replication's seed, which ysp.aep is fed through update()) and the SAME
   uniform variate on every trial, drawn once per replication from a seeded
   numpy Generator: the response is 1 when u >= 1 - p. So the two runs differ
   only in where the adaptive trials go and in what the model makes of them.
-- psy.gp: RBF kernel, probit Bernoulli, candidates on an 11 x 21 grid
+- ysp.aep: RBF kernel, probit Bernoulli, candidates on an 11 x 21 grid
   (M = 231, the C benchmark's), hyperparameters fitted every 20 trials.
 - AEPsych: GPClassificationModel with its defaults (variational GP, an RBF
   kernel with a lognormal lengthscale prior and its output scale fixed at 1
@@ -31,30 +31,30 @@ stream:
   threshold found by bracketing along intensity per frequency column (the
   first bracketing pair, linearly interpolated, identically for truth and
   model), over the columns where both cross.
-- Wall time per trial: next + update for psy.gp; gen (which includes the
+- Wall time per trial: next + update for ysp.aep; gen (which includes the
   model fit) + add_data for AEPsych. The metric grid is not charged.
 
 Replications run in worker processes, one job per (library, method,
 replication), each pinned to one torch thread so the per-trial times are
 single-core numbers and the jobs do not fight over cores.
 
-Usage (from the repository root, in a venv with psy-gp, numpy, scipy and
+Usage (from the repository root, in a venv with ysp-aep, numpy, scipy and
 aepsych installed):
 
     python tests/compare/compare_gp_aepsych.py                 # 10 reps, both
-    python tests/compare/compare_gp_aepsych.py --reps 3 --libs psy
+    python tests/compare/compare_gp_aepsych.py --reps 3 --libs ysp
     python tests/compare/compare_gp_aepsych.py --csv curves.csv --workers 8
-    python tests/compare/compare_gp_aepsych.py --same-data sobol,psy-lse
+    python tests/compare/compare_gp_aepsych.py --same-data sobol,ysp-lse
 
 --same-data takes the acquisition out of the comparison: each replication is
-one fixed trial sequence (150 Sobol points, or the trials psy.gp LSE with
+one fixed trial sequence (150 Sobol points, or the trials ysp.aep LSE with
 refine_steps = 2 chose), both models are fitted from scratch to its first 25,
 50, 100 and 150 trials, and the table compares them with the truth and with
 each other, with MAE(p) split into the transition band (true p in 0.05..0.95)
 and outside it, and the fitted hyperparameters of both.
 
 Not a CI test: AEPsych pulls PyTorch. The output table is what goes into
-psy_gp.h's STATUS block.
+ysp/aep.h's STATUS block.
 """
 import argparse
 import math
@@ -67,7 +67,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.special import ndtr
 
-# --- the test field (examples/gp_audiometric.c) -----------------------------
+# --- the test field (examples/aep_audiometric.c) -----------------------------
 
 AUDIO_F = np.array([0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0])
 PHENO = {
@@ -158,7 +158,7 @@ def spline_selfcheck(field):
 
 
 def respond(p, u):
-    """psygp_simulate_outcome([1 - p, p], u), shared by both libraries."""
+    """yaep_simulate_outcome([1 - p, p], u), shared by both libraries."""
     return 0 if u < 1.0 - p else 1
 
 
@@ -171,7 +171,7 @@ def stream(seed, rep, n_trials):
 
 def sobol_init(rep):
     """AEPsych's own Sobol init points on the unit square, or SciPy's when
-    AEPsych is not installed (then the psy.gp half cannot be paired anyway)."""
+    AEPsych is not installed (then the ysp.aep half cannot be paired anyway)."""
     try:
         import torch
         from aepsych.generators import SobolGenerator
@@ -192,8 +192,8 @@ def to_box(unit):
 
 # --- the two runners ------------------------------------------------------------
 
-def run_psy(method, rep, args):
-    import psy.gp as pg
+def run_ysp(method, rep, args):
+    import ysp.aep as pg
     field = Field(args.pheno, args.beta)
     u = stream(args.seed, rep, args.trials)
     init, _ = sobol_init(rep)
@@ -298,7 +298,7 @@ def run_aepsych(method, rep, args):
 # per replication, and both models fitted from scratch to exactly its first n
 # trials at each mark.
 
-SAME_SOURCES = ("sobol", "psy-lse")
+SAME_SOURCES = ("sobol", "ysp-lse")
 
 
 def same_sequence(source, rep, args):
@@ -318,9 +318,9 @@ def same_sequence(source, rep, args):
         xs = to_box(unit)
         ys = [respond(float(field.p(x[0], x[1])), u[t]) for t, x in enumerate(xs)]
         return np.asarray(xs), np.asarray(ys, dtype=float)
-    # psy-lse: the trials psy.gp LSE with refine_steps = 2 chose in the
+    # ysp-lse: the trials ysp.aep LSE with refine_steps = 2 chose in the
     # adaptive protocol, replayed as they were answered.
-    import psy.gp as pg
+    import ysp.aep as pg
     init, _ = sobol_init(rep)
     g = pg.GP(lo=list(LO), hi=list(HI), intensity_dim=1, acq="lse",
               target_p=TARGET_P, grid=list(args.grid), n_init=N_INIT, fit=True,
@@ -337,9 +337,9 @@ def same_sequence(source, rep, args):
     return np.array([r["x"] for r in h]), np.array([r["y"] for r in h])
 
 
-def fit_psy(xs, ys, args):
-    """psy.gp fitted once from its defaults to these trials, as AEPsych is."""
-    import psy.gp as pg
+def fit_ysp(xs, ys, args):
+    """ysp.aep fitted once from its defaults to these trials, as AEPsych is."""
+    import ysp.aep as pg
     n = len(ys)
     g = pg.GP(lo=list(LO), hi=list(HI), intensity_dim=1, target_p=TARGET_P,
               grid=list(args.grid), n_init=N_INIT, fit=True, fit_every=0,
@@ -417,7 +417,7 @@ def compare_fields(field, pa, pb):
     band = (field.truth_p >= 0.05) & (field.truth_p <= 0.95)
     out = {}
     curves = {}
-    for tag, p in (("psy", pa), ("aep", pb)):
+    for tag, p in (("ysp", pa), ("aep", pb)):
         p = np.asarray(p).reshape(NGRID, NGRID)
         err = np.abs(p - field.truth_p)
         out[tag + "_p"] = float(err.mean())
@@ -426,7 +426,7 @@ def compare_fields(field, pa, pb):
         out[tag + "_thr"] = field.score(p)[1]
         curves[tag] = [column_threshold(p[i], field.xi) for i in range(NGRID)]
     out["p_diff"] = float(np.mean(np.abs(np.asarray(pa) - np.asarray(pb))))
-    d = [abs(a - b) for a, b in zip(curves["psy"], curves["aep"])
+    d = [abs(a - b) for a, b in zip(curves["ysp"], curves["aep"])
          if a is not None and b is not None]
     out["thr_diff"] = float(np.mean(d)) if d else float("nan")
     return out
@@ -441,7 +441,7 @@ def same_job(source, rep, args):
         for n in MARKS:
             if n > len(ys):
                 continue
-            pa, ha = fit_psy(xs[:n], ys[:n], args)
+            pa, ha = fit_ysp(xs[:n], ys[:n], args)
             pb, hb = fit_aepsych(xs[:n], ys[:n], rep, args)
             rows.append((n, compare_fields(field, pa, pb), ha, hb))
         return source, rep, rows, None, time.perf_counter() - t0
@@ -455,7 +455,7 @@ def same_data_main(args):
     for src in sources:
         if src not in SAME_SOURCES:
             sys.exit("unknown --same-data source %s; choose from %s" % (src, SAME_SOURCES))
-    print("same-data mode: sources %s, %d replications, fits at %s; psy.gp fitted "
+    print("same-data mode: sources %s, %d replications, fits at %s; ysp.aep fitted "
           "once from its defaults (fit(), grid %dx%d), AEPsych "
           "GPClassificationModel(dim=2) on the unit square, output scale %s"
           % (sources, args.reps, [m for m in MARKS if m <= args.trials],
@@ -484,20 +484,20 @@ def same_data_main(args):
         for r in range(args.reps):
             for row in results.get((src, r), []):
                 by_n.setdefault(row[0], []).append(row)
-        print("   n  MAE(p) psy      MAE(p) aep      |p psy-aep|     "
-              "band psy        band aep        outside psy     outside aep")
+        print("   n  MAE(p) ysp      MAE(p) aep      |p ysp-aep|     "
+              "band ysp        band aep        outside ysp     outside aep")
         for n in sorted(by_n):
             c = [row[1] for row in by_n[n]]
             print("%4d  " % n + "  ".join(cell([x[k] for x in c]) for k in
-                  ("psy_p", "aep_p", "p_diff", "psy_p_band", "aep_p_band",
-                   "psy_p_out", "aep_p_out")))
-        print("   n  thr psy (dB)   thr aep (dB)   |thr psy-aep| (dB)")
+                  ("ysp_p", "aep_p", "p_diff", "ysp_p_band", "aep_p_band",
+                   "ysp_p_out", "aep_p_out")))
+        print("   n  thr ysp (dB)   thr aep (dB)   |thr ysp-aep| (dB)")
         for n in sorted(by_n):
             c = [row[1] for row in by_n[n]]
             print("%4d  " % n + "   ".join(cell([x[k] for x in c], "%5.2f+-%4.2f") for k in
-                  ("psy_thr", "aep_thr", "thr_diff")))
-        print("   n  ls freq (log2 kHz) psy/aep   ls intensity (dB) psy/aep   "
-              "outputscale psy/aep   mean psy/aep   aep inducing points")
+                  ("ysp_thr", "aep_thr", "thr_diff")))
+        print("   n  ls freq (log2 kHz) ysp/aep   ls intensity (dB) ysp/aep   "
+              "outputscale ysp/aep   mean ysp/aep   aep inducing points")
         for n in sorted(by_n):
             rs = by_n[n]
             f = lambda i, k: float(np.mean([row[i][k] for row in rs]))
@@ -518,7 +518,7 @@ def same_data_main(args):
 def job(lib, method, rep, args):
     t0 = time.perf_counter()
     try:
-        rows, extra = (run_psy if lib == "psy" else run_aepsych)(method, rep, args)
+        rows, extra = (run_ysp if lib == "ysp" else run_aepsych)(method, rep, args)
         err = None
     except Exception as e:  # report and keep the other jobs
         import traceback
@@ -540,17 +540,17 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--reps", type=int, default=10)
     ap.add_argument("--methods", default=",".join(METHODS))
-    ap.add_argument("--libs", default="psy,aepsych")
+    ap.add_argument("--libs", default="ysp,aepsych")
     ap.add_argument("--trials", type=int, default=150)
     ap.add_argument("--every", type=int, default=5, help="score every this many trials")
     ap.add_argument("--fit-every", type=int, default=20, dest="fit_every")
     ap.add_argument("--refine", type=int, default=0,
-                    help="psy.gp refine_steps: golden-section rounds off the grid (0 = off)")
+                    help="ysp.aep refine_steps: golden-section rounds off the grid (0 = off)")
     ap.add_argument("--model", default="gp", choices=("gp", "psychometric"),
-                    help="psy.gp desc.model: one GP over the box, or the threshold "
-                         "and log-slope GPs over frequency (psy_gp.h >= 0.3.0)")
+                    help="ysp.aep desc.model: one GP over the box, or the threshold "
+                         "and log-slope GPs over frequency (ysp/aep.h >= 0.3.0)")
     ap.add_argument("--grid", default="11x21", type=parse_grid,
-                    help="psy.gp candidate grid, frequency x intensity (default 11x21, M = 231)")
+                    help="ysp.aep candidate grid, frequency x intensity (default 11x21, M = 231)")
     ap.add_argument("--pheno", default="metabolic", choices=sorted(PHENO))
     ap.add_argument("--beta", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=20210419)
@@ -587,7 +587,7 @@ def main():
         try:
             import aepsych  # noqa: F401
         except Exception as e:
-            print(f"AEPsych did not import ({e!r}); running psy.gp only", file=sys.stderr)
+            print(f"AEPsych did not import ({e!r}); running ysp.aep only", file=sys.stderr)
             libs = [l for l in libs if l != "aepsych"]
     if args.same_data:
         return same_data_main(args)
@@ -596,7 +596,7 @@ def main():
     print("compare_gp_aepsych: Owen et al. 2021 audiometric benchmark")
     print(f"observer: {args.pheno}, beta = {args.beta} dB; {args.trials} trials "
           f"({N_INIT} Sobol from {init_src}, shared); target p = {TARGET_P}")
-    print(f"psy.gp candidates: {args.grid[0]} x {args.grid[1]} grid "
+    print(f"ysp.aep candidates: {args.grid[0]} x {args.grid[1]} grid "
           f"(M = {args.grid[0] * args.grid[1]}), refine_steps {args.refine}, "
           f"model {args.model}; "
           f"hyperparameters fitted every "
@@ -605,7 +605,7 @@ def main():
           f"{args.workers} worker processes, one thread each; seed {args.seed}")
     try:
         import importlib.metadata as md
-        vers = {k: md.version(k) for k in ("psy-gp", "aepsych", "torch", "botorch", "gpytorch")
+        vers = {k: md.version(k) for k in ("ysp-aep", "aepsych", "torch", "botorch", "gpytorch")
                 if _has_dist(md, k)}
         print("versions:", ", ".join(f"{k} {v}" for k, v in vers.items()))
     except Exception:
@@ -657,23 +657,23 @@ def main():
     fails = [(k, e) for k, (_, _, e) in results.items() if e]
     for k, e in fails:
         print(f"failed: {k}: {e}")
-    if "psy" in libs:
-        nums = sum(results[k][1].get("numeric", 0) for k in results if k[0] == "psy")
-        lms = [results[k][1]["log_marginal"] for k in results if k[0] == "psy" and results[k][1]]
-        print(f"psy.gp: PSYGP_ERR_NUMERIC {nums} times; mean final log marginal "
+    if "ysp" in libs:
+        nums = sum(results[k][1].get("numeric", 0) for k in results if k[0] == "ysp")
+        lms = [results[k][1]["log_marginal"] for k in results if k[0] == "ysp" and results[k][1]]
+        print(f"ysp.aep: YAEP_ERR_NUMERIC {nums} times; mean final log marginal "
               f"{np.mean(lms):.1f}")
         # The fitted hyperparameters at the end of each run, in the box's own
         # units (dB for intensity, log2 kHz for frequency), so they can be put
         # beside another model's without guessing the scaling.
         for m in methods:
             hs = [results[k][1]["hyper"] for k in sorted(results)
-                  if k[0] == "psy" and k[1] == m and results[k][1]]
+                  if k[0] == "ysp" and k[1] == m and results[k][1]]
             if not hs:
                 continue
             ls = np.array([h["lengthscale"][:2] for h in hs])
             os_ = np.array([h["outputscale"] for h in hs])
             mn = np.array([h["mean"] for h in hs])
-            print(f"psy.gp {m}: final lengthscale freq {ls[:, 0].mean():.3f} "
+            print(f"ysp.aep {m}: final lengthscale freq {ls[:, 0].mean():.3f} "
                   f"[{ls[:, 0].min():.3f}, {ls[:, 0].max():.3f}] log2 kHz, "
                   f"intensity {ls[:, 1].mean():.2f} [{ls[:, 1].min():.2f}, "
                   f"{ls[:, 1].max():.2f}] dB, outputscale {os_.mean():.3f} "
@@ -684,7 +684,7 @@ def main():
                 lg = np.array([h["lengthscale_g"][0] for h in hs])
                 og = np.array([h["outputscale_g"] for h in hs])
                 mg = np.array([h["mean_g"] for h in hs])
-                print(f"psy.gp {m}: log-slope GP lengthscale_g freq {lg.mean():.3f} "
+                print(f"ysp.aep {m}: log-slope GP lengthscale_g freq {lg.mean():.3f} "
                       f"[{lg.min():.3f}, {lg.max():.3f}] log2 kHz, outputscale_g "
                       f"{og.mean():.3f} [{og.min():.3f}, {og.max():.3f}], mean_g "
                       f"{mg.mean():.3f} [{mg.min():.3f}, {mg.max():.3f}] "

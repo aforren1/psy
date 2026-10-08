@@ -2,16 +2,16 @@
  * rotation of the other, bit for bit, because HarfBuzz may start a contour
  * whose first point is off the curve at another on-curve point. Zero-length
  * segments and contours of one repeated point are skipped: HarfBuzz passes
- * them on, psy_outline.h drops them, and neither has an area. */
+ * them on, ysp/outline.h drops them, and neither has an area. */
 #define SEGCMP_MAX 65536
 
 static double segcmp_a[6 * SEGCMP_MAX], segcmp_b[6 * SEGCMP_MAX];
 
 /* The contour's segments that have a length, into s; -1 if more than
  * SEGCMP_MAX. */
-static int segs_of(const psyol_path* p, int k, double* s) {
-    int f = (int)(p->contours[k] & ~PSYOL_OPEN), l, i, j, n = 0;
-    l = (k + 1 < p->n_contours ? (int)(p->contours[k + 1] & ~PSYOL_OPEN) : p->n_pts) - 1;
+static int segs_of(const yol_path* p, int k, double* s) {
+    int f = (int)(p->contours[k] & ~YOL_OPEN), l, i, j, n = 0;
+    l = (k + 1 < p->n_contours ? (int)(p->contours[k + 1] & ~YOL_OPEN) : p->n_pts) - 1;
     for (i = f; i + 2 <= l; i += 2) {
         const double* q = p->pts + 2 * i;
         if (q[0] == q[2] && q[2] == q[4] && q[1] == q[3] && q[3] == q[5]) continue;
@@ -25,7 +25,7 @@ static int segs_of(const psyol_path* p, int k, double* s) {
 /* 1 if equal. *dmax grows to the largest, over unequal contours, of the
  * smallest difference over rotations; HUGE_VAL if the contour or segment
  * counts differ. */
-static int seg_same(const psyol_path* a, const psyol_path* b, double* dmax) {
+static int seg_same(const yol_path* a, const yol_path* b, double* dmax) {
     int ka = 0, kb = 0, ok = 1;
     for (;;) {
         int na = 0, nb = 0, r, i, j, found = 0;

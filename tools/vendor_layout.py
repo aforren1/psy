@@ -207,7 +207,7 @@ def main():
             want = {l.strip(): None for l in f if l.strip() and not l.startswith("#")}
     else:
         want = read_manifest()
-    work = tempfile.mkdtemp(prefix="psy_vendor_")
+    work = tempfile.mkdtemp(prefix="ysp_vendor_")
     try:
         build_tree(sorted(want), a.cache, not a.no_patch, work)
         got = {p: open(os.path.join(work, p), "rb").read() for p in want}

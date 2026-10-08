@@ -10,7 +10,7 @@ PDF backend writes each glyph id as an Identity-H CID with CIDToGIDMap
 /Identity and positions the glyphs with text-space moves and the font's /W
 widths; a small content-stream interpreter reads every glyph id and position
 back. Positions are written in font units, y down, relative to the first glyph
-in visual order (by x, then y, then id), as psy_layout_test.c compares them.
+in visual order (by x, then y, then id), as layout_test.c compares them.
 Each item records the SHA-256 of its font file: a different font version has
 different glyph ids, and the test skips it. Edge trims the space of adjacent
 CJK punctuation by default, so the page sets text-spacing-trim: space-all.

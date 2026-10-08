@@ -1,8 +1,8 @@
 # third_party: the vendored layout stack
 
-Skribidi and its dependencies, for `pack/psy_layout` (docs/psy_layout.md).
-Built only with the CMake option `PSY_BUILD_LAYOUT` (default OFF); no
-`psy_*.h` header uses anything here. Decision record:
+Skribidi and its dependencies, for `pack/layout` (docs/layout.md).
+Built only with the CMake option `YSP_BUILD_LAYOUT` (default OFF); no
+`ysp/*.h` header uses anything here. Decision record:
 [docs/layout_probe.md](../docs/layout_probe.md).
 
 ## Components
@@ -24,8 +24,8 @@ Built only with the CMake option `PSY_BUILD_LAYOUT` (default OFF); no
   file, so section 4(d) adds nothing to carry; section 4(a) is met by the
   two license files above. Neither source is modified.
 - Skribidi's pins of the others are HarfBuzz 11.0.0, SheenBidi `83f7710`,
-  libunibreak 6.1 and budouxc `a044d49`. psy pins HarfBuzz 14.6.0 instead
-  (docs/psy_layout.md, Vendoring).
+  libunibreak 6.1 and budouxc `a044d49`. ysp pins HarfBuzz 14.6.0 instead
+  (docs/layout.md, Vendoring).
 
 ## What is kept, what is trimmed
 
@@ -76,7 +76,7 @@ Both change `src/skb_layout.c` and apply in this order:
    `skb__apply_rule_l1()`), and lets the line breaker leave trailing
    whitespace out of the fit in either direction. SHA-256
    `36ce7aec18d9f2b1256ee4374522ef36e87b6850be8bab4ba0bd720c162fb1b1`.
-   Why: docs/psy_layout.md, "Known issues" and "The patches".
+   Why: docs/layout.md, "Known issues" and "The patches".
 
 The tree here holds the patched source; the script applies the patches,
 in order, to a fresh download.
@@ -102,14 +102,14 @@ checkout with `core.autocrlf=true` keeps the files as upstream has them.
 ## Update a pin
 
 1. Change the commit in `PINS` in `tools/vendor_layout.py` and in
-   `pack/psy_layout.c`, and here.
+   `pack/layout.c`, and here.
 2. `uv run --no-project python tools/vendor_layout.py --extract DIR`: the
    whole upstream trees, Skribidi patched (the patch must still apply).
 3. `uv run --no-project python tools/vendor_layout.py --closure DIR > list.txt`
    (needs gcc and g++ on PATH): the file list.
 4. `uv run --no-project python tools/vendor_layout.py --write --list list.txt`:
    the trees and a new manifest.
-5. Build with `PSY_BUILD_LAYOUT=ON` and run `test_psy_layout`; regenerate
+5. Build with `YSP_BUILD_LAYOUT=ON` and run `test_layout`; regenerate
    `tests/layout/corpus_ref.txt` only if Chromium's version is the reason.
    Every difference in glyph ids, order or positions goes in
-   docs/psy_layout.md (policy point 4).
+   docs/layout.md (policy point 4).

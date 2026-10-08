@@ -3,8 +3,8 @@
 This note records two probes that decided the text plan in
 [rig_spec.md](rig_spec.md) section 5.2 (Font row). The probe code was in
 a session scratchpad and is lost; the numbers below are the record.
-`psy_gfx.h` v0.6.0 has Slug curve runs and the blur pass. Their pixel
-errors and GPU times were measured again in [psy_gfx.md](psy_gfx.md)
+`ysp/gfx.h` v0.6.0 has Slug curve runs and the blur pass. Their pixel
+errors and GPU times were measured again in [gfx.md](gfx.md)
 ("v0.6" sections), which is now the current record. The cause of the
 D3D11 difference below is there: interpolated em coordinates.
 
@@ -18,7 +18,7 @@ also ran on WARP, SwiftShader and Mesa llvmpipe. Only one GPU was timed.
 - Scalable text is drawn from glyph outlines by the Slug algorithm
   (Lengyel, JCGT 6(2), 2017; patent dedicated to the public domain
   2026-03-17; reference shaders "MIT OR Apache-2.0", credit required).
-- MSDF atlases are not a pack format. The MSDF path in `psy_gfx.h` can
+- MSDF atlases are not a pack format. The MSDF path in `ysp/gfx.h` can
   stay.
 - Value-exact text is an exact-size alpha atlas from an exact-area
   rasterizer in the pack tool, drawn on the pixel grid only.
@@ -29,7 +29,7 @@ also ran on WARP, SwiftShader and Mesa llvmpipe. Only one GPU was timed.
 ## Why MSDF was dropped
 
 - A distance soft edge is a true Gaussian blur only on straight edges
-  (0.25 off at a corner, psy_gfx.h EXACTNESS). Blurred-letter stimuli
+  (0.25 off at a corner, ysp/gfx.h EXACTNESS). Blurred-letter stimuli
   need a real blur, which a distance field cannot give.
 - MSDF failed on dense CJK at large sizes (holes and blobs) and on
   overlapping contours (holes at joints), and left corner wedges.
@@ -49,7 +49,7 @@ texels/em with pxrange 8; MSDF B is 64 texels/em with pxrange 16.
 
 Coverage error on edge pixels, rotation 0, max / mean:
 
-| px | Slug f32 | MSDF A, psy_gfx cosine 1 px | MSDF B, linear | Skribidi rasterizer | stb_truetype |
+| px | Slug f32 | MSDF A, ysp_gfx cosine 1 px | MSDF B, linear | Skribidi rasterizer | stb_truetype |
 |---|---|---|---|---|---|
 | 8 | 0.48 / 0.049 | 0.53 / 0.076 | 0.44 / 0.060 | 0.26 / 0.023 | 0.28 / 0.0085 |
 | 12 | 0.53 / 0.037 | 0.46 / 0.062 | 0.41 / 0.041 | 0.27 / 0.026 | 0.34 / 0.012 |
@@ -95,7 +95,7 @@ drawing is refused.
 ## Blur probe
 
 Reference: the exact shape convolved with a Gaussian, in double (closed
-form in x with erfc, adaptive in y), checked against psy_gfx's
+form in x with erfc, adaptive in y), checked against ysp_gfx's
 EXACT_BLUR erf product to 1.7e-15. Blur kernel: direct taps,
 2 ceil(5 s') + 1 per pass, with s' = sqrt(s^2 - 1/12) to remove the box
 filter's variance. Shader accumulation is f32 in every variant.
@@ -115,7 +115,7 @@ Max error against the exact blurred shape:
 - 8-bit exactness (3.9e-3) is reached at sigma 4 and up at 1x, and at
   sigma 2 and up with a 2x supersampled source. 10-bit (9.8e-4) needs
   sigma 8 and up with f32 targets at 1x.
-- Against psy_gfx's distance soft edge: the blur pass errs everywhere,
+- Against ysp_gfx's distance soft edge: the blur pass errs everywhere,
   straight edges included (a rect at sigma 1: 0.025), but less than the
   distance soft edge at corners (0.25).
 

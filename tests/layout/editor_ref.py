@@ -3,13 +3,13 @@
 
     uv run --no-project --with playwright python tests/layout/editor_ref.py
 
-Writes tests/layout/editor_ref.txt, which psy_layout_test.c compares with
-Skribidi (docs/psy_layout.md, "Editing against Edge"). Microsoft Edge (the
+Writes tests/layout/editor_ref.txt, which layout_test.c compares with
+Skribidi (docs/layout.md, "Editing against Edge"). Microsoft Edge (the
 installed browser, Playwright channel "msedge") lays each item out in a div
 that loads the item's font files through @font-face, at 100 px per em, with
 white-space: pre-wrap (a text box keeps its spaces). Two models:
 
-  layout  a plain div, overflow-wrap: normal: psylay_layout() (Skribidi's
+  layout  a plain div, overflow-wrap: normal: ylay_layout() (Skribidi's
           SKB_WRAP_WORD), which breaks only at break opportunities;
   editor  a contenteditable div, overflow-wrap: break-word, the model of a
           textarea: Skribidi's editor (SKB_WRAP_WORD_CHAR), which breaks

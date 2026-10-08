@@ -2,9 +2,9 @@
 # requires-python = ">=3.10"
 # dependencies = ["mpmath"]
 # ///
-"""Reference values for psy_trials.h's fixed-point jitter logarithm.
+"""Reference values for ysp/trials.h's fixed-point jitter logarithm.
 
-psytr__neglog(Y) returns -ln(Y / 2^53) in Q58 for Y in [1, 2^53], from
+ytr__neglog(Y) returns -ln(Y / 2^53) in Q58 for Y in [1, 2^53], from
 integer arithmetic only: Y = m 2^e with m in [1, 2), m multiplied by a
 table reciprocal INV[i] (Q63, rounded up) of 1 + i/128 chosen by m's next
 7 bits, so m x INV[i] = 1 + t with 0 <= t < 2^-7, and
@@ -44,12 +44,12 @@ def ref_q58(y):
 
 def tables():
     ln2 = int(mpmath.nint(mpmath.log(2) * mpmath.mpf(2) ** 63))
-    print("#define PSYTR__LN2_Q63 0x%016xULL" % ln2)
-    print("static const uint64_t psytr__inv_q63[128] = {")
+    print("#define YTR__LN2_Q63 0x%016xULL" % ln2)
+    print("static const uint64_t ytr__inv_q63[128] = {")
     for i in range(0, 128, 4):
         print("    " + ", ".join("0x%016xULL" % inv(k) for k in range(i, i + 4)) + ",")
     print("};")
-    print("static const uint64_t psytr__nlinv_q63[128] = {")
+    print("static const uint64_t ytr__nlinv_q63[128] = {")
     for i in range(0, 128, 4):
         print("    " + ", ".join("0x%016xULL" % t_entry(k) for k in range(i, i + 4)) + ",")
     print("};")

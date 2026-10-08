@@ -1,0 +1,142 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "YSP_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "msvc",
+      "displayName": "MSVC (VS 2022), examples and tests",
+      "inherits": "windows-base",
+      "generator": "Visual Studio 17 2022",
+      "cacheVariables": {
+        "YSP_BUILD_EXAMPLES": "ON"
+      }
+    },
+    {
+      "name": "msvc-full",
+      "displayName": "MSVC with SDL3, ANGLE, layout, loopback and both fetches",
+      "description": "SDL3_DIR and YSP_ANGLE_DIR come from the environment variables of the same names.",
+      "inherits": "msvc",
+      "cacheVariables": {
+        "YSP_BUILD_LOOPBACK": "ON",
+        "YSP_BUILD_LAYOUT": "ON",
+        "YSP_FETCH_MINIAUDIO": "ON",
+        "YSP_FETCH_PL_MPEG": "ON",
+        "SDL3_DIR": { "type": "PATH", "value": "$env{SDL3_DIR}" },
+        "YSP_ANGLE_DIR": { "type": "PATH", "value": "$env{YSP_ANGLE_DIR}" }
+      }
+    },
+    {
+      "name": "mingw",
+      "displayName": "MinGW-w64, Release, compile checks and tests (as CI)",
+      "inherits": "windows-base",
+      "generator": "MinGW Makefiles",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "YSP_BUILD_EXAMPLES": "OFF",
+        "YSP_FETCH_MINIAUDIO": "ON",
+        "YSP_FETCH_PL_MPEG": "ON"
+      }
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "YSP_FETCH_MINIAUDIO": "ON",
+        "YSP_FETCH_PL_MPEG": "ON"
+      }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux, default compiler, Release, Tracy check (as CI's headers job)",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "YSP_TRACY_CHECK": "ON"
+      }
+    },
+    {
+      "name": "clang",
+      "displayName": "Linux, clang, Debug",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "sanitizers",
+      "displayName": "Linux, gcc, ASan and UBSan, Debug",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer"
+      }
+    },
+    {
+      "name": "nothreads-cxx",
+      "displayName": "Linux, gcc, Y<X>_NO_THREADS in the C++ compile checks, Debug",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_CXX_FLAGS": "-DYSER_NO_THREADS -DYPAR_NO_THREADS -DYRT_NO_THREADS"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "build-windows", "hidden": true, "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" } },
+    { "name": "build-linux",   "hidden": true, "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" } },
+    { "name": "msvc",          "inherits": "build-windows", "configurePreset": "msvc",          "configuration": "Release" },
+    { "name": "msvc-full",     "inherits": "build-windows", "configurePreset": "msvc-full",     "configuration": "Release" },
+    { "name": "mingw",         "inherits": "build-windows", "configurePreset": "mingw" },
+    { "name": "linux",         "inherits": "build-linux",   "configurePreset": "linux" },
+    { "name": "clang",         "inherits": "build-linux",   "configurePreset": "clang" },
+    { "name": "sanitizers",    "inherits": "build-linux",   "configurePreset": "sanitizers" },
+    { "name": "nothreads-cxx", "inherits": "build-linux",   "configurePreset": "nothreads-cxx" }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    { "name": "test-windows", "hidden": true, "inherits": "test-base", "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" } },
+    { "name": "test-linux",   "hidden": true, "inherits": "test-base", "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" } },
+    { "name": "msvc",          "inherits": "test-windows", "configurePreset": "msvc",          "configuration": "Release" },
+    { "name": "msvc-full",     "inherits": "test-windows", "configurePreset": "msvc-full",     "configuration": "Release" },
+    { "name": "mingw",         "inherits": "test-windows", "configurePreset": "mingw" },
+    { "name": "linux",         "inherits": "test-linux",   "configurePreset": "linux" },
+    { "name": "clang",         "inherits": "test-linux",   "configurePreset": "clang" },
+    {
+      "name": "sanitizers",
+      "inherits": "test-linux",
+      "configurePreset": "sanitizers",
+      "environment": {
+        "ASAN_OPTIONS": "exitcode=42",
+        "LSAN_OPTIONS": "exitcode=42",
+        "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1:exitcode=42"
+      }
+    },
+    { "name": "nothreads-cxx", "inherits": "test-linux",   "configurePreset": "nothreads-cxx" }
+  ]
+}

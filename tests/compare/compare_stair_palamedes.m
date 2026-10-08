@@ -1,5 +1,5 @@
 function compare_stair_palamedes(pal_dir)
-%COMPARE_STAIR_PALAMEDES  psy_stair and psy_quest (MEX) against Palamedes.
+%COMPARE_STAIR_PALAMEDES  ysp_stair and ysp_quest (MEX) against Palamedes.
 %
 %   compare_stair_palamedes('/path/to/Palamedes')
 %   compare_stair_palamedes            % reads the PALAMEDES_DIR variable
@@ -9,28 +9,28 @@ function compare_stair_palamedes(pal_dir)
 %   here: download it and pass the folder that holds PAL_AMUD_setupUD.m.
 %   Build the MEX first (run bindings/mex/build.m).
 %
-%   Part 1, PAL_AMUD against psy_stair. Fixed response sequences, one per
+%   Part 1, PAL_AMUD against ysp_stair. Fixed response sequences, one per
 %   rule, fed to both; the proposals, the reversal trials and the length of
 %   the run must agree. Palamedes steps 1-up-1-down until the first reversal
 %   whatever the rule (PAL_AMUD_updateUD tests max(UD.reversal) < 1), which is
-%   psy_stair's initial_rule, so every psy_stair desc here sets it.
+%   ysp_stair's initial_rule, so every ysp_stair desc here sets it.
 %   Palamedes has no step schedule; a caller changes UD.stepSizeUp/Down
 %   between trials. Two callers are run:
 %     'after'    changes the step after the update that reversed. The
 %                reversal trial itself then steps by the OLD size.
 %     'predict'  works out before the update whether this response will
-%                reverse, and sets the new size first, which is psy_stair's
+%                reverse, and sets the new size first, which is ysp_stair's
 %                documented order (the reversal trial takes the new size, as
 %                in PsychoPy's StairHandler).
-%   The 'after' rows are expected to differ from psy_stair, from the trial
+%   The 'after' rows are expected to differ from ysp_stair, from the trial
 %   after the first reversal on; they are printed, not failed.
 %
-%   Part 2, PAL_AMPM against psy_quest: Psi (threshold and slope, PAL_Gumbel)
+%   Part 2, PAL_AMPM against ysp_quest: Psi (threshold and slope, PAL_Gumbel)
 %   and Psi-marginal (lapse marginalized). Palamedes drives: both select,
 %   both are updated with Palamedes' stimulus and one outcome from a fixed
 %   stream, and the posteriors are compared cell by cell. A selection that
 %   differs is a TIE when Palamedes' own expected entropy at our stimulus is
-%   within 1e-9 of its minimum. Palamedes' slope grid is log10(beta); the psy
+%   within 1e-9 of its minimum. Palamedes' slope grid is log10(beta); the ysp
 %   axis gets 10.^ of it, the values PAL_AMPM_CreateLUT computes.
 %
 %   Prints a table per part and raises an error on any disagreement beyond
@@ -50,7 +50,7 @@ function compare_stair_palamedes(pal_dir)
     bad = compare_ud();
     bad = compare_pm() || bad;
     if bad
-        error('compare:disagree', 'psy and Palamedes disagree beyond tolerance');
+        error('compare:disagree', 'ysp and Palamedes disagree beyond tolerance');
     end
     fprintf('agreement within tolerance on every case\n');
 end
@@ -62,7 +62,7 @@ function r = responses(seed, n, p)
     state = uint64(seed);
     r = zeros(1, n);
     for i = 1:n
-        [u, state] = psy_trials('splitmix', state);
+        [u, state] = ysp_trials('splitmix', state);
         r(i) = u < p;
     end
 end
@@ -82,7 +82,7 @@ function bad = compare_ud()
         'schedule, after',    1, 2, 0.4,  0.4,  0,   [],   [],   'trials',    80, [0.4 0.2 0.1],    false, 0.72
         '2-up-2-down',        2, 2, 0.1,  0.1,  0,   [],   [],   'trials',    80, [],               false, 0.60
     };
-    fprintf('\nPart 1: psy_stair %s against PAL_AMUD\n\n', psy_stair('version'));
+    fprintf('\nPart 1: ysp_stair %s against PAL_AMUD\n\n', ysp_stair('version'));
     fprintf('%-20s %7s %7s %10s %12s  %s\n', 'case', 'trials', 'revs', 'max |dx|', 'first diff', 'verdict');
     bad = false;
     for c = 1:size(C, 1)
@@ -112,7 +112,7 @@ function bad = compare_ud()
         pal_x = UD.x(1:t);
         pal_rev = find(UD.reversal ~= 0);
 
-        % psy_stair.
+        % ysp_stair.
         d = struct('n_up', up, 'n_down', down, 'initial_rule', true);
         if islog
             d.start = 10 ^ x0; d.step_type = 'log';
@@ -128,25 +128,25 @@ function bad = compare_ud()
             d.steps = sched;
         end
         if strcmp(crit, 'trials'), d.stop_trials = rule; else, d.stop_reversals = rule; end
-        h = psy_stair('open', d);
+        h = ysp_stair('open', d);
         k = 0;
-        while ~psy_stair('done', h)
+        while ~ysp_stair('done', h)
             k = k + 1;
-            x = psy_stair('next', h);
-            psy_stair('update', h, x, resp(k));
+            x = ysp_stair('next', h);
+            ysp_stair('update', h, x, resp(k));
         end
-        hist = psy_stair('history', h);
-        psy_x = hist.proposed.';
-        if islog, psy_x = log10(psy_x); end
-        psy_rev = find(hist.reversal.');
-        psy_stair('close', h);
+        hist = ysp_stair('history', h);
+        ysp_x = hist.proposed.';
+        if islog, ysp_x = log10(ysp_x); end
+        ysp_rev = find(hist.reversal.');
+        ysp_stair('close', h);
 
-        m = min(numel(pal_x), numel(psy_x));
-        dx = abs(pal_x(1:m) - psy_x(1:m));
+        m = min(numel(pal_x), numel(ysp_x));
+        dx = abs(pal_x(1:m) - ysp_x(1:m));
         first = find(dx > 1e-9, 1);
-        rv = min(numel(pal_rev), numel(psy_rev));
-        rfirst = find(pal_rev(1:rv) ~= psy_rev(1:rv), 1);
-        same = isempty(first) && numel(pal_x) == numel(psy_x) && isempty(rfirst) && numel(pal_rev) == numel(psy_rev);
+        rv = min(numel(pal_rev), numel(ysp_rev));
+        rfirst = find(pal_rev(1:rv) ~= ysp_rev(1:rv), 1);
+        same = isempty(first) && numel(pal_x) == numel(ysp_x) && isempty(rfirst) && numel(pal_rev) == numel(ysp_rev);
         if same
             verdict = 'identical';
             fd = '-';
@@ -161,13 +161,13 @@ function bad = compare_ud()
                 bad = true;
             end
         end
-        fprintf('%-20s %3d/%-3d %3d/%-3d %10.2g %12s  %s\n', name, numel(pal_x), numel(psy_x), ...
-                numel(pal_rev), numel(psy_rev), max([dx 0]), fd, verdict);
+        fprintf('%-20s %3d/%-3d %3d/%-3d %10.2g %12s  %s\n', name, numel(pal_x), numel(ysp_x), ...
+                numel(pal_rev), numel(ysp_rev), max([dx 0]), fd, verdict);
     end
     fprintf(['\n''schedule, after'': Palamedes applies a new step size from the trial after the\n' ...
-             'reversal; psy_stair already steps the reversal trial by it. ''2-up-2-down'':\n' ...
+             'reversal; ysp_stair already steps the reversal trial by it. ''2-up-2-down'':\n' ...
              'PAL_AMUD keeps the run counter of the other direction when a response does not\n' ...
-             'step (a correct response leaves UD.u alone), psy_stair resets both counters on\n' ...
+             'step (a correct response leaves UD.u alone), ysp_stair resets both counters on\n' ...
              'every change of response direction, as PsychoPy does.\n']);
 end
 
@@ -200,7 +200,7 @@ function bad = compare_pm()
         'Psi',                 0.02,        [], 60
         'Psi-marginal (lapse)', 0:0.02:0.08, 4,  60
     };
-    fprintf('\nPart 2: psy_quest %s against PAL_AMPM\n\n', psy_quest('version'));
+    fprintf('\nPart 2: ysp_quest %s against PAL_AMPM\n\n', ysp_quest('version'));
     fprintf('%-22s %6s %10s %6s %10s %6s %12s %10s\n', 'case', 'trials', 'identical', 'ties', ...
             'max gap', 'diffs', 'max |dpost|', 'first diff');
     bad = false;
@@ -220,12 +220,12 @@ function bad = compare_pm()
             nu = zeros(1, 4); nu(marg) = 1;
             d.nuisance = nu;
         end
-        h = psy_quest('open', d);
+        h = ysp_quest('open', d);
 
         state = uint64(3000 + c);
         same = 0; ties = 0; gap = 0; diffs = 0; maxdp = 0; first = 0;
         for t = 1:n
-            ip = psy_quest('next', h);
+            ip = ysp_quest('next', h);
             im = find(abs(stims - PM.xCurrent) < 1e-12, 1);
             if ip == im
                 same = same + 1;
@@ -240,15 +240,15 @@ function bad = compare_pm()
                     if first == 0, first = t; end
                 end
             end
-            [u, state] = psy_trials('splitmix', state);
+            [u, state] = ysp_trials('splitmix', state);
             pc = PAL_Gumbel(truth, PM.xCurrent);
             r = double(u < pc);
             PM = PAL_AMPM_updatePM(PM, r);
-            psy_quest('update', h, im, r);
-            post = psy_quest('posterior', h);
+            ysp_quest('update', h, im, r);
+            post = ysp_quest('posterior', h);
             maxdp = max(maxdp, max(abs(post(:) - PM.pdf(:))));
         end
-        psy_quest('close', h);
+        ysp_quest('close', h);
         fd = '-';
         if first > 0, fd = sprintf('%d', first); end
         fprintf('%-22s %6d %10d %6d %10.2g %6d %12.3g %10s\n', name, n, same, ties, gap, diffs, maxdp, fd);
