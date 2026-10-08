@@ -473,6 +473,19 @@ if(TARGET test_video AND YSP_QOI_DIR)
 endif()
 
 if(YSP_BUILD_LAYOUT)
+    # The vendored trees are not in git (third_party/README.md): fetch them
+    # once. Configure never downloads by itself.
+    foreach(_tp harfbuzz/src/harfbuzz.cc sheenbidi/Source/SheenBidi.c libunibreak/src/linebreak.c
+                budouxc/src/budoux.c skribidi/src/skb_layout.c)
+        if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/${_tp})
+            message(FATAL_ERROR "YSP_BUILD_LAYOUT: third_party/${_tp} is missing. Fetch and verify the "
+                "layout sources once, from the repository root:
+"
+                "    uv run --no-project python tools/vendor_layout.py --write
+"
+                "(or python3 tools/vendor_layout.py --write; it needs git for the patches)")
+        endif()
+    endforeach()
     add_subdirectory(third_party)
     add_subdirectory(pack)
 endif()

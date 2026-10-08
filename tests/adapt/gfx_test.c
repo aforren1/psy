@@ -3432,6 +3432,10 @@ static void test_default_cache_dir(void) {
         SetEnvironmentVariableW(L"LOCALAPPDATA", k > 0 && k < 512 ? old : NULL);
         if (k > 0 && k < 512) CHECK(ygfx_default_cache_dir(d, sizeof d) == YGFX_OK);
     }
+#elif defined(__EMSCRIPTEN__)
+    /* WebGL has no program binaries: never a folder, whatever the
+     * environment says. */
+    CHECK(ygfx_default_cache_dir(d, sizeof d) == YGFX_ERR_ARG && d[0] == '\0');
 #else
     {
         char home[512] = "", xdg[512] = "";

@@ -15,8 +15,9 @@ header. The `ysp/*.h` headers stay free of Skribidi and HarfBuzz.
 
 - Skribidi does bidi, script and font runs, shaping (HarfBuzz), line
   breaking (libunibreak, BudouX for Japanese, Chinese and Thai) and the
-  editor. It is vendored in `third_party/` at a commit, with one local
-  patch.
+  editor. It is pinned at a commit with two local patches. The sources are
+  fetched into `third_party/` by `tools/vendor_layout.py` and checked
+  against `third_party/MANIFEST.sha256`; git tracks only that recipe.
 - The glue converts Skribidi's layout runs into one group of items per
   font and size, so each group is one `ygfx_crun()`. It builds the glyphs
   a layout uses into that font's curve set (resolved, backward lists), on
@@ -34,12 +35,15 @@ The CMake option `YSP_BUILD_LAYOUT` (default OFF) adds `third_party/` and
 `pack/`:
 
 ```sh
+uv run --no-project python tools/vendor_layout.py --write   # once: fetch, patch, verify
 cmake -B build -DYSP_BUILD_LAYOUT=ON -DSDL3_DIR=...   # SDL3 only for gfx_layout
 cmake --build build --target test_layout gfx_layout
 ctest --test-dir build -R layout
 ```
 
-- No network at configure or build time: no FetchContent.
+- No network at configure or build time: no FetchContent. The one fetch is
+  the explicit script run above; configure stops with that command if the
+  sources are missing.
 - The upstream code compiles with its warnings off (`/W0`, `-w`) and its
   include directories are SYSTEM, so our `/W4 /WX` and `-Werror` builds do
   not see its warnings. The upstream sources are not changed beyond the

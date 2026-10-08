@@ -2,7 +2,21 @@
 
 Skribidi and its dependencies, for `pack/layout` (docs/layout.md).
 Built only with the CMake option `YSP_BUILD_LAYOUT` (default OFF); no
-`ysp/*.h` header uses anything here. Decision record:
+`ysp/*.h` header uses anything here.
+
+The trees are not in git (decided 2026-10-08, to keep the repository
+small). Git tracks the recipe: this README, `MANIFEST.sha256`, `patches/`,
+`CMakeLists.txt` and `.gitattributes`. Fetch the trees once before you
+configure with `YSP_BUILD_LAYOUT=ON`:
+
+```sh
+uv run --no-project python tools/vendor_layout.py --write
+```
+
+The script downloads each pin by its full commit SHA, applies the patches
+and checks every file against `MANIFEST.sha256`, so the trees are the same
+bytes on every machine. Without them, configure stops and prints that
+command. CI runs it with a tarball cache keyed on the manifest. Decision record:
 [docs/layout_probe.md](../docs/layout_probe.md).
 
 ## Components

@@ -4,7 +4,7 @@
  *   a local bidi patch) and gives glyphs as ysp/gfx.h curve-run items over
  *   ysp/outline.h curve sets built from the same font bytes. Not a single
  *   header: it links the vendored Skribidi, HarfBuzz, SheenBidi, libunibreak
- *   and budouxc (CMake option YSP_BUILD_LAYOUT). The ysp/*.h headers stay
+ *   and budouxc (CMake option YSP_BUILD_LAYOUT). The headers in include/ysp stay
  *   free of them (rig_spec 5.2, Font). docs/layout.md is the manual.
  *
  *   The program compiles ysp/outline.h's implementation once

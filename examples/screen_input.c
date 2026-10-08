@@ -485,6 +485,7 @@ int main(int argc, char** argv) {
         }
     }
 #else
+    (void)reports;   /* the report count injects keys: Windows only */
     printf("key injection is Windows only here\n");
 #endif
     yscr_close(&s);
