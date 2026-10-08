@@ -205,3 +205,23 @@ find = '''
         psyvid__err(mv, "psy_video: the movie base runs at %lld/%lld; a soundtrack plays at rate 1 only (no resampling)", (long long)rn, (long long)rd);
         return PSYVID_ERR_REFUSED;'''
 replace = '        (void)0;'
+
+# v0.2.1: the decode thread after a decoder's PENDING.
+
+[[mutant]]
+id = "v021-00"
+name = "PENDING does not mark the decode thread idle"
+test = "video"
+why = "Nothing else wakes the pump: the decoder must be asked again after PENDING, or the movie shows no new frame until a seek."
+find = '''    if (!mv->inline_mode) psyvid__xchg32(&mv->idle, 1);
+    return false;'''
+replace = '''    (void)mv;
+    return false;'''
+
+[[mutant]]
+id = "v021-01"
+name = "PENDING while discarding toward a target not retried"
+test = "video"
+why = "An outage that begins while the decoder discards frames on the way to the due frame must be retried as one that begins on a kept frame."
+find = '''            if (rc == PSYVID_PENDING) return psyvid__pending(mv);'''
+replace = '''            if (rc == PSYVID_PENDING) return false;'''

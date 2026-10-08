@@ -1,4 +1,4 @@
-/* psy_video.h - v0.2.0 - public domain single-header video playback library
+/* psy_video.h - v0.2.1 - public domain single-header video playback library
  *
  *   A movie as a stimulus. On each display frame the header takes the
  *   frame's PREDICTED ONSET, asks the movie clock for the movie time at
@@ -26,6 +26,13 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.1 - Fixed: after a decoder's PSYVID_PENDING the decode thread
+ *          slept until the next seek or control, so a custom decoder that
+ *          stalled once showed no new frame again (the frame on screen
+ *          REPEATED with DECODE_LATE). It now asks again once a display
+ *          frame, and catches up as before: it decodes the due frame (from
+ *          its keyframe), and the frames passed over are DROPPED with
+ *          DECODE_LATE. The built-in backends never return PENDING.
  *   v0.2.0 - Media Foundation (Windows): H.264 and HEVC (8-bit 4:2:0) in
  *          MP4, decoded into NV12 by the software decoder or DXVA
  *          (desc.hw_decode; AUTO is DXVA, by measurement). psyvid_index_make()
@@ -484,8 +491,8 @@
 
 #define PSYVID_VERSION_MAJOR 0
 #define PSYVID_VERSION_MINOR 2
-#define PSYVID_VERSION_PATCH 0
-#define PSYVID_VERSION_STRING "0.2.0"
+#define PSYVID_VERSION_PATCH 1
+#define PSYVID_VERSION_STRING "0.2.1"
 
 #include "psy_gfx.h"
 #include "psy_timeline.h"
@@ -4187,6 +4194,15 @@ static void psyvid__on_msg(void* ctx, const void* msg, uint32_t seq) {
     }
 }
 
+/* PENDING: nothing now, ask again later. The pump blocks when on_idle has
+ * no more to do, and only a message wakes it: marked idle, the thread gets
+ * one from the next psyvid_update(), so the decoder is asked again once a
+ * display frame. Before v0.2.1 nothing woke it until a seek. */
+static bool psyvid__pending(psyvid_movie* mv) {
+    if (!mv->inline_mode) psyvid__xchg32(&mv->idle, 1);
+    return false;
+}
+
 /* One step: discard one frame on the way to the target, or decode one into a
  * free slot. True: there is more to do now. */
 static bool psyvid__dstep(psyvid_movie* mv) {
@@ -4214,7 +4230,7 @@ static bool psyvid__dstep(psyvid_movie* mv) {
             memset(&out, 0, sizeof out);
             out.index = -1;
             rc = mv->dec->next(mv->dec_ctx, NULL, &out);
-            if (rc == PSYVID_PENDING) return false;
+            if (rc == PSYVID_PENDING) return psyvid__pending(mv);
             if (rc != PSYVID_OK) { psyvid__dt_fail(mv, PSYVID_ERR_DECODER, "psy_video: %s: the stream ended or failed at frame %lld while seeking (%d)", mv->dec->name, (long long)mv->dt_pos, rc); return false; }
             mv->dt_pos++;
             mv->dt_discarded++;
@@ -4248,7 +4264,7 @@ static bool psyvid__dstep(psyvid_movie* mv) {
         rc = mv->dec->next(mv->dec_ctx, &dst, &out);
         dt = PSYVID__NOW() - t0;
         PSYRT_ZONE_END(zd);
-        if (rc == PSYVID_PENDING) { mv->dt_spare = s; return false; }
+        if (rc == PSYVID_PENDING) { mv->dt_spare = s; return psyvid__pending(mv); }
         if (rc == PSYVID_ENDED) {
             mv->dt_spare = s;
             psyvid__dt_fail(mv, PSYVID_ERR_DECODER, "psy_video: %s: the stream ended at frame %lld; the index says %lld frames", mv->dec->name, (long long)idx, (long long)N);

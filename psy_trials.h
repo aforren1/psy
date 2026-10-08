@@ -1,4 +1,4 @@
-/* psy_trials.h - v0.2.0 - public domain single-header trial sequencing library
+/* psy_trials.h - v0.2.1 - public domain single-header trial sequencing library
  *
  *   The layer above the adaptive methods: which trial comes next, and what
  *   happened on it. Conditions and repetitions (the method of constant
@@ -29,6 +29,30 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.1 - jitter: a random duration per trial (a foreperiod, an ITI,
+ *          an SOA), drawn from the session's generator in a fixed order, so
+ *          restore() and load() reproduce it, and logged in the data line
+ *          (JITTER). Uniform on an interval, uniform over a list
+ *          (psytr_choice()), and an exponential truncated to an interval
+ *          (a non-aging foreperiod); any of them snapped to whole frames of
+ *          a rate num/den. In seconds, also as int64 nanoseconds and frame
+ *          counts. Every draw is integer arithmetic on the variate's 53
+ *          bits (a fixed-point logarithm for the exponential), so it is the
+ *          same nanosecond on every C library, compiler and flag set.
+ *          desc.jitters[] with per-condition intervals from table
+ *          columns, psytr_jitter() and psytr_jitter_index(); call-level
+ *          psytr_jitter_draw(), psytr_jitter_map(), psytr_jitter_check();
+ *          the rules statement `jitter`.
+ *          - Every v0.2.0 desc gives the same schedule, draws, history,
+ *            records, tallies, format lines (but the version token) and
+ *            snapshot bytes as v0.2.0: tests/adapt/psy_trials_pins_v02.h
+ *            holds the hashes of 320 sessions (16 v0.2 designs x 20 seeds)
+ *            made by v0.2.0, beside the 600 of v0.1.1.
+ *          - Snapshot format 3 for a desc with jitters (format 2 plus the
+ *            jitters and their draws); formats 1 and 2 as before.
+ *          - The handle grew by 8 bytes per trial per PSYTR_MAX_JITTERS (4):
+ *            243344 bytes at the defaults on a 64-bit ABI. Define
+ *            PSYTR_MAX_JITTERS lower to save it.
  *   v0.2.0 - tables, sampling, groups, units, balance, Latin squares, rules
  *          text. Every v0.1 desc gives the same schedule, draws, history,
  *          records, tallies, format lines (but the version token) and
@@ -111,7 +135,47 @@
  *          - psytr_condition_at() indexes the practice slots too.
  *   v0.0 - specification. Declarations and the manual, no implementation.
  *
- *   STATUS: v0.2.0, 2026-10-07. Built and run on Windows 11 with MinGW-w64
+ *   STATUS: v0.2.1, 2026-10-07. The jitter release, built and run as
+ *   v0.2.0 below (gcc 16.1 C11, C99, C++17; MSVC 19.44 C and C++17; WSL2
+ *   gcc 11.4 C11 and C++17 under ASan and UBSan; PSYTR_MAX_TRIALS 256) and
+ *   at PSYTR_MAX_JITTERS 1. The 600 v0.1.1 pins and 320 new v0.2.0 pins
+ *   (tests/adapt/psy_trials_pins_v02.h: 16 v0.2 designs x 20 seeds, made
+ *   by v0.2.0) match on every build, so no earlier draw moved.
+ *   The jitter draws are integer arithmetic: golden digests of 200000
+ *   draws of each of six kinds (tests/adapt/psy_trials_jitter_golden.h)
+ *   match under MinGW gcc 16.1 -O0 to -Ofast -march=native
+ *   -ffp-contract=fast, MSVC 19.44 /Od to /O2 /arch:AVX2 /fp:fast, WSL gcc
+ *   11.4 -O2 to -Ofast -march=native and under ASan and UBSan, each with
+ *   and without the compilers' 128-bit types, and in the Python binding;
+ *   CI checks them on Linux, macOS arm64, MSVC and MinGW and builds
+ *   tests/adapt/psy_trials_jitter_repro.c at -O3 native and -Ofast. The
+ *   fixed-point -ln(1 - u) is within 0.71 x 2^-58 of mpmath over 1000000
+ *   values (tests/compare/trials_jitter_ref.py). tests/adapt/
+ *   psy_trials_test_jitter.h also checks every refusal by name; values
+ *   at fixed variates and the frame ends; each distribution against its
+ *   CDF (200000 draws each, the snapped exponential 1000000; worst
+ *   chi-square at 0.80 of its bound) and the truncated mean; 20000 random
+ *   snaps inside their intervals; the draw order against a logged
+ *   generator; no draw for the pending trial; restore() and save/load
+ *   (format 3) reproducing every draw and data line; per-condition
+ *   columns; the rules text round trip. Measured per-frame hazard of the
+ *   exponential snapped to 60 Hz, 0.5 to 2.0 s, scale 0.4: within 6.2 % of
+ *   flat up to 0.8 s (truncation alone accounts for 5.2 %), within 4.4 %
+ *   of the truncated geometric's exact hazard; flat per-frame hazard x 60
+ *   = 2.4486/s against 1/s = 2.5/s. Fuzzed (tests/fuzz/psy_trials_fuzz.c,
+ *   jitter seeds added) under MSVC libFuzzer with ASan: 9,003,538 inputs
+ *   in 1201 s, then 4,221,162 in 601 s on the integer version, no crash;
+ *   the 2495 corpus files replayed on Linux under ASan and UBSan, no
+ *   report. Mutations: tests/mutate/trials.toml, 47 of 47 killed (18 for
+ *   jitter). Python binding 156 tests; MEX test_mex.m in MATLAB R2023a and
+ *   Octave 10.1. Costs measured (Iris Xe laptop, AC, measurement lock,
+ *   examples/trials_bench.c, medians, gcc 16.1 -O2 / MSVC 19.44 /O2): one
+ *   psytr_jitter_draw() 66 / 54 ns uniform snapped, 82 / 109 ns
+ *   exponential snapped, 32 / 62 ns exponential, 12 / 16 ns choice;
+ *   next() + update() with 4 jitters mean 0.16 / 0.20 us, worst 5.2 / 4.8
+ *   us. A design without jitters runs as fast as under v0.2.0 (an
+ *   interleaved A/B of open(), docs/psy_trials.md).
+ *   v0.2.0 STATUS, kept as written: built and run on Windows 11 with MinGW-w64
  *   gcc 16.1 as C11, C99 and C++17 under -Wall -Wextra -Wpedantic -Wshadow
  *   -Werror and with MSVC 19.44 under /W4 /WX, in its default C dialect and
  *   as /std:c++17; on Linux (WSL2) with gcc 11.4 as C11 and C++17 under
@@ -169,8 +233,9 @@
  *   v0.1.1 STATUS, kept as written: built and run on Linux (WSL2) with
  *   gcc 11.4 as C99, C11 and C++17 under -Wall -Wextra -Wpedantic
  *   -Wshadow -Werror, and under -fsanitize=address,undefined
- *   -fno-sanitize-recover=all with no diagnostic; on Windows 11 with MSVC 19.44 under /W4 /WX, in its
- *   default C dialect and as /std:c++17. The header, its test and both
+ *   -fno-sanitize-recover=all with no diagnostic; on Windows 11 with MSVC
+ *   19.44 under /W4 /WX, in its default C dialect and as /std:c++17. The
+ *   header, its test and both
  *   examples also build at -O2 and -O3 under gcc 11.4 with
  *   -Warray-bounds=2 -Wstringop-overflow=4 -Wmaybe-uninitialized
  *   -Waggressive-loop-optimizations -Wnull-dereference added, and under
@@ -641,6 +706,10 @@
  *                                        min_gap D - 1 (mindist counts
  *                                        rows: 2 is no immediate repeat)
  *       shuffle                          OpenSesame: order full_random
+ *       jitter NAME uniform LO HI [rate=NUM[/DEN]]          desc.jitters[]
+ *       jitter NAME choice V V ... [rate=NUM[/DEN]]         (v0.2.1); LO, HI
+ *       jitter NAME exponential LO HI SCALE [rate=NUM[/DEN]] and SCALE are
+ *                                        seconds or a numeric column
  *     A statement that sets one field may come once (a second names the
  *     first's line); where, list and the rules accumulate (rules are
  *     appended after any the desc holds). The participant number is
@@ -656,10 +725,103 @@
  *     the constraint, which psytr_format_rules() prints by name.
  *     BOUNDS AND MEMORY: 4096 bytes per line, 64 arguments per line, 100000
  *     lines. Nothing allocates: the arrays the rules make (cond_reps,
- *     order_list, weights, the practice list, the group list) are carved
- *     from rules_desc.arena (at most 4 x PSYTR_MAX_TRIALS + 32 bytes per
- *     row; a short arena is an error naming the bytes needed). open() and
+ *     order_list, weights, the practice list, the group list, a jitter's
+ *     name and values) are carved from rules_desc.arena (at most 4 x
+ *     PSYTR_MAX_TRIALS + 32 bytes per row + 300 bytes per jitter; a short
+ *     arena is an error naming the bytes needed). open() and
  *     load() copy or read them, so the arena may go away after open().
+ *
+ *   JITTER (desc.jitters[], desc.n_jitters; v0.2.1)
+ *     A jitter is a duration drawn for every trial: a foreperiod, an
+ *     inter-trial interval, an SOA. The header draws and logs it; the
+ *     caller waits it. The drawn duration is a whole number of
+ *     nanoseconds, .ns (int64), for a clock; .s is the same duration in
+ *     seconds, the correctly rounded .ns / 1e9; .frames is the whole frame
+ *     count when the jitter snaps, else -1. lo, hi, s and the values are
+ *     given in seconds and taken to the nearest nanosecond.
+ *       psytr_uniform(name, lo, hi)          uniform over the nanoseconds
+ *                                            of [lo, hi]
+ *       psytr_choice(name, values, n)        one of n values (at most
+ *                                            PSYTR_MAX_JITTER_VALUES, 32),
+ *                                            each 1/n likely; repeat a value
+ *                                            to weight it
+ *       psytr_exponential(name, lo, hi, s)   lo + an exponential of mean s,
+ *                                            truncated to [lo, hi)
+ *       psytr_frames(j, num, den)            j snapped to whole frames of
+ *                                            num/den Hz (psy_timeline.h's
+ *                                            rates; den 0 means 1)
+ *     0 <= lo <= hi <= PSYTR_JITTER_MAX_S (1e6 s), 1 ns <= s <= 1e6 s,
+ *     values in [0, 1e6] s. The name heads the jitter's data-line column:
+ *     1 to 31 of [A-Za-z0-9_], not starting with a digit, unique in the
+ *     session.
+ *     THE NON-AGING FOREPERIOD. An exponential has a constant hazard: the
+ *     chance that the target comes in the next instant, given that it has
+ *     not come yet, is 1/s whatever the time already waited, so waiting
+ *     tells the observer nothing and expectancy stays flat. TRUNCATION at
+ *     hi bends that: the density is e^-(t-lo)/s / (s (1 - e^-(hi-lo)/s)) on
+ *     [lo, hi], the hazard at t is (1/s) / (1 - e^-(hi-t)/s), so it is
+ *     within e^-3 = 5 % of flat until 3 s before hi and grows without
+ *     bound at hi, and the mean is lo + s - (hi-lo) e^-(hi-lo)/s /
+ *     (1 - e^-(hi-lo)/s). The draws the truncation removes, e^-(hi-lo)/s
+ *     of the untruncated ones (2.4 % for lo 0.5, hi 2.0, s 0.4), are
+ *     spread over [lo, hi) in proportion to the density, not piled at hi
+ *     (THE DRAW). Choose hi - lo of 3 to 4 s or more.
+ *     FRAMES. A snapped jitter is a whole number of frames k, its
+ *     duration k den / num s, which .ns rounds to the nearest nanosecond
+ *     (ties up). The frames inside [lo, hi] are those whose .ns lies in
+ *     [lo, hi], all in integers, so 0.07 s at 100 Hz is frame 7 though 0.07
+ *     x 100 is 7.000000000000001 in binary. UNIFORM: each of those frames
+ *     equally likely. CHOICE: each value moved to its nearest frame (ties
+ *     up). EXPONENTIAL: a geometric over those frames, P(k) proportional
+ *     to q^(k - first),
+ *     q = e^-(den / (num s)): the per-frame hazard is exactly
+ *     1 - q, the chance an exponential of mean s ends within one frame,
+ *     until the truncation term 1 / (1 - q^(frames left)) takes over as
+ *     above. As a rate per second it is (1 - q) num/den, slightly below
+ *     1/s: 2.4486/s against 2.5/s at 60 Hz with s = 0.4 (2.1 % low). The
+ *     test measures it (STATUS). When no whole frame lies in [lo, hi],
+ *     open() and psytr_jitter_check() refuse and name the rate and the
+ *     interval.
+ *     PER CONDITION. With desc.table, lo_column, hi_column and (for
+ *     EXPONENTIAL) scale_column name numeric columns whose cells replace
+ *     lo, hi and s for a trial of that row; open() checks every row and
+ *     names the first bad one. A track trial has no row and uses the
+ *     jitter's own numbers, which open() then checks too.
+ *     THE DRAW. Each jitter takes one raw draw u per new trial
+ *     (RANDOMNESS gives the order), so the generator's position after a
+ *     trial does not depend on the values drawn, and maps u53 = floor(u
+ *     2^53) (u clamped to [0, 1)) in integer arithmetic only: no libm call
+ *     and no floating-point operation that a C library, a compiler or a
+ *     flag (-Ofast, /fp:fast, FMA contraction) could round differently, so
+ *     a draw is the same nanosecond on every platform, and a session
+ *     replays exactly in another build (the Python binding regenerates a
+ *     Windows session). UNIFORM: lo + floor(u53 (hi - lo + 1) / 2^53) ns.
+ *     CHOICE: value floor(u53 n / 2^53). EXPONENTIAL: E = s (-ln(1 - u)),
+ *     the inverse CDF of the untruncated exponential, in nanoseconds
+ *     rounded half up, then lo + (E mod (hi - lo)): the exponential is
+ *     memoryless, so E folded into the interval is exactly the truncated
+ *     exponential, with no exp() needed (hi - lo = 0 gives lo). Snapped,
+ *     the same with E counted in whole frames, G = floor(-ln(1 - u) x the
+ *     scale in frames, s num / (den 1e9) held to 62 bits), folded into the
+ *     frames inside. -ln(1 - u) is a Q58 fixed-point logarithm (a 128-entry
+ *     table of reciprocals and their logarithms, from mpmath, and a
+ *     degree-8 integer series): within 2^-57 of the exact value by
+ *     analysis, 0.71 x 2^-58 at worst over 1,000,000 values checked against
+ *     mpmath (tests/compare/trials_jitter_ref.py), so E is within 0.5 ns +
+ *     s x 7e-18 of s (-ln(1 - u)) for the u53 drawn.
+ *     psytr_jitter(t, i, j) returns trial i's draw any time after next()
+ *     handed trial i out; psytr_jitter_index() finds j by name. The data
+ *     line (psytr_format_row) ends with one column per jitter, named by
+ *     the jitter, the seconds as the exact decimal of .ns
+ *     (1.184516667); psytr_format_meta() and psytr_format_rules() write
+ *     the jitters' settings.
+ *     CALL LEVEL. psytr_jitter_draw(&j, rng, ctx) calls rng once and maps
+ *     the variate; psytr_jitter_map(&j, u) maps a variate the caller has;
+ *     psytr_jitter_check() says why a desc is refused (columns need a
+ *     session). They touch no session: a draw made with the session's
+ *     generator between next() and update() moves every later draw, and
+ *     restore() would not repeat it. Use desc.jitters (replayed and
+ *     logged), or a generator of the caller's own that the caller logs.
  *
  *   TRACKS (desc.tracks[], desc.n_tracks, desc.interleave, desc.track_rate)
  *     A track is {ctx, is_done(ctx), weight}. While a track is not done and
@@ -817,6 +979,14 @@
  *     end of the state section i32 blk, i32 blk_next, u8 units, u8
  *     has_leadin. schedule_flags then also carry the unit, block-start and
  *     lead-in marks of each slot.
+ *     SNAPSHOT LAYOUT, format 3 (v0.2.1), for a desc with jitters: format
+ *     2 (its desc and state sections whether or not a v0.2 field is used)
+ *     with, at the end of the desc section, i32 n_jitters and per jitter u8
+ *     name length and the name's bytes, i32 dist, f64 lo, hi, scale, i32
+ *     n_values and f64 per value, i32 rate_num, rate_den, i32 lo, hi and
+ *     scale column (-1 for none); and after the records, n_run x n_jitters
+ *     i64 draws in trial order (nanoseconds, or the frame count of a
+ *     snapped jitter).
  *     psytr_load() compares the desc section with the desc it is given and
  *     names the first field that differs, then range-checks every number
  *     it reads, so a wrong, truncated or corrupt snapshot fails the load
@@ -914,6 +1084,12 @@
  *     groups or a lead-in and requeue_gap > 0: one index draw among the
  *     unit boundaries from the gap (and the unit's end) to the end of the
  *     schedule, or of the BLOCKED group's block.
+ *     v0.2.1. A desc with no jitters draws exactly as above. With jitters,
+ *     every new trial that next() hands out (practice, warmup, main,
+ *     track, a re-queued copy, a lead-in) takes, after all of the draws
+ *     above for it, one raw draw per jitter in jitter order. open() draws
+ *     none, so the schedule is the one without jitters; next() returning
+ *     the pending trial again draws none.
  *     Nothing else draws: not update(), mark_break(), load(), done(), the
  *     format functions or the tallies.
  *
@@ -952,8 +1128,10 @@
  *   condition at PSYTR_MAX_CONDITIONS (1024) plus the desc, 91480
  *   bytes on a 64-bit ABI in v0.1; v0.2 adds scratch for open() and the
  *   unit moves (2 x 2 bytes per trial), the group order (2 bytes per
- *   condition) and the table's level pointers: 110528 bytes. Nothing
- *   allocates. The caller's per-trial
+ *   condition) and the table's level pointers: 110528 bytes; v0.2.1 adds
+ *   8 bytes per trial per PSYTR_MAX_JITTERS (4) for the draws and 1.7 KB
+ *   for the jitters' settings: 243344 bytes (PSYTR_MAX_JITTERS 1: 143744).
+ *   Nothing allocates. The caller's per-trial
  *   records live in desc.records, a buffer of at least record_size x
  *   PSYTR_MAX_TRIALS bytes the caller provides. Define PSYTR_MAX_TRIALS or
  *   PSYTR_MAX_CONDITIONS before the include to resize; both must stay
@@ -998,8 +1176,8 @@
  * string is the three numbers, and the test asserts that it stays so. */
 #define PSYTR_VERSION_MAJOR 0
 #define PSYTR_VERSION_MINOR 2
-#define PSYTR_VERSION_PATCH 0
-#define PSYTR_VERSION_STRING "0.2.0"
+#define PSYTR_VERSION_PATCH 1
+#define PSYTR_VERSION_STRING "0.2.1"
 
 /* Tables (conditions files, trial lists) are psy_table.h's. */
 #include "psy_table.h"
@@ -1025,11 +1203,22 @@ extern "C" {
 #define PSYTR_MAX_FACTORS      8
 #define PSYTR_MAX_CONSTRAINTS 16
 #define PSYTR_MAX_TRACKS      16
+/* Jitters per session (v0.2.1): each costs 8 bytes per trial in the
+ * handle, so a session that needs fewer may define it lower. */
+#ifndef PSYTR_MAX_JITTERS
+#define PSYTR_MAX_JITTERS      4
+#endif
+#define PSYTR_MAX_JITTER_VALUES 32   /* values of one CHOICE jitter        */
+#define PSYTR_MAX_JITTER_NAME   31   /* bytes of a jitter's name           */
+#define PSYTR_JITTER_MAX_S   1.0e6   /* the longest duration, seconds      */
 
 /* The history and the schedule store trial and condition numbers in 16
  * bits to keep the handle small. */
 #if PSYTR_MAX_TRIALS < 1 || PSYTR_MAX_TRIALS > 32767
 #error "PSYTR_MAX_TRIALS must be in [1, 32767]"
+#endif
+#if PSYTR_MAX_JITTERS < 1 || PSYTR_MAX_JITTERS > 64
+#error "PSYTR_MAX_JITTERS must be in [1, 64]"
 #endif
 #if PSYTR_MAX_CONDITIONS < 1 || PSYTR_MAX_CONDITIONS > 32767
 #error "PSYTR_MAX_CONDITIONS must be in [1, 32767]"
@@ -1159,6 +1348,52 @@ typedef struct psytr_group_desc {
  * or a NULL out. See LATIN SQUARES. */
 PSYTR_API int psytr_latin(int n, int row, bool balanced, int* out);
 
+/* --- jitter (v0.2.1) --------------------------------------------------- */
+
+typedef enum psytr_jitter_dist {
+    PSYTR_JITTER_UNIFORM = 0,      /* [lo, hi]                                */
+    PSYTR_JITTER_CHOICE,           /* one of values[], each equally likely    */
+    PSYTR_JITTER_EXPONENTIAL       /* lo + an exponential of mean `scale`,
+                                    * truncated at hi                         */
+} psytr_jitter_dist;
+
+/* A random duration, in seconds (JITTER). Zero-initialize, or use the
+ * helpers below. */
+typedef struct psytr_jitter_desc {
+    const char*       name;        /* data-line column; [A-Za-z_][A-Za-z0-9_]* */
+    psytr_jitter_dist dist;
+    double            lo, hi;      /* UNIFORM, EXPONENTIAL: the interval      */
+    double            scale;       /* EXPONENTIAL: 1 / hazard, seconds        */
+    const double*     values;      /* CHOICE                                  */
+    int               n_values;
+    int               rate_num;    /* > 0: whole frames of rate_num / rate_den */
+    int               rate_den;    /* Hz (0 = 1); 0 / 0 = continuous          */
+    const char*       lo_column;   /* desc level: per-condition lo, hi, scale */
+    const char*       hi_column;   /* from these table columns; NULL = the    */
+    const char*       scale_column;/* field above                             */
+} psytr_jitter_desc;
+
+/* One drawn duration. frames is -1 unless the jitter snaps to frames; an
+ * invalid desc gives s = NaN, ns = -1, frames = -1. */
+typedef struct psytr_jitter_value {
+    double  s;
+    int64_t ns;
+    int64_t frames;
+} psytr_jitter_value;
+
+PSYTR_API psytr_jitter_desc psytr_uniform(const char* name, double lo, double hi);
+PSYTR_API psytr_jitter_desc psytr_choice(const char* name, const double* values, int n);
+PSYTR_API psytr_jitter_desc psytr_exponential(const char* name, double lo, double hi, double scale);
+/* j with its draws snapped to whole frames of rate_num / rate_den Hz. */
+PSYTR_API psytr_jitter_desc psytr_frames(psytr_jitter_desc j, int rate_num, int rate_den);
+
+/* Call level, no session: is j valid (the message says why not)? */
+PSYTR_API bool psytr_jitter_check(const psytr_jitter_desc* j, char* err, size_t cap);
+/* The duration for variate u in [0, 1) (clamped into it). */
+PSYTR_API psytr_jitter_value psytr_jitter_map(const psytr_jitter_desc* j, double u);
+/* One call of rng(ctx), then psytr_jitter_map(). */
+PSYTR_API psytr_jitter_value psytr_jitter_draw(const psytr_jitter_desc* j, psytr_rng_fn rng, void* ctx);
+
 /* Is the track finished? Called on the caller's handle; TRACKS says when. */
 typedef bool (*psytr_done_fn)(void* ctx);
 
@@ -1223,6 +1458,9 @@ typedef struct psytr_desc {
     const double*     weights;       /* WITH_REPLACEMENT: per row; NULL = equal */
     int               subset;        /* k rows without replacement; 0 = all */
     psytr_group_desc  groups;
+    /* v0.2.1: a duration drawn per trial for each (JITTER). */
+    psytr_jitter_desc jitters[PSYTR_MAX_JITTERS];
+    int               n_jitters;
 } psytr_desc;
 
 /* --- handle ------------------------------------------------------------ */
@@ -1261,6 +1499,16 @@ typedef struct psytr_trial {
 #define PSYTR_FLAG_VIOLATION      64  /* ran against a constraint because
                                        * nothing else could; see CONSTRAINTS */
 #define PSYTR_FLAG_LEADIN        128  /* the lead-in of a balanced order (v0.2) */
+
+/* A jitter as the handle keeps it: name and values copied, columns
+ * resolved to indices (-1 for none). Internal. */
+typedef struct psytr__jit {
+    char    name[PSYTR_MAX_JITTER_NAME + 1];
+    int     dist, n_values, rate_num, rate_den;
+    int     col[3];                       /* lo, hi, scale column           */
+    double  lo, hi, scale;
+    double  values[PSYTR_MAX_JITTER_VALUES];
+} psytr__jit;
 
 /* Handle. The caller allocates it and treats every field as opaque.
  * psytr_open() and psytr_load() reset it, so it may be reused. Sized by
@@ -1314,6 +1562,12 @@ typedef struct psytr_trials {
     const unsigned char* col_lev[PSYTB_MAX_COLUMNS]; /* table level bytes   */
     int16_t     aux[PSYTR_MAX_CONDITIONS];    /* group order at open        */
     int16_t     work[2][PSYTR_MAX_TRIALS];    /* scratch, never state       */
+    /* v0.2.1: jitters, copied at open (names, values, columns resolved) */
+    int         n_jit;
+    psytr__jit  jit[PSYTR_MAX_JITTERS];
+    int64_t     jit_raw[PSYTR_MAX_TRIALS][PSYTR_MAX_JITTERS]; /* per trial:
+                                               * nanoseconds, or the frame
+                                               * count when the jitter snaps */
 } psytr_trials;
 
 /* --- lifecycle --------------------------------------------------------- */
@@ -1456,6 +1710,14 @@ PSYTR_API bool   psytr_load(psytr_trials* t, const psytr_desc* desc, const void*
  * or PSYTR_ERR_*; SAVING, REPLAY AND RESUME gives the limits. */
 PSYTR_API int psytr_restore(psytr_trials* t, const int* outcomes, const void* records, int n);
 
+/* --- jitter values (v0.2.1) ------------------------------------------- */
+
+/* Jitter j of trial i (psytr_trial_info.index): seconds, nanoseconds and,
+ * for a jitter that snaps, whole frames. Invalid i or j: s NaN, ns -1. */
+PSYTR_API psytr_jitter_value psytr_jitter(const psytr_trials* t, int i, int j);
+/* The index of the jitter named `name`, or -1. */
+PSYTR_API int psytr_jitter_index(const psytr_trials* t, const char* name);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
@@ -1490,6 +1752,8 @@ PSYTR_API int psytr_restore(psytr_trials* t, const int* outcomes, const void* re
 #define PSYTR__DEFAULT_SWAPS 100000
 #define PSYTR__SNAP_FORMAT   1u   /* a v0.1 desc            */
 #define PSYTR__SNAP_FORMAT2  2u   /* a desc with v0.2 fields */
+#define PSYTR__SNAP_FORMAT3  3u   /* a desc with jitters (v0.2.1): format 2
+                                   * plus the jitters and their draws */
 
 /* break_pending bits: the flag goes on the next trial of any kind, the
  * segment starts at the next MAIN trial, and those can differ when the next
@@ -1599,6 +1863,458 @@ PSYTR_API psytr_track_desc psytr_track(void* ctx, psytr_done_fn is_done) {
     d.is_done = is_done;
     d.weight = 0.0;
     return d;
+}
+
+/* --- jitter ------------------------------------------------------------- */
+
+PSYTR_API psytr_jitter_desc psytr_uniform(const char* name, double lo, double hi) {
+    psytr_jitter_desc j;
+    memset(&j, 0, sizeof(j));
+    j.name = name;
+    j.dist = PSYTR_JITTER_UNIFORM;
+    j.lo = lo;
+    j.hi = hi;
+    return j;
+}
+
+PSYTR_API psytr_jitter_desc psytr_choice(const char* name, const double* values, int n) {
+    psytr_jitter_desc j;
+    memset(&j, 0, sizeof(j));
+    j.name = name;
+    j.dist = PSYTR_JITTER_CHOICE;
+    j.values = values;
+    j.n_values = n;
+    return j;
+}
+
+PSYTR_API psytr_jitter_desc psytr_exponential(const char* name, double lo, double hi, double scale) {
+    psytr_jitter_desc j = psytr_uniform(name, lo, hi);
+    j.dist = PSYTR_JITTER_EXPONENTIAL;
+    j.scale = scale;
+    return j;
+}
+
+PSYTR_API psytr_jitter_desc psytr_frames(psytr_jitter_desc j, int rate_num, int rate_den) {
+    j.rate_num = rate_num;
+    j.rate_den = rate_den;
+    return j;
+}
+
+/* The numbers one draw needs: a jitter's own, or with a row's columns. */
+typedef struct psytr__jp {
+    int           dist, n_values, num, den;     /* num 0: continuous       */
+    double        lo, hi, scale;
+    const double* values;
+} psytr__jp;
+
+/* --- exact integer arithmetic for the draws ------------------------------
+ * Every draw is computed in integers from the variate's 53 bits, so it is
+ * the same on every C library, compiler and flag set (-Ofast, FMA
+ * contraction): no libm call and no floating-point operation whose result
+ * could round differently. 128-bit values are two words. */
+typedef struct psytr__u128 { uint64_t hi, lo; } psytr__u128;
+
+/* The compiler's 128-bit integers where it has them; the same exact
+ * results from 32-bit pieces elsewhere (PSYTR__NO_U128 forces those, for
+ * the test). */
+#if defined(__SIZEOF_INT128__) && !defined(PSYTR__NO_U128)
+__extension__ typedef unsigned __int128 psytr__u128n;
+#define PSYTR__HAVE_U128N 1
+#elif defined(_MSC_VER) && defined(_M_X64) && _MSC_VER >= 1920 && !defined(PSYTR__NO_U128)
+#include <intrin.h>
+#define PSYTR__HAVE_UDIV128 1
+#endif
+
+static psytr__u128 psytr__mul64(uint64_t a, uint64_t b) {
+#if defined(PSYTR__HAVE_U128N)
+    psytr__u128n p = (psytr__u128n)a * b;
+    psytr__u128 r;
+    r.hi = (uint64_t)(p >> 64);
+    r.lo = (uint64_t)p;
+    return r;
+#elif defined(PSYTR__HAVE_UDIV128)
+    psytr__u128 r;
+    r.lo = _umul128(a, b, &r.hi);
+    return r;
+#else
+    uint64_t a0 = a & 0xFFFFFFFFu, a1 = a >> 32, b0 = b & 0xFFFFFFFFu, b1 = b >> 32;
+    uint64_t p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    uint64_t mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu) + (p10 & 0xFFFFFFFFu);
+    psytr__u128 r;
+    r.lo = (mid << 32) | (p00 & 0xFFFFFFFFu);
+    r.hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return r;
+#endif
+}
+
+static psytr__u128 psytr__add64(psytr__u128 x, uint64_t v) {
+    x.lo += v;
+    if (x.lo < v) x.hi++;
+    return x;
+}
+
+/* floor(x / 2^sh), sh in [0, 127]; the caller knows it fits 64 bits. */
+static uint64_t psytr__shr(psytr__u128 x, int sh) {
+    if (sh <= 0) return x.lo;
+    if (sh >= 128) return 0;
+    if (sh >= 64) return x.hi >> (sh - 64);
+    return (x.lo >> sh) | (x.hi << (64 - sh));
+}
+
+/* x / 2^sh rounded to nearest, ties up. */
+static uint64_t psytr__shr_round(psytr__u128 x, int sh) {
+    if (sh <= 0) return x.lo;
+    if (sh > 128) return 0;
+    return psytr__shr(x, sh) + (uint64_t)(sh <= 64 ? (x.lo >> (sh - 1)) & 1u : (x.hi >> (sh - 65)) & 1u);
+}
+
+/* floor(x / d); the quotient must fit 64 bits (x.hi < d). */
+static uint64_t psytr__div(psytr__u128 x, uint64_t d) {
+#if defined(PSYTR__HAVE_U128N)
+    return (uint64_t)((((psytr__u128n)x.hi << 64) | x.lo) / d);
+#elif defined(PSYTR__HAVE_UDIV128)
+    uint64_t rem;
+    return _udiv128(x.hi, x.lo, d, &rem);
+#else
+    uint64_t r = x.hi, q = 0, top;
+    int i;
+    for (i = 63; i >= 0; i--) {
+        top = r >> 63;
+        r = (r << 1) | ((x.lo >> i) & 1u);
+        q <<= 1;
+        if (top || r >= d) {
+            r -= d;
+            q |= 1u;
+        }
+    }
+    return q;
+#endif
+}
+
+/* x 2^sh, sh in [0, 127]; the caller knows it fits. */
+static psytr__u128 psytr__shl(psytr__u128 x, int sh) {
+    if (sh <= 0) return x;
+    if (sh >= 64) {
+        x.hi = x.lo << (sh - 64);
+        x.lo = 0;
+    } else {
+        x.hi = (x.hi << sh) | (x.lo >> (64 - sh));
+        x.lo <<= sh;
+    }
+    return x;
+}
+
+static int psytr__bitlen(uint64_t v) {
+    int n = 0;
+    while (v) { n++; v >>= 1; }
+    return n;
+}
+
+/* Seconds to the nearest nanosecond, ties up, from the double's bits.
+ * x is finite and in [0, PSYTR_JITTER_MAX_S] (or -0). */
+static int64_t psytr__s_to_ns(double x) {
+    uint64_t b, m;
+    int e;
+    memcpy(&b, &x, sizeof(b));
+    b &= ~((uint64_t)1 << 63);
+    e = (int)(b >> 52);
+    m = b & (((uint64_t)1 << 52) - 1u);
+    if (e == 0) e = 1;                      /* subnormal */
+    else m |= (uint64_t)1 << 52;
+    if (m == 0) return 0;
+    /* x = m 2^(e - 1075); x < 2^52 s, so the shift is positive. */
+    return (int64_t)psytr__shr_round(psytr__mul64(m, 1000000000u), 1075 - e);
+}
+
+/* The variate's 53 bits: floor(u 2^53), u clamped to [0, 1). A product
+ * by a power of two is exact, so no flag changes it. */
+static uint64_t psytr__u53(double u) {
+    const double two53 = 9007199254740992.0;
+    if (!(u > 0.0)) return 0;
+    if (u >= 1.0) return ((uint64_t)1 << 53) - 1u;
+    return (uint64_t)(u * two53);
+}
+
+/* -ln(y / 2^53) in Q58 for y in [1, 2^53], within 2^-57 (tested against
+ * mpmath at 123 points, and 1,000,000 by tests/compare/trials_jitter_ref.py).
+ * y = m 2^e, m in [1, 2); m x INV[i] = 1 + t with i m's next 7 bits and
+ * 0 <= t < 2^-7 (INV rounded up); ln(1 + t) by Horner to degree 8, whose
+ * truncation is below 2^-70; T[i] = -ln(INV[i]) from mpmath. */
+#define PSYTR__LN2_Q63 0x58b90bfbe8e7bcd6ULL
+static const uint64_t psytr__inv_q63[128] = {
+    0x8000000000000000ULL, 0x7f01fc07f01fc080ULL, 0x7e07e07e07e07e08ULL, 0x7d1196792909c560ULL,
+    0x7c1f07c1f07c1f08ULL, 0x7b301ecc07b301edULL, 0x7a44c6afc2dd9ca9ULL, 0x795ceb240795ceb3ULL,
+    0x7878787878787879ULL, 0x77975b8fe21a291dULL, 0x76b981dae6076b99ULL, 0x75ded952e0b0ce46ULL,
+    0x7507507507507508ULL, 0x7432d63dbb01d0ccULL, 0x73615a240e6c2b45ULL, 0x7292cc157b864408ULL,
+    0x71c71c71c71c71c8ULL, 0x70fe3c070fe3c071ULL, 0x70381c0e070381c1ULL, 0x6f74ae26501bdd2cULL,
+    0x6eb3e45306eb3e46ULL, 0x6df5b0f768ce2cacULL, 0x6d3a06d3a06d3a07ULL, 0x6c80d901b2036407ULL,
+    0x6bca1af286bca1b0ULL, 0x6b15c06b15c06b16ULL, 0x6a63bd81a98ef607ULL, 0x69b4069b4069b407ULL,
+    0x6906906906906907ULL, 0x685b4fe5e92c0686ULL, 0x67b23a5440cf6475ULL, 0x670b453b92840671ULL,
+    0x6666666666666667ULL, 0x65c393e032e1c9f1ULL, 0x6522c3f35ba78195ULL, 0x6483ed274388a357ULL,
+    0x63e7063e7063e707ULL, 0x634c0634c0634c07ULL, 0x62b2e43dafcea68eULL, 0x621b97c2aec12653ULL,
+    0x6186186186186187ULL, 0x60f25deacafb74a4ULL, 0x6060606060606061ULL, 0x5fd017f405fd0180ULL,
+    0x5f417d05f417d060ULL, 0x5eb4882383b30d52ULL, 0x5e293205e293205fULL, 0x5d9f7390d2a6c406ULL,
+    0x5d1745d1745d1746ULL, 0x5c90a1fd1b7af018ULL, 0x5c0b81702e05c0b9ULL, 0x5b87ddad0cdf1b2dULL,
+    0x5b05b05b05b05b06ULL, 0x5a84f3454dca4110ULL, 0x5a05a05a05a05a06ULL, 0x5987b1a9448be406ULL,
+    0x590b21642c8590b3ULL, 0x588fe9dc0588fe9eULL, 0x5816058160581606ULL, 0x579d6ee340579d6fULL,
+    0x572620ae4c415c99ULL, 0x56b015ac056b015bULL, 0x563b48c20563b48dULL, 0x55c7b4f141ace689ULL,
+    0x5555555555555556ULL, 0x54e42523d03fab1cULL, 0x54741fab8be05475ULL, 0x5405405405405406ULL,
+    0x5397829cbc14e5e1ULL, 0x532ae21c96bdb9d4ULL, 0x52bf5a814afd6a06ULL, 0x5254e78ecb419ba9ULL,
+    0x51eb851eb851eb86ULL, 0x51832f1fd73e6871ULL, 0x511be1958b67ebbaULL, 0x50b59897547e1bbfULL,
+    0x5050505050505051ULL, 0x4fec04fec04fec05ULL, 0x4f88b2f392a409f2ULL, 0x4f265691eeaf9d11ULL,
+    0x4ec4ec4ec4ec4ec5ULL, 0x4e6470b061fd8cddULL, 0x4e04e04e04e04e05ULL, 0x4da637cf781d1e55ULL,
+    0x4d4873ecade304d5ULL, 0x4ceb916d5ef2c784ULL, 0x4c8f8d28ac42fd9cULL, 0x4c346404c346404dULL,
+    0x4bda12f684bda130ULL, 0x4b8097012e025c05ULL, 0x4b27ed3604b27ed4ULL, 0x4ad012b404ad012cULL,
+    0x4a7904a7904a7905ULL, 0x4a22c04a22c04a23ULL, 0x49cd42e2049cd42fULL, 0x497889c2024bc44fULL,
+    0x4924924924924925ULL, 0x48d159e26af37c05ULL, 0x487ede0487ede049ULL, 0x482d1c319f03621eULL,
+    0x47dc11f7047dc120ULL, 0x478bbcecfee1d10dULL, 0x473c1ab68a0473c2ULL, 0x46ed29011bb4a405ULL,
+    0x469ee58469ee5847ULL, 0x46514e02328a7012ULL, 0x4604604604604605ULL, 0x45b81a2509cde3aeULL,
+    0x456c797dd49c3412ULL, 0x45217c382b34eda4ULL, 0x44d72044d72044d8ULL, 0x448d639d74c0cda9ULL,
+    0x4444444444444445ULL, 0x43fbc043fbc043fcULL, 0x43b3d5af9a723f79ULL, 0x436c82a23d1a5664ULL,
+    0x4325c53ef368eb05ULL, 0x42df9bb096771e4eULL, 0x429a0429a0429a05ULL, 0x4254fce404254fcfULL,
+    0x4210842108421085ULL, 0x41cc98291fdf19b4ULL, 0x4189374bc6a7ef9eULL, 0x41465fdf5cd01052ULL,
+    0x4104104104104105ULL, 0x40c246d47d78693cULL, 0x4081020408102041ULL, 0x4040404040404041ULL,
+};
+static const uint64_t psytr__nlinv_q63[128] = {
+    0x0000000000000000ULL, 0x00ff015358833c47ULL, 0x01fc0a8b0fc03e3dULL, 0x02f72360fab62355ULL,
+    0x03f05361cf066009ULL, 0x04e7a1ee7faf57eaULL, 0x05dd163d8cb73f11ULL, 0x06d0b75c465c6fb0ULL,
+    0x07c28c300458a998ULL, 0x08b29b7751bd7073ULL, 0x09a0ebcb0de8e848ULL, 0x0a8d839f830c1fb5ULL,
+    0x0b78694572b5a5cdULL, 0x0c61a2eb18cd907aULL, 0x0d49369d256ab1b2ULL, 0x0e2f2a47ade3a18aULL,
+    0x0f1383b7157972f4ULL, 0x0ff64898edf55d55ULL, 0x10d77e7cd08e5966ULL, 0x11b72ad52f67a028ULL,
+    0x129552f81ff5234bULL, 0x1371fc201e8f743cULL, 0x144d2b6ccb7d1e68ULL, 0x1526e5e3a1b437a3ULL,
+    0x15ff3070a793d3c7ULL, 0x16d60fe719d21c8dULL, 0x17ab890210d9091bULL, 0x187fa06520c91090ULL,
+    0x19525a9cf456b476ULL, 0x1a23bc1fe2b56319ULL, 0x1af3c94e80bff2d8ULL, 0x1bc286742d8cd62aULL,
+    0x1c8ff7c79a9a21abULL, 0x1d5c216b4fbb915aULL, 0x1e27076e2af2e5e9ULL, 0x1ef0adcbdc593651ULL,
+    0x1fb9186d5e3e2a8cULL, 0x20804b2969a081b5ULL, 0x214649c4e721c6bfULL, 0x220b17f35c95aa31ULL,
+    0x22ceb957574c1c06ULL, 0x23913182d333f5f7ULL, 0x245283f79ef2cb44ULL, 0x2512b427bd0d46bcULL,
+    0x25d1c575c23a6137ULL, 0x268fbb3530faa9acULL, 0x274c98aad28bd38dULL, 0x2808610d0d4fc77aULL,
+    0x28c3178438bd84faULL, 0x297cbf2aeef141b5ULL, 0x2a355b0e5bf05a12ULL, 0x2aecee2e8ab4d8a8ULL,
+    0x2ba37b7eb01394a1ULL, 0x2c5905e5738f2a5eULL, 0x2d0d903d36295d88ULL, 0x2dc11d545743c718ULL,
+    0x2e73afed77a00d38ULL, 0x2f254abfba8f44f8ULL, 0x2fd5f077055f86c9ULL, 0x3085a3b43d162e92ULL,
+    0x3134670d8284b56bULL, 0x31e23d0e6cc58efcULL, 0x328f2838422df573ULL, 0x333b2b022fc11597ULL,
+    0x33e647d97f3097e4ULL, 0x34908121cb761458ULL, 0x3539d93534109319ULL, 0x35e252648ef0d621ULL,
+    0x3689eef7991ec519ULL, 0x3730b12d2621f6b3ULL, 0x37d69b3b4e36f7eeULL, 0x387baf4f9b5a9ae7ULL,
+    0x391fef8f35344357ULL, 0x39c35e170be7d6f6ULL, 0x3a65fcfc01d7aac2ULL, 0x3b07ce4b145e7ca0ULL,
+    0x3ba8d4098389417dULL, 0x3c491034f8d84c39ULL, 0x3ce884c3ad0f0fc6ULL, 0x3d8733a48d19802dULL,
+    0x3e251ebf5e0dd967ULL, 0x3ec247f4e05158c2ULL, 0x3f5eb11ef1e63db3ULL, 0x3ffa5c10afe930abULL,
+    0x40954a969743fb1aULL, 0x412f7e76a49b4996ULL, 0x41c8f970737d0139ULL, 0x4261bd3d5cd482e3ULL,
+    0x42f9cb9094aa0ad9ULL, 0x4391261747322fdbULL, 0x4427ce78b5325bf6ULL, 0x44bdc6564fbef14bULL,
+    0x45530f4bd357a6a6ULL, 0x45e7aaef626682ffULL, 0x467b9ad19f25bb30ULL, 0x470ee07dc4f092f1ULL,
+    0x47a17d79c10340f7ULL, 0x483373464aadb64cULL, 0x48c4c35efafd0a0bULL, 0x49556f3a63df2cefULL,
+    0x49e5784a26c46badULL, 0x4a74dffb0ac22b20ULL, 0x4b03a7b5123a2ee5ULL, 0x4b91d0db9009a100ULL,
+    0x4c1f5ccd3c42f87eULL, 0x4cac4ce44875c4c7ULL, 0x4d38a27673874c5bULL, 0x4dc45ed51d1ed716ULL,
+    0x4e4f834d58a866a6ULL, 0x4eda1127fff08abdULL, 0x4f6409a9c55bea8eULL, 0x4fed6e1345bd096cULL,
+    0x50763fa119cab990ULL, 0x50fe7f8be7399de9ULL, 0x51862f08717b09f3ULL, 0x520d4f47aa237dcdULL,
+    0x5293e176c0faec07ULL, 0x5319e6bf33b8e6c4ULL, 0x539f6046dd6ec271ULL, 0x54244f3005a1ad2eULL,
+    0x54a8b4996f16abb8ULL, 0x552c919e66525ea4ULL, 0x55afe756cfce6504ULL, 0x5632b6d735e624c1ULL,
+    0x56b50130d67cb3ebULL, 0x5736c771b05d9233ULL, 0x57b80aa49059d5c2ULL, 0x5838cbd11e236328ULL,
+};
+
+static uint64_t psytr__neglog(uint64_t y) {
+    psytr__u128 acc, p;
+    uint64_t mq, v, t, s, l1p, sub;
+    int e, i, k;
+    e = psytr__bitlen(y) - 1;                       /* 0..53 */
+    mq = y << (63 - e);                             /* m in Q63, [2^63, 2^64) */
+    i = (int)((mq >> 56) & 127u);
+    v = psytr__shr(psytr__mul64(mq, psytr__inv_q63[i]), 63);   /* (1 + t) Q63 */
+    t = v - ((uint64_t)1 << 63);
+    s = ((uint64_t)1 << 63) / 8u;                   /* Horner: 1/8 - t(1/9 ...) */
+    for (k = 7; k >= 1; k--)
+        s = (((uint64_t)1 << 63) / (uint64_t)k) - psytr__shr(psytr__mul64(t, s), 63);
+    l1p = psytr__shr(psytr__mul64(t, s), 63);       /* ln(1 + t) Q63 */
+    /* (53 - e) ln 2 - T[i] - ln(1 + t), in Q63 over 128 bits. */
+    acc = psytr__mul64((uint64_t)(53 - e), PSYTR__LN2_Q63);
+    sub = psytr__nlinv_q63[i];
+    p = acc;
+    for (k = 0; k < 2; k++) {
+        if (p.lo < sub) {
+            if (p.hi == 0) return 0;                /* rounding below 0: -ln(1) */
+            p.hi--;
+        }
+        p.lo -= sub;
+        sub = l1p;
+    }
+    return psytr__shr_round(p, 5);                  /* Q63 -> Q58 */
+}
+
+/* The frame whose start, k den / num s, is nearest a duration: its
+ * nanoseconds, floor((2 k den 1e9 + num) / (2 num)). */
+static int64_t psytr__frame_ns(int64_t k, int num, int den) {
+    psytr__u128 x = psytr__mul64(2u * (uint64_t)k, (uint64_t)den * 1000000000u);
+    return (int64_t)psytr__div(psytr__add64(x, (uint64_t)num), 2u * (uint64_t)num);
+}
+
+/* The first and last frame k whose nanoseconds lie in [lo, hi]. */
+static void psytr__frames_in(int64_t lo, int64_t hi, int num, int den, int64_t* klo, int64_t* khi) {
+    uint64_t d2 = 2u * (uint64_t)den * 1000000000u;
+    psytr__u128 x;
+    uint64_t q;
+    if (lo <= 0) {
+        *klo = 0;
+    } else {
+        /* k >= (2 lo - 1) num / (2 den 1e9), rounded up */
+        x = psytr__mul64(2u * (uint64_t)lo - 1u, (uint64_t)num);
+        q = psytr__div(x, d2);
+        if (psytr__mul64(q, d2).lo != x.lo || psytr__mul64(q, d2).hi != x.hi) q++;
+        *klo = (int64_t)q;
+    }
+    /* k <= ((2 hi + 1) num - 1) / (2 den 1e9), rounded down */
+    x = psytr__mul64(2u * (uint64_t)hi + 1u, (uint64_t)num);
+    if (x.lo == 0) x.hi--;
+    x.lo--;
+    *khi = (int64_t)psytr__div(x, d2);
+}
+
+/* Is p drawable? The message names `who` and the first fault. */
+static bool psytr__jit_valid(const psytr__jp* p, const char* who, char* err, size_t cap) {
+    int i;
+    int64_t klo, khi;
+    const double mx = PSYTR_JITTER_MAX_S;
+#define PSYTR__JERR(...) do { if (err && cap) { int n_ = snprintf(err, cap, "%s: ", who); \
+        if (n_ >= 0 && (size_t)n_ < cap) snprintf(err + n_, cap - (size_t)n_, __VA_ARGS__); } return false; } while (0)
+    if (p->dist < (int)PSYTR_JITTER_UNIFORM || p->dist > (int)PSYTR_JITTER_EXPONENTIAL)
+        PSYTR__JERR("dist is not a psytr_jitter_dist");
+    if (p->num < 0 || p->den < 0) PSYTR__JERR("rate_num and rate_den must not be negative");
+    if (p->num == 0 && p->den != 0) PSYTR__JERR("rate_den needs rate_num");
+    if (p->dist == (int)PSYTR_JITTER_CHOICE) {
+        if (!p->values || p->n_values < 1 || p->n_values > PSYTR_MAX_JITTER_VALUES)
+            PSYTR__JERR("CHOICE needs 1 to %d values", PSYTR_MAX_JITTER_VALUES);
+        for (i = 0; i < p->n_values; i++)
+            if (!psytr__finite(p->values[i]) || p->values[i] < 0.0 || p->values[i] > mx)
+                PSYTR__JERR("values[%d] must be in [0, %g] s", i, mx);
+        return true;
+    }
+    if (!psytr__finite(p->lo) || !psytr__finite(p->hi) || p->lo < 0.0 || p->hi < p->lo || p->hi > mx)
+        PSYTR__JERR("needs 0 <= lo <= hi <= %g s (lo %g, hi %g)", mx, p->lo, p->hi);
+    if (p->dist == (int)PSYTR_JITTER_EXPONENTIAL &&
+        (!psytr__finite(p->scale) || !(p->scale > 0.0) || p->scale > mx || psytr__s_to_ns(p->scale) < 1))
+        PSYTR__JERR("EXPONENTIAL needs a scale in [1 ns, %g s] (scale %g)", mx, p->scale);
+    if (p->num > 0) {
+        psytr__frames_in(psytr__s_to_ns(p->lo), psytr__s_to_ns(p->hi), p->num, p->den, &klo, &khi);
+        if (klo > khi)
+            PSYTR__JERR("no whole frame of %d/%d Hz lies in [%.9g, %.9g] s", p->num, p->den, p->lo, p->hi);
+    }
+    return true;
+#undef PSYTR__JERR
+}
+
+/* The draw for variate u: nanoseconds, or the frame count when p snaps.
+ * u53 = floor(u 2^53). UNIFORM: lo + floor(u53 (hi - lo + 1) / 2^53) ns,
+ * or that over the frames inside. CHOICE: value floor(u53 n / 2^53).
+ * EXPONENTIAL: E = s (-ln(1 - u)), then lo + (E mod (hi - lo)): the
+ * exponential is memoryless, so E folded into the interval is exactly the
+ * truncated exponential, from one variate and with no exp(); snapped, the
+ * same with E counted in frames (a geometric) folded into the frames. */
+static int64_t psytr__jit_raw(const psytr__jp* p, double u) {
+    uint64_t u53 = psytr__u53(u), n, f, g, q, d;
+    int64_t lo, hi, klo, khi, sc;
+    int i, sh;
+    if (p->dist == (int)PSYTR_JITTER_CHOICE) {
+        i = (int)psytr__shr(psytr__mul64(u53, (uint64_t)p->n_values), 53);
+        if (i > p->n_values - 1) i = p->n_values - 1;
+        lo = psytr__s_to_ns(p->values[i]);
+        if (p->num <= 0) return lo;
+        /* the nearest frame: floor((2 v num + den 1e9) / (2 den 1e9)) */
+        d = (uint64_t)p->den * 1000000000u;
+        return (int64_t)psytr__div(psytr__add64(psytr__mul64(2u * (uint64_t)lo, (uint64_t)p->num), d), 2u * d);
+    }
+    lo = psytr__s_to_ns(p->lo);
+    hi = psytr__s_to_ns(p->hi);
+    if (p->num > 0) {
+        psytr__frames_in(lo, hi, p->num, p->den, &klo, &khi);
+        n = (uint64_t)(khi - klo) + 1u;
+        if (p->dist == (int)PSYTR_JITTER_UNIFORM) return klo + (int64_t)psytr__shr(psytr__mul64(u53, n), 53);
+        /* Scale in frames, s num / (den 1e9), as q 2^-sh with q in
+         * [2^62, 2^64); then G = floor(-ln(1 - u) x scale in frames). The
+         * numerator s num is below 2^81 and den 1e9 at least 2^30, so sh
+         * is positive and the shifted numerator fits 128 bits. */
+        sc = psytr__s_to_ns(p->scale);
+        d = (uint64_t)p->den * 1000000000u;
+        {
+            psytr__u128 a = psytr__mul64((uint64_t)sc, (uint64_t)p->num);
+            int bn = a.hi ? 64 + psytr__bitlen(a.hi) : psytr__bitlen(a.lo);
+            sh = 63 + psytr__bitlen(d) - bn;
+            q = psytr__div(psytr__shl(a, sh), d);
+        }
+        f = psytr__neglog(((uint64_t)1 << 53) - u53);
+        g = psytr__shr(psytr__mul64(f, q), 58 + sh);
+        return klo + (int64_t)(g % n);
+    }
+    if (p->dist == (int)PSYTR_JITTER_UNIFORM)
+        return lo + (int64_t)psytr__shr(psytr__mul64(u53, (uint64_t)(hi - lo) + 1u), 53);
+    sc = psytr__s_to_ns(p->scale);
+    f = psytr__neglog(((uint64_t)1 << 53) - u53);
+    g = psytr__shr_round(psytr__mul64(f, (uint64_t)sc), 58);   /* E in ns */
+    return hi > lo ? lo + (int64_t)(g % (uint64_t)(hi - lo)) : lo;
+}
+
+/* Seconds, ns and frames from a stored draw. The seconds are the
+ * correctly rounded ns / 1e9: a division (the divisor is volatile so no
+ * -freciprocal-math turns it into a product). */
+static psytr_jitter_value psytr__jit_value(int64_t raw, int num, int den) {
+    static volatile double billion = 1e9;
+    psytr_jitter_value v;
+    if (num > 0) {
+        v.frames = raw;
+        v.ns = psytr__frame_ns(raw, num, den);
+    } else {
+        v.ns = raw;
+        v.frames = -1;
+    }
+    v.s = (double)v.ns / billion;
+    return v;
+}
+
+static psytr_jitter_value psytr__jit_bad(void) {
+    psytr_jitter_value v;
+    v.s = PSYTR__NAN;
+    v.ns = -1;
+    v.frames = -1;
+    return v;
+}
+
+/* A desc's own numbers (no columns) as draw parameters, den 0 made 1. */
+static void psytr__jit_from_desc(const psytr_jitter_desc* j, psytr__jp* p) {
+    p->dist = (int)j->dist;
+    p->n_values = j->n_values;
+    p->values = j->values;
+    p->num = j->rate_num;
+    p->den = (j->rate_num > 0 && j->rate_den == 0) ? 1 : j->rate_den;
+    p->lo = j->lo;
+    p->hi = j->hi;
+    p->scale = j->scale;
+}
+
+PSYTR_API bool psytr_jitter_check(const psytr_jitter_desc* j, char* err, size_t cap) {
+    psytr__jp p;
+    if (err && cap) err[0] = '\0';
+    if (!j) {
+        if (err && cap) snprintf(err, cap, "psy_trials: jitter: null desc");
+        return false;
+    }
+    if (j->lo_column || j->hi_column || j->scale_column) {
+        if (err && cap) snprintf(err, cap, "psy_trials: jitter: columns need a session with a table (desc.jitters)");
+        return false;
+    }
+    psytr__jit_from_desc(j, &p);
+    return psytr__jit_valid(&p, "psy_trials: jitter", err, cap);
+}
+
+PSYTR_API psytr_jitter_value psytr_jitter_map(const psytr_jitter_desc* j, double u) {
+    psytr__jp p;
+    if (!psytr_jitter_check(j, NULL, 0)) return psytr__jit_bad();
+    psytr__jit_from_desc(j, &p);
+    return psytr__jit_value(psytr__jit_raw(&p, u), p.num, p.den);
+}
+
+PSYTR_API psytr_jitter_value psytr_jitter_draw(const psytr_jitter_desc* j, psytr_rng_fn rng, void* ctx) {
+    if (!rng || !psytr_jitter_check(j, NULL, 0)) return psytr__jit_bad();
+    {
+        psytr__jp p;
+        psytr__jit_from_desc(j, &p);
+        return psytr__jit_value(psytr__jit_raw(&p, rng(ctx)), p.num, p.den);
+    }
 }
 
 /* --- text -------------------------------------------------------------- */
@@ -2810,6 +3526,113 @@ static uint64_t psytr__mix_in(uint64_t h, uint64_t v) {
 /* Everything open() and load() share: validate, copy the desc with its
  * defaults resolved, size the schedule. No generator draw and no track
  * call, so load() can use it. */
+/* --- jitter in a session ------------------------------------------------- */
+
+/* Draw parameters of jitter j for a trial of condition `cond` (-1 for a
+ * track trial): the jitter's own numbers, with any column's value for the
+ * row in their place. */
+static void psytr__jit_params(const psytr_trials* t, int j, int cond, psytr__jp* p) {
+    const psytr__jit* q = &t->jit[j];
+    const psytb_table* tb = t->desc.table;
+    p->dist = q->dist;
+    p->n_values = q->n_values;
+    p->values = q->values;
+    p->num = q->rate_num;
+    p->den = q->rate_den;
+    p->lo = q->lo;
+    p->hi = q->hi;
+    p->scale = q->scale;
+    if (cond >= 0 && tb) {
+        if (q->col[0] >= 0) p->lo = psytb_num(tb, cond, q->col[0]);
+        if (q->col[1] >= 0) p->hi = psytb_num(tb, cond, q->col[1]);
+        if (q->col[2] >= 0) p->scale = psytb_num(tb, cond, q->col[2]);
+    }
+}
+
+static bool psytr__jit_name_ok(const char* nm) {
+    size_t i, n;
+    if (!nm) return false;
+    n = strlen(nm);
+    if (n < 1 || n > PSYTR_MAX_JITTER_NAME) return false;
+    for (i = 0; i < n; i++) {
+        char c = nm[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (i > 0 && c >= '0' && c <= '9')))
+            return false;
+    }
+    return true;
+}
+
+/* Copy desc.jitters[j] into the handle, resolve its columns, and check it
+ * for every row that can use it (and for track trials, which use the
+ * jitter's own numbers). n_cond and the table are set. */
+static bool psytr__jit_setup(psytr_trials* t, const psytr_desc* d, int j, int n_cond) {
+    const psytr_jitter_desc* s = &d->jitters[j];
+    psytr__jit* q = &t->jit[j];
+    const char* cols[3];
+    char who[96], msg[256];
+    psytr__jp p;
+    int k, c;
+    bool any_col = false;
+    if (!psytr__jit_name_ok(s->name))
+        return psytr__fail(t, "desc.jitters[%d].name must be 1 to %d of [A-Za-z0-9_], not starting with a digit",
+                           j, PSYTR_MAX_JITTER_NAME);
+    for (k = 0; k < j; k++)
+        if (strcmp(t->jit[k].name, s->name) == 0)
+            return psytr__fail(t, "desc.jitters[%d] and [%d] are both named '%s'", k, j, s->name);
+    memcpy(q->name, s->name, strlen(s->name) + 1);
+    snprintf(who, sizeof(who), "desc.jitters[%d] (%s)", j, q->name);
+    psytr__jit_from_desc(s, &p);
+    q->dist = p.dist;
+    q->rate_num = p.num;
+    q->rate_den = p.den;
+    q->lo = p.lo;
+    q->hi = p.hi;
+    q->scale = p.scale;
+    q->n_values = 0;
+    if (p.dist == (int)PSYTR_JITTER_CHOICE && p.values && p.n_values >= 1 && p.n_values <= PSYTR_MAX_JITTER_VALUES) {
+        for (k = 0; k < p.n_values; k++) q->values[k] = p.values[k];
+        q->n_values = p.n_values;
+    }
+    cols[0] = s->lo_column;
+    cols[1] = s->hi_column;
+    cols[2] = s->scale_column;
+    for (k = 0; k < 3; k++) {
+        q->col[k] = -1;
+        if (!cols[k]) continue;
+        if (!d->table) return psytr__fail(t, "%s: a column needs desc.table", who);
+        if (p.dist == (int)PSYTR_JITTER_CHOICE) return psytr__fail(t, "%s: a CHOICE jitter takes no columns", who);
+        if (k == 2 && p.dist != (int)PSYTR_JITTER_EXPONENTIAL)
+            return psytr__fail(t, "%s: scale_column needs an EXPONENTIAL jitter", who);
+        q->col[k] = psytb_col(d->table, cols[k]);
+        if (q->col[k] < 0) return psytr__fail(t, "%s: the table has no column '%s'", who, cols[k]);
+        if (psytb_col_type(d->table, q->col[k]) == PSYTB_STRING)
+            return psytr__fail(t, "%s: column '%s' is not numeric", who, cols[k]);
+        any_col = true;
+    }
+    /* With columns the jitter's own numbers are used only by track trials. */
+    if (!any_col || d->n_tracks > 0) {
+        if (!psytr__jit_valid(&p, who, msg, sizeof(msg))) return psytr__fail(t, "%s", msg);
+    }
+    if (any_col) {
+        for (c = 0; c < n_cond; c++) {
+            psytr__jit_params(t, j, c, &p);
+            snprintf(who, sizeof(who), "desc.jitters[%d] (%s), row %d", j, q->name, c);
+            if (!psytr__jit_valid(&p, who, msg, sizeof(msg))) return psytr__fail(t, "%s", msg);
+        }
+    }
+    return true;
+}
+
+/* One variate per jitter, in jitter order, for the trial just pushed. */
+static void psytr__jit_draw(psytr_trials* t, int i, int cond) {
+    psytr__jp p;
+    int j;
+    for (j = 0; j < t->n_jit && j < PSYTR_MAX_JITTERS; j++) {
+        psytr__jit_params(t, j, cond, &p);
+        t->jit_raw[i][j] = psytr__jit_raw(&p, t->desc.rng(t->desc.rng_ctx));
+    }
+}
+
 static bool psytr__setup(psytr_trials* t, const psytr_desc* d) {
     int i, f, n_cond, n_main = 0, n_fac, n_struct = 0, n_groups = 1;
     long prod;
@@ -3097,6 +3920,10 @@ static bool psytr__setup(psytr_trials* t, const psytr_desc* d) {
     if (d->requeue_gap < 0) return psytr__fail(t, "desc.requeue_gap is negative");
     if (d->record_size > 0 && !d->records)
         return psytr__fail(t, "desc.record_size needs desc.records");
+    if (d->n_jitters < 0 || d->n_jitters > PSYTR_MAX_JITTERS)
+        return psytr__fail(t, "desc.n_jitters must be in [0, PSYTR_MAX_JITTERS (%d)]", PSYTR_MAX_JITTERS);
+    for (i = 0; i < d->n_jitters && i < PSYTR_MAX_JITTERS; i++)
+        if (!psytr__jit_setup(t, d, i, n_cond)) return false;
 
     /* Practice and warmup draw only under an order other than SEQUENTIAL,
      * and they need conditions, so the first test covers them. */
@@ -3115,6 +3942,8 @@ static bool psytr__setup(psytr_trials* t, const psytr_desc* d) {
             why = "a track_rate below 1";
         else if (d->requeue_gap > 0)
             why = "a requeue_gap";
+        else if (d->n_jitters > 0)
+            why = "jitter draws";
         if (why) return psytr__fail(t, "desc.rng is required for %s", why);
     }
 
@@ -3139,6 +3968,9 @@ static bool psytr__setup(psytr_trials* t, const psytr_desc* d) {
     t->desc.warmup_conditions = NULL;
     t->desc.order_list = NULL;
     t->desc.groups.list = NULL;
+    /* Jitters live in t->jit; the desc's copies would dangle. */
+    memset(t->desc.jitters, 0, sizeof(t->desc.jitters));
+    t->n_jit = d->n_jitters;
     t->aux_hash = h;
     t->had_weights = d->weights != NULL;
     t->v2 = psytr__is_v2(d);
@@ -3312,6 +4144,7 @@ static int psytr__push(psytr_trials* t, int cond, int track, int rep, int block,
     h->outcome = PSYTR_INVALID;
     t->n_run = i + 1;
     t->current = i;
+    if (t->n_jit > 0) psytr__jit_draw(t, i, cond);
     psytr__info(t, i, info);
     return i;
 }
@@ -3854,6 +4687,21 @@ PSYTR_API const void* psytr_record(const psytr_trials* t, int i) {
     return psytr__slot(t, i);
 }
 
+PSYTR_API psytr_jitter_value psytr_jitter(const psytr_trials* t, int i, int j) {
+    if (!t || !t->open || i < 0 || i >= t->n_run || i >= PSYTR_MAX_TRIALS || j < 0 || j >= t->n_jit ||
+        j >= PSYTR_MAX_JITTERS)
+        return psytr__jit_bad();
+    return psytr__jit_value(t->jit_raw[i][j], t->jit[j].rate_num, t->jit[j].rate_den);
+}
+
+PSYTR_API int psytr_jitter_index(const psytr_trials* t, const char* name) {
+    int j;
+    if (!t || !t->open || !name) return -1;
+    for (j = 0; j < t->n_jit && j < PSYTR_MAX_JITTERS; j++)
+        if (strcmp(t->jit[j].name, name) == 0) return j;
+    return -1;
+}
+
 /* A CSV field, quoted when it would otherwise split or break the line. */
 static void psytr__csv_name(psytr__str* s, const char* name, int f) {
     const char* p;
@@ -3890,6 +4738,7 @@ PSYTR_API int psytr_format_header(const psytr_trials* t, char* buf, size_t cap) 
         if (t->desc.table) psytr__cat(&s, "%s", psytb_col_name(t->desc.table, f));
         else psytr__csv_name(&s, t->desc.factors[f].name, f);
     }
+    for (f = 0; f < t->n_jit && f < PSYTR_MAX_JITTERS; f++) psytr__cat(&s, ",%s", t->jit[f].name);
     psytr__cat(&s, "\n");
     return psytr__str_done(&s);
 }
@@ -3923,8 +4772,59 @@ PSYTR_API int psytr_format_row(const psytr_trials* t, int i, char* buf, size_t c
             psytr__cat(&s, ",%d", psytr__lv(t, h->condition, f));
         }
     }
+    for (f = 0; f < t->n_jit && f < PSYTR_MAX_JITTERS; f++) {
+        /* Seconds as the exact decimal of the nanoseconds used. */
+        psytr_jitter_value v = psytr_jitter(t, i, f);
+        psytr__cat(&s, ",%lld.%09lld", (long long)(v.ns / 1000000000), (long long)(v.ns % 1000000000));
+    }
     psytr__cat(&s, "\n");
     return psytr__str_done(&s);
+}
+
+static void psytr__fr_factor(psytr__str* s, const psytr_trials* t, int f);
+
+/* x in the fewest digits that read back as x (15 to 17), with '.' for
+ * the decimal point whatever LC_NUMERIC says, so the text parses back. */
+static void psytr__cat_num(psytr__str* s, double x) {
+    char b[40];
+    double y;
+    int prec;
+    size_t i, n = 0;
+    for (prec = 15; prec <= 17; prec++) {
+        snprintf(b, sizeof(b), "%.*g", prec, x);
+        for (i = 0; b[i]; i++)
+            if (!((b[i] >= '0' && b[i] <= '9') || b[i] == 'e' || b[i] == 'E' || b[i] == '-' || b[i] == '+'))
+                b[i] = '.';
+        n = i;
+        if (psytb_parse_number(b, n, &y) == PSYTB_NUM_OK && y == x) break;
+    }
+    psytr__cat(s, "%s", b);
+}
+
+/* Jitter j as the arguments of its rules statement, `sep` between them. */
+static void psytr__fr_jitter(psytr__str* s, const psytr_trials* t, int j, char sep) {
+    static const char* const dn[] = { "uniform", "choice", "exponential" };
+    const psytr__jit* q = &t->jit[j];
+    double num[3];
+    int k, np;
+    psytr__cat(s, "%s%c%s", q->name, sep, dn[q->dist]);
+    if (q->dist == (int)PSYTR_JITTER_CHOICE) {
+        for (k = 0; k < q->n_values; k++) {
+            psytr__cat(s, "%c", sep);
+            psytr__cat_num(s, q->values[k]);
+        }
+    } else {
+        num[0] = q->lo;
+        num[1] = q->hi;
+        num[2] = q->scale;
+        np = q->dist == (int)PSYTR_JITTER_EXPONENTIAL ? 3 : 2;
+        for (k = 0; k < np; k++) {
+            psytr__cat(s, "%c", sep);
+            if (q->col[k] >= 0) psytr__fr_factor(s, t, q->col[k]);
+            else psytr__cat_num(s, num[k]);
+        }
+    }
+    if (q->rate_num > 0) psytr__cat(s, "%crate=%d/%d", sep, q->rate_num, q->rate_den);
 }
 
 PSYTR_API int psytr_format_meta(const psytr_trials* t, char* buf, size_t cap) {
@@ -3972,6 +4872,13 @@ PSYTR_API int psytr_format_meta(const psytr_trials* t, char* buf, size_t cap) {
         psytr__cat(&s, " subset=%d draws=%d list=%d groups=%s,%d,%s,%d aux=%016llx",
                    d->subset, d->draws, d->n_order_list, gmodes[d->groups.mode], d->groups.factor,
                    gorders[d->groups.order], d->groups.participant, (unsigned long long)t->aux_hash);
+    }
+    if (t->n_jit > 0) {
+        psytr__cat(&s, " jitters=");
+        for (i = 0; i < t->n_jit && i < PSYTR_MAX_JITTERS; i++) {
+            if (i) psytr__cat(&s, ";");
+            psytr__fr_jitter(&s, t, i, ':');
+        }
     }
     psytr__cat(&s, "\n");
     return psytr__str_done(&s);
@@ -4124,6 +5031,11 @@ PSYTR_API int psytr_format_rules(const psytr_trials* t, char* buf, size_t cap) {
         default:
             break;
         }
+        psytr__cat(&s, "\n");
+    }
+    for (i = 0; i < t->n_jit && i < PSYTR_MAX_JITTERS; i++) {
+        psytr__cat(&s, "jitter ");
+        psytr__fr_jitter(&s, t, i, ' ');
         psytr__cat(&s, "\n");
     }
     return psytr__str_done(&s);
@@ -4362,7 +5274,7 @@ static const char* const psytr__rl_verbs[] = {
     "order", "reps", "cond_reps", "weight", "where", "subset", "draws", "list", "groups",
     "block_size", "practice", "warmup", "warmup_conditions", "requeue_gap", "max_swaps", "span_blocks",
     "max_run", "max_in_window", "min_gap", "no_transition", "first_not", "followed_by", "preceded_by",
-    "chunk", "balance", "constrain", "shuffle"
+    "chunk", "balance", "constrain", "shuffle", "jitter"
 };
 
 /* Spellings from other tools that mean a statement here. */
@@ -4377,7 +5289,9 @@ static const char* psytr__rl_alias(const char* p, size_t n) {
         { "repetitions", "reps" }, { "nreps", "reps" }, { "size", "draws" },
         { "with_replacement", "order with_replacement" }, { "without_replacement", "subset" },
         { "randomize_order", "order random" }, { "shufflenorepeats", "max_run @row 1" },
-        { "counterbalance", "groups ... latin" }, { "latin", "order latin" }
+        { "counterbalance", "groups ... latin" }, { "latin", "order latin" },
+        { "iti", "jitter iti ..." }, { "foreperiod", "jitter foreperiod ..." }, { "isi", "jitter isi ..." },
+        { "soa", "jitter soa ..." }
     };
     size_t i;
     for (i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++)
@@ -4783,6 +5697,83 @@ static bool psytr__rl_stmt(psytr__rl* rl, psytr__arg* a, int na) {
         }
         return any;
     }
+    if (VERB("jitter")) {
+        static const char* const form =
+            "jitter NAME uniform LO HI | choice V V ... | exponential LO HI SCALE, then [rate=NUM[/DEN]]";
+        psytr_jitter_desc* jd;
+        char* nm;
+        char tok[64];
+        double* vals = NULL;
+        double num;
+        const char* cols[3] = { NULL, NULL, NULL };
+        double nums[3] = { 0.0, 0.0, 0.0 };
+        int kind, np, last = na, rn = 0, rd = 0;
+        if (na < 4) return psytr__rl_fail(rl, 0, "expected: %s", form), false;
+        if (d->n_jitters < 0 || d->n_jitters >= PSYTR_MAX_JITTERS)
+            return psytr__rl_fail(rl, 0, "more than %d jitters (PSYTR_MAX_JITTERS)", PSYTR_MAX_JITTERS), false;
+        if (a[1].v || a[1].kq || a[1].kn < 1 || a[1].kn > PSYTR_MAX_JITTER_NAME)
+            return psytr__rl_fail(rl, a[1].col, "a jitter's name is a word of 1 to %d characters", PSYTR_MAX_JITTER_NAME), false;
+        if (psytr__rl_word(&a[2], "uniform")) kind = PSYTR_JITTER_UNIFORM;
+        else if (psytr__rl_word(&a[2], "choice")) kind = PSYTR_JITTER_CHOICE;
+        else if (psytr__rl_word(&a[2], "exponential")) kind = PSYTR_JITTER_EXPONENTIAL;
+        else return psytr__rl_fail(rl, a[2].col, "expected uniform, choice or exponential"), false;
+        if (a[na - 1].v && !a[na - 1].kq && a[na - 1].kn == 4 && memcmp(a[na - 1].k, "rate", 4) == 0) {
+            const char* v2 = a[na - 1].v;
+            size_t vn = a[na - 1].vn, sl;
+            for (sl = 0; sl < vn && v2[sl] != '/'; sl++) {}
+            rn = psytr__rl_count(v2, sl, a[na - 1].vq);
+            rd = sl < vn ? psytr__rl_count(v2 + sl + 1, vn - sl - 1, a[na - 1].vq) : 1;
+            if (rn < 1 || rd < 1) return psytr__rl_fail(rl, a[na - 1].col, "expected rate=NUM or rate=NUM/DEN (positive counts)"), false;
+            last = na - 1;
+        }
+        np = last - 3;
+        if (kind == PSYTR_JITTER_UNIFORM && np != 2) return psytr__rl_fail(rl, 0, "expected: jitter NAME uniform LO HI [rate=NUM[/DEN]]"), false;
+        if (kind == PSYTR_JITTER_EXPONENTIAL && np != 3) return psytr__rl_fail(rl, 0, "expected: jitter NAME exponential LO HI SCALE [rate=NUM[/DEN]]"), false;
+        if (kind == PSYTR_JITTER_CHOICE && (np < 1 || np > PSYTR_MAX_JITTER_VALUES))
+            return psytr__rl_fail(rl, 0, "expected: jitter NAME choice V V ... (1 to %d values) [rate=NUM[/DEN]]", PSYTR_MAX_JITTER_VALUES), false;
+        if (kind == PSYTR_JITTER_CHOICE) {
+            vals = (double*)psytr__rl_alloc(rl, sizeof(double) * (size_t)np);
+            if (!vals) return false;
+        }
+        for (k = 0; k < np; k++) {
+            const psytr__arg* g = &a[3 + k];
+            if (g->v) return psytr__rl_fail(rl, g->col, "expected a number of seconds or a column"), false;
+            if (g->kn < sizeof(tok) && !g->kq) {
+                memcpy(tok, g->k, g->kn);
+                tok[g->kn] = '\0';
+                if (psytb_parse_number(tok, g->kn, &num) == PSYTB_NUM_OK) {
+                    if (vals) vals[k] = num;
+                    else nums[k] = num;
+                    continue;
+                }
+            }
+            if (vals || !tb)
+                return psytr__rl_fail(rl, g->col, "'%.*s' is not a number of seconds", (int)(g->kn > 40 ? 40 : g->kn), g->k), false;
+            f = psytr__rl_factor(rl, g, g->k, g->kn, g->kq);
+            if (f == -2) return false;
+            if (f < 0) return psytr__rl_fail(rl, g->col, "a jitter takes a column, not @row"), false;
+            cols[k] = psytb_col_name(tb, f);
+        }
+        nm = (char*)psytr__rl_alloc(rl, a[1].kn + 1);
+        if (!nm) return false;
+        memcpy(nm, a[1].k, a[1].kn);
+        nm[a[1].kn] = '\0';
+        jd = &d->jitters[d->n_jitters++];
+        memset(jd, 0, sizeof(*jd));
+        jd->name = nm;
+        jd->dist = (psytr_jitter_dist)kind;
+        jd->lo = nums[0];
+        jd->hi = nums[1];
+        jd->scale = nums[2];
+        jd->lo_column = cols[0];
+        jd->hi_column = cols[1];
+        jd->scale_column = cols[2];
+        jd->values = vals;
+        jd->n_values = vals ? np : 0;
+        jd->rate_num = rn;
+        jd->rate_den = rd;
+        return true;
+    }
 #undef VERB
     {
         static const char* const os[] = { "slice", "sort", "sortby", "reverse", "roll", "shuffle_horiz",
@@ -4919,6 +5910,11 @@ static void psytr__put_f64(psytr__w* w, double v, const char* name) {
     psytr__put(w, u, 8, name);
 }
 
+/* The snapshot format a session saves and loads. */
+static uint32_t psytr__snap_format(const psytr_trials* t) {
+    return t->n_jit > 0 ? PSYTR__SNAP_FORMAT3 : t->v2 ? PSYTR__SNAP_FORMAT2 : PSYTR__SNAP_FORMAT;
+}
+
 static void psytr__put_desc(psytr__w* w, const psytr_trials* t) {
     const psytr_desc* d = &t->desc;
     int i;
@@ -4954,7 +5950,7 @@ static void psytr__put_desc(psytr__w* w, const psytr_trials* t) {
         psytr__put_i32(w, t->warm_list[i], "warmup_conditions[]");
     psytr__put_i32(w, d->requeue_gap, "requeue_gap");
     psytr__put(w, (uint64_t)d->record_size, 8, "record_size");
-    if (t->v2) {
+    if (t->v2 || t->n_jit > 0) {
         /* Format 2: what v0.2 added. The arrays the handle does not keep
          * (weights, the order list, the group list) are checked by hash. */
         psytr__put(w, d->table ? psytb_hash(d->table) : 0u, 8, "table");
@@ -4970,6 +5966,28 @@ static void psytr__put_desc(psytr__w* w, const psytr_trials* t) {
         psytr__put_i32(w, d->groups.n_list, "groups.n_list");
         psytr__put(w, t->aux_hash, 8, "order_list, weights or groups.list");
     }
+    if (t->n_jit > 0) {
+        size_t n, k;
+        psytr__put_i32(w, t->n_jit, "n_jitters");
+        for (i = 0; i < t->n_jit && i < PSYTR_MAX_JITTERS; i++) {
+            const psytr__jit* q = &t->jit[i];
+            n = strlen(q->name);
+            psytr__put(w, (uint64_t)n, 1, "jitters[].name");
+            for (k = 0; k < n; k++) psytr__put(w, (unsigned char)q->name[k], 1, "jitters[].name");
+            psytr__put_i32(w, q->dist, "jitters[].dist");
+            psytr__put_f64(w, q->lo, "jitters[].lo");
+            psytr__put_f64(w, q->hi, "jitters[].hi");
+            psytr__put_f64(w, q->scale, "jitters[].scale");
+            psytr__put_i32(w, q->n_values, "jitters[].n_values");
+            for (k = 0; k < (size_t)q->n_values && k < PSYTR_MAX_JITTER_VALUES; k++)
+                psytr__put_f64(w, q->values[k], "jitters[].values");
+            psytr__put_i32(w, q->rate_num, "jitters[].rate_num");
+            psytr__put_i32(w, q->rate_den, "jitters[].rate_den");
+            psytr__put_i32(w, q->col[0], "jitters[].lo_column");
+            psytr__put_i32(w, q->col[1], "jitters[].hi_column");
+            psytr__put_i32(w, q->col[2], "jitters[].scale_column");
+        }
+    }
 }
 
 static void psytr__put_all(psytr__w* w, const psytr_trials* t) {
@@ -4982,7 +6000,7 @@ static void psytr__put_all(psytr__w* w, const psytr_trials* t) {
     psytr__put(w, 'S', 1, "magic");
     psytr__put(w, 'T', 1, "magic");
     psytr__put(w, 'R', 1, "magic");
-    psytr__put(w, t->v2 ? PSYTR__SNAP_FORMAT2 : PSYTR__SNAP_FORMAT, 4, "format");
+    psytr__put(w, psytr__snap_format(t), 4, "format");
     psytr__put_desc(w, t);
 
     psytr__put_i32(w, t->n_scheduled, "n_scheduled");
@@ -4998,7 +6016,7 @@ static void psytr__put_all(psytr__w* w, const psytr_trials* t) {
     psytr__put_i32(w, t->warm_block, "warm_block");
     psytr__put_i32(w, t->warm_done, "warm_done");
     psytr__put_i32(w, t->swaps, "swaps");
-    if (t->v2) {
+    if (t->v2 || t->n_jit > 0) {
         psytr__put_i32(w, t->blk, "blk");
         psytr__put_i32(w, t->blk_next, "blk_next");
         psytr__put(w, t->units ? 1u : 0u, 1, "units");
@@ -5028,6 +6046,11 @@ static void psytr__put_all(psytr__w* w, const psytr_trials* t) {
         rec = (const unsigned char*)t->desc.records;
         nrec = (size_t)psytr__nrun(t) * t->desc.record_size;
         for (k = 0; k < nrec; k++) psytr__put(w, rec[k], 1, "records");
+    }
+    for (i = 0; i < psytr__nrun(t); i++) {
+        int j;
+        for (j = 0; j < t->n_jit && j < PSYTR_MAX_JITTERS; j++)
+            psytr__put(w, (uint64_t)t->jit_raw[i][j], 8, "jitter");
     }
 }
 
@@ -5093,9 +6116,8 @@ PSYTR_API bool psytr_load(psytr_trials* t, const psytr_desc* desc, const void* b
     r.in = in;
     r.len = len;
     r.pos = 4;
-    if ((uint32_t)psytr__get(&r, 4) != (t->v2 ? PSYTR__SNAP_FORMAT2 : PSYTR__SNAP_FORMAT))
-        return psytr__fail(t, "psytr_load: snapshot format is not %u",
-                           t->v2 ? PSYTR__SNAP_FORMAT2 : PSYTR__SNAP_FORMAT);
+    if ((uint32_t)psytr__get(&r, 4) != psytr__snap_format(t))
+        return psytr__fail(t, "psytr_load: snapshot format is not %u", (unsigned)psytr__snap_format(t));
 
     memset(&w, 0, sizeof(w));
     w.cmp = in;
@@ -5119,7 +6141,7 @@ PSYTR_API bool psytr_load(psytr_trials* t, const psytr_desc* desc, const void* b
     t->warm_block   = psytr__get_i32(&r);
     t->warm_done    = psytr__get_i32(&r);
     t->swaps        = psytr__get_i32(&r);
-    if (t->v2) {
+    if (t->v2 || t->n_jit > 0) {
         t->blk        = psytr__get_i32(&r);
         t->blk_next   = psytr__get_i32(&r);
         t->units      = psytr__get(&r, 1) != 0;
@@ -5183,6 +6205,19 @@ PSYTR_API bool psytr_load(psytr_trials* t, const psytr_desc* desc, const void* b
             rec = (unsigned char*)t->desc.records;
             for (k = 0; k < nrec; k++) rec[k] = r.in[r.pos + k];
             r.pos += nrec;
+        }
+    }
+    for (i = 0; i < psytr__nrun(t); i++) {
+        int j;
+        for (j = 0; j < t->n_jit && j < PSYTR_MAX_JITTERS; j++) {
+            /* A draw is nanoseconds in [0, the longest duration], or a
+             * frame count no larger than that duration's; anything else is
+             * corruption. */
+            int64_t x = (int64_t)psytr__get(&r, 8);
+            double lim = PSYTR_JITTER_MAX_S * 1e9;
+            if (t->jit[j].rate_num > 0) lim = PSYTR_JITTER_MAX_S * t->jit[j].rate_num / t->jit[j].rate_den + 1.0;
+            if (x < 0 || (double)x > lim) r.bad = true;
+            else t->jit_raw[i][j] = x;
         }
     }
     if (r.bad)

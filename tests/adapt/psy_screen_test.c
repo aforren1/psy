@@ -43,6 +43,17 @@ static void varm(struct psyscr_screen* s, long long t);
 #define PSYSCR__ARM(s, t)       varm((s), (long long)(t))
 #define PSYSCR__WORKER_START(s) (1)
 #define PSYSCR__WORKER_STOP(s)  ((void)(s))
+/* The input bridge's doorbells: recorded here in the order rung, refused
+ * while g_bell_refuse is set (SDL's queue full). Threads ring them. */
+static int g_bell_refuse;
+static volatile long g_nbells;
+static int g_bells[16384];
+static int test_bell(int seq);
+#define PSYSCR__DOORBELL(seq) test_bell(seq)
+/* Text input as SDL would report it for the window: -1 = what the header
+ * set (no other library), else 0 or 1 as another library left it. */
+static int g_ti = -1;
+#define PSYSCR__TEXT_INPUT_ACTIVE(s) (g_ti >= 0 ? g_ti : (s)->text_input)
 
 #define PSY_SCREEN_IMPLEMENTATION
 #include "psy_screen.h"
@@ -1322,6 +1333,422 @@ static void test_missing(void) {
     CHECK_I(est_ok, 4);
 }
 
+/* Text input (INPUT): off at open; a ring record per change, none for a
+ * moved rectangle; the flag on the flips planned while it is on. The
+ * scripted backend has no window, so no SDL call is made. */
+static void test_text_input(void) {
+    static script c;
+    psyscr_screen s;
+    static psyscr_frame f;   /* static: gcc -O3 cannot see begin() fill it */
+    psyscr_record out;
+    int i, j, n, recs = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    CHECK_I(psyscr_text_input(NULL, true, 0, 0, 1, 1), PSYSCR_ERR_ARG);
+    memset(&s, 0, sizeof s);
+    CHECK_I(psyscr_text_input(&s, true, 0, 0, 1, 1), PSYSCR_ERR_CLOSED);
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 5));
+    if (!psyscr_is_open(&s)) return;
+    CHECK_I(psyscr_text_input(&s, true, 0, 0, -1, 1), PSYSCR_ERR_ARG);
+    for (i = 0; i < 12; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        if (i == 4) CHECK_I(psyscr_text_input(&s, true, 10, 20, 300, 40), PSYSCR_OK);
+        if (i == 6) CHECK_I(psyscr_text_input(&s, true, 50, 20, 300, 40), PSYSCR_OK);   /* moved: no record */
+        if (i == 8) CHECK_I(psyscr_text_input(&s, false, 0, 0, 0, 0), PSYSCR_OK);
+        if (i == 9) CHECK_I(psyscr_text_input(&s, false, 0, 0, 0, 0), PSYSCR_OK);     /* no change */
+        CHECK_I(psyscr_flip_at(&s, f.onset, &out), PSYSCR_OK);
+        CHECK_I((out.flags & PSYSCR_FLIP_TEXT_INPUT) != 0, i >= 4 && i < 8);
+    }
+    psyscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const psyrt_event* e = &g_ev[j];
+        if (e->source != PSYRT_SRC_SCREEN) continue;
+        if (e->kind == PSYSCR_EV_TEXT_INPUT) {
+            CHECK_I(e->aux, 5);
+            CHECK_I(e->u.u32[0], recs == 0 ? 1 : 0);
+            CHECK_I(e->u.u32[5], 0);                 /* commanded, not observed */
+            if (recs == 0) { CHECK_I(e->u.i32[1], 10); CHECK_I(e->u.i32[2], 20); CHECK_I(e->u.i32[3], 300); CHECK_I(e->u.i32[4], 40); }
+            recs++;
+        }
+    }
+    CHECK_I(recs, 2);
+    /* v0.3.3: another library turns text input on (frame 3) and off
+     * (frame 7) behind the header's back: the same records, external */
+    ring_reset();
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    CHECK(open_scripted(&s, &c, 0, 5));
+    if (!psyscr_is_open(&s)) return;
+    for (i = 0; i < 10; i++) {
+        CHECK_I(psyscr_begin(&s, &f), PSYSCR_OK);
+        if (i == 3) g_ti = 1;
+        if (i == 7) g_ti = 0;
+        CHECK_I(psyscr_flip_at(&s, f.onset, &out), PSYSCR_OK);
+        CHECK_I((out.flags & PSYSCR_FLIP_TEXT_INPUT) != 0, i >= 3 && i < 7);
+    }
+    g_ti = -1;
+    psyscr_close(&s);
+    n = ring_drain();
+    recs = 0;
+    for (j = 0; j < n; j++) {
+        const psyrt_event* e = &g_ev[j];
+        if (e->source != PSYRT_SRC_SCREEN || e->kind != PSYSCR_EV_TEXT_INPUT) continue;
+        CHECK_I(e->u.u32[0], recs == 0 ? 1 : 0);
+        CHECK_I(e->u.u32[5], 1);
+        recs++;
+    }
+    CHECK_I(recs, 2);
+}
+
+/* v0.3.4: one PSYSCR_EV_DEVICE record per change of an input device. */
+static void test_devices(void) {
+    static script c;
+    psyscr_screen s;
+    int i, j, n, recs = 0, added = 0;
+    char longname[40];
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 5));
+    if (!psyscr_is_open(&s)) return;
+    memset(longname, 'k', sizeof longname);
+    longname[30] = 0;
+    psyscr__device_log(&s, PSYSCR_DEV_KEYBOARD, PSYSCR_DEV_PRESENT, 0x1001, "Keyboard A");
+    psyscr__device_log(&s, PSYSCR_DEV_KEYBOARD, PSYSCR_DEV_ADDED, 0x1001, "Keyboard A");    /* SDL again */
+    psyscr__device_log(&s, PSYSCR_DEV_MOUSE, PSYSCR_DEV_PRESENT, 0x1001, "Mouse");           /* same id, other kind */
+    psyscr__device_log(&s, PSYSCR_DEV_KEYBOARD, PSYSCR_DEV_ADDED, 0x2002, longname);
+    psyscr__device_log(&s, PSYSCR_DEV_KEYBOARD, PSYSCR_DEV_REMOVED, 0x2002, NULL);
+    psyscr__device_log(&s, PSYSCR_DEV_KEYBOARD, PSYSCR_DEV_REMOVED, 0x2002, NULL);           /* gone already */
+    psyscr__device_log(&s, PSYSCR_DEV_TOUCH, PSYSCR_DEV_ADDED, 0x123456789ULL, NULL);
+    for (i = 0; i < 40; i++)                                                                /* past the table */
+        psyscr__device_log(&s, PSYSCR_DEV_GAMEPAD, PSYSCR_DEV_ADDED, 100 + (uint64_t)i, "pad");
+    psyscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const psyrt_event* e = &g_ev[j];
+        if (e->source != PSYRT_SRC_SCREEN || e->kind != PSYSCR_EV_DEVICE) continue;
+        CHECK_I(e->aux, 5);
+        if (recs == 0) {
+            CHECK_I(e->u.u32[0], PSYSCR_DEV_KEYBOARD);
+            CHECK_I(e->u.u32[1], PSYSCR_DEV_PRESENT);
+            CHECK_I(e->u.u64[1], 0x1001);
+            CHECK(!strcmp(PSYSCR_DEV_NAME_OF(e), "Keyboard A"));
+        }
+        if (recs == 1) CHECK_I(e->u.u32[0], PSYSCR_DEV_MOUSE);
+        if (recs == 2) { CHECK_I(strlen(PSYSCR_DEV_NAME_OF(e)), 23); CHECK_I(e->u.u64[1], 0x2002); }
+        if (recs == 3) { CHECK_I(e->u.u32[1], PSYSCR_DEV_REMOVED); CHECK_I(PSYSCR_DEV_NAME_OF(e)[0], 0); }
+        if (recs == 4) { CHECK_I(e->u.u32[0], PSYSCR_DEV_TOUCH); CHECK(e->u.u64[1] == 0x123456789ULL); }
+        if (e->u.u32[0] == PSYSCR_DEV_GAMEPAD) added++;
+        recs++;
+    }
+    CHECK_I(recs, 5 + 40);
+    CHECK_I(added, 40);
+}
+
+static int test_bell(int seq) {
+    long k;
+    if (g_bell_refuse) return 0;
+#if defined(_WIN32)
+    k = InterlockedIncrement(&g_nbells) - 1;
+#else
+    k = __atomic_add_fetch(&g_nbells, 1, __ATOMIC_SEQ_CST) - 1;
+#endif
+    if (k < 16384) g_bells[k] = seq;
+    return 1;
+}
+
+static void bridge_reset(void) {
+    uint32_t type = psyscr__in.type;
+    memset(&psyscr__in, 0, sizeof psyscr__in);
+    psyscr__in.type = type;
+    g_nbells = 0;
+    g_bell_refuse = 0;
+}
+
+static psyin_event box_event(int control) {
+    psyin_event e;
+    memset(&e, 0, sizeof e);
+    e.t = 1000 + control;
+    e.kind = PSYIN_KIND_BOX;
+    e.type = PSYIN_PRESS;
+    e.control = (uint32_t)control;
+    return e;
+}
+
+#define BRIDGE_THREADS 4
+#define BRIDGE_EACH 1000
+#if defined(_WIN32)
+static DWORD WINAPI bridge_producer(LPVOID arg) {
+#else
+static void* bridge_producer(void* arg) {
+#endif
+    int id = (int)(intptr_t)arg, i;
+    for (i = 0; i < BRIDGE_EACH; i++) {
+        psyin_event e = box_event(i);
+        e.device = (uint32_t)id;
+        psyscr_push_input(&e);
+    }
+#if defined(_WIN32)
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+/* v0.4.0: the input bridge on its seam (no SDL): store, doorbell, decode. */
+static void test_bridge(void) {
+    static script c;
+    psyscr_screen s;
+    psyin_event e, o;
+    psyscr_input_stats st;
+    int i, j, n, seq_b, recs = 0, last[BRIDGE_THREADS];
+    bridge_reset();
+    psyscr__in.type = 0;
+    e = box_event(1);
+    CHECK_I(psyscr_push_input(&e), PSYSCR_ERR_CLOSED);     /* no SDL screen yet */
+    CHECK_I(psyscr_push_input(NULL), PSYSCR_ERR_ARG);
+    psyscr__in.type = 0x8001;                              /* as SDL_RegisterEvents gives */
+    CHECK_I(psyscr_input_event_type(), 0x8001);
+    /* in order, each doorbell its own record, the producer's stamp kept */
+    for (i = 0; i < 3; i++) { e = box_event(i); CHECK_I(psyscr_push_input(&e), PSYSCR_OK); }
+    CHECK_I(g_nbells, 3);
+    for (i = 0; i < 3; i++) {
+        CHECK(psyscr__in_decode(NULL, g_bells[i], &o));
+        CHECK_I(o.control, i);
+        CHECK_I(o.t, 1000 + i);
+    }
+    CHECK(!psyscr__in_decode(NULL, g_bells[1], &o));       /* decoded already: not lost */
+    CHECK_I(psyscr__in.lost, 0);
+    /* a skipped doorbell keeps its record, and no later doorbell takes it */
+    bridge_reset();
+    for (i = 0; i < 3; i++) { e = box_event(10 + i); psyscr_push_input(&e); }
+    CHECK(psyscr__in_decode(NULL, g_bells[2], &o));
+    CHECK_I(o.control, 12);
+    CHECK(psyscr__in_decode(NULL, g_bells[0], &o));
+    CHECK_I(o.control, 10);
+    seq_b = g_bells[1];
+    CHECK(psyscr__in_decode(NULL, seq_b, &o));            /* late, still its own */
+    CHECK_I(o.control, 11);
+    /* never decoded: overwritten when the store wraps, then reported lost */
+    bridge_reset();
+    e = box_event(77);
+    psyscr_push_input(&e);
+    seq_b = g_bells[0];
+    for (i = 0; i < PSYSCR_INPUT_STORE; i++) { e = box_event(i); psyscr_push_input(&e); }
+    CHECK_I(psyscr__in.overwritten, 1);
+    CHECK(!psyscr__in_decode(NULL, seq_b, &o));
+    CHECK_I(psyscr__in.lost, 1);
+    CHECK(psyscr__in_decode(NULL, g_bells[1 + PSYSCR_INPUT_STORE - 1], &o));
+    CHECK_I(o.control, PSYSCR_INPUT_STORE - 1);
+    /* SDL's queue full: the doorbell is refused, the record kept, and the
+     * doorbell rung again later, oldest first */
+    bridge_reset();
+    g_bell_refuse = 1;
+    for (i = 0; i < 3; i++) { e = box_event(20 + i); CHECK_I(psyscr_push_input(&e), PSYSCR_OK); }
+    CHECK_I(g_nbells, 0);
+    CHECK_I(psyscr__in.refused, 3);
+    CHECK_I(psyscr__in.pending, 3);
+    CHECK_I(psyscr__in_rebell(), 0);                       /* still full */
+    g_bell_refuse = 0;
+    CHECK_I(psyscr__in_rebell(), 3);
+    CHECK_I(psyscr__in.pending, 0);
+    for (i = 0; i < 3; i++) {
+        CHECK(psyscr__in_decode(NULL, g_bells[i], &o));
+        CHECK_I(o.control, 20 + i);
+    }
+    CHECK_I(psyscr__in_rebell(), 0);
+    /* a refused doorbell whose record was decoded some other way: nothing to ring */
+    g_bell_refuse = 1;
+    e = box_event(30);
+    psyscr_push_input(&e);
+    g_bell_refuse = 0;
+    CHECK(psyscr__in_take(3, &o, NULL) == 1);              /* sequence 3 */
+    CHECK_I(psyscr__in.pending, 0);
+    CHECK_I(psyscr__in_rebell(), 0);
+    /* producer threads: every event once, each producer's in its order */
+    bridge_reset();
+    {
+#if defined(_WIN32)
+        HANDLE th[BRIDGE_THREADS];
+        for (i = 0; i < BRIDGE_THREADS; i++) th[i] = CreateThread(NULL, 0, bridge_producer, (LPVOID)(intptr_t)i, 0, NULL);
+        WaitForMultipleObjects(BRIDGE_THREADS, th, TRUE, INFINITE);
+        for (i = 0; i < BRIDGE_THREADS; i++) CloseHandle(th[i]);
+#else
+        pthread_t th[BRIDGE_THREADS];
+        for (i = 0; i < BRIDGE_THREADS; i++) pthread_create(&th[i], NULL, bridge_producer, (void*)(intptr_t)i);
+        for (i = 0; i < BRIDGE_THREADS; i++) pthread_join(th[i], NULL);
+#endif
+    }
+    CHECK_I(g_nbells, BRIDGE_THREADS * BRIDGE_EACH);
+    for (i = 0; i < BRIDGE_THREADS; i++) last[i] = -1;
+    n = 0;
+    for (i = 0; i < (int)g_nbells; i++) {
+        if (!psyscr__in_decode(NULL, g_bells[i], &o)) continue;
+        n++;
+        if (o.device < BRIDGE_THREADS) {
+            if ((int)o.control <= last[o.device]) { CHECK((int)o.control > last[o.device]); break; }
+            last[o.device] = (int)o.control;
+        }
+    }
+    CHECK_I(n, BRIDGE_THREADS * BRIDGE_EACH);
+    for (i = 0; i < BRIDGE_THREADS; i++) CHECK_I(last[i], BRIDGE_EACH - 1);
+    psyscr_get_input_stats(&st);
+    CHECK_I(st.stored, BRIDGE_THREADS * BRIDGE_EACH);
+    CHECK_I(st.overwritten, 0);
+    CHECK_I(st.lost, 0);
+    /* the ring record at begin(): once per change */
+    bridge_reset();
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 5));
+    if (!psyscr_is_open(&s)) return;
+    g_bell_refuse = 1;
+    e = box_event(1);
+    psyscr_push_input(&e);
+    g_bell_refuse = 0;
+    psyscr__in_log(&s);
+    psyscr__in_log(&s);                                    /* no change: no record */
+    psyscr__in_rebell();
+    psyscr__in_log(&s);                                    /* only the waiting count fell */
+    psyscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++)
+        if (g_ev[j].source == PSYRT_SRC_SCREEN && g_ev[j].kind == PSYSCR_EV_INPUT_LOST) {
+            CHECK_I(g_ev[j].u.u32[1], 1);
+            CHECK_I(g_ev[j].u.u32[3], 1);
+            recs++;
+        }
+    CHECK_I(recs, 1);
+    bridge_reset();
+}
+
+/* v0.3.5: the raw mouse reader's pure parts on synthetic RAWMOUSE data:
+ * the decoder, the queue, the unlisted-device log, the guard, the refusal. */
+static void test_raw_mice(void) {
+    static script c;
+    psyscr_screen s;
+    psyscr_desc d;
+    psyscr_mouse_event e, out;
+    int j, n, unlisted_recs = 0, rm_recs = 0;
+    int32_t susp = 0;
+    /* the decoder: winuser.h's RI_MOUSE_* bits */
+    psyscr__mouse_decode(0, 0x0001 | 0x0008, 0, 3, -4, 0x77, 1000, &e);
+    CHECK_I(e.down, PSYSCR_MOUSE_LEFT);
+    CHECK_I(e.up, PSYSCR_MOUSE_RIGHT);
+    CHECK_I(e.dx, 3);
+    CHECK_I(e.dy, -4);
+    CHECK_I(e.device, 0x77);
+    CHECK_I(e.t, 1000);
+    CHECK_I(e.flags, 0);
+    psyscr__mouse_decode(0, 0x0010 | 0x0040 | 0x0200, 0, 0, 0, 1, 0, &e);
+    CHECK_I(e.down, PSYSCR_MOUSE_MIDDLE | PSYSCR_MOUSE_X1);
+    CHECK_I(e.up, PSYSCR_MOUSE_X2);
+    psyscr__mouse_decode(0, 0x0020 | 0x0080 | 0x0100 | 0x0002 | 0x0004, 0, 0, 0, 1, 0, &e);
+    CHECK_I(e.up, PSYSCR_MOUSE_MIDDLE | PSYSCR_MOUSE_X1 | PSYSCR_MOUSE_LEFT);
+    CHECK_I(e.down, PSYSCR_MOUSE_X2 | PSYSCR_MOUSE_RIGHT);
+    psyscr__mouse_decode(0, 0x0400, (uint16_t)0xFF88, 0, 0, 1, 0, &e);     /* one notch toward the user */
+    CHECK_I(e.wheel, -120);
+    CHECK_I(e.hwheel, 0);
+    psyscr__mouse_decode(0, 0x0800, 240, 0, 0, 1, 0, &e);
+    CHECK_I(e.hwheel, 240);
+    CHECK_I(e.wheel, 0);
+    psyscr__mouse_decode(0x0001 | 0x0002, 0, 0, 65535, 32768, 1, 0, &e);
+    CHECK_I(e.flags, PSYSCR_MOUSE_ABSOLUTE | PSYSCR_MOUSE_VIRTUAL_DESKTOP);
+    CHECK_I(e.dx, 65535);
+    /* the reader's reports go onto the bridge (origin 1); the deprecated
+     * psyscr_poll_mouse() reads them back, one event of a report at a time */
+    bridge_reset();
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = PSYSCR_PATH_OVERLAY;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 5));
+    if (!psyscr_is_open(&s)) return;
+    psyscr__device_log(&s, PSYSCR_DEV_MOUSE, PSYSCR_DEV_PRESENT, 0x77, "Mouse");
+    {
+        psyin_event ev[12], o;
+        int k, nn;
+        psyscr__mouse_decode(0, 0x0001, 0, 0, 0, 0x77, 10, &e);
+        nn = psyin_from_mouse(&e, ev, 12);
+        for (k = 0; k < nn; k++) psyscr__in_push(&ev[k], 1);
+        memset(&o, 0, sizeof o);
+        o.kind = PSYIN_KIND_BOX;                       /* another producer's */
+        psyscr__in_push(&o, 0);
+        psyscr__mouse_decode(0, 0, 0, 5, -2, 0x99, 11, &e);
+        nn = psyin_from_mouse(&e, ev, 12);
+        for (k = 0; k < nn; k++) psyscr__in_push(&ev[k], 1);
+        psyscr__in_push(&ev[0], 1);
+        psyscr__mouse_decode(0, 0x0400, 120, 0, 0, 0, 12, &e);         /* injected */
+        nn = psyin_from_mouse(&e, ev, 12);
+        for (k = 0; k < nn; k++) psyscr__in_push(&ev[k], 1);
+    }
+    CHECK(psyscr_poll_mouse(&s, &out));
+    CHECK_I(out.flags & PSYSCR_MOUSE_UNLISTED, 0);
+    CHECK_I(out.down, PSYSCR_MOUSE_LEFT);
+    CHECK_I(out.t, 10);
+    CHECK(psyscr_poll_mouse(&s, &out));
+    CHECK_I(out.flags & PSYSCR_MOUSE_UNLISTED, PSYSCR_MOUSE_UNLISTED);
+    CHECK_I(out.dx, 5);
+    CHECK_I(out.dy, -2);
+    CHECK(psyscr_poll_mouse(&s, &out));
+    CHECK_I(out.flags & PSYSCR_MOUSE_UNLISTED, PSYSCR_MOUSE_UNLISTED);
+    CHECK(psyscr_poll_mouse(&s, &out));
+    CHECK_I(out.flags, 0);
+    CHECK_I(out.wheel, 120);
+    CHECK(!psyscr_poll_mouse(&s, &out));
+    {   /* their doorbells now decode as taken, not lost; the box event decodes */
+        psyin_event o;
+        int k, taken = 0, decoded = 0;
+        for (k = 0; k < (int)g_nbells; k++) {
+            if (psyscr__in_decode(&s, g_bells[k], &o)) { decoded++; CHECK_I(o.kind, PSYIN_KIND_BOX); }
+            else taken++;
+        }
+        CHECK_I(decoded, 1);
+        CHECK_I(taken, 4);
+        CHECK_I(psyscr__in.lost, 0);
+    }
+    /* the guard: relative mode suspends once; a lost registration asks again */
+    CHECK_I(psyscr__rm_guard(&susp, 0, 1), 0);
+    CHECK_I(psyscr__rm_guard(&susp, 1, 1), PSYSCR_RAW_MICE_SUSPENDED);
+    CHECK_I(psyscr__rm_guard(&susp, 1, 0), 0);
+    CHECK_I(psyscr__rm_guard(&susp, 0, 0), PSYSCR_RAW_MICE_REGISTERED);
+    CHECK_I(susp, 0);
+    CHECK_I(psyscr__rm_guard(&susp, 0, 1), 0);
+    psyscr__rm_log(&s, PSYSCR_RAW_MICE_REGISTERED);
+    psyscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const psyrt_event* r = &g_ev[j];
+        if (r->source != PSYRT_SRC_SCREEN) continue;
+        if (r->kind == PSYSCR_EV_DEVICE && r->u.u64[1] == 0x99) {
+            CHECK_I(r->u.u32[0], PSYSCR_DEV_MOUSE);
+            CHECK_I(r->u.u32[1], PSYSCR_DEV_ADDED);
+            CHECK(!strcmp(PSYSCR_DEV_NAME_OF(r), "raw, not in SDL's list"));
+            unlisted_recs++;
+        }
+        if (r->kind == PSYSCR_EV_RAW_MICE) {
+            CHECK_I(r->u.u32[0], PSYSCR_RAW_MICE_REGISTERED);
+            rm_recs++;
+        }
+    }
+    CHECK_I(unlisted_recs, 1);
+    CHECK_I(rm_recs, 1);
+    /* refused where there is no reader: the simulated display */
+    memset(&s, 0, sizeof s);
+    memset(&d, 0, sizeof d);
+    d.backend = PSYSCR_BACKEND_SIM;
+    d.raw_mice = true;
+    CHECK(!psyscr_open(&s, &d));
+    CHECK(strstr(psyscr_error(&s), "raw_mice") != NULL);
+}
+
 /* The snap: nearest vblank at lead 0.5, the next one at or after under
  * PSYSCR_LEAD_NONE; a hold to a later vblank lands on it, natively or by
  * the header's own wait. */
@@ -1448,6 +1875,7 @@ static void test_unshown_and_tiers(void) {
     }
     psyscr_get_caps(&s, &caps);
     CHECK_I(caps.worst_tier, PSYSCR_TIER_3);
+    CHECK(!caps.raw_keyboard);              /* no window: no raw keyboard path */
     psyscr_close(&s);
     memset(seen, 0, sizeof seen);
     n = ring_drain();
@@ -1632,10 +2060,13 @@ static void test_mode_multiple(void) {
 }
 
 static void test_params(void) {
-    int n = 0, i, j;
+    int n = 0, i, j, gamepads = 0;
     const psyscr_param* p = psyscr_params(&n);
     CHECK(p != NULL);
     CHECK(n >= 15);
+    for (i = 0; i < n; i++)   /* v0.3.3: off by default */
+        if (!strcmp(p[i].name, "gamepads")) gamepads += p[i].def == 0 && !strcmp(p[i].type, "bool");
+    CHECK_I(gamepads, 1);
     for (i = 0; i < n; i++) {
         CHECK(p[i].name && p[i].type && p[i].unit && p[i].doc);
         CHECK(p[i].min <= p[i].def && p[i].def <= p[i].max);
@@ -1899,6 +2330,15 @@ static void test_panic_rule(void) {
     CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_HOOK), 0);
     CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 1250000000, PSYSCR__AB_HOOK), 0);
     CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 2500000000LL, PSYSCR__AB_HOOK), 0);
+    /* a tool that injects by virtual key (remote desktop, assistive
+     * software): each press reported twice, the second 34.2 ms later, the
+     * longest gap measured (INPUT). Two presses, not four: no panic. */
+    vlose(20000000000LL);
+    t = vnow();
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t, PSYSCR__AB_HOOK), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 34200000, PSYSCR__AB_SDL), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 500000000, PSYSCR__AB_HOOK), 0);
+    CHECK_I(psyscr__abort_key(PSYSCR_KEY_ESCAPE, PSYSCR_MOD_SHIFT, t + 534200000, PSYSCR__AB_SDL), 0);
     /* a live loop reports press 1: presses 2 and 3 are aborts, not a panic */
     vlose(20000000000LL);
     CHECK_I(one_frame(&s, &f), PSYSCR_QUIT);       /* the presses above */
@@ -2006,6 +2446,10 @@ int main(void) {
     test_codes();
     test_present_hook();
     test_missing();
+    test_text_input();
+    test_devices();
+    test_bridge();
+    test_raw_mice();
     test_snap_and_hold(1, 0);
     test_snap_and_hold(0, 0);
     test_snap_and_hold(1, PSYSCR_LEAD_NONE);

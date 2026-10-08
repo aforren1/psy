@@ -7,7 +7,9 @@ constrained orders, interleaved adaptive tracks, blocks, practice, warmup and
 re-queued trials) and records what happened. From version 0.2 it also reads
 conditions files and trial lists from CSV, samples with or without
 replacement, orders groups by Latin square, keeps units together ("b always
-follows a"), balances transitions, and takes the header's rules text. It uses the plain CPython C API
+follows a"), balances transitions, and takes the header's rules text. From
+0.2.1 it draws a random duration per trial (a foreperiod, an ITI, an SOA),
+logs it and replays it. It uses the plain CPython C API
 and has no dependencies. It is built against the **Limited API / stable ABI**
 (`Py_LIMITED_API = 0x03080000`), so one `psy/trials.abi3.so` works on CPython
 3.8 and later.
@@ -94,6 +96,26 @@ raises `ArgumentError` with the line, the row and the column. A `Table` keeps
 its own copy of the block; `to_bytes()` is the block a pack stores, and
 `Table.from_bytes()` checks one.
 
+## How to jitter a foreperiod and an ITI
+
+```python
+t = pt.Trials(n_conditions=4, reps=25, order=pt.ORDER_FULL_RANDOM, rng=20261007,
+              jitters=[pt.exponential("fp", 0.5, 2.0, 0.4, rate=(60000, 1001)),  # non-aging
+                       pt.uniform("iti", 0.8, 1.2)])
+while (ti := t.next()) is not None:
+    fp = t.jitter(ti.index, "fp")            # Jitter(s, ns, frames)
+    show_cue(); wait_frames(fp.frames); t.update(run_target(ti.condition))
+    wait_ns(t.jitter(ti.index, "iti").ns)
+```
+
+The durations come from the session's generator, one draw per jitter per
+trial in a fixed order, so `restore()` and `load()` reproduce them, and
+`format_row()` logs each in its own column (seconds to the nanosecond). A
+jitter's `lo`, `hi` and `scale` can name table columns, for an interval per
+condition: `pt.uniform("fp", "fp_lo", "fp_hi")`. The rules text takes
+`jitter fp exponential 0.5 2.0 0.4 rate=60000/1001`. `pt.jitter_map(spec, u)`
+maps a variate of your own with no session, and nothing replays it.
+
 ## How to interleave adaptive tracks
 
 ```python
@@ -173,6 +195,7 @@ default.
 | `groups` | from `groups()`: blocked or alternating groups of one factor (v0.2) |
 | `rules` | rules text, applied after the other arguments (v0.2) |
 | `participant` | the participant number for `@participant` and the Latin orders (v0.2) |
+| `jitters` | from `uniform()`, `choice()` and `exponential()`: a duration drawn per trial (v0.2.1) |
 
 | Method or property | Returns |
 |---|---|
@@ -189,6 +212,7 @@ default.
 | `format_header()`, `format_row(i)`, `format_meta()` | CSV lines and a `key=value` line, as str with the newline |
 | `format_rules()` | the session's settings as rules text (v0.2) |
 | `values(c)`, `table` | condition `c`'s table row as a dict; the `Table` or None (v0.2) |
+| `jitter(i, j)`, `jitters` | trial `i`'s draw of jitter `j` (index or name) as `Jitter(s, ns, frames)`; the names (v0.2.1) |
 | `save()`, `Trials.load(data, **desc)`, `restore(outcomes, records=None)` | snapshot, resume, replay. `records` is one bytes object or a list of records. |
 | `rng_state` | the splitmix state for an int seed (read and write); None for a callable |
 | `n_conditions`, `n_factors`, `n_run`, `n_done`, `swaps`, `is_open`, `record_size` | counts and state |
@@ -218,6 +242,13 @@ list=None)` makes the `groups` argument: `mode` is `'blocked'` or
 `row` (taken modulo the design's rows) of a cyclic or Williams square, and
 `latin_rows(n, balanced=False)` the row count (2n for a balanced square of
 odd n).
+
+`uniform(name, lo, hi, *, rate=None)`, `choice(name, values, *, rate=None)` and
+`exponential(name, lo, hi, scale, *, rate=None)` make the `jitters` entries
+(v0.2.1): seconds, or a table column's name for `lo`, `hi` or `scale`; `rate`
+is an int or `(num, den)` Hz that snaps the draws to whole frames. `frames` is
+-1 for a jitter that does not snap. `jitter_map(spec, u)` maps a variate in
+[0, 1) with no session.
 
 `Table(csv, *, types=None, delimiter=',', allow_empty=False)` parses CSV text
 (str or bytes); `types` maps column names to `'integer'`, `'number'` or
@@ -283,4 +314,6 @@ files written by Python's `csv` module and read back by both, and 5000
 random decimals parsed by both `Table` and `float()`, bit for bit. They also
 run every v0.2 order, groups, units and balance, and check that rules text
 gives the same schedule as the equivalent arguments and survives a round
-trip through `format_rules()`.
+trip through `format_rules()`. The 0.2.1 tests draw jitters in a session and
+replay them, read per-condition intervals from a table, and check
+`jitter_map()` against the inverse CDFs written from their definitions.

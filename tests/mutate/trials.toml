@@ -272,3 +272,154 @@ test = "trials"
 why = "A resumed session with units and block_size would start its blocks on the wrong trials."
 find = 'psytr__put_i32(w, t->blk_next, "blk_next");'
 replace = 'psytr__put_i32(w, 0, "blk_next");'
+
+# --- jitter (v0.2.1) --------------------------------------------------------------
+
+[[mutant]]
+id = "j-01"
+name = "first frame rounded down"
+test = "trials"
+why = "The first frame inside [lo, hi] is the first whose nanoseconds reach lo: k rounded up, or a frame before lo is drawn."
+find = 'if (psytr__mul64(q, d2).lo != x.lo || psytr__mul64(q, d2).hi != x.hi) q++;'
+replace = ''
+
+[[mutant]]
+id = "j-02"
+name = "last frame includes one that rounds above hi"
+test = "trials"
+why = "A frame whose time is hi + 0.5 ns rounds to hi + 1 ns and lies outside; without the -1 it is counted in."
+find = '''    if (x.lo == 0) x.hi--;
+    x.lo--;'''
+replace = ''
+
+[[mutant]]
+id = "j-03"
+name = "snapped uniform never draws the last frame"
+test = "trials"
+why = "Every frame inside [lo, hi] is equally likely; n - 1 bins leave the last one out."
+find = 'if (p->dist == (int)PSYTR_JITTER_UNIFORM) return klo + (int64_t)psytr__shr(psytr__mul64(u53, n), 53);'
+replace = 'if (p->dist == (int)PSYTR_JITTER_UNIFORM) return klo + (int64_t)psytr__shr(psytr__mul64(u53, n - 1u), 53);'
+
+[[mutant]]
+id = "j-04"
+name = "exponential not folded into the interval"
+test = "trials"
+why = "E mod (hi - lo) is what makes it the truncated exponential; without it draws pass hi."
+find = 'return hi > lo ? lo + (int64_t)(g % (uint64_t)(hi - lo)) : lo;'
+replace = 'return lo + (int64_t)g;'
+
+[[mutant]]
+id = "j-05"
+name = "log series with the wrong sign"
+test = "trials"
+why = "ln(1 + t) alternates; a plus makes every -ln(1 - u) wrong by up to t^2, far beyond 2^-58."
+find = 's = (((uint64_t)1 << 63) / (uint64_t)k) - psytr__shr(psytr__mul64(t, s), 63);'
+replace = 's = (((uint64_t)1 << 63) / (uint64_t)k) + psytr__shr(psytr__mul64(t, s), 63);'
+
+[[mutant]]
+id = "j-06"
+name = "frames to ns truncated, not rounded"
+test = "trials"
+why = "71 frames at 60000/1001 Hz is 1184516666.67 ns: 1184516667, not 1184516666."
+find = 'return (int64_t)psytr__div(psytr__add64(x, (uint64_t)num), 2u * (uint64_t)num);'
+replace = 'return (int64_t)psytr__div(psytr__add64(x, 0u), 2u * (uint64_t)num);'
+
+[[mutant]]
+id = "j-07"
+name = "choice never draws the last value"
+test = "trials"
+why = "Each of the n values is equally likely."
+find = 'i = (int)psytr__shr(psytr__mul64(u53, (uint64_t)p->n_values), 53);'
+replace = 'i = (int)psytr__shr(psytr__mul64(u53, (uint64_t)p->n_values - 1u), 53);'
+
+[[mutant]]
+id = "j-08"
+name = "columns ignored at draw time"
+test = "trials"
+why = "A per-condition interval comes from the trial's row; -1 is a track trial's."
+find = 'if (t->n_jit > 0) psytr__jit_draw(t, i, cond);'
+replace = 'if (t->n_jit > 0) psytr__jit_draw(t, i, -1);'
+
+[[mutant]]
+id = "j-09"
+name = "snapshot without the draws"
+test = "trials"
+why = "A resumed session must log the durations its trials ran with."
+find = 'psytr__put(w, (uint64_t)t->jit_raw[i][j], 8, "jitter");'
+replace = ';'
+
+[[mutant]]
+id = "j-10"
+name = "data line without the zero padding"
+test = "trials"
+why = "0.0123 s must print as 0.012300000, not 0.12300000."
+find = 'psytr__cat(&s, ",%lld.%09lld", (long long)(v.ns / 1000000000), (long long)(v.ns % 1000000000));'
+replace = 'psytr__cat(&s, ",%lld.%lld", (long long)(v.ns / 1000000000), (long long)(v.ns % 1000000000));'
+
+[[mutant]]
+id = "j-11"
+name = "the hi column not read"
+test = "trials"
+why = "The row's hi replaces the jitter's own; without it the rows' intervals are refused or wrong."
+find = 'if (q->col[1] >= 0) p->hi = psytb_num(tb, cond, q->col[1]);'
+replace = ''
+
+[[mutant]]
+id = "j-12"
+name = "jitter snapshot of a v0.1 desc saved as format 1"
+test = "trials"
+why = "Format 3 marks the jitter sections; a v0.1 desc with jitters must not claim format 1."
+find = 'return t->n_jit > 0 ? PSYTR__SNAP_FORMAT3 : t->v2 ? PSYTR__SNAP_FORMAT2 : PSYTR__SNAP_FORMAT;'
+replace = 'return (t->n_jit > 0 && t->v2) ? PSYTR__SNAP_FORMAT3 : t->v2 ? PSYTR__SNAP_FORMAT2 : PSYTR__SNAP_FORMAT;'
+
+[[mutant]]
+id = "j-13"
+name = "no generator required for jitters"
+test = "trials"
+why = "A SEQUENTIAL session with jitters draws; open() must refuse it without desc.rng instead of crashing at next()."
+find = '''        else if (d->n_jitters > 0)
+            why = "jitter draws";'''
+replace = ''
+
+[[mutant]]
+id = "j-14"
+name = "duplicate jitter names accepted"
+test = "trials"
+why = "Two data-line columns of one name cannot be told apart."
+find = 'if (strcmp(t->jit[k].name, s->name) == 0)'
+replace = 'if (false)'
+
+[[mutant]]
+id = "j-15"
+name = "pending trial redraws"
+test = "trials"
+why = "next() returns the pending trial again with no draw; a redraw would shift every later draw and change the trial's logged duration."
+find = '''        psytr__info(t, t->current, info);
+        return t->current;'''
+replace = '''        if (t->n_jit > 0) psytr__jit_draw(t, t->current, t->history[t->current].condition);
+        psytr__info(t, t->current, info);
+        return t->current;'''
+
+[[mutant]]
+id = "j-16"
+name = "seconds to ns truncated"
+test = "trials"
+why = "1.2 s is the double 1.19999999999999996; rounded it is 1200000000 ns, truncated one less."
+find = 'return (int64_t)psytr__shr_round(psytr__mul64(m, 1000000000u), 1075 - e);'
+replace = 'return (int64_t)psytr__shr(psytr__mul64(m, 1000000000u), 1075 - e);'
+
+[[mutant]]
+id = "j-17"
+name = "log off by one ln 2"
+test = "trials"
+why = "The exponent counts from 2^53; one ln 2 short shifts every exponential draw by 0.69 scales."
+find = 'acc = psytr__mul64((uint64_t)(53 - e), PSYTR__LN2_Q63);'
+replace = 'acc = psytr__mul64((uint64_t)(52 - e), PSYTR__LN2_Q63);'
+
+[[mutant]]
+id = "j-18"
+name = "seconds by a product with 1e-9"
+test = "trials"
+why = "The seconds are the correctly rounded ns / 1e9: 1200000000 x 1e-9 is 1.2000000000000002, not 1.2."
+find = 'v.s = (double)v.ns / billion;'
+replace = 'v.s = (double)v.ns * 1e-9;'

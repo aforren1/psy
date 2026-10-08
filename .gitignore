@@ -8,9 +8,28 @@ compile_commands.json
 *.pyd
 *.mex*
 *.oct
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# example output written to the working directory (data files, --shots images)
+/*.csv
+/*.ppm
+/*.pgm
+
+# libFuzzer artifacts (tests/fuzz/)
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
+*.profraw
 
 # python
 __pycache__/
+.pytest_cache/
+.venv/
 dist/
 wheelhouse/
 *.egg-info/

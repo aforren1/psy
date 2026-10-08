@@ -63,6 +63,8 @@ typedef struct tn {
     double*      weights;
     int*         group_list;
     uint64_t*    rules_arena; /* psytr_rules() output, read at open            */
+    char*        jit_str[PSYTR_MAX_JITTERS][4];   /* name and column names     */
+    double       jit_vals[PSYTR_MAX_JITTERS][PSYTR_MAX_JITTER_VALUES];
     tn_track     tracks[PSYTR_MAX_TRACKS];
     int          n_tracks;
     mxArray*     done_str;    /* persistent 'done', the command a track gets  */
@@ -85,6 +87,11 @@ static void tn_destroy(void* obj) {
     free(n->weights);
     free(n->group_list);
     free(n->rules_arena);
+    {
+        int j, k;
+        for (j = 0; j < PSYTR_MAX_JITTERS; j++)
+            for (k = 0; k < 4; k++) free(n->jit_str[j][k]);
+    }
     free(n);
 }
 
@@ -213,8 +220,89 @@ static const char* const t_fields[] = {
     "max_swaps", "tracks", "track_weights", "interleave", "track_rate",
     "block_size", "constraints_span_blocks", "n_practice", "n_warmup",
     "warmup_conditions", "requeue_gap", "rng", "record_size",
-    "table", "order_list", "draws", "weights", "subset", "groups", "rules", "participant"
+    "table", "order_list", "draws", "weights", "subset", "groups", "rules", "participant",
+    "jitters"
 };
+
+/* ---- jitter ------------------------------------------------------------- */
+
+static const char* const t_jit_dists[] = { "uniform", "choice", "exponential" };
+static const char* t_jit_fields[] = { "name", "dist", "lo", "hi", "scale", "values", "rate" };
+
+/* A malloc'd copy of a char argument, or NULL when empty. */
+static char* t_dup(const mxArray* a, const char* what) {
+    char* v = pm_string(a, what);
+    size_t n = strlen(v);
+    char* c = (char*)malloc(n + 1);
+    if (!c) pm_err("memory", "out of memory");
+    memcpy(c, v, n + 1);
+    return c;
+}
+
+/* Element e of a jitter struct array into j. Strings go to str[4] (name,
+ * lo, hi, scale column; malloc'd, the caller frees), values to vals. */
+static void t_jitter_desc(const mxArray* s, size_t e, psytr_jitter_desc* j, char** str, double* vals) {
+    const mxArray* f;
+    int k;
+    double* num[3];
+    const char** col[3];
+    static const char* const keys[3] = { "lo", "hi", "scale" };
+    memset(j, 0, sizeof(*j));
+    if (!mxIsStruct(s)) pm_err("arg", "a jitter is a struct from psy_trials('uniform', ...), 'choice' or 'exponential'");
+    if ((f = mxGetField(s, e, "name")) && !mxIsEmpty(f)) { str[0] = t_dup(f, "jitter name"); j->name = str[0]; }
+    if (!(f = mxGetField(s, e, "dist"))) pm_err("arg", "a jitter needs a dist");
+    j->dist = (psytr_jitter_dist)pm_enum(f, "jitter dist", t_jit_dists, 3);
+    num[0] = &j->lo; num[1] = &j->hi; num[2] = &j->scale;
+    col[0] = &j->lo_column; col[1] = &j->hi_column; col[2] = &j->scale_column;
+    for (k = 0; k < 3; k++) {
+        f = mxGetField(s, e, keys[k]);
+        if (!f || mxIsEmpty(f)) continue;
+        if (mxIsChar(f)) { str[1 + k] = t_dup(f, keys[k]); *col[k] = str[1 + k]; }
+        else *num[k] = pm_scalar(f, keys[k]);
+    }
+    if ((f = mxGetField(s, e, "values")) && !mxIsEmpty(f)) {
+        int m = (int)mxGetNumberOfElements(f);
+        if (m > PSYTR_MAX_JITTER_VALUES) pm_err("arg", "a choice takes at most %d values", PSYTR_MAX_JITTER_VALUES);
+        pm_vector(f, "values", vals, m);
+        j->values = vals;
+        j->n_values = m;
+    }
+    if ((f = mxGetField(s, e, "rate")) && !mxIsEmpty(f)) {
+        double r[2] = { 0.0, 1.0 };
+        int m = (int)mxGetNumberOfElements(f);
+        if (m < 1 || m > 2) pm_err("arg", "rate is NUM or [NUM DEN]");
+        pm_vector(f, "rate", r, m);
+        if (r[0] < 1 || r[1] < 1 || r[0] != floor(r[0]) || r[1] != floor(r[1]) || r[0] > 2147483647.0 || r[1] > 2147483647.0)
+            pm_err("arg", "rate needs positive whole NUM and DEN");
+        j->rate_num = (int)r[0];
+        j->rate_den = (int)r[1];
+    }
+}
+
+static mxArray* t_jitter_out(psytr_jitter_value v) {
+    static const char* fields[] = { "s", "ns", "frames" };
+    mxArray* s = mxCreateStructMatrix(1, 1, 3, fields);
+    mxArray* ns = mxCreateNumericMatrix(1, 1, mxINT64_CLASS, mxREAL);
+    *(int64_t*)mxGetData(ns) = v.ns;
+    mxSetField(s, 0, "s", mxCreateDoubleScalar(v.s));
+    mxSetField(s, 0, "ns", ns);
+    mxSetField(s, 0, "frames", mxCreateDoubleScalar((double)v.frames));
+    return s;
+}
+
+/* psy_trials('uniform', name, lo, hi [, rate]) and friends: a jitter struct. */
+static mxArray* t_jitter_make(int dist, const mxArray* name, const mxArray* lo, const mxArray* hi,
+                              const mxArray* scale, const mxArray* values, const mxArray* rate) {
+    mxArray* s = mxCreateStructMatrix(1, 1, 7, t_jit_fields);
+    mxSetField(s, 0, "name", mxDuplicateArray(name));
+    mxSetField(s, 0, "dist", mxCreateString(t_jit_dists[dist]));
+    if (lo) mxSetField(s, 0, "lo", mxDuplicateArray(lo));
+    if (hi) mxSetField(s, 0, "hi", mxDuplicateArray(hi));
+    if (scale) mxSetField(s, 0, "scale", mxDuplicateArray(scale));
+    if (values) mxSetField(s, 0, "values", mxDuplicateArray(values));
+    if (rate) mxSetField(s, 0, "rate", mxDuplicateArray(rate));
+    return s;
+}
 
 /* Parse CSV text (char) or struct('csv', text, 'types', struct(name, type),
  * 'delimiter', ',', 'allow_empty', false) into a block the caller frees,
@@ -255,7 +343,10 @@ static uint64_t* t_parse_table(const mxArray* a, psytb_table* out) {
         }
     }
     if (!mxIsChar(f)) pm_err("arg", "desc.table is CSV text or struct('csv', text, ...)");
-#ifdef OCTMEX_API
+    /* HAVE_OCTAVE as psy_mex_util.h uses it: OCTMEX_API exists only in newer
+     * Octave (10.1 has it, CI's 7.3 does not), and mxArrayToUTF8String is
+     * MATLAB's alone. */
+#if defined(HAVE_OCTAVE) || defined(OCTMEX_API)
     text = mxArrayToString(f);           /* Octave's char arrays hold UTF-8 */
 #else
     text = mxArrayToUTF8String(f);       /* MATLAB's hold UTF-16          */
@@ -489,6 +580,13 @@ static void t_read_desc(const mxArray* s, psytr_desc* d, tn* n, int** cond_reps,
         d->rng = pm_rng_call;
         d->rng_ctx = &n->rng;
     }
+    if ((f = pm_field(s, "jitters")) && !mxIsEmpty(f)) {
+        size_t m = mxGetNumberOfElements(f), e;
+        if (!mxIsStruct(f)) pm_err("arg", "desc.jitters must be a struct array (psy_trials('uniform', ...))");
+        if (m > PSYTR_MAX_JITTERS) pm_err("arg", "desc.jitters holds %d; the maximum is %d", (int)m, PSYTR_MAX_JITTERS);
+        for (e = 0; e < m; e++) t_jitter_desc(f, e, &d->jitters[e], n->jit_str[e], n->jit_vals[e]);
+        d->n_jitters = (int)m;
+    }
     if ((f = pm_field(s, "rules"))) {
         /* Rules text over the fields above (psytr_rules); its arrays live in
          * the node until open() has read them. */
@@ -496,7 +594,8 @@ static void t_read_desc(const mxArray* s, psytr_desc* d, tn* n, int** cond_reps,
         char err[512];
         char* txt = pm_string(f, "rules");
         int rows = t_rows(d);
-        size_t sz = (size_t)4 * PSYTR_MAX_TRIALS + (size_t)32 * (size_t)(rows > 0 ? rows : PSYTR_MAX_CONDITIONS) + 1024;
+        size_t sz = (size_t)4 * PSYTR_MAX_TRIALS + (size_t)32 * (size_t)(rows > 0 ? rows : PSYTR_MAX_CONDITIONS) + 1024 +
+                    (size_t)320 * PSYTR_MAX_JITTERS;
         n->rules_arena = (uint64_t*)malloc(sz);
         if (!n->rules_arena) pm_err("memory", "out of memory");
         memset(&rd, 0, sizeof(rd));
@@ -774,6 +873,38 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         mxDestroyArray(z);
         return;
     }
+    if (strcmp(cmd, "uniform") == 0) {
+        pm_nargs(nrhs, 4, "j = psy_trials('uniform', name, lo, hi [, rate])");
+        plhs[0] = t_jitter_make(0, prhs[1], prhs[2], prhs[3], NULL, NULL, nrhs > 4 ? prhs[4] : NULL);
+        return;
+    }
+    if (strcmp(cmd, "choice") == 0) {
+        pm_nargs(nrhs, 3, "j = psy_trials('choice', name, values [, rate])");
+        plhs[0] = t_jitter_make(1, prhs[1], NULL, NULL, NULL, prhs[2], nrhs > 3 ? prhs[3] : NULL);
+        return;
+    }
+    if (strcmp(cmd, "exponential") == 0) {
+        pm_nargs(nrhs, 5, "j = psy_trials('exponential', name, lo, hi, scale [, rate])");
+        plhs[0] = t_jitter_make(2, prhs[1], prhs[2], prhs[3], prhs[4], NULL, nrhs > 5 ? prhs[5] : NULL);
+        return;
+    }
+    if (strcmp(cmd, "jitter_map") == 0) {
+        psytr_jitter_desc j;
+        char* str[4] = { NULL, NULL, NULL, NULL };
+        double vals[PSYTR_MAX_JITTER_VALUES];
+        char err[256];
+        int k;
+        bool ok;
+        double u;
+        pm_nargs(nrhs, 3, "v = psy_trials('jitter_map', j, u)");
+        u = pm_scalar(prhs[2], "u");
+        t_jitter_desc(prhs[1], 0, &j, str, vals);
+        ok = psytr_jitter_check(&j, err, sizeof(err));
+        if (ok) plhs[0] = t_jitter_out(psytr_jitter_map(&j, u));
+        for (k = 0; k < 4; k++) free(str[k]);
+        if (!ok) pm_err("arg", "%s", err);
+        return;
+    }
     if (strcmp(cmd, "chunk") == 0) {
         mxArray* z = mxCreateDoubleMatrix(0, 0, mxREAL);
         pm_nargs(nrhs, 2, t_con_usage[7]);
@@ -930,6 +1061,22 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         pm_nargs(nrhs, 3, "row = psy_trials('values', h, condition)");
         if (!t->desc.table) pm_err("arg", "values needs a session with a table");
         plhs[0] = t_row_struct(t->desc.table, pm_index(prhs[2], "condition", psytr_n_conditions(t)));
+    } else if (strcmp(cmd, "jitter") == 0) {
+        /* 1-based trial and jitter (or the jitter's name). */
+        int i, j;
+        pm_nargs(nrhs, 4, "v = psy_trials('jitter', h, trial, jitter)");
+        i = pm_index(prhs[2], "trial", psytr_n_run(t));
+        if (mxIsChar(prhs[3])) {
+            j = psytr_jitter_index(t, pm_string(prhs[3], "jitter"));
+            if (j < 0) pm_err("arg", "no jitter of that name");
+        } else {
+            j = pm_index(prhs[3], "jitter", t->n_jit);
+        }
+        plhs[0] = t_jitter_out(psytr_jitter(t, i, j));
+    } else if (strcmp(cmd, "jitter_names") == 0) {
+        int j;
+        plhs[0] = mxCreateCellMatrix(1, (size_t)t->n_jit);
+        for (j = 0; j < t->n_jit; j++) mxSetCell(plhs[0], (size_t)j, mxCreateString(t->jit[j].name));
     } else if (strcmp(cmd, "table_info") == 0) {
         if (!t->desc.table) pm_err("arg", "the session has no table");
         plhs[0] = t_table_info(t->desc.table);

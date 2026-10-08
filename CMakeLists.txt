@@ -29,6 +29,10 @@ option(PSY_BUILD_LOOPBACK "Build the loopback tests in tests/loopback/ (needs ha
 # with PSYRT_TRACY against the real TracyC.h, so the macro mapping is checked
 # against Tracy itself and not against a copy of it.
 option(PSY_TRACY_CHECK "Fetch Tracy and build the PSYRT_TRACY compile check" OFF)
+# Off by default: text layout for the pack tool and the player (pack/, the
+# vendored Skribidi and HarfBuzz in third_party/, examples/gfx_layout.c and
+# tests/layout/). About 8 MB of sources that no header needs.
+option(PSY_BUILD_LAYOUT "Build the layout library (pack/, third_party/), its test and gfx_layout" OFF)
 
 # psy_screen.h needs SDL3 (3.2 or later). Without it only its SDL-free test is
 # built; point SDL3_DIR at an SDL3 CMake package to build the rest. ANGLE is
@@ -109,7 +113,7 @@ endif()
 # program registered with ctest too, and one with PSY_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
 # PSY<X>_ASYNC defined, which is the opt-in layer that pulls in psy_rt.h.
-set(PSY_LIBS rt parallel serial stair quest gp table trials timeline color rdk outline screen audio gfx video)
+set(PSY_LIBS rt parallel serial stair quest gp table trials timeline input response color rdk outline screen audio gfx video)
 
 set(PSY_PREFIX_rt          PSYRT)
 set(PSY_PLATFORMS_rt       Windows Linux Darwin)
@@ -151,6 +155,19 @@ set(PSY_THREADS_table      OFF)
 set(PSY_PREFIX_trials      PSYTR)
 set(PSY_PLATFORMS_trials   Windows Linux Darwin)
 set(PSY_THREADS_trials     OFF)
+
+# The input event: types and inline adapters only, nothing to link. Its test
+# reads psy_screen.h's raw mouse struct and needs none of its deps.
+set(PSY_PREFIX_input       PSYIN)
+set(PSY_PLATFORMS_input    Windows Linux Darwin)
+set(PSY_THREADS_input      OFF)
+
+# The response collector requires psy_input.h beside it and nothing else;
+# its test reads the structs of psy_screen.h, psy_audio.h and psy_timeline.h
+# and needs none of their deps.
+set(PSY_PREFIX_response    PSYRSP)
+set(PSY_PLATFORMS_response Windows Linux Darwin)
+set(PSY_THREADS_response   OFF)
 
 # The timeline includes nothing either; it takes times as arguments.
 set(PSY_PREFIX_timeline    PSYTL)
@@ -325,6 +342,8 @@ foreach(lib IN LISTS PSY_LIBS)
     # --- examples: examples/<lib>_*.c, one program each, named after the file.
     if(PSY_BUILD_EXAMPLES AND deps_ok)
         file(GLOB lib_examples CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${lib}_*.c)
+        # gfx_layout.c needs the layout library: pack/CMakeLists.txt builds it.
+        list(FILTER lib_examples EXCLUDE REGEX "/gfx_layout\\.c$")
         foreach(src IN LISTS lib_examples)
             get_filename_component(name ${src} NAME_WE)
             psy_add_program(${name} ${src})
@@ -335,6 +354,27 @@ endforeach()
 # The audio loopback test opens WASAPI's loopback capture itself.
 if(TARGET psy_audio_loopback AND WIN32)
     target_link_libraries(psy_audio_loopback PRIVATE ole32)
+endif()
+
+# psy_input.h and psy_response.h with SDL3: their tests again with the SDL
+# adapter (SDL's headers only, nothing linked), and the keyboard trial
+# example, which sits on psy_gfx.h and so matches no examples/<lib>_*.c
+# pattern.
+if(TARGET SDL3::Headers AND PSY_BUILD_TESTS)
+    set(PSY_CURRENT_DEPS "")
+    psy_add_program(test_psy_response_sdl tests/adapt/psy_response_test.c)
+    target_compile_definitions(test_psy_response_sdl PRIVATE PSYRSP_TEST_SDL)
+    target_link_libraries(test_psy_response_sdl PRIVATE SDL3::Headers)
+    add_test(NAME test_psy_response_sdl COMMAND test_psy_response_sdl)
+    psy_add_program(test_psy_input_sdl tests/adapt/psy_input_test.c)
+    target_compile_definitions(test_psy_input_sdl PRIVATE PSYIN_TEST_SDL)
+    target_link_libraries(test_psy_input_sdl PRIVATE SDL3::Headers)
+    add_test(NAME test_psy_input_sdl COMMAND test_psy_input_sdl)
+endif()
+if(TARGET SDL3::SDL3 AND PSY_BUILD_EXAMPLES)
+    set(PSY_CURRENT_DEPS SDL3::SDL3)
+    psy_add_program(trial_keyboard examples/trial_keyboard.c)
+    set(PSY_CURRENT_DEPS "")
 endif()
 
 # psy_video.h: pl_mpeg when it was found, else the build without MPEG-1. The
@@ -360,6 +400,12 @@ foreach(t test_psy_gfx gfx_bench gfx_rdk_bench)
         target_link_libraries(${t} PRIVATE ${CMAKE_DL_LIBS})
     endif()
 endforeach()
+
+if(PSY_BUILD_LAYOUT)
+    set(PSY_CURRENT_DEPS "")   # the loop above leaves the last header's deps here
+    add_subdirectory(third_party)
+    add_subdirectory(pack)
+endif()
 
 if(PSY_TRACY_CHECK AND PSY_BUILD_TESTS)
     include(FetchContent)

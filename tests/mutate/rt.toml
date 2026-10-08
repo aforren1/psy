@@ -1,0 +1,152 @@
+# psy_rt.h mutants: the device clock fit (DEVICE CLOCK FIT, v0.6.0). The
+# test runs the fit's part of tests/adapt/psy_rt_test.c only
+# (PSYRT_TEST_FIT_ONLY), which takes under a second. docs/psy_rt.md lists
+# the results.
+header = "psy_rt.h"
+
+[test.fit]
+source = "tests/adapt/psy_rt_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w", "-DPSYRT_TEST_FIT_ONLY"]
+libs = ["-lm"]
+timeout = 120
+
+[[mutant]]
+id = "fit-01"
+name = "upper hull"
+test = "fit"
+why = "LATE pairs are late, never early: the map must run under the points, not over them."
+find = 'if ((x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1) <= 0.0) h--; else break;'
+replace = 'if ((x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1) >= 0.0) h--; else break;'
+
+[[mutant]]
+id = "fit-02"
+name = "first hull edge"
+test = "fit"
+why = "The least summed gap is the edge that spans the mean x (Moon et al. 1999); the first edge rests on the oldest points only."
+find = '            while (j + 1 < h - 1 && PSYRT__X(hull[j + 1]) <= xm) j++;'
+replace = '            (void)xm;'
+
+[[mutant]]
+id = "fit-03"
+name = "offset from the whole window"
+test = "fit"
+why = "Before the slope is fitted, an offset from old points carries the drift the nominal slope ignores."
+find = '            if (f->py[(i + i0) % N] < from) continue;'
+replace = '            (void)from;'
+
+[[mutant]]
+id = "fit-04"
+name = "the later pair of a bucket"
+test = "fit"
+why = "A bucket keeps its least late pair; keeping the latest one puts the USB delay into the map."
+find = '            if ((double)(y - f->py[i]) < (double)(x - f->px[i]) * f->d.ns_per_tick) {'
+replace = '            if ((double)(y - f->py[i]) > (double)(x - f->px[i]) * f->d.ns_per_tick) {'
+
+[[mutant]]
+id = "fit-05"
+name = "UNBIASED sum without its count"
+test = "fit"
+why = "A bucket's mean divides by the pairs in it."
+find = '''            f->uy += (double)(y - f->uy0);
+            f->un++;'''
+replace = '''            f->uy += (double)(y - f->uy0);'''
+
+[[mutant]]
+id = "fit-06"
+name = "never restart"
+test = "fit"
+why = "A box whose timer was reset (XID e5) must start a new epoch, or every later event maps far off."
+find = '    if (omax - omin > f->d.restart_ns) return rc;'
+replace = '    if (omax - omin >= 0) return rc;'
+
+[[mutant]]
+id = "fit-07"
+name = "the hold drops its first pair"
+test = "fit"
+why = "The hold is timed from its first pair; at 100 pairs a second, eight pairs never span 1 s (the bug found on 2026-10-08)."
+find = '        for (i = 2; i < 8; i++) {'
+replace = '        for (i = 1; i < 8; i++) {'
+
+[[mutant]]
+id = "fit-08"
+name = "no stall tolerance"
+test = "fit"
+why = "A burst of late pairs after an OS stall is not a clock reset: the hold must last restart_hold_ns."
+find = '    if (n < 2 || f->pend_y[n - 1] - f->pend_y[0] < f->d.restart_hold_ns) return rc;'
+replace = '    if (n < 2) return rc;'
+
+[[mutant]]
+id = "fit-09"
+name = "wide brackets taken"
+test = "fit"
+why = "A bracket wider than max_width_ns bounds the device's time too loosely to use."
+find = '    if (f->d.mode == PSYRT_FIT_BRACKET && (width_ns < 0 || width_ns > f->d.max_width_ns)) {'
+replace = '    if (f->d.mode == PSYRT_FIT_BRACKET && (width_ns < 0 || width_ns > 2 * f->d.max_width_ns)) {'
+
+[[mutant]]
+id = "fit-10"
+name = "no forward wrap"
+test = "fit"
+why = "micros() wraps every 71.6 minutes; a counter past the wrap must unwrap forward."
+find = '''    if (d > half) u -= m;
+    else if (d < -half) u += m;'''
+replace = '''    if (d > half) u -= m;'''
+
+[[mutant]]
+id = "fit-11"
+name = "no CLOCK records"
+test = "fit"
+why = "The thinned pairs in the log are what an offline refit of the session reads."
+find = '''            psyrt__fit_record(f, (uint16_t)PSYRT_KIND_CLOCK, (f->head + f->n - 1) % N);
+            closed = true;'''
+replace = '''            closed = true;'''
+
+[[mutant]]
+id = "fit-12"
+name = "no FIT record at the first pair"
+test = "fit"
+why = "The log must hold the map that stamped the first events of an epoch."
+find = '        if (first || closed) psyrt__fit_record(f, (uint16_t)PSYRT_KIND_FIT, 0);'
+replace = '        if (closed) psyrt__fit_record(f, (uint16_t)PSYRT_KIND_FIT, 0);'
+
+[[mutant]]
+id = "fit-13"
+name = "anchor at the oldest point"
+test = "fit"
+why = "The map's anchor x and host time must be the same point of the line."
+find = '    f->fx = x0 + (int64_t)xl;'
+replace = '    f->fx = x0;'
+
+[[mutant]]
+id = "fit-14"
+name = "truncating bucket division"
+test = "fit"
+why = "A pair stamped before the epoch's first pair is in bucket -1, not bucket 0."
+find = '    if (a % b != 0 && a < 0) q--;'
+replace = '    (void)0;'
+
+[[mutant]]
+id = "fit-15"
+name = "slope at once"
+test = "fit"
+why = "A slope from a short span is worse than the drift it corrects (psy_audio.h measured it)."
+find = '    if (n >= 2 && f->py[il] - y0 >= f->d.slope_span_ns) {'
+replace = '    if (n >= 2) {'
+
+[[mutant]]
+id = "fit-16"
+name = "spread as the median"
+test = "fit"
+why = "The spread is the p99 distance from the map, the bound a source entry starts from."
+find = '    kth = (99 * n + 99) / 100 - 1;'
+replace = '    kth = n / 2;'
+
+[[mutant]]
+id = "fit-17"
+name = "a normal pair keeps the hold"
+test = "fit"
+why = "Held pairs that a normal pair contradicts were outliers; kept, they could restart the fit later."
+find = '''        f->rejected += (uint32_t)f->pend_n;
+        f->pend_n = 0;'''
+replace = '''        f->rejected += (uint32_t)f->pend_n;'''

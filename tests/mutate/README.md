@@ -69,6 +69,7 @@ values change from run to run.
 | `color.toml` | gcc | `gcc -std=c99 -O2 -w -I<copy> tests/adapt/psy_color_test.c -lm` |
 | `screen.toml` | gcc | `gcc -std=c11 -O1 -w -I<copy> tests/adapt/psy_screen_test.c -lm` |
 | `timeline.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/psy_timeline_test.c -lm` |
+| `rt.toml` | gcc | `gcc -std=c11 -O2 -w -DPSYRT_TEST_FIT_ONLY -I<copy> tests/adapt/psy_rt_test.c -lm` (the device clock fit only) |
 | `video.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/psy_video_test.c -lm` |
 
 These are the compilers of the original runs. The runner finds gcc in
@@ -169,3 +170,4 @@ measurement lock.
 | `timeline.toml` | 43 | 4 | 9 min |
 | `video.toml` | 21 | 3 | 19 min (one test run with the clips takes about 70 s) |
 | `gfx.toml` | 35 | 1 | 25 min (about 42 s for each mutant) |
+| `rt.toml` | 17 | 4 | 18 s (2026-10-08) |

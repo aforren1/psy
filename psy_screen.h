@@ -1,4 +1,4 @@
-/* psy_screen.h - v0.3.1 - public domain single-header display library
+/* psy_screen.h - v0.4.0 - public domain single-header display library
  *
  *   The window, the GL ES 3.0 context, the display mode and the swap path
  *   of a stimulus display, with flip at a time: each frame learns the
@@ -10,7 +10,8 @@
  *   the psy_rt.h clock, and several displays.
  *
  *   REQUIRES psy_rt.h beside it (the clock, the waits, the event ring, the
- *   instrumentation macros), and SDL3 (3.2 or later) to link. On Windows it
+ *   instrumentation macros), psy_input.h (the input event, v0.4.0), and
+ *   SDL3 (3.2 or later) to link. On Windows it
  *   also needs ANGLE's libEGL.dll and libGLESv2.dll at run time; nothing
  *   ANGLE or Khronos is needed to compile. Copy psy_screen.h and psy_rt.h.
  *
@@ -21,6 +22,49 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.4.0 - The input bridge (INPUT, "The input bridge"): any thread hands
+ *          psy_input.h events to psyscr_push_input(); each one is stored
+ *          and announced by an SDL event (a doorbell) in SDL's queue, so
+ *          psyscr_poll() returns keyboard, mouse, raw mice, response boxes
+ *          and eye trackers in one stream, and psyscr_event_input() turns
+ *          any input event of that stream (a doorbell or SDL's own) into a
+ *          psyin_event. Raw mice go over the bridge; psyscr_poll_mouse()
+ *          is deprecated and reads them back for one more version.
+ *          Breaking: psy_screen.h requires psy_input.h beside it (types and
+ *          inline adapters only); psyscr_mouse_event is psy_input.h's
+ *          psyin_mouse_report. Defaults unchanged: no producer, no doorbell.
+ *   v0.3.5 - Raw mice (INPUT, "Raw mice"): desc.raw_mice reads every
+ *          mouse's Raw Input on a thread of its own, per device and
+ *          stamped when read, and psyscr_poll_mouse() hands the reports
+ *          out (buttons, wheel, unaccelerated deltas). A guard registers
+ *          again after SDL's relative mode took the mice, and logs it.
+ *          Off by default: mice come through SDL as before.
+ *   v0.3.4 - The input devices in the ring (INPUT, "Devices"): a
+ *          PSYSCR_EV_DEVICE record for each keyboard, mouse, touch device
+ *          and (with desc.gamepads) gamepad SDL lists at open, and for each
+ *          one added or removed later (seen in psyscr_poll()), and for a
+ *          pen or touch device the first time it is used: kind, id and
+ *          name, so a data file's device column maps to a device.
+ *   v0.3.3 - Input for psy_response.h (INPUT): desc.gamepads starts SDL's
+ *          gamepad subsystem and opens each gamepad, so its events come
+ *          through psyscr_poll() (off by default, as before);
+ *          caps.raw_keyboard says whether keys come on SDL's raw path. The
+ *          Text input is observed, not only commanded: flip_at() reads
+ *          SDL_TextInputActive(), so text input that another library
+ *          started (Dear ImGui's SDL3 backend) gets the ring record (with
+ *          u.u32[5] 1, external) and the flip flag too. The
+ *          INPUT text on SDL 3.4's double key report is narrowed to what
+ *          was measured: it comes from keys whose window message has no
+ *          scan code (virtual-key injection), not from every key. Reports
+ *          of one abort press within 50 ms (was 30) are one press: the
+ *          second report came up to 34.2 ms later, and a tool that injects
+ *          by virtual key could otherwise turn two presses into a panic.
+ *   v0.3.2 - psyscr_text_input() (INPUT, "Text input"): starts or stops SDL
+ *          text input on a screen's window and sets the IME area, for a
+ *          text box. Each change writes a PSYSCR_EV_TEXT_INPUT ring record,
+ *          and every flip planned while it is on carries
+ *          PSYSCR_FLIP_TEXT_INPUT, so analysis sees when keys were off the
+ *          raw timed path. Off at open, as before.
  *   v0.3.1 - Aborts (ABORT): Shift+Esc, a close request, Alt+F4, SDL's
  *          quit event and psyscr_request_abort() each make one begin()
  *          return PSYSCR_QUIT with f.abort, f.abort_presses and f.abort_ns,
@@ -87,7 +131,7 @@
  *          groups, input restamping, mode lists and the parameter table.
  *          The other swap paths are stubs that refuse to open.
  *
- *   STATUS: v0.3.1. Two swap paths run, DXGI_FLIP and COMPOSITION, on one
+ *   STATUS: v0.4.0. Two swap paths run, DXGI_FLIP and COMPOSITION, on one
  *   machine: a Windows 11 25H2 laptop whose Intel Iris Xe drives a 1920 x
  *   1200 panel at 60.0008 Hz (60 Hz is its only rate), with the ANGLE that
  *   ships in Docker Desktop's Electron front end (2.1.23876, git
@@ -175,8 +219,10 @@
  *   virtual clock, so the host's load cannot change a result, on MSVC,
  *   MinGW gcc 16.1, gcc 11.4 (WSL2; also as C99 at -O3, as C++17, and
  *   under ASan and UBSan, and 8 of 8 runs with a busy loop on its CPU) and
- *   clang (emcc, run in node); 41 deliberate mutations of the header
- *   each make it fail (v0.3.1's 12 checked with MinGW only).
+ *   clang (emcc, run in node); 43 deliberate mutations of the header
+ *   each make it fail (v0.3.1's 12 and v0.3.2's 2 checked with MinGW
+ *   only). v0.3.2's text input: its records and flag on the scripted path
+ *   (MSVC, MinGW); its SDL calls by hand in examples/gfx_layout.c.
  *   CODES and TRIGGERS (v0.3.0, measured on battery, Balanced plan; the
  *   tables are in docs/psy_screen.md): the open-time self test passed on
  *   DXGI_FLIP and COMPOSITION, and 1800 code read-backs in fullscreen
@@ -218,8 +264,8 @@
  *   SendInput; docs/psy_screen.md has the tables): Shift+Esc gave one
  *   abort per press, stamped 0.12 to 0.70 ms after the call, also when the
  *   loop read its events before begin(); Esc alone gave none; a held
- *   Shift+Esc gave one. SDL 3.4 reports each key twice on the raw path
- *   (INPUT); the header counts one. A hung program ended 28 to 85 ms after
+ *   Shift+Esc gave one. SDL 3.4 reports a key injected by virtual-key code
+ *   twice on the raw path (INPUT); the header counts one. A hung program ended 28 to 85 ms after
  *   the third press, after its panic_fn ran and a gamma entry was put
  *   back; after a 7 s hang, with Windows' ghost window in front, too; a
  *   held Shift+Esc did not panic; a responsive loop got 5 aborts for 5
@@ -455,6 +501,8 @@
  *     changes (u.u16[0] old, u.u16[1] new) and PSYSCR_EV_MODE at open
  *     (u.i32[0..4] w, h, refresh_num, refresh_den, backend). Records arrive
  *     in completion order, which is not always frame order.
+ *     PSYSCR_EV_TEXT_INPUT, PSYSCR_EV_DEVICE, PSYSCR_EV_RAW_MICE and
+ *     PSYSCR_EV_INPUT_LOST: INPUT.
  *
  *   ONE FRAME IN FLIGHT
  *     begin() waits until the swap path takes a frame, so the frame drawn
@@ -846,10 +894,174 @@
  *   before to 12.1 ms after the call. On X11 the server's 1 ms
  *   time, on Wayland the compositor's. Keyboards are not response boxes;
  *   use psy_serial.h for reaction times.
- *   With the raw path on, SDL 3.4 reports each key twice: once from its
- *   raw-input thread and once from the message loop, 0.1 to 11 ms apart
- *   (measured with SendInput, docs/psy_screen.md). To count presses, count
- *   a key-down only after a key-up of the same key.
+ *   With the raw path on, SDL 3.4 also sends a key from the window message
+ *   when the message carries no scan code (read in SDL 3.4.0's source):
+ *   keys injected by virtual-key code (SendInput with wVk only), keys with
+ *   no scan code (some media keys), some on-screen keyboards and remote
+ *   tools. Measured with SendInput (examples/screen_input.c --reports, 518
+ *   taps): a virtual-key tap gave two press-release pairs, the second
+ *   -0.1 to 34.2 ms after the first; a 100 ms virtual-key hold gave one
+ *   press and a repeat; scan-code injection gave one report, tapped or
+ *   held. Keys from a keyboard carry scan codes, so they most likely
+ *   report once; screen_input --hand checks keys pressed by hand.
+ *   psy_response.h removes second reports; to count presses yourself,
+ *   count a key-down only after a key-up of the same key.
+ *   caps.raw_keyboard says whether keys come on the raw path now: on
+ *   Windows, with a window, the hint on and text input off.
+ *   Devices (v0.3.4). Keyboards on the raw path are per device: a key
+ *   event's `which` is the keyboard's Raw Input handle, so two keyboards
+ *   give two ids (psy_response.h keeps them apart). Keys on the message
+ *   path (text input on, the hint off, keys with no scan code) and keys
+ *   from SendInput have which 0. Mice: SDL reads Raw Input for mice only in
+ *   relative mode; in its absolute mode, the one psy_screen.h uses, every
+ *   mouse comes as one pointer, which 0, stamped with the message time
+ *   (tier 3 in psy_response.h). The abort and panic keys count every
+ *   keyboard on purpose: the watchdog's low-level hook sees the system's
+ *   keys, not a device. A screen with a window and desc.ring writes a
+ *   PSYSCR_EV_DEVICE record for each device: t_ns the time it was logged,
+ *   aux desc.display_index, u.u32[0] PSYSCR_DEV_KEYBOARD, _MOUSE, _GAMEPAD,
+ *   _TOUCH or _PEN, u.u32[1] PSYSCR_DEV_PRESENT (listed at open), _ADDED
+ *   or _REMOVED, u.u64[1] the id (SDL's: the keyboard's or mouse's `which`,
+ *   a gamepad's instance id, a touch device's touchID, a pen's id), and its
+ *   name in u.bytes[16..39] (PSYSCR_DEV_NAME_OF(e): NUL-terminated, cut at
+ *   23 bytes; empty for a removal). Keyboards, mice and touch devices are
+ *   listed at open, gamepads too with desc.gamepads; hot-plug comes from
+ *   SDL's ADDED and REMOVED events as they pass through psyscr_poll();
+ *   pens and touch devices SDL did not list get a record when first used.
+ *   One record per change: a table of 32 devices per screen drops SDL's
+ *   ADDED events for devices it listed already (a full table logs every
+ *   report). The ids are Windows handles on Windows: a keyboard unplugged
+ *   and plugged in again gets a new id, and ids are not stable across
+ *   sessions; map them through the names in the same log.
+ *   Raw mice (desc.raw_mice, v0.3.5, Windows). One thread per process
+ *   registers Raw Input for mice (usage page 1, usage 2) for a message-only
+ *   window of its own, at time-critical priority, as SDL's thread does for
+ *   the keyboard, and stamps each report when GetRawInputBuffer() returns
+ *   (the reports of one call share the stamp). From v0.4.0 each report
+ *   goes over the input bridge as psy_input.h events (psyin_from_mouse():
+ *   presses, releases, a movement, a wheel; device the Raw Input handle,
+ *   SDL's mouse id and the PSYSCR_EV_DEVICE id, 0 for injected input), so
+ *   psyscr_poll() and psyscr_event_input() deliver them with everything
+ *   else; a mouse SDL does not list gets PSYIN_UNLISTED. Movement is in
+ *   counts, unaccelerated (no pointer ballistics: the system cursor moves
+ *   by other rules). A tablet, remote desktop or a VM sends positions
+ *   instead (PSYIN_AXIS_ABSOLUTE, 0..1 of the primary display or the
+ *   virtual desktop). psyscr_poll_mouse() is DEPRECATED (v0.4.0, goes in
+ *   v0.5): it reads the raw mouse records straight from the bridge's
+ *   store, one event of a report per call (v0.3.5 gave a whole report),
+ *   and their doorbells then decode as already taken. u.u32[1] of the
+ *   PSYSCR_EV_RAW_MICE records counts the bridge's overwritten records.
+ *   SDL keeps its own mouse events: the system cursor,
+ *   clicks on other windows, the focus, Dear ImGui and an operator console
+ *   work as before.
+ *   Focus: registered without RIDEV_INPUTSINK, so reports come only while
+ *   this process is in front. A participant's clicks while another program
+ *   has the focus are not taken; an operator window of this process (an
+ *   ImGui panel included) keeps the process in front. RIDEV_INPUTSINK was
+ *   measured working and is not used: it would take every click on the
+ *   desktop.
+ *   Devices: SDL lists the mice it recognizes; Windows listed the same 3
+ *   here. A precision touchpad's cursor, injected input and remote desktop
+ *   come with no device handle: device 0, which cannot be told apart from
+ *   each other (a touchpad is a digitizer; its fingers are a touch source,
+ *   not a mouse). A report from a device SDL does not list gets
+ *   PSYSCR_MOUSE_UNLISTED and, the first time, a PSYSCR_EV_DEVICE record
+ *   (added, named "raw, not in SDL's list"); filter on the flag.
+ *   Relative mode: Raw Input registration is per process and per usage.
+ *   SDL's relative mode takes the mice while on and removes the
+ *   registration for the whole process when it ends (measured). open()
+ *   refuses raw_mice while any SDL window is in relative mode. Later, a
+ *   guard in begin() reads the window's relative mode every frame (23 ns
+ *   measured) and the registration when that changes and every 30th frame
+ *   (GetRegisteredRawInputDevices, 0.4 to 11 us measured; 291 ns per frame
+ *   on average): while relative mode is on, no raw reports come (SDL's
+ *   mouse events carry the device then) and a PSYSCR_EV_RAW_MICE record
+ *   says SUSPENDED; when it ends, or when other code took the mice, the
+ *   reader registers again and the record says REGISTERED. Each screen with
+ *   raw_mice shares the one reader; the last to close stops it. On other
+ *   platforms, and with no window, open() refuses raw_mice. Measured with
+ *   injected input only (examples/screen_input.c --mice is the hand test
+ *   for two physical mice): reports stamped 0.15 to 0.40 ms after
+ *   SendInput (means of three runs), no report lost or doubled with SDL's
+ *   raw keyboard running.
+ *   The input bridge (v0.4.0). One loop for every input: a producer on any
+ *   thread (desc.raw_mice's reader, a response-box reader, an eye tracker)
+ *   calls psyscr_push_input(&e) with a psy_input.h event stamped on the
+ *   psy_rt clock. The header stores it (a store of PSYSCR_INPUT_STORE
+ *   records, 4096 unless defined before the implementation, one per
+ *   process) and pushes one SDL event of type psyscr_input_event_type()
+ *   (registered at the first open with SDL), its user.code the record's
+ *   sequence number: a doorbell. psyscr_poll() returns doorbells in SDL's
+ *   stream like any event; ImGui and other SDL consumers see the stream
+ *   unchanged (they ignore an event type they do not know). Then
+ *       while (psyscr_poll(&scr, &ev, &t)) {
+ *           ImGui_ImplSDL3_ProcessEvent(&ev);                  // optional
+ *           if (psyscr_event_input(&scr, &ev, &in)) psyrsp_feed(&rsp, &in);
+ *       }
+ *   psyscr_event_input() gives a doorbell's own record (keyed by the
+ *   sequence, so a doorbell decoded late, out of order or never does not
+ *   shift any other) and converts SDL's keyboard, mouse, touch, pen and
+ *   gamepad events through psy_input.h's adapter, with the screen's raw
+ *   keyboard state and the psy_rt time. A bridged event keeps the
+ *   producer's stamp; SDL's push time is never used for it.
+ *   Order: one producer's events come in its push order. Against SDL's own
+ *   events, a doorbell sits where SDL queued it, so the stream is arrival
+ *   order to within one pump of SDL's queue; every event carries its
+ *   time, and psy_response.h reads times, not order.
+ *   Overflow: a record nobody decodes stays until the store wraps; then the
+ *   newest overwrites it (counted), and its doorbell, if decoded later,
+ *   returns false and counts as lost. Overwriting the oldest, not refusing
+ *   the newest, keeps a skipped doorbell from holding its slot forever.
+ *   SDL's queue takes 65,535 events (measured); a doorbell it refuses is
+ *   counted, its record kept, and psyscr_poll() pushes it again, oldest
+ *   first, when SDL's queue is empty, so it arrives late but arrives.
+ *   begin() writes a PSYSCR_EV_INPUT_LOST ring record when the counts of
+ *   overwritten records, refused doorbells or lost decodes move (u.u32[0]
+ *   to [3]: overwritten, refused, lost, still waiting; totals);
+ *   psyscr_get_input_stats() reads them. psyscr_push_input() is for any
+ *   thread; psyscr_poll() and psyscr_event_input() for one thread.
+ *   Measured (AC, the timing guard, a 320 x 200 window): 4 producer
+ *   threads at about 1 kHz each, 8000 events, every one decoded once and
+ *   in each producer's order, none lost; psyscr_push_input() 1.9 to 2.6 us
+ *   with a window (SDL_PushEvent calls the event watches and wakes the
+ *   queue), psyscr_event_input() on a doorbell 74 to 81 ns, the doorbell's
+ *   whole poll and decode 410 to 424 ns (SDL_PollEvent pumps the window's
+ *   messages). 70,000 pushes with no poll: SDL refused 4465 doorbells, the
+ *   store kept the newest 4096 records, all decoded over the next 3
+ *   frames, and 65,535 doorbells of overwritten records counted lost. Raw
+ *   mice through the bridge: 30 of 30 injected moves, with SDL's keys in
+ *   the same loop.
+ *   Gamepads (desc.gamepads): open() starts SDL_INIT_GAMEPAD and opens each
+ *   gamepad; psyscr_poll() opens one on SDL_EVENT_GAMEPAD_ADDED and closes
+ *   it on SDL_EVENT_GAMEPAD_REMOVED (so read events with psyscr_poll(), not
+ *   SDL_PollEvent()); close() closes them and stops the subsystem. Up to 8
+ *   gamepads. A screen with no window (SIM) does not start it. The stamps
+ *   of gamepad events depend on SDL's driver for the pad (XInput is
+ *   polled; Raw Input, HIDAPI and GameInput are not) and were not
+ *   measured. Off by default: open() starts SDL's video subsystem only.
+ *   Text input (psyscr_text_input): a text box needs SDL text input
+ *   (SDL_EVENT_TEXT_INPUT, and SDL_EVENT_TEXT_EDITING for an input method's
+ *   composition), which open() stops. psyscr_text_input(s, true, x, y, w,
+ *   h) starts it on the screen's window and puts the IME candidate window
+ *   by the rectangle x, y, w, h (window pixels, the caret's line); false
+ *   stops it. Call it again while on to move the rectangle with the caret.
+ *   While it is on, keys go through the message path: their times are not
+ *   the raw path's (see above), so a typed response is untimed. Each change
+ *   of on or off writes a PSYSCR_EV_TEXT_INPUT ring record (t_ns the call,
+ *   aux desc.display_index, u.u32[0] 1 on or 0 off, u.i32[1..4] x, y, w, h,
+ *   u.u32[5] 0), and every flip planned while it is on has
+ *   PSYSCR_FLIP_TEXT_INPUT in its record (not in the ring's mode word,
+ *   which holds 10 flag bits). On a screen with no window (SIM) only the
+ *   record and the flag change.
+ *   The state is observed, not only commanded: another library can start
+ *   text input on the window (Dear ImGui's SDL3 backend does, on whichever
+ *   window has the focus; docs/imgui_probe.md measured its keys 11.4 ms
+ *   late). flip_at() reads SDL_TextInputActive() and, when it differs from
+ *   the last logged state, writes the same record with u.u32[5] 1
+ *   (external; t_ns when flip_at() saw it, the rectangle 0) before it sets
+ *   the flip's flag. A change between two flips is seen at the next one,
+ *   so the flag can be a frame late; caps.raw_keyboard reads the state at
+ *   once.
  *
  *   ---------------------------------------------------------------------
  *   ABORT (desc.abort_keys, psyscr_request_abort, f.abort)
@@ -883,7 +1095,7 @@
  *   The header sees each event as SDL queues it (SDL_AddEventWatch), so
  *   an abort counts although your code read the event first with
  *   psyscr_poll() or SDL_PollEvent(). An SDL event filter that drops the
- *   event hides it. Reports of one press within 30 ms (SDL's two, INPUT,
+ *   event hides it. Reports of one press within 50 ms (SDL's two, INPUT,
  *   and the panic watchdog's) are one press. The aborts wait in a log of
  *   16 per process; a screen opened later does not see the earlier ones.
  *   A group reports an abort in every f[i], and no member begins a frame.
@@ -1060,11 +1272,12 @@
 #define PSY_SCREEN_H_INCLUDED
 
 #define PSYSCR_VERSION_MAJOR 0
-#define PSYSCR_VERSION_MINOR 3
-#define PSYSCR_VERSION_PATCH 1
-#define PSYSCR_VERSION_STRING "0.3.1"
+#define PSYSCR_VERSION_MINOR 4
+#define PSYSCR_VERSION_PATCH 0
+#define PSYSCR_VERSION_STRING "0.4.0"
 
 #include "psy_rt.h"
+#include "psy_input.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -1124,6 +1337,9 @@ union SDL_Event;
 #define PSYSCR_FLIP_BELOW_TIER    0x200u /* tier worse than desc.min_tier   */
 #define PSYSCR_FLIP_CODE_AT_RISK  0x400u /* record.code_risk is not 0; not in
                                           * the ring's mode word (CODES)    */
+#define PSYSCR_FLIP_TEXT_INPUT    0x800u /* planned while text input was on:
+                                          * keys were off the raw path; not
+                                          * in the ring's mode word (INPUT) */
 
 /* How far a flip's onset can be trusted, from its backend, path and the
  * source of its time (TIERS in the manual). Lower is better. */
@@ -1149,6 +1365,52 @@ typedef enum psyscr_tier {
 #define PSYSCR_EV_CODE      6u   /* the codes in one flip (CODES)           */
 #define PSYSCR_EV_ABORT     7u   /* one abort, as begin() reports it (ABORT) */
 #define PSYSCR_EV_PANIC     8u   /* the watchdog ends the process (PANIC)   */
+#define PSYSCR_EV_TEXT_INPUT 9u  /* text input on or off (INPUT)            */
+#define PSYSCR_EV_DEVICE    10u  /* an input device present, added, removed (INPUT) */
+
+/* PSYSCR_EV_DEVICE: u.u32[0] the kind, u.u32[1] the change. */
+#define PSYSCR_DEV_KEYBOARD 1u
+#define PSYSCR_DEV_MOUSE    2u
+#define PSYSCR_DEV_GAMEPAD  3u
+#define PSYSCR_DEV_TOUCH    4u
+#define PSYSCR_DEV_PEN      5u
+#define PSYSCR_DEV_PRESENT  0u   /* there at open                            */
+#define PSYSCR_DEV_ADDED    1u
+#define PSYSCR_DEV_REMOVED  2u
+#define PSYSCR_DEV_NAME_OF(e) ((const char*)(e)->u.bytes + 16)   /* NUL-terminated, at most 23 */
+
+/* PSYSCR_EV_RAW_MICE: the raw mouse reader's state changed (INPUT, "Raw
+ * mice"). u.u32[0] one of these, u.u32[1] the events lost so far. */
+#define PSYSCR_EV_RAW_MICE        11u
+#define PSYSCR_RAW_MICE_ON         1u   /* registered at open                 */
+#define PSYSCR_RAW_MICE_REGISTERED 2u   /* registered again after a loss     */
+#define PSYSCR_RAW_MICE_SUSPENDED  3u   /* SDL relative mode holds the mice  */
+
+/* desc.raw_mice's report is psy_input.h's psyin_mouse_report (v0.4.0). */
+#define PSYSCR_MOUSE_LEFT            PSYIN_MOUSE_LEFT
+#define PSYSCR_MOUSE_RIGHT           PSYIN_MOUSE_RIGHT
+#define PSYSCR_MOUSE_MIDDLE          PSYIN_MOUSE_MIDDLE
+#define PSYSCR_MOUSE_X1              PSYIN_MOUSE_X1
+#define PSYSCR_MOUSE_X2              PSYIN_MOUSE_X2
+#define PSYSCR_MOUSE_ABSOLUTE        PSYIN_MOUSE_ABSOLUTE
+#define PSYSCR_MOUSE_VIRTUAL_DESKTOP PSYIN_MOUSE_VIRTUAL_DESKTOP
+#define PSYSCR_MOUSE_UNLISTED        PSYIN_MOUSE_UNLISTED
+typedef psyin_mouse_report psyscr_mouse_event;
+
+/* PSYSCR_EV_INPUT_LOST: the input bridge lost or delayed events since the
+ * last record (INPUT, "The input bridge"). u.u32[0] records overwritten
+ * before they were decoded, [1] doorbells SDL refused, [2] decodes that
+ * found no record, [3] doorbells waiting to be pushed again; all totals. */
+#define PSYSCR_EV_INPUT_LOST 12u
+
+/* The bridge's counters, totals since the process started. */
+typedef struct psyscr_input_stats {
+    uint32_t stored;        /* events stored by psyscr_push_input() and raw mice */
+    uint32_t overwritten;   /* records overwritten before anyone decoded them  */
+    uint32_t refused;       /* doorbells SDL refused (its queue full)          */
+    uint32_t pending;       /* refused doorbells not pushed again yet          */
+    uint32_t lost;          /* doorbells decoded after their record was gone   */
+} psyscr_input_stats;
 
 /* --- abort and panic (ABORT, PANIC) --------------------------------------- */
 
@@ -1245,6 +1507,7 @@ typedef struct psyscr_caps {
     int32_t  max_in_flight;    /* 1                                           */
     psyscr_mode mode;          /* the mode obtained, read back from the OS    */
     psyscr_tier worst_tier;    /* the worst tier of any flip since open       */
+    bool     raw_keyboard;     /* keys come on SDL's raw path now (INPUT)     */
 } psyscr_caps;
 
 typedef struct psyscr_patch {
@@ -1522,6 +1785,11 @@ typedef struct psyscr_desc {
     bool           icon_sdl;         /* keep SDL's own icon                    */
     /* the D3D11 device for a video decoder (NATIVE HANDLES) */
     bool           d3d11_video;      /* VIDEO_SUPPORT and multithread protection */
+    /* input (INPUT) */
+    bool           gamepads;         /* start SDL's gamepad subsystem and open
+                                      * every gamepad                         */
+    bool           raw_mice;         /* read every mouse's Raw Input on a
+                                      * thread: per device, raw-timed (Windows) */
 } psyscr_desc;
 
 /* Private. One flip between flip_at() and its completion. */
@@ -1537,6 +1805,8 @@ typedef struct psyscr__pend {
 } psyscr__pend;
 
 #define PSYSCR__MAX_PEND 8
+#define PSYSCR__MAX_PADS 8
+#define PSYSCR__MAX_DEVS 32
 /* Slack: the planned vblank's time minus the present call's return, in
  * bins of a 32nd of a period over 4 periods, per path. */
 #define PSYSCR__SLACK_BINS  128
@@ -1576,6 +1846,16 @@ typedef struct psyscr_screen {
     struct SDL_Window*      window;
     int                     sdl_video;
     int                     cursor_hidden;
+    int                     text_input;   /* text input on, as last logged    */
+    int                     sdl_gamepad;  /* desc.gamepads: the subsystem is up */
+    void*                   pads[PSYSCR__MAX_PADS];   /* SDL_Gamepad*, opened here */
+    uint64_t                dev_id[PSYSCR__MAX_DEVS]; /* the devices logged, for
+                                                       * one record per change */
+    uint8_t                 dev_kind[PSYSCR__MAX_DEVS];
+    uint32_t                rm_unlisted[16];          /* raw mice SDL does not list */
+    int32_t                 raw_mice;                 /* desc.raw_mice: a reader user */
+    int32_t                 rm_state;                 /* 1 while relative mode holds the mice */
+    int32_t                 rm_rel, rm_frames;        /* the guard's last relative mode, frames */
     psyscr_caps             caps;
     psyrt_ring*             ring;
     uint32_t                display_index;
@@ -1848,9 +2128,45 @@ PSYSCR_API void  psyscr_bind(psyscr_screen* s);
  * be NULL). See INPUT for what that time is worth. */
 PSYSCR_API bool    psyscr_poll(psyscr_screen* s, union SDL_Event* ev, int64_t* t_rt);
 
+/* The next raw mouse report (desc.raw_mice), oldest first: true and *out,
+ * or false when none is waiting. Any screen drains the one process-wide
+ * queue; call it from one thread, once a frame until false (INPUT, "Raw
+ * mice"). A device SDL does not list gets PSYSCR_MOUSE_UNLISTED and, the
+ * first time, a PSYSCR_EV_DEVICE record. */
+PSYSCR_API bool    psyscr_poll_mouse(psyscr_screen* s, psyscr_mouse_event* out);
+
+/* The input bridge (INPUT, "The input bridge"). Any thread: store *e (its
+ * t, the producer's psy_rt stamp, is kept as given) and push one doorbell,
+ * an SDL event of type psyscr_input_event_type(), into SDL's queue.
+ * PSYSCR_OK (also when SDL refused the doorbell: it is pushed again
+ * later), PSYSCR_ERR_ARG, PSYSCR_ERR_CLOSED before the first screen with
+ * SDL opened. */
+PSYSCR_API int      psyscr_push_input(const psyin_event* e);
+
+/* The doorbell's SDL event type; 0 before the first screen with SDL. */
+PSYSCR_API uint32_t psyscr_input_event_type(void);
+
+/* One SDL event from psyscr_poll() as a psyin_event: a doorbell gives its
+ * stored event (keyed by the doorbell's sequence number, user.code); SDL's
+ * keyboard, mouse, touch, pen and gamepad events go through psy_input.h's
+ * adapter, with this screen's raw-keyboard state and the psy_rt time.
+ * false for any other event, a doorbell already decoded, or a doorbell
+ * whose record was overwritten (counted as lost). s may be NULL. */
+PSYSCR_API bool     psyscr_event_input(psyscr_screen* s, const union SDL_Event* ev, psyin_event* out);
+
+/* The bridge's counters. */
+PSYSCR_API void     psyscr_get_input_stats(psyscr_input_stats* out);
+
 /* An SDL_GetTicksNS() value on the psy_rt clock; 0 on a screen with no
  * window. */
 PSYSCR_API int64_t psyscr_restamp(const psyscr_screen* s, uint64_t sdl_ticks_ns);
+
+/* Starts (on) or stops SDL text input on the screen's window, with the IME
+ * area at x, y, w, h (window pixels); a ring record on each change and
+ * PSYSCR_FLIP_TEXT_INPUT on the flips planned while on (INPUT, "Text
+ * input"). Off at open. PSYSCR_OK, PSYSCR_ERR_ARG, PSYSCR_ERR_CLOSED, or
+ * PSYSCR_ERR_LOST when SDL refuses (psyscr_error() says why). */
+PSYSCR_API int     psyscr_text_input(psyscr_screen* s, bool on, int x, int y, int w, int h);
 
 /* Asks every open screen to abort: the next begin() of each returns
  * PSYSCR_QUIT with PSYSCR_ABORT_REQUEST. Any thread; no screen needed (a
@@ -1905,6 +2221,7 @@ PSYSCR_API const psyscr_param* psyscr_params(int* n);
 
 #if !defined(PSYSCR_NO_SDL)
     #include <SDL3/SDL.h>
+    #include "psy_input.h"   /* again, now with SDL: psyin_from_sdl */
 #endif
 
 #if defined(_WIN32) && !defined(PSYSCR_NO_SDL)
@@ -1976,12 +2293,60 @@ enum {
 #ifndef PSYSCR__SLEEP_UNTIL
 #define PSYSCR__SLEEP_UNTIL(t, spin) psyrt_sleep_until((uint64_t)(t), (spin))
 #endif
+/* Whether SDL text input is on for the screen's window now: another
+ * library (a GUI) can start it, so the header reads it instead of trusting
+ * its own calls. With no window, the state psyscr_text_input() set. */
+#ifndef PSYSCR__TEXT_INPUT_ACTIVE
+#if !defined(PSYSCR_NO_SDL)
+#define PSYSCR__TEXT_INPUT_ACTIVE(s) ((s)->window ? (SDL_TextInputActive((s)->window) ? 1 : 0) : (s)->text_input)
+#else
+#define PSYSCR__TEXT_INPUT_ACTIVE(s) ((s)->text_input)
+#endif
+#endif
+static void psyscr__text_input_set(psyscr_screen* s, int on, int external, int x, int y, int w, int h);
+
+/* One PSYSCR_EV_DEVICE record per change of a device: present at open,
+ * added, removed. The table makes a device that SDL reports twice (its
+ * ADDED events for devices already there) one record; a full table still
+ * logs. Pure: tests/adapt/psy_screen_test.c calls it without SDL. */
+static void psyscr__device_log(psyscr_screen* s, uint32_t kind, uint32_t change, uint64_t id, const char* name);
 /* examples/screen_abort.c sets it to 1 to arm the panic watchdog in a
  * window, so its test needs no fullscreen. */
 #ifndef PSYSCR__PANIC_WINDOWED
 #define PSYSCR__PANIC_WINDOWED 0
 #endif
 static int64_t psyscr__now(void) { return PSYSCR__NOW(); }
+
+static void psyscr__device_log(psyscr_screen* s, uint32_t kind, uint32_t change, uint64_t id, const char* name) {
+    psyrt_event ev;
+    int i, at = -1, free_i = -1;
+    size_t n;
+    for (i = 0; i < PSYSCR__MAX_DEVS; i++) {
+        if (s->dev_kind[i] == kind && s->dev_id[i] == id) at = i;
+        else if (!s->dev_kind[i] && free_i < 0) free_i = i;
+    }
+    if (change == PSYSCR_DEV_REMOVED) {
+        if (at < 0) return;
+        s->dev_kind[at] = 0;
+        s->dev_id[at] = 0;
+    } else {
+        if (at >= 0) return;
+        if (free_i >= 0) { s->dev_kind[free_i] = (uint8_t)kind; s->dev_id[free_i] = id; }
+    }
+    if (!s->ring) return;
+    memset(&ev, 0, sizeof ev);
+    ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+    ev.kind = (uint16_t)PSYSCR_EV_DEVICE;
+    ev.t_ns = (uint64_t)psyscr__now();
+    ev.aux = s->display_index;
+    ev.u.u32[0] = kind;
+    ev.u.u32[1] = change;
+    ev.u.u64[1] = id;
+    n = name ? strlen(name) : 0;
+    if (n > 23) n = 23;
+    if (n) memcpy(ev.u.bytes + 16, name, n);
+    psyrt_ring_push(s->ring, &ev);
+}
 
 
 static void psyscr__push_code(psyscr_screen* s, const psyscr__pend* p);
@@ -2082,9 +2447,12 @@ static void psyscr__a_store64(volatile int64_t* p, int64_t v) { __atomic_store_n
 #define PSYSCR__ABORT_LOG   16
 /* Reports of one key press: the hook sees it as Windows reads it, SDL's
  * raw path 0.1 to 0.7 ms later, and SDL's message path, which with the raw
- * keyboard on reports each key a second time (measured, docs/psy_screen.md),
- * up to 12 ms either side (INPUT). A person cannot press twice within this. */
-#define PSYSCR__AB_SAME_NS  30000000
+ * keyboard on reports a key with no scan code a second time (INPUT): up to
+ * 17.1 ms later in 517 of 518 virtual-key taps, 34.2 ms in one. Remote
+ * desktop and assistive tools inject by virtual key, so at 30 ms two
+ * presses through one could count as four and meet the panic rule. A
+ * person cannot press twice within 50 ms. */
+#define PSYSCR__AB_SAME_NS  50000000
 
 typedef struct psyscr__abort_entry {
     volatile int32_t seq;      /* the entry's number, written last; 0 while written */
@@ -2137,6 +2505,238 @@ static int psyscr__panic_due(int64_t t) {
 
 /* A press is a key-down after an up: Windows repeats key-downs while a key
  * is held, and a held combination must not count as several presses. */
+/* --- raw mice: the queue, the decoder, the guard (pure; INPUT, "Raw mice") ------- */
+
+/* The input bridge's store (INPUT, "The input bridge"). Many producers,
+ * one decoder: a record goes in slot seq % size, and its doorbell carries
+ * seq, so a doorbell finds its own record or learns it is gone; a record
+ * whose doorbell nobody decodes is overwritten when the store wraps,
+ * instead of holding its slot forever. */
+#ifndef PSYSCR_INPUT_STORE
+#define PSYSCR_INPUT_STORE 4096   /* records, a power of two */
+#endif
+#define PSYSCR__IN_MASK ((uint32_t)PSYSCR_INPUT_STORE - 1u)
+#define PSYSCR__IN_SEQ  0x7FFFFFFFu   /* sequences stay positive: -1 marks a write */
+typedef struct psyscr__in_slot {
+    volatile int32_t seq;     /* the record's sequence, written last; -1 while written */
+    volatile int32_t state;   /* 0 empty, 1 stored, 2 decoded                 */
+    volatile int32_t bell;    /* 1: SDL refused its doorbell                   */
+    int32_t          origin;  /* 1: desc.raw_mice's reader                     */
+    psyin_event      e;
+} psyscr__in_slot;
+static struct {
+    volatile int32_t next;    /* the next sequence, unmasked                   */
+    volatile int32_t overwritten, refused, pending, lost;
+    uint32_t type;            /* the doorbell's SDL type; 0 = no SDL yet       */
+    uint32_t mouse_next;      /* psyscr_poll_mouse()'s scan; the frame thread  */
+    uint32_t logged[4];       /* the counters the last record showed           */
+    psyscr__in_slot slot[PSYSCR_INPUT_STORE];
+} psyscr__in;
+
+static void psyscr__a_dec(volatile int32_t* p) {
+    int32_t v;
+    do { v = psyscr__a_load(p); } while (!psyscr__a_cas(p, v, v - 1));
+}
+
+/* Any thread. Returns the record's sequence. */
+static int32_t psyscr__in_store(const psyin_event* e, int32_t origin) {
+    uint32_t raw = (uint32_t)psyscr__a_inc(&psyscr__in.next) - 1u;
+    int32_t seq = (int32_t)(raw & PSYSCR__IN_SEQ);
+    psyscr__in_slot* sl = &psyscr__in.slot[raw & PSYSCR__IN_MASK];
+    if (psyscr__a_load(&sl->state) == 1) psyscr__a_inc(&psyscr__in.overwritten);
+    if (psyscr__a_cas(&sl->bell, 1, 0)) psyscr__a_dec(&psyscr__in.pending);
+    psyscr__a_store(&sl->seq, -1);
+    sl->e = *e;
+    sl->origin = origin;
+    psyscr__a_store(&sl->state, 1);
+    psyscr__a_store(&sl->seq, seq);
+    return seq;
+}
+
+/* Test-only seam, not API: tests/adapt/psy_screen_test.c rings its own
+ * doorbells. 1 when SDL took the doorbell. */
+#ifndef PSYSCR__DOORBELL
+#if !defined(PSYSCR_NO_SDL)
+static int psyscr__doorbell(int32_t seq) {
+    SDL_Event ev;
+    if (!psyscr__in.type) return 0;
+    memset(&ev, 0, sizeof ev);
+    ev.type = psyscr__in.type;
+    ev.user.code = seq;
+    return SDL_PushEvent(&ev) ? 1 : 0;
+}
+#define PSYSCR__DOORBELL(seq) psyscr__doorbell(seq)
+#else
+#define PSYSCR__DOORBELL(seq) ((void)(seq), 0)
+#endif
+#endif
+
+static int psyscr__in_push(const psyin_event* e, int32_t origin) {
+    int32_t seq = psyscr__in_store(e, origin);
+    if (!PSYSCR__DOORBELL(seq)) {
+        psyscr__in_slot* sl = &psyscr__in.slot[(uint32_t)seq & PSYSCR__IN_MASK];
+        psyscr__a_inc(&psyscr__in.refused);
+        if (psyscr__a_load(&sl->seq) == seq && psyscr__a_cas(&sl->bell, 0, 1)) psyscr__a_inc(&psyscr__in.pending);
+    }
+    return 0;
+}
+
+/* The frame thread: the record of doorbell seq. 1 found (and marked
+ * decoded), 0 gone (overwritten), -1 decoded already. */
+static int psyscr__in_take(int32_t seq, psyin_event* out, int32_t* origin) {
+    psyscr__in_slot* sl;
+    psyin_event copy;
+    int32_t o;
+    if (seq < 0) return 0;
+    sl = &psyscr__in.slot[(uint32_t)seq & PSYSCR__IN_MASK];
+    if (psyscr__a_load(&sl->seq) != seq) return 0;
+    copy = sl->e;
+    o = sl->origin;
+    if (psyscr__a_load(&sl->seq) != seq) return 0;           /* torn: rewritten meanwhile */
+    if (!psyscr__a_cas(&sl->state, 1, 2)) return psyscr__a_load(&sl->seq) == seq ? -1 : 0;
+    if (psyscr__a_load(&sl->seq) != seq) return 0;
+    if (psyscr__a_cas(&sl->bell, 1, 0)) psyscr__a_dec(&psyscr__in.pending);
+    *out = copy;
+    if (origin) *origin = o;
+    return 1;
+}
+
+/* The frame thread, when SDL's queue is empty: push the doorbells SDL
+ * refused again, oldest first. Returns how many SDL took. */
+static int psyscr__in_rebell(void) {
+    uint32_t raw, i, start;
+    int pushed = 0, waiting = 0;
+    if (psyscr__a_load(&psyscr__in.pending) <= 0) return 0;
+    raw = (uint32_t)psyscr__a_load(&psyscr__in.next);
+    start = raw > PSYSCR_INPUT_STORE ? raw - PSYSCR_INPUT_STORE : 0;
+    for (i = start; i != raw; i++) {
+        psyscr__in_slot* sl = &psyscr__in.slot[i & PSYSCR__IN_MASK];
+        int32_t seq = (int32_t)(i & PSYSCR__IN_SEQ);
+        if (!psyscr__a_load(&sl->bell) || psyscr__a_load(&sl->state) != 1 || psyscr__a_load(&sl->seq) != seq) continue;
+        if (!PSYSCR__DOORBELL(seq)) { waiting = 1; break; }
+        if (psyscr__a_cas(&sl->bell, 1, 0)) psyscr__a_dec(&psyscr__in.pending);
+        pushed++;
+    }
+    if (!pushed && !waiting) psyscr__a_store(&psyscr__in.pending, 0);   /* nothing left */
+    return pushed;
+}
+
+/* A mouse SDL does not list: say so on every event, log it the first time. */
+static int psyscr__unlisted(psyscr_screen* s, uint32_t device, int64_t t) {
+    int i, free_i = -1;
+    if (!s || !device) return 0;
+    for (i = 0; i < PSYSCR__MAX_DEVS; i++)
+        if (s->dev_kind[i] == PSYSCR_DEV_MOUSE && s->dev_id[i] == device) return 0;
+    for (i = 0; i < 16; i++) {
+        if (s->rm_unlisted[i] == device) return 1;
+        if (!s->rm_unlisted[i] && free_i < 0) free_i = i;
+    }
+    if (free_i >= 0) s->rm_unlisted[free_i] = device;
+    if (s->ring) {
+        psyrt_event ev;
+        memset(&ev, 0, sizeof ev);
+        ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+        ev.kind = (uint16_t)PSYSCR_EV_DEVICE;
+        ev.t_ns = (uint64_t)t;
+        ev.aux = s->display_index;
+        ev.u.u32[0] = PSYSCR_DEV_MOUSE;
+        ev.u.u32[1] = PSYSCR_DEV_ADDED;
+        ev.u.u64[1] = device;
+        memcpy(ev.u.bytes + 16, "raw, not in SDL's list", 22);
+        psyrt_ring_push(s->ring, &ev);
+    }
+    return 1;
+}
+
+/* A decoded doorbell: the record, with the unlisted flag on a raw mouse. */
+static int psyscr__in_decode(psyscr_screen* s, int32_t seq, psyin_event* out) {
+    int r = psyscr__in_take(seq, out, NULL);
+    if (r == 0) psyscr__a_inc(&psyscr__in.lost);
+    if (r <= 0) return 0;
+    if (out->kind == PSYIN_KIND_MOUSE && psyscr__unlisted(s, out->device, out->t)) out->flags |= PSYIN_UNLISTED;
+    return 1;
+}
+
+/* At begin(): one PSYSCR_EV_INPUT_LOST record when a counter moved. */
+static void psyscr__in_log(psyscr_screen* s) {
+    uint32_t v[4];
+    psyrt_event ev;
+    v[0] = (uint32_t)psyscr__a_load(&psyscr__in.overwritten);
+    v[1] = (uint32_t)psyscr__a_load(&psyscr__in.refused);
+    v[2] = (uint32_t)psyscr__a_load(&psyscr__in.lost);
+    v[3] = (uint32_t)psyscr__a_load(&psyscr__in.pending);
+    if (v[0] == psyscr__in.logged[0] && v[1] == psyscr__in.logged[1] && v[2] == psyscr__in.logged[2]) {
+        psyscr__in.logged[3] = v[3];   /* only the waiting count fell */
+        return;
+    }
+    memcpy(psyscr__in.logged, v, sizeof v);
+    if (!s->ring) return;
+    memset(&ev, 0, sizeof ev);
+    ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+    ev.kind = (uint16_t)PSYSCR_EV_INPUT_LOST;
+    ev.t_ns = (uint64_t)PSYSCR__NOW();
+    ev.aux = s->display_index;
+    memcpy(&ev.u.u32[0], v, sizeof v);
+    psyrt_ring_push(s->ring, &ev);
+}
+
+/* RAWMOUSE's flags and button flags, as winuser.h defines them; repeated
+ * here so the decoder and its test need no Windows header. */
+#define PSYSCR__RI_MOVE_ABSOLUTE   0x0001u
+#define PSYSCR__RI_VIRTUAL_DESKTOP 0x0002u
+#define PSYSCR__RI_WHEEL           0x0400u
+#define PSYSCR__RI_HWHEEL          0x0800u
+
+/* One RAWMOUSE (usFlags, usButtonFlags, usButtonData, lLastX, lLastY). */
+static void psyscr__mouse_decode(uint16_t flags, uint16_t bflags, uint16_t bdata, int32_t lx, int32_t ly,
+                                 uint32_t device, int64_t t, psyscr_mouse_event* e) {
+    /* down, up bit pairs: left, right, middle, button 4, button 5 */
+    static const uint8_t button[5] = { PSYSCR_MOUSE_LEFT, PSYSCR_MOUSE_RIGHT, PSYSCR_MOUSE_MIDDLE,
+                                       PSYSCR_MOUSE_X1, PSYSCR_MOUSE_X2 };
+    int i;
+    memset(e, 0, sizeof *e);
+    e->t = t;
+    e->device = device;
+    e->dx = lx;
+    e->dy = ly;
+    for (i = 0; i < 5; i++) {
+        if (bflags & (1u << (2 * i))) e->down |= button[i];
+        if (bflags & (2u << (2 * i))) e->up |= button[i];
+    }
+    if (bflags & PSYSCR__RI_WHEEL) e->wheel = (int16_t)bdata;
+    if (bflags & PSYSCR__RI_HWHEEL) e->hwheel = (int16_t)bdata;
+    if (flags & PSYSCR__RI_MOVE_ABSOLUTE) e->flags |= PSYSCR_MOUSE_ABSOLUTE;
+    if (flags & PSYSCR__RI_VIRTUAL_DESKTOP) e->flags |= PSYSCR_MOUSE_VIRTUAL_DESKTOP;
+}
+
+/* The registration guard, once a frame: SDL's relative mode takes the
+ * mouse registration while it is on, and removes it for the process when
+ * it ends (measured). Returns 0, PSYSCR_RAW_MICE_SUSPENDED when relative
+ * mode took the mice, or PSYSCR_RAW_MICE_REGISTERED when the reader must
+ * register again. *suspended is the screen's state. */
+static int psyscr__rm_guard(int32_t* suspended, int relative, int registered) {
+    if (relative) {
+        if (*suspended) return 0;
+        *suspended = 1;
+        return (int)PSYSCR_RAW_MICE_SUSPENDED;
+    }
+    *suspended = 0;
+    return registered ? 0 : (int)PSYSCR_RAW_MICE_REGISTERED;
+}
+
+static void psyscr__rm_log(psyscr_screen* s, uint32_t what) {
+    psyrt_event ev;
+    if (!s->ring) return;
+    memset(&ev, 0, sizeof ev);
+    ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+    ev.kind = (uint16_t)PSYSCR_EV_RAW_MICE;
+    ev.t_ns = (uint64_t)PSYSCR__NOW();
+    ev.aux = s->display_index;
+    ev.u.u32[0] = what;
+    ev.u.u32[1] = (uint32_t)psyscr__a_load(&psyscr__in.overwritten);
+    psyrt_ring_push(s->ring, &ev);
+}
+
 static int psyscr__abort_edge(int32_t* held, int down) {
     int press = down && !*held;
     *held = down ? 1 : 0;
@@ -2427,6 +3027,10 @@ static void psyscr__mode_from_sdl(const SDL_DisplayMode* m, psyscr_mode* out) {
  * it only for its own duration. */
 static bool psyscr__video_up(void) { return SDL_InitSubSystem(SDL_INIT_VIDEO); }
 static void psyscr__video_down(void) { SDL_QuitSubSystem(SDL_INIT_VIDEO); }
+static void psyscr__pad_open(psyscr_screen* s, SDL_JoystickID id);
+static void psyscr__pad_close(psyscr_screen* s, SDL_JoystickID id, bool all);
+static void psyscr__devices_at_open(psyscr_screen* s);
+static void psyscr__device_event(psyscr_screen* s, const SDL_Event* ev);
 
 static SDL_DisplayID psyscr__display_id(uint32_t display) {
     return display ? (SDL_DisplayID)display : SDL_GetPrimaryDisplay();
@@ -4035,6 +4639,16 @@ typedef BOOL (WINAPI *psyscr__UnhookWindowsHookEx_fn)(HHOOK);
 typedef LRESULT (WINAPI *psyscr__CallNextHookEx_fn)(HHOOK, int, WPARAM, LPARAM);
 typedef BOOL (WINAPI *psyscr__GetMessageW_fn)(LPMSG, HWND, UINT, UINT);
 typedef BOOL (WINAPI *psyscr__PeekMessageW_fn)(LPMSG, HWND, UINT, UINT, UINT);
+typedef BOOL (WINAPI *psyscr__RegisterRawInputDevices_fn)(PCRAWINPUTDEVICE, UINT, UINT);
+typedef UINT (WINAPI *psyscr__GetRegisteredRawInputDevices_fn)(PRAWINPUTDEVICE, PUINT, UINT);
+typedef UINT (WINAPI *psyscr__GetRawInputBuffer_fn)(PRAWINPUT, PUINT, UINT);
+typedef ATOM (WINAPI *psyscr__RegisterClassW_fn)(const WNDCLASSW*);
+typedef HWND (WINAPI *psyscr__CreateWindowExW_fn)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU,
+                                                   HINSTANCE, LPVOID);
+typedef BOOL (WINAPI *psyscr__DestroyWindow_fn)(HWND);
+typedef LRESULT (WINAPI *psyscr__DefWindowProcW_fn)(HWND, UINT, WPARAM, LPARAM);
+typedef DWORD (WINAPI *psyscr__MsgWaitForMultipleObjects_fn)(DWORD, const HANDLE*, BOOL, DWORD, DWORD);
+typedef BOOL (WINAPI *psyscr__PostMessageW_fn)(HWND, UINT, WPARAM, LPARAM);
 typedef BOOL (WINAPI *psyscr__PostThreadMessageW_fn)(DWORD, UINT, WPARAM, LPARAM);
 typedef SHORT (WINAPI *psyscr__GetAsyncKeyState_fn)(int);
 typedef HWND (WINAPI *psyscr__GetForegroundWindow_fn)(void);
@@ -4083,6 +4697,16 @@ static struct psyscr__winapi {
     psyscr__CreateDIBSection_fn            create_dib;
     psyscr__CreateBitmap_fn                create_bitmap;
     psyscr__DeleteObject_fn                delete_object;
+    /* the raw mouse reader */
+    psyscr__RegisterRawInputDevices_fn     raw_register;
+    psyscr__GetRegisteredRawInputDevices_fn raw_registered;
+    psyscr__GetRawInputBuffer_fn           raw_buffer;
+    psyscr__RegisterClassW_fn              register_class;
+    psyscr__CreateWindowExW_fn             create_window;
+    psyscr__DestroyWindow_fn               destroy_window;
+    psyscr__DefWindowProcW_fn              def_proc;
+    psyscr__MsgWaitForMultipleObjects_fn   msg_wait;
+    psyscr__PostMessageW_fn                post_message;
 } psyscr__win;
 
 static void psyscr__win_load(void) {
@@ -4113,6 +4737,15 @@ static void psyscr__win_load(void) {
         psyscr__win.send_message = (psyscr__SendMessageW_fn)(psyscr_proc)GetProcAddress(u, "SendMessageW");
         psyscr__win.window_dpi = (psyscr__GetDpiForWindow_fn)(psyscr_proc)GetProcAddress(u, "GetDpiForWindow");
         psyscr__win.metrics_dpi = (psyscr__GetSystemMetricsForDpi_fn)(psyscr_proc)GetProcAddress(u, "GetSystemMetricsForDpi");
+        psyscr__win.raw_register = (psyscr__RegisterRawInputDevices_fn)(psyscr_proc)GetProcAddress(u, "RegisterRawInputDevices");
+        psyscr__win.raw_registered = (psyscr__GetRegisteredRawInputDevices_fn)(psyscr_proc)GetProcAddress(u, "GetRegisteredRawInputDevices");
+        psyscr__win.raw_buffer = (psyscr__GetRawInputBuffer_fn)(psyscr_proc)GetProcAddress(u, "GetRawInputBuffer");
+        psyscr__win.register_class = (psyscr__RegisterClassW_fn)(psyscr_proc)GetProcAddress(u, "RegisterClassW");
+        psyscr__win.create_window = (psyscr__CreateWindowExW_fn)(psyscr_proc)GetProcAddress(u, "CreateWindowExW");
+        psyscr__win.destroy_window = (psyscr__DestroyWindow_fn)(psyscr_proc)GetProcAddress(u, "DestroyWindow");
+        psyscr__win.def_proc = (psyscr__DefWindowProcW_fn)(psyscr_proc)GetProcAddress(u, "DefWindowProcW");
+        psyscr__win.msg_wait = (psyscr__MsgWaitForMultipleObjects_fn)(psyscr_proc)GetProcAddress(u, "MsgWaitForMultipleObjects");
+        psyscr__win.post_message = (psyscr__PostMessageW_fn)(psyscr_proc)GetProcAddress(u, "PostMessageW");
     }
     if (g) {
         psyscr__win.get_ramp = (psyscr__GammaRamp_fn)(psyscr_proc)GetProcAddress(g, "GetDeviceGammaRamp");
@@ -4483,6 +5116,168 @@ static DWORD WINAPI psyscr__wd_main(LPVOID arg) {
         if (m.message == WM_APP) psyscr__panic();
     if (psyscr__wd.hook) { psyscr__win.unhook(psyscr__wd.hook); psyscr__wd.hook = NULL; }
     return 0;
+}
+
+
+/* --- the raw mouse reader (desc.raw_mice; INPUT, "Raw mice") ------------------------
+ * One per process: Raw Input registration is per process and per usage, so
+ * a second registration for mice would take the first one's. SDL's own
+ * thread keeps the keyboard (usage 6); this one takes mice (usage 2), flags
+ * 0: input only while this process is in front (a participant's clicks are
+ * not taken while another program has the focus; an operator window in
+ * this process, ImGui's included, keeps the focus in the process). */
+#define PSYSCR__RM_REGISTER (WM_APP + 0x51)
+static int psyscr__rm_still_ours(void);
+static struct {
+    volatile int32_t users;
+    volatile int32_t registered;   /* the reader's registration is in place */
+    HANDLE thread, quit, ready;
+    HWND   hwnd;
+    UINT   offset;                 /* RAWINPUTHEADER as GetRawInputBuffer lays it */
+    uint64_t buf[2048];            /* 16 KB, 8-byte aligned for GetRawInputBuffer */
+} psyscr__rm;
+
+static LRESULT CALLBACK psyscr__rm_proc(HWND h, UINT msg, WPARAM w, LPARAM l) {
+    return psyscr__win.def_proc(h, msg, w, l);
+}
+
+static int psyscr__rm_register(void) {
+    RAWINPUTDEVICE rid;
+    rid.usUsagePage = 1;
+    rid.usUsage = 2;
+    rid.dwFlags = 0;
+    rid.hwndTarget = psyscr__rm.hwnd;
+    return psyscr__win.raw_register(&rid, 1, sizeof rid) ? 1 : 0;
+}
+
+/* Every report waiting, stamped when GetRawInputBuffer() returned: the
+ * reports of one call share a stamp (SDL interpolates mouse times across a
+ * call; an interpolated time would be a guess). */
+static void psyscr__rm_drain(void) {
+    for (;;) {
+        UINT size = (UINT)sizeof psyscr__rm.buf, count, i;
+        RAWINPUT* in = (RAWINPUT*)(void*)psyscr__rm.buf;
+        int64_t t;
+        count = psyscr__win.raw_buffer(in, &size, sizeof(RAWINPUTHEADER));
+        t = PSYSCR__NOW();
+        if (count == 0 || count == (UINT)-1) return;
+        for (i = 0; i < count; i++) {
+            if (in->header.dwType == RIM_TYPEMOUSE) {
+                const RAWMOUSE* m = (const RAWMOUSE*)(const void*)((const BYTE*)in + psyscr__rm.offset);
+                psyscr_mouse_event e;
+                psyin_event ev[12];
+                int k, n;
+                psyscr__mouse_decode(m->usFlags, m->usButtonFlags, m->usButtonData, m->lLastX, m->lLastY,
+                                     (uint32_t)(uintptr_t)in->header.hDevice, t, &e);
+                /* onto the bridge: one doorbell per event */
+                n = psyin_from_mouse(&e, ev, 12);
+                for (k = 0; k < n; k++) psyscr__in_push(&ev[k], 1);
+            }
+            /* NEXTRAWINPUTBLOCK, which MinGW's headers lack (no QWORD) */
+            in = (RAWINPUT*)(void*)(((uintptr_t)in + in->header.dwSize + 7u) & ~(uintptr_t)7u);
+        }
+    }
+}
+
+static DWORD WINAPI psyscr__rm_main(LPVOID arg) {
+    WNDCLASSW wc;
+    MSG m;
+    (void)arg;
+    memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc = psyscr__rm_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"psy_screen_raw_mice";
+    psyscr__win.register_class(&wc);   /* fails harmlessly when a reader ran before */
+    psyscr__rm.hwnd = psyscr__win.create_window(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                                                 wc.hInstance, NULL);
+    if (psyscr__rm.hwnd && psyscr__rm_register()) psyscr__a_store(&psyscr__rm.registered, 1);
+    /* the raw keyboard's thread runs at this priority too (SDL) */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    SetEvent(psyscr__rm.ready);
+    if (!psyscr__a_load(&psyscr__rm.registered)) return 1;
+    for (;;) {
+        DWORD w = psyscr__win.msg_wait(1, &psyscr__rm.quit, FALSE, INFINITE, QS_RAWINPUT | QS_POSTMESSAGE);
+        if (w != WAIT_OBJECT_0 + 1) break;
+        psyscr__rm_drain();
+        /* only the reader's own requests: WM_INPUT stays for the buffer */
+        while (psyscr__win.peek_message(&m, NULL, PSYSCR__RM_REGISTER, PSYSCR__RM_REGISTER, PM_REMOVE))
+            psyscr__a_store(&psyscr__rm.registered, psyscr__rm_register());
+    }
+    {
+        RAWINPUTDEVICE rid;
+        rid.usUsagePage = 1;
+        rid.usUsage = 2;
+        rid.dwFlags = RIDEV_REMOVE;
+        rid.hwndTarget = NULL;
+        if (psyscr__rm_still_ours()) psyscr__win.raw_register(&rid, 1, sizeof rid);
+    }
+    psyscr__win.destroy_window(psyscr__rm.hwnd);
+    psyscr__rm.hwnd = NULL;
+    return 0;
+}
+
+/* Whether the process's mouse registration still targets the reader's
+ * window (relative mode and other code can take it). */
+static int psyscr__rm_still_ours(void) {
+    RAWINPUTDEVICE list[16];
+    UINT n = 16, i, got;
+    if (!psyscr__rm.hwnd) return 0;
+    got = psyscr__win.raw_registered(list, &n, sizeof list[0]);
+    if (got == (UINT)-1) return 1;   /* more than 16 registrations: do not guess */
+    for (i = 0; i < got; i++)
+        if (list[i].usUsagePage == 1 && list[i].usUsage == 2) return list[i].hwndTarget == psyscr__rm.hwnd;
+    return 0;
+}
+
+static const char* psyscr__rm_start(void) {
+    BOOL wow = FALSE;
+    if (psyscr__a_inc(&psyscr__rm.users) > 1) return NULL;
+    psyscr__win_load();
+    if (!psyscr__win.raw_register || !psyscr__win.raw_registered || !psyscr__win.raw_buffer ||
+        !psyscr__win.register_class || !psyscr__win.create_window || !psyscr__win.destroy_window ||
+        !psyscr__win.def_proc || !psyscr__win.msg_wait || !psyscr__win.peek_message || !psyscr__win.post_message) {
+        psyscr__a_store(&psyscr__rm.users, 0);
+        return "desc.raw_mice: user32.dll lacks the Raw Input calls";
+    }
+    /* a 32-bit process on 64-bit Windows gets 64-bit headers (SDL does the same) */
+    psyscr__rm.offset = (UINT)sizeof(RAWINPUTHEADER);
+    if (IsWow64Process(GetCurrentProcess(), &wow) && wow) psyscr__rm.offset += 8;
+    psyscr__a_store(&psyscr__rm.registered, 0);
+    psyscr__rm.quit = CreateEventW(NULL, TRUE, FALSE, NULL);
+    psyscr__rm.ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    psyscr__rm.thread = (psyscr__rm.quit && psyscr__rm.ready) ? CreateThread(NULL, 0, psyscr__rm_main, NULL, 0, NULL) : NULL;
+    if (!psyscr__rm.thread || WaitForSingleObject(psyscr__rm.ready, 2000) != WAIT_OBJECT_0 ||
+        !psyscr__a_load(&psyscr__rm.registered)) {
+        if (psyscr__rm.thread) {
+            SetEvent(psyscr__rm.quit);
+            WaitForSingleObject(psyscr__rm.thread, 2000);
+            CloseHandle(psyscr__rm.thread);
+        }
+        if (psyscr__rm.quit) CloseHandle(psyscr__rm.quit);
+        if (psyscr__rm.ready) CloseHandle(psyscr__rm.ready);
+        psyscr__rm.thread = psyscr__rm.quit = psyscr__rm.ready = NULL;
+        psyscr__a_store(&psyscr__rm.users, 0);
+        return "desc.raw_mice: Raw Input registration for mice was refused";
+    }
+    return NULL;
+}
+
+static void psyscr__rm_stop(void) {
+    if (psyscr__a_load(&psyscr__rm.users) <= 0) return;
+    if (InterlockedDecrement((volatile LONG*)&psyscr__rm.users) > 0) return;
+    SetEvent(psyscr__rm.quit);
+    WaitForSingleObject(psyscr__rm.thread, 2000);
+    CloseHandle(psyscr__rm.thread);
+    CloseHandle(psyscr__rm.quit);
+    CloseHandle(psyscr__rm.ready);
+    psyscr__rm.thread = psyscr__rm.quit = psyscr__rm.ready = NULL;
+}
+
+/* The guard's Windows side: is the registration still the reader's, and
+ * a request to register again. */
+static int psyscr__rm_check_registered(void) { return psyscr__rm_still_ours(); }
+static void psyscr__rm_request(void) {
+    if (psyscr__rm.hwnd) psyscr__win.post_message(psyscr__rm.hwnd, PSYSCR__RM_REGISTER, 0, 0);
 }
 
 /* The first armed screen starts the watchdog, with its desc's numbers. */
@@ -5552,6 +6347,59 @@ static const char* psyscr__set_icon(psyscr_screen* s, const psyscr_desc* d) {
 }
 #endif
 
+/* desc.raw_mice at open: a window on Windows, no SDL relative mode on any
+ * window (it would take the registration), then the process's reader. */
+static const char* psyscr__rm_open(psyscr_screen* s) {
+#if defined(PSYSCR__DXGI) && !defined(PSYSCR_NO_SDL)
+    const char* why;
+    int i, n = 0;
+    SDL_Window** wins;
+    if (!s->window) return "desc.raw_mice needs a window";
+    wins = SDL_GetWindows(&n);
+    for (i = 0; wins && i < n; i++)
+        if (SDL_GetWindowRelativeMouseMode(wins[i])) {
+            SDL_free(wins);
+            return "desc.raw_mice: SDL relative mouse mode is on for a window; both read mice through one "
+                   "Raw Input registration";
+        }
+    SDL_free(wins);
+    why = psyscr__rm_start();
+    if (why) return why;
+    s->raw_mice = 1;
+    s->rm_state = 0;
+    psyscr__rm_log(s, PSYSCR_RAW_MICE_ON);
+    return NULL;
+#else
+#if defined(PSYSCR__DXGI)
+    (void)&psyscr__rm_start; (void)&psyscr__rm_check_registered; (void)&psyscr__rm_request;
+#endif
+    (void)s;
+    return "desc.raw_mice is Windows only, with a window";
+#endif
+}
+
+/* Once a frame (begin()): the registration guard (INPUT, "Raw mice"). Relative
+ * mode is read every frame (23 ns measured); the registration (0.4 to 11
+ * us measured, GetRegisteredRawInputDevices) when relative mode changes
+ * and every 30th frame, which also catches other code taking the mice. */
+static void psyscr__rm_check(psyscr_screen* s) {
+#if defined(PSYSCR__DXGI) && !defined(PSYSCR_NO_SDL)
+    int rel = s->window && SDL_GetWindowRelativeMouseMode(s->window) ? 1 : 0;
+    int act, due = rel != s->rm_rel || ++s->rm_frames >= 30;
+    s->rm_rel = rel;
+    if (!due) return;
+    s->rm_frames = 0;
+    act = psyscr__rm_guard(&s->rm_state, rel, rel ? 1 : psyscr__rm_check_registered());
+    if (act == (int)PSYSCR_RAW_MICE_REGISTERED) psyscr__rm_request();
+    if (act) psyscr__rm_log(s, (uint32_t)act);
+#else
+    /* the reader and its guard run on Windows with SDL only; the core
+     * test calls these directly */
+    (void)&psyscr__rm_guard; (void)&psyscr__mouse_decode; (void)&psyscr__rm_log;
+    (void)s;
+#endif
+}
+
 PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
     psyscr_presenter_open in;
     psyscr_mode want;
@@ -5680,6 +6528,24 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
             return false;
         }
         s->sdl_video = 1;
+        /* the input bridge's doorbell, once per process (SDL keeps it) */
+        if (!psyscr__in.type) {
+            Uint32 type = SDL_RegisterEvents(1);
+            if (type) psyscr__in.type = type;
+        }
+        if (desc->gamepads) {
+            int k, n_pads = 0;
+            SDL_JoystickID* ids;
+            if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
+                psyscr__set_error(s->error, sizeof s->error, "psy_screen: SDL gamepads: %s", SDL_GetError());
+                psyscr_close(s);
+                return false;
+            }
+            s->sdl_gamepad = 1;
+            ids = SDL_GetGamepads(&n_pads);
+            for (k = 0; ids && k < n_pads; k++) psyscr__pad_open(s, ids[k]);
+            SDL_free(ids);
+        }
         id = psyscr__display_id(desc->display);
         dm = SDL_GetDesktopDisplayMode(id);
         if (!dm) {
@@ -5792,6 +6658,17 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
     s->open = 1;
     s->ring = desc->ring;
     s->display_index = desc->display_index;
+#if !defined(PSYSCR_NO_SDL)
+    if (s->window) psyscr__devices_at_open(s);
+#endif
+    if (desc->raw_mice) {
+        const char* why = psyscr__rm_open(s);
+        if (why) {
+            psyscr__set_error(s->error, sizeof s->error, "psy_screen: %s", why);
+            psyscr_close(s);
+            return false;
+        }
+    }
     s->lead = desc->lead == 0 ? 0.5 : desc->lead;
     s->offset = desc->onset_offset_ns;
     s->patch = desc->patch;
@@ -5865,6 +6742,12 @@ PSYSCR_API bool psyscr_open(psyscr_screen* s, const psyscr_desc* desc) {
 
 PSYSCR_API void psyscr_close(psyscr_screen* s) {
     if (!s) return;
+    if (s->raw_mice) {
+#if defined(PSYSCR__DXGI)
+        psyscr__rm_stop();
+#endif
+        s->raw_mice = 0;
+    }
     if (s->pr && s->pr_open && s->open) {
         int64_t end = psyscr__now() + 100000000;
         psyscr_vblank newest;
@@ -5918,6 +6801,11 @@ PSYSCR_API void psyscr_close(psyscr_screen* s) {
         }
     }
 #endif
+    if (s->sdl_gamepad) {
+        psyscr__pad_close(s, 0, true);
+        SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+    }
+    s->sdl_gamepad = 0;
     if (s->sdl_video) psyscr__video_down();
 #endif
     s->window = NULL;
@@ -5930,11 +6818,23 @@ PSYSCR_API void psyscr_close(psyscr_screen* s) {
 PSYSCR_API const char* psyscr_error(const psyscr_screen* s) { return s ? s->error : "psy_screen: NULL screen"; }
 PSYSCR_API bool psyscr_is_open(const psyscr_screen* s) { return s && s->open; }
 
+/* Whether keys come on SDL's raw path now: the hint can change at any
+ * time, and text input routes keys through the message path (INPUT). */
+static bool psyscr__raw_keyboard(const psyscr_screen* s) {
+#if !defined(PSYSCR_NO_SDL) && defined(_WIN32)
+    return s->window && !PSYSCR__TEXT_INPUT_ACTIVE(s) && SDL_GetHintBoolean(SDL_HINT_WINDOWS_RAW_KEYBOARD, false);
+#else
+    (void)s;
+    return false;
+#endif
+}
+
 PSYSCR_API void psyscr_get_caps(const psyscr_screen* s, psyscr_caps* out) {
     if (!out) return;
     if (!s || !s->open) { memset(out, 0, sizeof *out); return; }
     *out = s->caps;
     out->worst_tier = (psyscr_tier)s->worst_tier;
+    out->raw_keyboard = psyscr__raw_keyboard(s);
 }
 
 static const char* psyscr__path_name(uint16_t p) {
@@ -6021,6 +6921,8 @@ PSYSCR_API int psyscr_begin(psyscr_screen* s, psyscr_frame* f) {
     if (!s->open) { PSYRT_ZONE_END(z_begin); return PSYSCR_ERR_CLOSED; }
     if (s->begun) { PSYRT_ZONE_END(z_begin); return PSYSCR_ERR_ORDER; }
     psyscr__pump(s);
+    if (s->raw_mice) psyscr__rm_check(s);
+    psyscr__in_log(s);
     if (psyscr__abort_take(s, f)) { PSYRT_ZONE_END(z_begin); return PSYSCR_QUIT; }
     t0 = psyscr__now();
     if (!s->slot_held) {
@@ -6178,6 +7080,12 @@ PSYSCR_API int psyscr_flip_at(psyscr_screen* s, int64_t t, psyscr_record* out) {
     p->rec.index = s->index;
     p->rec.target = t;
     p->rec.planned = psyscr__time_of(s, planned) + s->offset;
+    {   /* observed, not only commanded: a GUI library may have started
+         * it. SDL_TextInputActive() measured 21 ns a call. */
+        int ti = PSYSCR__TEXT_INPUT_ACTIVE(s);
+        if (ti != s->text_input) psyscr__text_input_set(s, ti, 1, 0, 0, 0, 0);
+    }
+    if (s->text_input) flags |= PSYSCR_FLIP_TEXT_INPUT;
     p->rec.flags = flags;
     /* A present without a target shows at the first vblank it can, held
      * or not, so every one measures the depth; one with a target only
@@ -6499,11 +7407,104 @@ PSYSCR_API int64_t psyscr_restamp(const psyscr_screen* s, uint64_t sdl_ticks_ns)
     return s->sdl_rt + ((int64_t)sdl_ticks_ns - s->sdl_ticks);
 }
 
+/* The input devices SDL lists at open (PSYSCR_EV_DEVICE). SDL's lists are
+ * its allocations, made once here, not in the frame loop. */
+static void psyscr__devices_at_open(psyscr_screen* s) {
+    int i, n = 0;
+    SDL_KeyboardID* kb = SDL_GetKeyboards(&n);
+    for (i = 0; kb && i < n; i++)
+        psyscr__device_log(s, PSYSCR_DEV_KEYBOARD, PSYSCR_DEV_PRESENT, kb[i], SDL_GetKeyboardNameForID(kb[i]));
+    SDL_free(kb);
+    {
+        SDL_MouseID* m = SDL_GetMice(&n);
+        for (i = 0; m && i < n; i++)
+            psyscr__device_log(s, PSYSCR_DEV_MOUSE, PSYSCR_DEV_PRESENT, m[i], SDL_GetMouseNameForID(m[i]));
+        SDL_free(m);
+    }
+    {
+        SDL_TouchID* tch = SDL_GetTouchDevices(&n);
+        for (i = 0; tch && i < n; i++)
+            psyscr__device_log(s, PSYSCR_DEV_TOUCH, PSYSCR_DEV_PRESENT, tch[i], SDL_GetTouchDeviceName(tch[i]));
+        SDL_free(tch);
+    }
+    if (s->sdl_gamepad) {
+        SDL_JoystickID* g = SDL_GetGamepads(&n);
+        for (i = 0; g && i < n; i++)
+            psyscr__device_log(s, PSYSCR_DEV_GAMEPAD, PSYSCR_DEV_PRESENT, g[i], SDL_GetGamepadNameForID(g[i]));
+        SDL_free(g);
+    }
+}
+
+/* Hot-plug, and devices SDL does not list (pens, touch devices it sees
+ * first in an event): a record the first time. Names are SDL's pointers. */
+static void psyscr__device_event(psyscr_screen* s, const SDL_Event* ev) {
+    switch (ev->type) {
+    case SDL_EVENT_KEYBOARD_ADDED:
+        psyscr__device_log(s, PSYSCR_DEV_KEYBOARD, PSYSCR_DEV_ADDED, ev->kdevice.which,
+                           SDL_GetKeyboardNameForID(ev->kdevice.which));
+        break;
+    case SDL_EVENT_KEYBOARD_REMOVED:
+        psyscr__device_log(s, PSYSCR_DEV_KEYBOARD, PSYSCR_DEV_REMOVED, ev->kdevice.which, NULL);
+        break;
+    case SDL_EVENT_MOUSE_ADDED:
+        psyscr__device_log(s, PSYSCR_DEV_MOUSE, PSYSCR_DEV_ADDED, ev->mdevice.which,
+                           SDL_GetMouseNameForID(ev->mdevice.which));
+        break;
+    case SDL_EVENT_MOUSE_REMOVED:
+        psyscr__device_log(s, PSYSCR_DEV_MOUSE, PSYSCR_DEV_REMOVED, ev->mdevice.which, NULL);
+        break;
+    case SDL_EVENT_GAMEPAD_ADDED:
+        psyscr__device_log(s, PSYSCR_DEV_GAMEPAD, PSYSCR_DEV_ADDED, ev->gdevice.which,
+                           SDL_GetGamepadNameForID(ev->gdevice.which));
+        break;
+    case SDL_EVENT_GAMEPAD_REMOVED:
+        psyscr__device_log(s, PSYSCR_DEV_GAMEPAD, PSYSCR_DEV_REMOVED, ev->gdevice.which, NULL);
+        break;
+    case SDL_EVENT_PEN_PROXIMITY_IN:
+        psyscr__device_log(s, PSYSCR_DEV_PEN, PSYSCR_DEV_ADDED, ev->pproximity.which, "pen");
+        break;
+    case SDL_EVENT_FINGER_DOWN:
+        psyscr__device_log(s, PSYSCR_DEV_TOUCH, PSYSCR_DEV_ADDED, ev->tfinger.touchID,
+                           SDL_GetTouchDeviceName(ev->tfinger.touchID));
+        break;
+    default:
+        break;
+    }
+}
+
+/* desc.gamepads: SDL sends a gamepad's events only while it is open. */
+static void psyscr__pad_open(psyscr_screen* s, SDL_JoystickID id) {
+    int i, free_i = -1;
+    SDL_Gamepad* g;
+    for (i = 0; i < PSYSCR__MAX_PADS; i++) {
+        if (s->pads[i] && SDL_GetGamepadID((SDL_Gamepad*)s->pads[i]) == id) return;
+        if (!s->pads[i] && free_i < 0) free_i = i;
+    }
+    if (free_i < 0) return;
+    g = SDL_OpenGamepad(id);
+    if (g) s->pads[free_i] = g;
+}
+
+static void psyscr__pad_close(psyscr_screen* s, SDL_JoystickID id, bool all) {
+    int i;
+    for (i = 0; i < PSYSCR__MAX_PADS; i++)
+        if (s->pads[i] && (all || SDL_GetGamepadID((SDL_Gamepad*)s->pads[i]) == id)) {
+            SDL_CloseGamepad((SDL_Gamepad*)s->pads[i]);
+            s->pads[i] = NULL;
+        }
+}
+
 PSYSCR_API bool psyscr_poll(psyscr_screen* s, union SDL_Event* ev, int64_t* t_rt) {
     if (!ev) return false;
     if (s) s->polled = 1;
-    if (!SDL_PollEvent(ev)) return false;
+    /* doorbells SDL refused go in again once its queue is empty */
+    if (!SDL_PollEvent(ev) && (!psyscr__in_rebell() || !SDL_PollEvent(ev))) return false;
     if (t_rt) *t_rt = psyscr_restamp(s, ev->common.timestamp);
+    if (s && s->sdl_gamepad) {
+        if (ev->type == SDL_EVENT_GAMEPAD_ADDED) psyscr__pad_open(s, ev->gdevice.which);
+        else if (ev->type == SDL_EVENT_GAMEPAD_REMOVED) psyscr__pad_close(s, ev->gdevice.which, false);
+    }
+    if (s && s->window) psyscr__device_event(s, ev);
     return true;
 }
 #else
@@ -6514,9 +7515,125 @@ PSYSCR_API bool psyscr_poll(psyscr_screen* s, union SDL_Event* ev, int64_t* t_rt
     /* the key feed and the icon serve SDL's event watch and its window;
      * without SDL only tests/adapt/psy_screen_test.c calls them */
     (void)&psyscr__abort_key; (void)&psyscr__icon_decode; (void)&psyscr__abort_edge;
+    (void)&psyscr__device_log; (void)&psyscr__in_rebell;
     (void)s; (void)ev; (void)t_rt; return false;
 }
 #endif
+
+/* One PSYSCR_EV_TEXT_INPUT record per change of on or off, not per caret
+ * move: the log needs the intervals. external: the change was observed
+ * (another library started or stopped text input), not made here. */
+static void psyscr__text_input_set(psyscr_screen* s, int on, int external, int x, int y, int w, int h) {
+    psyrt_event ev;
+    if (s->text_input == on) return;
+    s->text_input = on;
+    if (!s->ring) return;
+    memset(&ev, 0, sizeof ev);
+    ev.source = (uint16_t)PSYRT_SRC_SCREEN;
+    ev.kind = (uint16_t)PSYSCR_EV_TEXT_INPUT;
+    ev.t_ns = (uint64_t)psyscr__now();
+    ev.aux = s->display_index;
+    ev.u.u32[0] = (uint32_t)on;
+    ev.u.i32[1] = x; ev.u.i32[2] = y; ev.u.i32[3] = w; ev.u.i32[4] = h;
+    ev.u.u32[5] = (uint32_t)external;
+    psyrt_ring_push(s->ring, &ev);
+}
+
+/* Deprecated (v0.4.0): raw mice come through the bridge. This reads the
+ * raw mouse records straight from the store, oldest first, one event of a
+ * report at a time, so their doorbells then decode as taken. */
+PSYSCR_API bool psyscr_poll_mouse(psyscr_screen* s, psyscr_mouse_event* out) {
+    static const uint8_t button[6] = { 0, PSYSCR_MOUSE_LEFT, PSYSCR_MOUSE_MIDDLE, PSYSCR_MOUSE_RIGHT,
+                                       PSYSCR_MOUSE_X1, PSYSCR_MOUSE_X2 };
+    uint32_t raw, i;
+    if (!out) return false;
+    raw = (uint32_t)psyscr__a_load(&psyscr__in.next);
+    i = psyscr__in.mouse_next;
+    if (raw - i > PSYSCR_INPUT_STORE) i = raw - PSYSCR_INPUT_STORE;
+    for (; i != raw; i++) {
+        psyscr__in_slot* sl = &psyscr__in.slot[i & PSYSCR__IN_MASK];
+        int32_t seq = (int32_t)(i & PSYSCR__IN_SEQ), origin = 0;
+        psyin_event e;
+        if (sl->origin != 1 || psyscr__a_load(&sl->state) != 1 || psyscr__a_load(&sl->seq) != seq) continue;
+        if (psyscr__in_take(seq, &e, &origin) != 1 || origin != 1) continue;
+        psyscr__in.mouse_next = i + 1;
+        memset(out, 0, sizeof *out);
+        out->t = e.t;
+        out->device = e.device;
+        if (e.type == PSYIN_PRESS && e.control <= 5) out->down = button[e.control];
+        else if (e.type == PSYIN_RELEASE && e.control <= 5) out->up = button[e.control];
+        else if (e.control == PSYIN_AXIS_DELTA) { out->dx = (int32_t)e.x; out->dy = (int32_t)e.y; }
+        else if (e.control == PSYIN_AXIS_ABSOLUTE) {
+            out->dx = (int32_t)(e.x * 65535.0f + 0.5f);
+            out->dy = (int32_t)(e.y * 65535.0f + 0.5f);
+            out->flags |= PSYSCR_MOUSE_ABSOLUTE;
+        } else if (e.control == PSYIN_AXIS_WHEEL) {
+            out->wheel = (int16_t)(e.value * 120.0f);
+            out->hwheel = (int16_t)(e.x * 120.0f);
+        }
+        if (psyscr__unlisted(s, out->device, out->t)) out->flags |= PSYSCR_MOUSE_UNLISTED;
+        return true;
+    }
+    psyscr__in.mouse_next = raw;
+    return false;
+}
+
+PSYSCR_API int psyscr_push_input(const psyin_event* e) {
+    if (!e) return PSYSCR_ERR_ARG;
+    if (!psyscr__in.type) return PSYSCR_ERR_CLOSED;
+    return psyscr__in_push(e, 0);
+}
+
+PSYSCR_API uint32_t psyscr_input_event_type(void) { return psyscr__in.type; }
+
+PSYSCR_API void psyscr_get_input_stats(psyscr_input_stats* out) {
+    if (!out) return;
+    out->stored = (uint32_t)psyscr__a_load(&psyscr__in.next);
+    out->overwritten = (uint32_t)psyscr__a_load(&psyscr__in.overwritten);
+    out->refused = (uint32_t)psyscr__a_load(&psyscr__in.refused);
+    out->pending = (uint32_t)psyscr__a_load(&psyscr__in.pending);
+    out->lost = (uint32_t)psyscr__a_load(&psyscr__in.lost);
+}
+
+PSYSCR_API bool psyscr_event_input(psyscr_screen* s, const union SDL_Event* ev, psyin_event* out) {
+    if (!ev || !out) return false;
+#if !defined(PSYSCR_NO_SDL)
+    if (psyscr__in.type && ev->type == psyscr__in.type) return psyscr__in_decode(s, ev->user.code, out) != 0;
+    {
+        psyin_sdl_ctx ctx;
+        ctx.raw_keyboard = s ? psyscr__raw_keyboard(s) : true;
+        ctx.keep_synthetic = false;
+        return psyin_from_sdl(ev, psyscr_restamp(s, ev->common.timestamp), &ctx, out) != 0;
+    }
+#else
+    (void)s;
+    (void)&psyscr__in_decode;
+    return false;
+#endif
+}
+
+PSYSCR_API int psyscr_text_input(psyscr_screen* s, bool on, int x, int y, int w, int h) {
+    if (!s) return PSYSCR_ERR_ARG;
+    if (!s->open) return PSYSCR_ERR_CLOSED;
+    if (w < 0 || h < 0) return PSYSCR_ERR_ARG;
+#if !defined(PSYSCR_NO_SDL)
+    if (s->window) {
+        if (on) {
+            SDL_Rect r;
+            r.x = x; r.y = y; r.w = w; r.h = h;
+            if (!SDL_SetTextInputArea(s->window, &r, 0) || (!SDL_TextInputActive(s->window) && !SDL_StartTextInput(s->window))) {
+                psyscr__set_error(s->error, sizeof s->error, "psy_screen: text input: %s", SDL_GetError());
+                return PSYSCR_ERR_LOST;
+            }
+        } else if (SDL_TextInputActive(s->window) && !SDL_StopTextInput(s->window)) {
+            psyscr__set_error(s->error, sizeof s->error, "psy_screen: text input: %s", SDL_GetError());
+            return PSYSCR_ERR_LOST;
+        }
+    }
+#endif
+    psyscr__text_input_set(s, on ? 1 : 0, 0, x, y, w, h);
+    return PSYSCR_OK;
+}
 
 PSYSCR_API const psyscr_param* psyscr_params(int* n) {
     static const psyscr_param table[] = {
@@ -6544,6 +7661,8 @@ PSYSCR_API const psyscr_param* psyscr_params(int* n) {
         { "panic_grace_ms",  "i32",  0, 600000, 10000, "ms",      "no panic this long after the frame loop reported an abort" },
         { "icon_sdl",        "bool", 0, 1, 0, "",                 "keep SDL's window icon instead of the header's" },
         { "d3d11_video",     "bool", 0, 1, 0, "",                 "D3D11 device with video support and multithread protection" },
+        { "gamepads",        "bool", 0, 1, 0, "",                 "start SDL's gamepad subsystem and open every gamepad" },
+        { "raw_mice",        "bool", 0, 1, 0, "",                 "read each mouse's Raw Input on a thread: per device, raw-timed (Windows)" },
         { "onset_offset_ns", "i64", -1e9, 1e9, 0, "ns",           "added to every onset; from the photodiode test" },
         { "min_tier",        "i32",  0, 3, 0, "",                 "flag flips whose tier is worse; 0 = off" },
         { "sim_period_ns",   "i64",  0, 1e10, 16666667, "ns",     "frame period of the simulated display" }

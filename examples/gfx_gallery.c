@@ -28,7 +28,7 @@
  * repeats do not turn pages for the same reason.
  *
  * Usage: gfx_gallery [--sim] [--page N] [--frames N] [--composition]
- *                    [--topmost] [--shots PREFIX] [--cache DIR]
+ *                    [--topmost] [--shots PREFIX] [--cache DIR] [--no-cache]
  *   Right, Down, Space, Page Down: next page; Left, Up, Page Up: previous;
  *   1 to 7: that page; Shift+Esc or closing the window: quit.
  *   --sim          the simulated display and the null backend, for CI:
@@ -40,7 +40,9 @@
  *   --shots PREFIX show each page for 120 frames, read the output back, write
  *                  PREFIX-pN.ppm, then quit
  *   --cache DIR    keep compiled programs in DIR (psygfx_file_cache_init:
- *                  it writes files there); the next open loads them
+ *                  it writes files there); the default is the per-user
+ *                  folder of psygfx_default_cache_dir(), when there is one
+ *   --no-cache     compile every program; read and write no cache file
  * Exit code: 0; 1 when the screen or the gfx did not open or a draw was
  * refused; 2 for a bad argument.
  * On Windows set PSYSCR_ANGLE_DIR to ANGLE's directory.
@@ -1711,7 +1713,7 @@ static int cache_text_setup(float x, float y, int cache_on) {
     int n;
     psygfx_program_stats(&gfx, &ps);
     snprintf(t, sizeof t, "%s\nFROM THE CACHE: %u\nCOMPILED:       %u\nREJECTED:       %u\nOPEN:      %5.0f MS",
-             cache_on ? "--CACHE DIR GIVEN" : "NO --CACHE: OFF", ps.loaded, ps.compiled, ps.rejected, (double)ps.open_ns * 1e-6);
+             cache_on ? "PROGRAM CACHE ON" : "PROGRAM CACHE OFF", ps.loaded, ps.compiled, ps.rejected, (double)ps.open_ns * 1e-6);
     n = layout(g, 160, t, 0, 0, 2.0f);   /* the labels' size */
     b = psygfx_buffer(&gfx, sizeof g);
     if (!b.id || psygfx_buffer_update(&gfx, b, 0, g, sizeof g) < 0) return -1;
@@ -2218,11 +2220,13 @@ int main(int argc, char** argv) {
     psyscr_frame f;
     const char* shots = NULL;
     static psygfx_file_cache pcache;
+    static char cache_dir[512];
     const psygfx_cache* cache = NULL;
+    int no_cache = 0;
     uint8_t* shot_px = NULL;
     int64_t frames = -1, on_page = 0;
     int i, p, cur = 0, next, topmost = 0, sim = 0, started = 0, quit = 0, pages_done = 0;
-    char line[400];
+    char line[640];
 
     memset(&sd, 0, sizeof sd);
     sd.windowed = true; sd.window_w = WIN_W; sd.window_h = WIN_H;
@@ -2234,13 +2238,19 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = atoll(argv[++i]); if (frames < 1) cur = -1; }
         else if (!strcmp(argv[i], "--shots") && i + 1 < argc) shots = argv[++i];
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc) { cache = psygfx_file_cache_init(&pcache, argv[++i]); if (!cache) cur = -1; }
+        else if (!strcmp(argv[i], "--no-cache")) no_cache = 1;
         else cur = -1;
         if (cur < 0 || cur >= N_PAGES) {
             fprintf(stderr, "usage: gfx_gallery [--sim] [--page 1..%d] [--frames N] [--composition] [--topmost] "
-                            "[--shots PREFIX] [--cache DIR]\n", N_PAGES);
+                            "[--shots PREFIX] [--cache DIR] [--no-cache]\n", N_PAGES);
             return 2;
         }
     }
+    /* The per-user folder unless told otherwise, so that a second run loads
+     * the programs instead of compiling them (PROGRAM CACHE). */
+    if (no_cache) cache = NULL;
+    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
+        cache = psygfx_file_cache_init(&pcache, cache_dir);
     if (cal_setup() < 0) { fprintf(stderr, "gfx_gallery: the nominal calibration failed\n"); return 1; }
     if (!psyscr_open(&scr, &sd)) { fprintf(stderr, "gfx_gallery: %s\n", psyscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);

@@ -700,7 +700,7 @@ section can cite the manifest and a reviewer can rebuild the pack.
 | Texture | Uncompressed 8-bit, 16-bit or float planes, optionally QOI or a single-file deflate or LZ4 | Block compression opt-in, recorded in the manifest. |
 | Video | Constant frame rate, fixed pixel format and resolution, closed GOPs, no B-frames, plus an index of frame to byte offset and timestamp | Produced by ffmpeg, command recorded. |
 | Audio | The project rate and channel count; 16-bit, 24-bit or float samples | Resampled offline with a high-quality resampler, recorded. In memory always float, widened exactly at load (2026-10-05): one mixer path, and float holds 16- and 24-bit values exactly. |
-| Font | The font file, plus the glyph outlines built from it in the Slug form (quadratic curves and bands; cubic outlines converted within a stated tolerance), and alpha coverage at the sizes the experiment uses for value-exact text. Static text is stored as laid-out glyph runs. | No platform font engine. One pinned Skribidi does layout, bidirectional text and shaping in the designer (WebAssembly, with editing), the pack tool and the player, so text is the same everywhere. Its sources are vendored at a commit with a named local patch (a bidi run-merge fix; docs/layout_probe.md), built without FetchContent; HarfBuzz is pinned by tag separately; the pack manifest records the Skribidi commit, the patch hash and the HarfBuzz version. In the pack tool HarfBuzz is also the outline source for variable-font instances and CFF2, which psy_outline.h refuses; its curve sets equal psy_outline.h's on static fonts. Compared and not taken (2026-10-07, docs/layout_probe.md): kb_text_shape (no paragraph layout or editing, unsafe on untrusted fonts), HarfBuzz's hb-gpu renderer (1 to 3 times the rays' edge error unturned, 24 to 51 times turned at 200 px), and Rust layout engines (no Rust dependency). Scalable text is drawn from the outlines by the Slug algorithm (Lengyel, JCGT 2017; patent dedicated to the public domain 2026-03-17; reference shaders need attribution). A whole font fits in the pack (about 65 MB for a CJK font, against 212 to 762 MB as MSDF atlases), and a glyph missing from it is built from the font's outline in 20 to 120 us, resolved (psy_outline.h, docs/psy_outline.md; the probe's 17 to 66 us did not remove overlaps), so the player rasterizes nothing at run time. Value-exact alpha coverage comes from an exact-area rasterizer in the pack tool, not Skribidi's (max error 0.24 to 0.32 of full scale), and is drawn on the pixel grid only. Effects: outlines and faux bold by stroke expansion of the curves, filled the same way; hard shadows by an offset copy; soft shadows, glow and blurred text by a Gaussian blur pass on a render target (numbers in docs/text_probe.md). Headers only draw glyph runs. Changed 2026-10-06: MSDF atlases dropped from the pack, after a probe on the Iris Xe (docs/text_probe.md; MSDF failed on dense CJK and overlapping contours, and a distance soft edge is a true blur only on straight edges). Changed 2026-10-05: "glyph atlas plus metrics; no font engine at runtime". |
+| Font | The font file, plus the glyph outlines built from it in the Slug form (quadratic curves and bands; cubic outlines converted within a stated tolerance), and alpha coverage at the sizes the experiment uses for value-exact text. Static text is stored as laid-out glyph runs. | No platform font engine. One pinned Skribidi does layout, bidirectional text and shaping in the designer (WebAssembly, with editing), the pack tool and the player, so text is the same everywhere. Its sources are vendored at a commit with named local patches (a bidi run-merge fix, docs/layout_probe.md; rule L1 per line, docs/psy_layout.md), built without FetchContent; HarfBuzz is pinned by tag separately; the pack manifest records the Skribidi commit, the patch hashes and the HarfBuzz version. In the pack tool HarfBuzz is also the outline source for variable-font instances and CFF2, which psy_outline.h refuses; its curve sets equal psy_outline.h's on static fonts. Compared and not taken (2026-10-07, docs/layout_probe.md): kb_text_shape (no paragraph layout or editing, unsafe on untrusted fonts), HarfBuzz's hb-gpu renderer (1 to 3 times the rays' edge error unturned, 24 to 51 times turned at 200 px), and Rust layout engines (no Rust dependency). Scalable text is drawn from the outlines by the Slug algorithm (Lengyel, JCGT 2017; patent dedicated to the public domain 2026-03-17; reference shaders need attribution). A whole font fits in the pack (about 65 MB for a CJK font, against 212 to 762 MB as MSDF atlases), and a glyph missing from it is built from the font's outline in 20 to 120 us, resolved (psy_outline.h, docs/psy_outline.md; the probe's 17 to 66 us did not remove overlaps), so the player rasterizes nothing at run time. Value-exact alpha coverage comes from an exact-area rasterizer in the pack tool, not Skribidi's (max error 0.24 to 0.32 of full scale), and is drawn on the pixel grid only. Effects: outlines and faux bold by stroke expansion of the curves, filled the same way; hard shadows by an offset copy; soft shadows, glow and blurred text by a Gaussian blur pass on a render target (numbers in docs/text_probe.md). Headers only draw glyph runs. Changed 2026-10-06: MSDF atlases dropped from the pack, after a probe on the Iris Xe (docs/text_probe.md; MSDF failed on dense CJK and overlapping contours, and a distance soft edge is a true blur only on straight edges). Changed 2026-10-05: "glyph atlas plus metrics; no font engine at runtime". |
 | Artwork | Filled paths in the Slug form, one solid color per layer, with the fill rule; strokes expanded to fills in the tool | The tool reads a subset of SVG: paths, basic shapes, transforms, solid fills and strokes. Filters, text, CSS, masks and gradients are refused by name, not ignored. Decided 2026-10-06, replacing MSDF artwork; the subset grows only when an experiment needs it. |
 | Shader | The user's fragment body wrapped in the contract (`psygfx_shader_wrap()`, the same function in the tool and the runtime), as GLSL ES 3.00 text, with reflection | glslang validates it in the tool. GL ES 3.0 has no portable binary, so ANGLE compiles the text on the rig when the pack loads; `psy_gfx.h` caches each program's binary per ANGLE build, adapter and driver (`desc.cache`, v0.4.0), checked by its own hash before the driver sees it. SPIRV-Cross is for a second backend only. Changed 2026-10-05: "D3D bytecode is finished by the runner" (docs/psy_gfx.md). |
 | Table | Typed binary columns from condition files and from ELAN, Praat or BIDS events exports | Read directly by `psy_trials.h` and `psy_timeline.h`. The form is `psy_table.h`'s PSTB block (v0.1.0, 2026-10-07; docs/psy_table.md): position independent, hashed, int32, double or string columns with levels; the CSV parser in the header builds the same bytes the pack tool stores. |
@@ -1163,7 +1163,7 @@ the one development machine, and Windows 10 became best effort
 |---|---|
 | 1. `psy_rt.h`: event ring, clock correlation | Done, v0.5.0, with the instrumentation macros. |
 | 2. `psy_timeline.h` | v0.4.0: events, tracks, tweens, `psytl_skip`, `psytl_lead`, `psytl_peek`, exact rational base rates (`psytl_rate`), `psytl_window`, `psytl_rt_time`, the `psytl_seq` builder with op tables, `psytl_run`, `psytl_check_ops` and the key arena (4.5.1). |
-| 3. `psy_screen.h` | v0.3.1 on Windows: DXGI_FLIP and COMPOSITION, flip hooks (codes, triggers, after-flip callbacks), the OS gamma ramp, the Shift+Esc abort and the triple-press panic, the window icon, D3D11 video support on the device. X11, Wayland, macOS and web are stubs. No photodiode run. |
+| 3. `psy_screen.h` | v0.3.2 on Windows: DXGI_FLIP and COMPOSITION, flip hooks (codes, triggers, after-flip callbacks), the OS gamma ramp, the Shift+Esc abort and the triple-press panic, the window icon, text input for a text box with a ring record and a flip flag while keys are off the raw path, D3D11 video support on the device. X11, Wayland, macOS and web are stubs. No photodiode run. |
 | 4. `psy_audio.h` | v0.2.0 on WASAPI shared mode: onsets from a fit of device positions, tier 2. Streams (ring-fed voices, the soundtrack path) and WAV streaming. The other backends compile and have never run. No line-in run. |
 | 5. `psy_gfx.h` | v0.10.0: stimuli, the signed-distance vector program and kind-specialized programs, strokes, sprites, groups, render targets and setup passes, curve runs from Slug-form curve sets (exact area on resolved unturned glyphs, rays elsewhere and chosen automatically for turned runs), the blur pass, NOISE (uniform, Gaussian, integer simplex fBm, each with a bit-exact CPU twin; v0.9 replaced the nested noise hash, which repeated rows), the output stage; a program binary cache, NV12 and I420 video in linear light, texture import (GL, D3D11 through ANGLE), instanced stimuli, and draws reordered where they do not overlap. It requires `psy_color.h` (v0.1.0). Text layout (Skribidi) belongs to the pack tool and the player (5.2), not to the header. Missed bars: full text pages (docs/psy_gfx.md; a page drawn once into a target costs 0.5 ms a frame), the text program's cold compile, and some of v0.3's GPU bars. |
 | 6. `psy_video.h` | v0.2.0: scheduler, frame sequence, pl_mpeg, decode-ahead; Media Foundation (DXVA by default), planar upload to the gfx shader by default, the shared D3D11 GPU path as an option, the soundtrack on `psy_audio.h` streams, base rates. Not built: AVFoundation, capture. |
@@ -1203,7 +1203,19 @@ the one development machine, and Windows 10 became best effort
    gets its tier from a photodiode or line-in run on that platform, not
    from CI.
 6. The pack tool as a library, and its CLI, with Skribidi, the outline
-   builder (item 3) and the SVG subset reader (5.2, Artwork).
+   builder (item 3) and the SVG subset reader (5.2, Artwork). State on
+   2026-10-07: the first piece of its text half is built
+   (docs/psy_layout.md). Skribidi `dee63d6` with two local bidi patches (run merge; rule L1 per line, 2026-10-08), HarfBuzz
+   14.6.0, SheenBidi, libunibreak 6.1 and budouxc are vendored in
+   `third_party/` (7.7 MB, verified byte for byte by
+   `tools/vendor_layout.py`); `pack/psy_layout` v0.1.0 lays text out into
+   curve-run items over on-demand curve sets and stamps each block with
+   the versions and font hashes; it gives Chromium's glyph ids on all 15
+   corpus lines (`tests/layout/`), on MSVC, MinGW and emcc.
+   `examples/gfx_layout.c` shows paragraphs in seven scripts, the bidi bug
+   strings, BudouX breaking and Skribidi's editor (on `psy_screen.h`
+   v0.3.2's `psyscr_text_input()`). Not started: the pack format, the
+   CLI, serialized glyph runs.
 7. The player, native and WebAssembly, and the runner protocol.
 8. The designer.
 9. Build jobs, `psy_net.h`.
@@ -1275,6 +1287,13 @@ extension implements one of these kinds, each a versioned C vtable:
   driver: not run.
 - Whether an untimed screen on a second display disturbs a timed
   display in independent flip on the same GPU (4.2, Untimed screens).
+  One-display result (docs/imgui_probe.md, 2026-10-07): an ImGui console
+  window on its own device and swapchain, presented with DO_NOT_WAIT,
+  left the timed window's flip records unchanged in windowed
+  COMPOSITION; but a busy console under a fullscreen timed window gave
+  25 presentation-path changes and 107 composed frames in 2 minutes
+  (none late). The two-display run must count path changes and
+  composed frames, not only drops.
 - Whether SDL3 opens a window and a GL context on an X screen other
   than the default (`:0.1`).
 - Whether the composition swapchain's present-at-time removes the need
@@ -1315,7 +1334,7 @@ Sources, read on 2026-10-07:
 | Need | psy today | Limit |
 |---|---|---|
 | Show a stimulus at a time, hide it after a duration | `psy_timeline.h` onset and offset events (`psytl_seq`, op tables), bound to `psy_gfx.h` stimuli (`psygfx_bind`); each event has a landing record (frame, residual) | None for shapes, gratings, gabors, dots, noise, images, video |
-| Key response | `psyscr_poll()`: SDL events restamped on the `psy_rt.h` clock; raw keyboard path on Windows | No response helper: the caller filters keys, removes SDL 3.4's double report, and computes RT. Keyboards are ms-grade at best |
+| Key response | `psyscr_poll()`: SDL events restamped on the `psy_rt.h` clock; raw keyboard path on Windows. `psy_response.h` v0.1.0 (2026-10-07): choices, a window bound to the flip onset, minimum RT, release, held keys, double-report removal, RT with the onset's tier (`examples/trial_keyboard.c`) | Keyboards are ms-grade at best |
 | RT-grade response | `psy_serial.h` response boxes | None |
 | Mouse click on a stimulus | SDL mouse events through `psyscr_poll()`; `psygfx_hit()`, `psygfx_hit_index()` (instances, curve runs, artwork layers) | No drag helper, no pointer trace recorder |
 | Sound at a time | `psyau_play_at()`, tones, noise, clicks, WAV load and stream; onset record (fit time, tier 2 at best) | No microphone capture |
@@ -1350,22 +1369,22 @@ Widget 11, Helper 4 (`sketchpad` counted here), Device 8, Out 8.
 
 | Plugin | What it does | psy parts | Missing | Class | C ex. |
 |---|---|---|---|---|---|
-| `html-keyboard-response` | Shows HTML, records a key | gfx shapes, curve runs; timeline on and off; `psyscr_poll()` | Layout for general HTML text; response helper | Text (Now for shapes and one-line Latin labels) | Yes, the base trial: fixation, stimulus, response window, RT from the flip onset |
-| `image-keyboard-response` | Shows an image, records a key | `psygfx_image()`; timeline | Image file decode for C users; response helper | Now | Yes, with QOI or procedural images |
-| `canvas-keyboard-response` | Draws through a user function, records a key | Any `psy_gfx.h` drawing, user shader contract | Response helper | Now | Covered by the base trial |
-| `audio-keyboard-response` | Plays a sound, records a key; `trial_ends_after_audio`, `response_allowed_while_playing` | `psyau_play_at()`, onset record, buffer length | Response helper; RT relative to an audio onset (fit time, tier 2) | Now | Yes: RT from a sound onset with its tier |
-| `video-keyboard-response` | Plays a video, records a key; `start`, `stop`, `rate`, `trial_ends_after_video` | `psy_video.h` play, seek, end; rate on the movie base (`psytl_rate`) | Response helper | Now | Yes: extend `video_play.c` |
+| `html-keyboard-response` | Shows HTML, records a key | gfx shapes, curve runs; timeline on and off; `psyscr_poll()` | Layout for general HTML text | Text (Now for shapes and one-line Latin labels) | Done: `examples/trial_keyboard.c` (fixation, stimulus, response window, RT from the flip onset) |
+| `image-keyboard-response` | Shows an image, records a key | `psygfx_image()`; timeline | Image file decode for C users | Now | Yes, with QOI or procedural images |
+| `canvas-keyboard-response` | Draws through a user function, records a key | Any `psy_gfx.h` drawing, user shader contract | None (`psy_response.h` v0.1.0) | Now | Covered by the base trial |
+| `audio-keyboard-response` | Plays a sound, records a key; `trial_ends_after_audio`, `response_allowed_while_playing` | `psyau_play_at()`, onset record, buffer length | None: `psy_response.h` v0.1.0 measures RT from the audio onset fit (`psyrsp_onset_audio()`, tier 2) | Now | Yes: RT from a sound onset with its tier |
+| `video-keyboard-response` | Plays a video, records a key; `start`, `stop`, `rate`, `trial_ends_after_video` | `psy_video.h` play, seek, end; rate on the movie base (`psytl_rate`) | None (`psy_response.h` v0.1.0) | Now | Yes: extend `video_play.c` |
 | `animation` | Image sequence at `frame_time`, `frame_isi`, `sequence_reps`; keys during it | Images as timeline onsets; one landing record per frame | Image decode for C users; prompt text | Now | Yes: shows per-frame landing records that jsPsych cannot give |
 | `categorize-image` | Image, key, feedback text by `key_answer` | Images, timeline | Feedback text (`correct_text`, `incorrect_text`) | Text (Now with symbol feedback) | After text |
 | `categorize-html` | HTML, key, feedback text | Shapes | Layout | Text | No |
 | `categorize-animation` | Animation, key, feedback text | Images, timeline | Feedback text | Text | No |
-| `same-different-image` | Two images in sequence: `first_stim_duration`, `gap_duration`, `second_stim_duration`; same or different key | Timeline sequence, images | Response helper | Now | Yes: SOA on the frame grid with records |
+| `same-different-image` | Two images in sequence: `first_stim_duration`, `gap_duration`, `second_stim_duration`; same or different key | Timeline sequence, images | None (`psy_response.h` v0.1.0) | Now | Yes: SOA on the frame grid with records |
 | `same-different-html` | The same with HTML | Shapes | Layout | Text | No |
 | `iat-image` | IAT: image, category labels left and right, error feedback | Images; one-line labels by advances | Layout for labels in general; `html_when_wrong` | Text | No |
 | `iat-html` | IAT with an HTML stimulus | As above | Layout | Text | No |
-| `serial-reaction-time` | Grid of squares, a target lights, key per position; `pre_target_duration`, `fade_duration` | `psygfx_instances()`, `psygfx_inst_grid()`, tween on opacity | Response helper | Now | Yes |
+| `serial-reaction-time` | Grid of squares, a target lights, key per position; `pre_target_duration`, `fade_duration` | `psygfx_instances()`, `psygfx_inst_grid()`, tween on opacity | None (`psy_response.h` v0.1.0) | Now | Yes |
 | `serial-reaction-time-mouse` | The same, click the target | `psygfx_hit_index()` on the grid; mouse events | Mouse times are ms-grade (state it) | Now | Yes, with the SRT above |
-| `visual-search-circle` | Target and foils on a circle; present or absent key | Shapes or images at computed places; instances | Response helper | Now | Yes |
+| `visual-search-circle` | Target and foils on a circle; present or absent key | Shapes or images at computed places; instances | None (`psy_response.h` v0.1.0) | Now | Yes |
 | `reconstruction` | Method of adjustment: keys change a parameter of `stim_function` | Any gfx parameter driven by a key; `psy_timeline.h` tween of length 0 | Finish key instead of `button_label` | Now | Yes: method of adjustment |
 
 #### Button and slider trials
@@ -1444,16 +1463,16 @@ tangram and copying games.
 | Plugin | What it does | psy parts | Missing | Class | C ex. |
 |---|---|---|---|---|---|
 | `plugin-rdk` (contrib) | Random dot kinematogram, key report | `psy_rdk.h`: `count`, `coherence`, `direction`, `lifetime`, `sets`, aperture CIRCLE and RECT, edge WRAP and REPLOT; transparent motion as two fields | `number_of_apertures` is several fields; `opposite_coherence` has no direct field. Units differ: contrib `move_distance` is px per frame, psy `speed` is units per second (contrib angle and `dot_life` units not verified) | Now | Yes: `gfx_rdk.c` plus a response window |
-| `plugin-rok` (contrib) | Random object kinematogram: oriented objects | `psy_rdk.h` into instance records (gabor arrays) | Response helper | Now | No (RDK covers it) |
-| `plugin-flanker` (contrib) | Flanker array with SOA | Arrows as polygons or paths; letters as one-line labels; timeline | Response helper | Now | Yes |
-| `plugin-stop-signal` (contrib) | Stop-signal task: an animation, button responses (its description; the paradigm details not verified) | Timeline; `psy_stair.h` for the stop-signal delay; `psyau_play_at()` for an auditory signal | Response helper (psy uses keys or a response box, not buttons) | Now | Yes: staircase, sound and display on one clock |
-| `plugin-libet-intentional-binding` (contrib) | Libet clock; participant sets the hand to report a time | Repeating rotation track, line shape, tone at a delay, key or mouse adjust | Response helper | Now | Yes: timing-critical |
+| `plugin-rok` (contrib) | Random object kinematogram: oriented objects | `psy_rdk.h` into instance records (gabor arrays) | None (`psy_response.h`) | Now | No (RDK covers it) |
+| `plugin-flanker` (contrib) | Flanker array with SOA | Arrows as polygons or paths; letters as one-line labels; timeline | None (`psy_response.h`) | Now | Yes |
+| `plugin-stop-signal` (contrib) | Stop-signal task: an animation, button responses (its description; the paradigm details not verified) | Timeline; `psy_stair.h` for the stop-signal delay; `psyau_play_at()` for an auditory signal | Covered by `psy_response.h` (psy uses keys or a response box, not buttons) | Now | Yes: staircase, sound and display on one clock |
+| `plugin-libet-intentional-binding` (contrib) | Libet clock; participant sets the hand to report a time | Repeating rotation track, line shape, tone at a delay, key or mouse adjust | None (`psy_response.h`) | Now | Yes: timing-critical |
 | `plugin-corsi-blocks` (contrib) | Blocks flash in order; participant clicks the order | Timeline sequence, `psygfx_hit_index()` | Click log helper | Now | Yes |
-| `plugin-spatial-nback` (contrib) | Grid cell lights; n-back responses | Instances grid, timeline | Response helper | Now | No |
+| `plugin-spatial-nback` (contrib) | Grid cell lights; n-back responses | Instances grid, timeline | None (`psy_response.h`) | Now | No |
 | `plugin-visual-search-click-target` (contrib) | Search display, click the target | Instances, hit tests | None | Now | No |
 | `plugin-image-array-keyboard-response` (contrib) | Many images, key response | Images | Image decode for C | Now | No |
 | `plugin-image-click-response`, `plugin-image-hotspots` (contrib) | Click points or regions on an image | Image, hit tests, mouse events | Region list helper | Now | No |
-| `plugin-video-several-keyboard-responses` (contrib) | Several keys during a video, with times | `psy_video.h`, `psyvid_movie_time()` | Response helper with `persist` | Now | No |
+| `plugin-video-several-keyboard-responses` (contrib) | Several keys during a video, with times | `psy_video.h`, `psyvid_movie_time()` | None (`psy_response.h` keep_open) | Now | No |
 | `plugin-video-hotspots` (contrib) | Video freezes, click regions | `psy_video.h` pause, hit tests | None | Now | No |
 | `plugin-vsl-animate-occlusion`, `plugin-vsl-grid-scene` (contrib) | Statistical learning: shapes behind an occluder; image grids | Tweens, images, instances | None | Now | No |
 | `plugin-pursuit-rotor` (contrib) | Track a moving target with the pointer | Sampled track or tween for the target; mouse events | Pointer trace recorder | Helper | Yes, with the mouse-tracking example |
@@ -1468,7 +1487,7 @@ tangram and copying games.
 | `plugin-gamepad` (contrib) | Gamepad responses | SDL events through `psyscr_poll()` | `psy_screen.h` starts only `SDL_INIT_VIDEO`; gamepad events need `SDL_INIT_GAMEPAD` from the caller (not verified); gamepad timing not measured | Helper | No |
 | `*-swipe-response`, `extension-touchscreen-buttons`, `extension-device-motion` (contrib) | Touch and motion input on phones | None | Out: mobile is not planned (9.1) | Out | No |
 | `extension-chiasm`, `plugin-chiasm-*`, `extension-mediapipe-face-mesh` (contrib) | Webcam eye and face tracking | None | Input source (12) | Device | No |
-| `plugin-html-keyboard-response-raf` (contrib) | Key trial timed by `requestAnimationFrame` | The frame loop does this by design | Response helper | Now | No |
+| `plugin-html-keyboard-response-raf` (contrib) | Key trial timed by `requestAnimationFrame` | The frame loop does this by design | None (`psy_response.h`) | Now | No |
 
 Third party, not in contrib: jspsych-psychophysics (Kuroki 2021, MIT) is
 the jsPsych route that jsPsych's own timing page recommends. Its stimulus
@@ -1519,7 +1538,7 @@ flat session in `psy_trials.h` and a within-trial sequence in
 | `post_trial_gap`, `default_iti` | Blank screen after the trial | None | A wait on the session base | A node or session parameter |
 | `rt` | From the call that registers the key listener (`performance.now()`), not from a flip (pluginAPI docs) | Caller's record | Onset record of the stimulus event | RT from the stimulus's flip onset estimate (or audio onset fit), with its tier in the row |
 | `choices`, `"ALL_KEYS"`, `"NO_KEYS"` | `KeyboardEvent.key` strings, lowercased by default | None | None | Accept jsPsych key names; map to SDL keycodes; log the scancode too |
-| `minimum_valid_rt`, `wait_for_key_release`, `rt_key_duration`, `allow_held_key`, `persist` | Key listener options | None | None | Options of the response helper |
+| `minimum_valid_rt`, `wait_for_key_release`, `rt_key_duration`, `allow_held_key`, `persist` | Key listener options | `psy_response.h` v0.1.0 | None | Options of `psyrsp_desc` (`allow_held_key` and `persist` semantics: docs/psy_response.md) |
 | `name`, `abortTimelineByName`, `abortCurrentTimeline`, `abortExperiment`, `pauseExperiment` | Flow control | None | None | Node names; abort and pause over the runner protocol and `psyscr_request_abort()` |
 | `extensions: [{type, params}]` per trial | Extension hooks per trial | None | None | Input-source extensions (12) enabled per node or trial |
 | Simulation mode (`data-only`, `visual`), `simulation_options` | Runs without a participant | The SIM display; simulated observers in examples | None | A player mode: data-only runs with a simulated observer on the SIM display |
@@ -1585,14 +1604,14 @@ means a C user writes the code each time.
 | Rank | Gap | Where it goes | Blocks or burdens | Count (official + contrib) | Size |
 |---|---|---|---|---|---|
 | 1 | Experiment flow: nested nodes, timeline variables bound to a pack table, conditional and loop, named data rows | The player (11, item 7) | Blocks every paradigm for users who do not write C | All | Large; planned |
-| 2 | Response helper: key set, double-report removal, RT from the onset record, window, `response_ends_trial`, key release, minimum RT | An example first, then `input.key` in the player | Burdens every key response trial | 17 + about 10 | Small |
+| 2 | Response helper: key set, double-report removal, RT from the onset record, window, `response_ends_trial`, key release, minimum RT | Done for C: `psy_response.h` v0.1.0 and `examples/trial_keyboard.c` (2026-10-07). Left: `input.key` in the player | Burdened every key response trial | 17 + about 10 | Small |
 | 3 | Text layout (Skribidi): prompts, instructions, word stimuli, feedback text | Pack tool and player (11, items 6 and 7) | Blocks text-heavy paradigms; `prompt` appears on most plugins | 8 + 3, and every `prompt` | Large; planned |
 | 4 | Widget layer: button, slider, text entry, control layout | Player, above `psy_gfx.h` | Blocks button and slider responses | 11 + 9 | Medium |
 | 5 | Image file decode for C users | Pack tool; meanwhile QOI or an outside decoder in examples | Burdens image trials | 10 + 3 | Small (in the pack tool) |
 | 6 | Eye-tracker input source and calibration, validation | Extension (12), Input source kind | Blocks gaze tasks and fixation control. jsPsych counts understate it: lab psychophysics uses fixation control widely | 4 + 4 | Medium per tracker |
 | 7 | Capture: microphone, camera | `psy_audio.h` input; `psy_video.h` capture (4.6) | Blocks voice and video responses | 6 + 0 | Medium |
 | 8 | Pointer helpers: drag, pointer trace, click sequence | Helper in the player; examples | Blocks drag sorting and mouse tracking | 2 + 4 | Small |
-| 9 | Jitter draws for the script (the order and draw part is done: `psy_trials.h` v0.2.0, 2026-10-07, has with-replacement, subset and an explicit order list) | Player | Burdens designs with jittered foreperiods | Node-level; not counted per plugin | Small |
+| 9 | Done in the headers: order and draws (`psy_trials.h` v0.2.0) and jitter draws (v0.2.1, 2026-10-07: uniform, choice and truncated exponential durations per trial, snapped to frames on request, logged and replayed, per condition from table columns). Left: exposing them in the script | Player | Burdens designs with jittered foreperiods | Node-level; not counted per plugin | Small |
 | 10 | Size procedures: card resize, blind spot | Web player | Blocks only web deploys without a measured display | 2 + 0 | Small |
 | 11 | Freehand canvas, gamepad | Helper; caller's SDL init | Blocks sketch tasks and gamepad responses | 1 + 1 | Small |
 

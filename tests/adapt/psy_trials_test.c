@@ -250,7 +250,7 @@ static void test_version(void) {
              PSYTR_VERSION_MAJOR, PSYTR_VERSION_MINOR, PSYTR_VERSION_PATCH);
     CHECK(strcmp(PSYTR_VERSION_STRING, want) == 0);
     CHECK(strcmp(psytr_version(), PSYTR_VERSION_STRING) == 0);
-    CHECK(strcmp(psytr_version(), "0.2.0") == 0);
+    CHECK(strcmp(psytr_version(), "0.2.1") == 0);
 }
 
 /* splitmix64 from seed 0: the reference's first two outputs are
@@ -1767,7 +1767,7 @@ static void test_format(void) {
     CHECK_I(psytr_format_row(&g_t, 3, NULL, 0), n);
 
     n = psytr_format_meta(&g_t, buf, sizeof(buf));
-    CHECK_S(buf, "psy_trials=0.2.0 conditions=6 factors=3 levels=2x3x1 reps=1 "
+    CHECK_S(buf, "psy_trials=0.2.1 conditions=6 factors=3 levels=2x3x1 reps=1 "
                  "order=sequential constraints= max_swaps=100000 swaps=0 span_blocks=0 "
                  "tracks=1 interleave=random weights=1 track_rate=1 block_size=0 "
                  "practice=1 warmup=0 warmup_conditions= requeue_gap=0 record_size=8 "

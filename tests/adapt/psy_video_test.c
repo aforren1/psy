@@ -114,6 +114,10 @@ typedef struct sdec {
     /* faults */
     int64_t  stall_frame;     /* this frame is not decodable until ...         */
     int64_t  stall_until;     /* ... this virtual time                         */
+    int      use_hold;        /* ... or, with use_hold, while hold is set: the */
+    uint32_t hold;            /* frame thread clears it (an atomic store)      */
+    int      stall_all;       /* every frame from stall_frame on stalls: an    */
+                              /* outage, not one bad frame a seek can pass     */
     int64_t  bad_ts_frame;    /* this frame reports the next frame's time      */
     int64_t  bad_hash_frame;
     int64_t  end_early;       /* the stream ends here (< frames)               */
@@ -150,7 +154,9 @@ static int sd_next(void* ctx, psyvid_planes* dst, psyvid_out* out) {
     sdec* s = (sdec*)ctx;
     int64_t i = s->pos;
     if (i >= s->frames || (s->end_early > 0 && i >= s->end_early)) return PSYVID_ENDED;
-    if (i == s->stall_frame && vnow() < s->stall_until) return PSYVID_PENDING;
+    if (s->stall_frame >= 0 && (i == s->stall_frame || (s->stall_all && i > s->stall_frame)) &&
+        (s->use_hold ? psyvid__ld32(&s->hold) != 0 : vnow() < s->stall_until))
+        return PSYVID_PENDING;
     if (i == s->fail_frame) return PSYVID_ERR_DECODER;
     s->pos++;
     if (!dst) { s->discards++; return PSYVID_OK; }
@@ -1827,6 +1833,7 @@ static void test_threaded(void) {
     psyvid_desc vd;
     psyscr_frame f;
     int64_t k, t0, P = 4000000, last = -1, order_bad = 0, shown = 0;
+    int64_t shown_after_stall = 0, shown_after_seek = 0, k_end, recover = -1;
     int rc = PSYVID_OK;
     g_case = "threaded";
     g_virtual = 0;
@@ -1836,6 +1843,7 @@ static void test_threaded(void) {
      * thread: the slot it took stays with that thread (the free queue has
      * the frame thread as its only producer; ThreadSanitizer checks) */
     g_sd.stall_frame = 40;
+    g_sd.stall_all = 1;
     g_sd.stall_until = (int64_t)psyrt_now_ns() + 300000000;
     desc_default(&vd);
     vd.inline_decode = false;
@@ -1844,6 +1852,7 @@ static void test_threaded(void) {
     if (!open_mv(&vd)) { g_virtual = 1; return; }
     CHECK(psyvid_play_at(&g_mv, PSYVID_ASAP) > 0);
     t0 = (int64_t)psyrt_now_ns() + 20000000;
+    k_end = (g_sd.stall_until - t0 + P - 1) / P;   /* the first display frame after the stall */
     for (k = 0; k < 400 && rc >= 0; k++) {
         memset(&f, 0, sizeof f);
         f.onset = t0 + k * P; f.period = P; f.index = k; f.vblank = k;
@@ -1853,12 +1862,99 @@ static void test_threaded(void) {
             if (g_mv.last.frame <= last) order_bad++;
             last = g_mv.last.frame;
             shown++;
+            if (k > 100 && k <= 200) shown_after_stall++;
+            if (k > 200) shown_after_seek++;
+            if (k >= k_end && k <= 200 && recover < 0) recover = k - k_end;
         }
         if (k == 200) psyvid_seek_frame(&g_mv, 50, PSYVID_ASAP), last = -1;
     }
+    /* This test is for the threads (order, slot ownership, no deadlock, the
+     * seek recovers), not throughput: on a shared CI runner (macOS,
+     * 2026-10-08: shown <= 200 of 400) the sleeps and the decode thread are
+     * late at will, and throughput is the video bench's. Before v0.2.1 no
+     * frame was shown between the end of the stall and the seek (the decode
+     * thread slept after PENDING). The recovery is measured here and bounded
+     * loosely, 50 display frames (200 ms), for a loaded runner; the exact
+     * count is test_threaded_stall's. */
+    printf("psy_video_test: threaded: shown %lld of 400 (after the stall %lld, after the seek %lld); "
+           "the first frame %lld display frames after the stall\n",
+           (long long)shown, (long long)shown_after_stall, (long long)shown_after_seek, (long long)recover);
     CHECK(rc >= 0);
     CHECK_I(order_bad, 0);
-    CHECK(shown > 200);
+    CHECK(shown_after_seek >= 10);
+    CHECK(recover >= 0 && recover <= 50);
+    psyvid_close(&g_mv);
+    g_virtual = 1;
+#endif
+}
+
+/* Waits until the decode thread has nothing to do: every slot full, or the
+ * decoder PENDING. 0 after 2 s. */
+static int wait_settled(void) {
+    uint64_t until = psyrt_now_ns() + 2000000000u;
+    while (!psyvid__ld32(&g_mv.idle)) {
+        if (psyrt_now_ns() > until) return 0;
+        psyrt_sleep_until(psyrt_now_ns() + 100000u, 0);
+    }
+    return 1;
+}
+
+/* The decode thread for real on a virtual display: after each update the
+ * frame thread waits for the decode thread to settle, so the count of
+ * display frames is exact. A decoder that is PENDING from frame 40 on until
+ * display frame R must show the due frame on display frame R + 1 (the
+ * update of R wakes the thread, which seeks to the due frame's keyframe
+ * and decodes it), drop the frames passed over as DECODE_LATE, and then
+ * show a new frame on every display frame. */
+static void test_threaded_stall(void) {
+#if !defined(PSYRT_NO_THREADS)
+    psyvid_desc vd;
+    disp d;
+    psyscr_frame f;
+    const int64_t R = 120, K = 200;
+    int64_t k, first = -1, first_frame = -1, f30 = -1, shown_after = 0, late_drop = 0, settled_bad = 0;
+    int i;
+    g_case = "threaded stall";
+    g_virtual = 0;   /* the decode thread reads the clock (decode times): the real one, not the test's variable */
+    rec_reset();
+    sd_default(&g_sd, 250, 1, 1000, 5);
+    g_sd.stall_frame = 40;
+    g_sd.stall_all = 1;
+    g_sd.use_hold = 1;
+    g_sd.hold = 1;
+    desc_default(&vd);
+    vd.inline_decode = false;
+    vd.refresh_num = 250;
+    vd.ahead = 4;
+    if (!open_mv(&vd)) { g_virtual = 1; return; }
+    if (g_mv.inline_mode) { psyvid_close(&g_mv); g_virtual = 1; return; }   /* no decode thread on this target */
+    disp_init(&d, 250.0, 0);
+    CHECK(psyvid_play_at(&g_mv, PSYVID_ASAP) > 0);
+    for (k = 0; k < K; k++) {
+        if (k == R) psyvid__st32(&g_sd.hold, 0);
+        disp_next(&d, &f);
+        CHECK(psyvid_update(&g_mv, &f) >= 0);
+        if (g_mv.has_last && g_mv.last.display == k && g_mv.last.decision == PSYVID_SHOWN) {
+            if (k == 30) f30 = g_mv.last.frame;
+            if (k > R) {
+                shown_after++;
+                if (first < 0) { first = k; first_frame = g_mv.last.frame; }
+            }
+        }
+        if (!settled_bad && !wait_settled()) settled_bad = 1;
+        if ((k & 63) == 0) drain();
+    }
+    drain();
+    for (i = 0; i < g_ndr; i++) if (g_dr[i].why == PSYVID_WHY_DECODE_LATE) late_drop += g_dr[i].count;
+    printf("psy_video_test: threaded stall: the first frame on display frame %lld (the stall ended before %lld), "
+           "frame %lld; %lld dropped DECODE_LATE\n", (long long)first, (long long)R, (long long)first_frame, (long long)late_drop);
+    CHECK_I(settled_bad, 0);
+    CHECK_I(first, R + 1);
+    CHECK(f30 >= 0);
+    CHECK_I(first_frame, f30 + (R + 1 - 30));   /* the due frame, one a display frame */
+    CHECK_I(late_drop, first_frame - 40);       /* 40 .. first_frame - 1 */
+    CHECK_I(g_mv.info.drops_by[PSYVID_WHY_DECODE_LATE], late_drop);
+    CHECK_I(shown_after, K - (R + 1));          /* back on schedule */
     psyvid_close(&g_mv);
     g_virtual = 1;
 #endif
@@ -3089,6 +3185,7 @@ int main(void) {
     test_seq();
     test_reader();
     test_threaded();
+    test_threaded_stall();
     test_soundtrack();
     test_rates();
     test_mf();

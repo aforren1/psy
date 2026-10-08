@@ -41,8 +41,8 @@
  * working screen.
  *
  * Usage: gfx_text [--sim] [--page N] [--frames N] [--composition] [--topmost]
- *                 [--shots PREFIX] [--cache DIR] [--font PATH] [--cjk PATH]
- *                 [--whole-font]
+ *                 [--shots PREFIX] [--cache DIR] [--no-cache] [--font PATH]
+ *                 [--cjk PATH] [--whole-font]
  *   Right, Down, Space, Page Down: next page; Left, Up, Page Up: previous;
  *   1 to 6: that page; Shift+Esc or closing the window: quit. Page keys:
  *   2: D drift on or off, the pointer moves the magnifier; 3: - and = set
@@ -56,7 +56,10 @@
  *   --topmost      keep the window on top and take the foreground (Windows)
  *   --shots PREFIX show each page for 120 frames, read the output back, write
  *                  PREFIX-pN.ppm, then quit
- *   --cache DIR    keep compiled programs in DIR (psygfx_file_cache_init)
+ *   --cache DIR    keep compiled programs in DIR (psygfx_file_cache_init:
+ *                  it writes files there); the default is the per-user
+ *                  folder of psygfx_default_cache_dir(), when there is one
+ *   --no-cache     compile every program; read and write no cache file
  *   --font PATH    the Latin font (default C:/Windows/Fonts/segoeui.ttf)
  *   --cjk PATH     the CJK font, face 0 (default C:/Windows/Fonts/msyh.ttc)
  *   --whole-font   page 4's set holds every glyph of the CJK font (YaHei:
@@ -1423,11 +1426,13 @@ int main(int argc, char** argv) {
     const char* font_path = DEFAULT_FONT;
     const char* cjk_path = DEFAULT_CJK;
     static psygfx_file_cache pcache;
+    static char cache_dir[512];
     const psygfx_cache* cache = NULL;
+    int no_cache = 0;
     uint8_t* shot_px = NULL;
     int64_t frames = -1, on_page = 0;
     int i, p, cur = 0, next, topmost = 0, sim = 0, started = 0, quit = 0, pages_done = 0;
-    char line[400];
+    char line[640];
 
     memset(&sd, 0, sizeof sd);
     sd.windowed = true; sd.window_w = WIN_W; sd.window_h = WIN_H;
@@ -1439,16 +1444,22 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = atoll(argv[++i]); if (frames < 1) cur = -1; }
         else if (!strcmp(argv[i], "--shots") && i + 1 < argc) shots = argv[++i];
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc) { cache = psygfx_file_cache_init(&pcache, argv[++i]); if (!cache) cur = -1; }
+        else if (!strcmp(argv[i], "--no-cache")) no_cache = 1;
         else if (!strcmp(argv[i], "--font") && i + 1 < argc) font_path = argv[++i];
         else if (!strcmp(argv[i], "--cjk") && i + 1 < argc) cjk_path = argv[++i];
         else if (!strcmp(argv[i], "--whole-font")) cjk_whole = 1;
         else cur = -1;
         if (cur < 0 || cur >= N_PAGES) {
             fprintf(stderr, "usage: gfx_text [--sim] [--page 1..%d] [--frames N] [--composition] [--topmost] [--shots PREFIX] "
-                            "[--cache DIR] [--font PATH] [--cjk PATH] [--whole-font]\n", N_PAGES);
+                            "[--cache DIR] [--no-cache] [--font PATH] [--cjk PATH] [--whole-font]\n", N_PAGES);
             return 2;
         }
     }
+    /* The per-user folder unless told otherwise, so that a second run loads
+     * the programs instead of compiling them (PROGRAM CACHE). */
+    if (no_cache) cache = NULL;
+    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
+        cache = psygfx_file_cache_init(&pcache, cache_dir);
     if (cal_setup() < 0) { fprintf(stderr, "gfx_text: the nominal calibration failed\n"); return 1; }
     if (!psyscr_open(&scr, &sd)) { fprintf(stderr, "gfx_text: %s\n", psyscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);

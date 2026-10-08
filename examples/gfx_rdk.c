@@ -31,11 +31,15 @@
  * values here, and nothing is a measurement of light.
  *
  * Usage: gfx_rdk [--sim] [--page N] [--frames N] [--composition] [--shots PREFIX]
+ *                [--cache DIR] [--no-cache]
  *   --sim          the simulated display (240 Hz) and the null backend, for
  *                  CI: 30 frames of each page, then two trials of page 4
  *                  with their replays checked
  *   --shots PREFIX show each page for 90 frames, read the output back, write
  *                  PREFIX-pN.ppm, then quit
+ *   --cache DIR    keep compiled programs in DIR; the default is the per-user
+ *                  folder of psygfx_default_cache_dir(), when there is one
+ *   --no-cache     compile every program; read and write no cache file
  * Exit code: 0; 1 when the screen or the gfx did not open, a call failed,
  * or a replay differed; 2 for a bad argument.
  * On Windows set PSYSCR_ANGLE_DIR to ANGLE's directory.
@@ -361,6 +365,11 @@ int main(int argc, char** argv) {
     const char* shots = NULL;
     uint8_t* shot_px = NULL;
     float scr_w, scr_h;
+    static psygfx_file_cache pcache;
+    static char cache_dir[512];
+    const psygfx_cache* cache = NULL;
+    int no_cache = 0;
+    char line[640];
     memset(&sd, 0, sizeof sd);
     sd.windowed = true; sd.window_w = WIN_W; sd.window_h = WIN_H;
     sd.sim_period_ns = 4166667;   /* 240 Hz when --sim */
@@ -370,18 +379,29 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--page") && i + 1 < argc) { start = atoi(argv[++i]) - 1; if (start < 0 || start >= N_PAGES) start = -1; }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = atoll(argv[++i]); if (frames < 1) start = -1; }
         else if (!strcmp(argv[i], "--shots") && i + 1 < argc) shots = argv[++i];
+        else if (!strcmp(argv[i], "--cache") && i + 1 < argc) { cache = psygfx_file_cache_init(&pcache, argv[++i]); if (!cache) start = -1; }
+        else if (!strcmp(argv[i], "--no-cache")) no_cache = 1;
         else start = -1;
         if (start < 0) {
-            fprintf(stderr, "usage: gfx_rdk [--sim] [--page 1..%d] [--frames N] [--composition] [--shots PREFIX]\n", N_PAGES);
+            fprintf(stderr, "usage: gfx_rdk [--sim] [--page 1..%d] [--frames N] [--composition] [--shots PREFIX] "
+                            "[--cache DIR] [--no-cache]\n", N_PAGES);
             return 2;
         }
     }
+    /* The per-user folder unless told otherwise, so that a second run loads
+     * the programs instead of compiling them (PROGRAM CACHE). */
+    if (no_cache) cache = NULL;
+    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
+        cache = psygfx_file_cache_init(&pcache, cache_dir);
     if (!psyscr_open(&scr, &sd)) { fprintf(stderr, "gfx_rdk: %s\n", psyscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.18f;
     gd.width = WIN_W; gd.height = WIN_H;   /* the simulated display's size */
+    gd.cache = cache;
     if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_rdk: %s\n", psygfx_error(&gfx)); psyscr_close(&scr); return 1; }
+    psygfx_describe(&gfx, line, sizeof line);
+    printf("%s\n", line);
     if (setup() < 0) { psygfx_close(&gfx); psyscr_close(&scr); return 1; }
     psygfx_size(&gfx, &scr_w, &scr_h);
     if (shots) shot_px = (uint8_t*)malloc((size_t)scr_w * (size_t)scr_h * 4);

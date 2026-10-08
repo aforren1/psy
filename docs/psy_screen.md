@@ -166,6 +166,34 @@ so the caller's own setting wins) and stops SDL text input. The times
 above leave out the keyboard itself. Use `psy_serial.h` response boxes
 for reaction times.
 
+### Text input (v0.3.2)
+
+A text box (a typed response, the designer's editor in the player) needs
+SDL text input: `SDL_EVENT_TEXT_INPUT` for committed text and
+`SDL_EVENT_TEXT_EDITING` for an input method's composition. Open stops it,
+because SDL routes keys through the message path while it runs, and keys
+on that path carry message times (the table above). `psyscr_text_input()`
+turns it on and off for one screen and sets the IME area. The header does
+not hide the cost; it records it:
+
+- each change of on or off is a `PSYSCR_EV_TEXT_INPUT` ring record (the
+  call's time, on or off, the rectangle);
+- each flip planned while it is on has `PSYSCR_FLIP_TEXT_INPUT` in its
+  record, so an analysis can drop or mark the key times of those frames.
+
+A caret move calls it again with the new rectangle and writes no record:
+the log needs the intervals, not every keystroke. The flag is not in the
+ring's mode word, which holds 10 flag bits; the ring records give the same
+intervals. Default: off at open, as before v0.3.2.
+
+Checked: the scripted-path test (records, the flag on exactly the flips
+planned while on, no record for a moved rectangle or a repeated off, the
+argument and closed-screen errors) on MSVC and MinGW gcc 16.1, and two
+mutants (`text-00`, `text-01` in `tests/mutate/screen.toml`), both caught.
+The SDL calls ran in `examples/gfx_layout.c`'s editor page. Not measured:
+how much later keys are stamped with text input on than on the raw path
+beyond the message-loop rows above.
+
 ## Measurements
 
 `examples/screen_flipstats.c` made every table here, built with MSVC
@@ -1087,7 +1115,10 @@ gave 8 key-downs from each thread and 16 from `SDL_PollEvent`. With the
 hint off, the probe gave 8. The tree's v0.3.0 header behaves the same,
 so `examples/screen_input.c`'s raw-path table matched the first report
 of each key. The header counts a press only after a key-up of the same
-key, and treats reports within 30 ms as one press.
+key, and treats reports within 30 ms (50 ms from v0.3.3) as one press.
+v0.3.3 found the cause: the probe sent keys by virtual-key code, and only
+such keys (no scan code) come twice. See "Input for psy_response.h
+(v0.3.3)".
 
 `examples/screen_abort.c` (a child process with a 320 x 200 window that
 reads its events with `psyscr_poll()` before begin()):
@@ -1239,6 +1270,239 @@ their documented exit codes. MinGW-w64 gcc 16.2 (MSYS2): the Screen
 job's MinGW step. All pass. emcc 6.0.10 compiles it only inside
 psy_gfx.h's and psy_video.h's compile checks (`PSYSCR_NO_SDL`), which
 pass under node; its own test was not run under emcc.
+
+## Input for psy_response.h (v0.3.3)
+
+Measured on 2026-10-07, on AC, with `examples/screen_input.c --reports`:
+F24 sent with SendInput while the test's window had the keyboard focus,
+on SDL's raw keyboard path. Five runs (20, 50, 50, 199 and 199 presses
+per row, 518 taps in all).
+
+### The double key report has one cause
+
+v0.3.1 found that SDL 3.4 reports each key twice with the raw path on.
+That probe injected keys by virtual-key code only (`wVk`, scan code 0).
+SDL 3.4.0's source (`SDL_windowsevents.c`) sends a key from `WM_KEYDOWN`
+only when the raw keyboard is off, text input is on, or the message has
+no scan code. So the second report belongs to keys without a scan code.
+
+| Injection | Hold | Key-downs per press | Second report after the first |
+|---|---|---|---|
+| Virtual key (`wVk`, scan code 0) | tap (down and up back to back) | 2, each with its key-up | -0.1 to 34.2 ms; 517 of 518 within 17.1 ms |
+| Virtual key | 100 ms | 1, then 1 marked as a repeat | |
+| Scan code (`KEYEVENTF_SCANCODE`) | tap | 1 | |
+| Scan code | 100 ms | 1 | |
+
+For the 100 ms hold, SDL's own key state marks the second down as a
+repeat and drops the second up, because both paths report as hardware
+keys. Only a press shorter than the gap gives two full presses.
+
+Keys from a keyboard carry scan codes, so they most likely report once.
+That was not measured: no key was pressed by hand here.
+`screen_input --hand [s]` logs keys pressed by hand for s seconds (30 by
+default): the reports of each press and their path (`which` is the
+keyboard's device id on the raw path and 0 on the message path). It
+prints `RESULT: one report per press` or `RESULT: some keys reported
+twice`.
+
+The abort merge was 30 ms, shorter than the longest measured gap (34.2
+ms, 1 of 518). Remote-desktop and assistive tools inject by virtual key,
+so two deliberate presses of Shift+Esc through such a tool could count as
+four and meet the panic rule (3 presses), which ends the program. v0.3.3
+merges reports of one abort press within 50 ms, as `psy_response.h` does.
+Two presses by hand cannot fall within 50 ms, so no press is lost. The
+core test sends two presses reported twice, 34.2 ms apart, to an armed
+watchdog: no panic (mutant `input-02`, with 30 ms, is caught).
+
+### caps.raw_keyboard
+
+`psyscr_get_caps()` reads it at each call: true on Windows with a window,
+`SDL_HINT_WINDOWS_RAW_KEYBOARD` on and text input off. `psy_response.h`
+uses it to label key stamps: the raw path's host part was measured (0.16
+to 0.67 ms after SendInput); the message path's is tick-quantized (-6.2
+to +12.1 ms).
+
+### Text input that another library starts
+
+`docs/imgui_probe.md` (finding 3) found that Dear ImGui's stock SDL3
+backend starts SDL text input on whichever window has the focus. On the
+stimulus window, keys then left the raw path and were stamped 11.4 ms
+after they were sent (p50), and v0.3.2 recorded nothing: only
+`psyscr_text_input()` wrote the ring record and set the flip flag.
+
+v0.3.3 observes the state. `flip_at()` reads `SDL_TextInputActive()` for
+the window, and when it differs from the last logged state, writes the
+same `PSYSCR_EV_TEXT_INPUT` record with `u.u32[5]` = 1 (external; the
+rectangle 0) before it sets `PSYSCR_FLIP_TEXT_INPUT`. Records from
+`psyscr_text_input()` have `u.u32[5]` = 0. A change between two flips is
+seen at the next flip, so the flag can be one frame late.
+`caps.raw_keyboard` reads the state when it is called.
+
+Measured on 2026-10-07 (AC, measurement lock, a 320 x 200 window on
+DXGI_FLIP), with `SDL_StartTextInput()` called directly at frame 30 and
+`SDL_StopTextInput()` at frame 80 of 120:
+
+| Check | Result |
+|---|---|
+| Flips with `PSYSCR_FLIP_TEXT_INPUT` | 50: frames 30 to 79 |
+| Ring records | on, external; off, external |
+| `caps.raw_keyboard` | 0 while on, 1 after off |
+| `SDL_TextInputActive()` | 21.1 ns a call (best of 21 rounds of 100,000) |
+| `psyscr_get_caps()` | 182.1 ns a call (it reads the raw-keyboard hint) |
+
+The core test models the other library through a seam
+(`PSYSCR__TEXT_INPUT_ACTIVE`): on at frame 3, off at frame 7, two external
+records and the flag on frames 3 to 6. Mutants `input-03` (state not
+observed) and `input-04` (not marked external) are caught; `text-01` was
+re-anchored on the shared logging function.
+
+### Devices (v0.3.4)
+
+SDL 3.4 on Windows: a key on the raw path carries the Raw Input handle of
+its keyboard (`which`), so keyboards are told apart. A key on the message
+path, and a key from SendInput, carries 0. Raw mouse input is on only in
+SDL's relative mode (`WIN_SetRelativeMouseMode`); in the absolute mode
+that `psy_screen.h` uses, every mouse arrives as mouse 0 through window
+messages, with the message time. The abort and panic keys count every
+keyboard on purpose: the watchdog's low-level hook sees the system's
+keys, not devices.
+
+With `desc.ring`, a screen with a window writes a `PSYSCR_EV_DEVICE`
+record for each keyboard, mouse and touch device SDL lists at open (and
+each gamepad with `desc.gamepads`), and one for each later ADDED or
+REMOVED event that passes through `psyscr_poll()`. Pens, and touch
+devices SDL did not list, get a record when first used. A table of 32
+devices per screen keeps it to one record per change. Names are cut at
+23 bytes in the record. The ids are Windows handles: a device that is
+plugged in again gets a new id.
+
+`screen_input --devices` on this laptop (no keys pressed):
+
+| Kind | Change | Id | Name in the record |
+|---|---|---|---|
+| keyboard | present | 65659 | Computer Corp Dell Univ (a USB receiver) |
+| keyboard | present | 65601 | Standard PS/2 Keyboard (the built-in one) |
+| keyboard | present | 65599 | HID Keyboard Device (0x |
+| mouse | present | 65661 | Computer Corp Dell Univ |
+| mouse | present | 65610 | TrackPoint Device |
+| mouse | present | 65608 | Microsoft HIDI2C Device |
+| touch | present | 18446744073709551614 | pen_input (SDL's touch device for the pen, `SDL_PEN_TOUCHID`) |
+
+It also prints SDL's full names, and the device of each key and click
+pressed in its window. Checked: the core test calls the logging function
+directly (present, a repeated ADDED dropped, the same id under another
+kind, a removal and a repeated one, a 30-byte name cut to 23, a 64-bit
+touch id, 40 gamepads past the 32-entry table all logged); mutants
+`dev-00` to `dev-02`, caught; the whole list, 22 of 22.
+
+### The input bridge (v0.4.0)
+
+One loop for every input. A producer on any thread (the raw mouse
+reader, a response-box reader, an eye tracker) calls
+`psyscr_push_input(&e)` with a `psy_input.h` event stamped on the psy_rt
+clock. The header stores the event and pushes one SDL event of a
+registered type, a doorbell, whose `user.code` is the record's sequence
+number. `psyscr_poll()` returns doorbells in SDL's stream; ImGui and
+other consumers see the stream unchanged. `psyscr_event_input()` turns a
+doorbell into its record and SDL's own keyboard, mouse, touch, pen and
+gamepad events into `psyin_event`s through `psy_input.h`'s adapter.
+
+Decisions (the user approved the design with one change: no second poll
+call):
+
+| Question | Decision | Why |
+|---|---|---|
+| One poll or two | One: `psyscr_poll()` plus a decode call | ImGui and the rest see one stream. |
+| How a doorbell finds its record | The sequence in `user.code`; the record in slot `seq % size`, checked on decode | A doorbell decoded late, out of order or never does not shift any other. |
+| A full store | The newest record overwrites the oldest; counted; its doorbell then decodes as lost | A doorbell the caller never decodes would otherwise hold its slot forever. |
+| SDL's queue full (65,535, measured) | The doorbell is counted and pushed again, oldest first, when SDL's queue is empty | The event arrives late, but it arrives. |
+| Timestamps | The producer's psy_rt stamp, kept as given | SDL's push time says when it was queued, not when it happened. |
+| Raw mice | Over the bridge; `psyscr_poll_mouse()` deprecated, reads the store for one more version | One loop. |
+| psy_screen.h requires psy_input.h | Yes, from v0.4.0 | The store holds `psyin_event`s. |
+
+Measured on 2026-10-08 (AC, the timing guard, a 320 x 200 window, two
+runs; `psyscr_push_input()` timed one call at a time):
+
+| Check | Result |
+|---|---|
+| 4 producer threads at about 1 kHz each, 8000 events | each decoded once, in each producer's order; none overwritten, refused or lost |
+| `psyscr_push_input()` with a window | 1.9 to 2.6 us (SDL_PushEvent runs the event watches and wakes the queue); 184 to 345 ns in the prototype without a window |
+| `psyscr_event_input()` on a doorbell | 74 to 81 ns |
+| A doorbell's poll and decode | 410 to 424 ns (SDL_PollEvent pumps the window's messages) |
+| 70,000 pushes without a poll | SDL refused 4465 doorbells; the store kept the newest 4096 records, all decoded over the next 3 frames; 65,535 doorbells of overwritten records counted as lost |
+| Doorbells decoded out of order and twice | each gave its own record; the second decode gave nothing |
+| Raw mice through the bridge | 30 of 30 injected moves, with SDL's keys in the same loop |
+
+The core test (no SDL) rings its own doorbells through a seam
+(`PSYSCR__DOORBELL`): in order, skipped and late decodes, a decode
+twice, a record overwritten and its doorbell lost, refused doorbells
+rung again oldest first, 4 producer threads of 1000 events, the ring
+record once per change, and the deprecated `psyscr_poll_mouse()` over
+the store. Mutants `br-00` to `br-05`, caught; the whole list, 33 of
+33. Two needed a second look: removing the first sequence check left a
+second one that catches the same fault (the mutant now removes both),
+and the loss record had a redundant early return (removed).
+
+### Raw mice (v0.3.5)
+
+`desc.raw_mice` (off by default, Windows, a window needed) starts one
+reader thread per process. It registers Raw Input for mice (usage page 1,
+usage 2) for a message-only window of its own, flags 0, runs at
+time-critical priority, and stamps each report when
+`GetRawInputBuffer()` returns. `psyscr_poll_mouse()` hands the reports
+out from a queue of 1024 (single producer, single consumer, no lock;
+reports that do not fit are dropped and counted).
+
+Decisions:
+
+| Question | Decision | Why |
+|---|---|---|
+| Own reader or SDL's relative mode | Own reader | Relative mode hides the cursor and keeps it in the window, which traps the operator's mouse and ImGui (design of 2026-10-07, approved). |
+| `RIDEV_INPUTSINK` | Not used | It worked in the prototype, but it takes clicks made on other programs. Without it, reports come only while this process is in front; an operator window of this process keeps it in front. |
+| Device filter | SDL's list; others flagged | Windows lists 3 mice here, the same 3 SDL lists (an earlier count of 31 came from a probe bug). Device 0 is system-synthesized: a precision touchpad's cursor, injected input, remote desktop. A report from an unlisted device gets `PSYSCR_MOUSE_UNLISTED` and one `PSYSCR_EV_DEVICE` record ("raw, not in SDL's list"). |
+| Relative mode | Refused at open; suspended and renewed later | Measured: relative mode takes the registration and its end removes it for the process. |
+| Guard cost | Relative mode every frame, the registration on a change and every 30th frame | `SDL_GetWindowRelativeMouseMode()` 23 ns; `GetRegisteredRawInputDevices()` 0.4 to 11 us. 291 ns per frame on average. |
+| Stamp | One stamp per `GetRawInputBuffer()` call | SDL interpolates across a call; an interpolated time is a guess. |
+
+Measured on 2026-10-08 with injected input (SendInput moves of +3 and -3
+pixels while the window had the focus, a scratch probe, three runs on
+battery and AC):
+
+| Check | Result |
+|---|---|
+| Delivery, raw mice on | every injected move, in order (40 of 40, net 0, in the run with the focus held) |
+| Stamp - SendInput | means 0.15 to 0.40 ms |
+| SDL relative mode on | no raw reports; one SUSPENDED record |
+| Relative mode off | REGISTERED record; reports again, 40 of 40 |
+| SDL's raw keyboard meanwhile | every injected key (6 of 6 per phase) |
+| A second screen with raw_mice | opens and shares the reader |
+| raw_mice while a window is in relative mode | refused with a message |
+
+Not verified: two physical mice coming apart (injected input has device
+0). `screen_input --mice` is the hand test: it prints each click and
+wheel notch with its mouse and ends with one line per mouse. Not
+measured: a physical mouse's stamp, its USB poll.
+
+The core test checks the decoder on synthetic RAWMOUSE data (every
+button bit, both wheels, absolute flags), the queue (order, 1024 kept,
+losses counted), the unlisted flag and its one record, the guard's
+transitions, the ring record and the refusal on the simulated display.
+Mutants `rm-00` to `rm-06`, caught; the whole list, 29 of 29.
+
+### desc.gamepads
+
+Off by default. On a screen with a window, open() starts
+`SDL_INIT_GAMEPAD` and opens each connected gamepad; `psyscr_poll()`
+opens a gamepad on `SDL_EVENT_GAMEPAD_ADDED` and closes it on
+`SDL_EVENT_GAMEPAD_REMOVED`; close() closes them and stops the
+subsystem. At most 8. Not run with a gamepad: none was attached. The
+stamps of gamepad events depend on SDL's driver for the pad and were not
+measured.
+
+Checked: the core test (no SDL) sees `gamepads` in the parameter table,
+off by default, and `caps.raw_keyboard` false on a screen with no window;
+five mutants (`input-00` to `input-04` in `tests/mutate/screen.toml`),
+all caught; the whole list, 19 of 19.
 
 ## Not measured
 

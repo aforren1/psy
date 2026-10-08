@@ -2986,6 +2986,94 @@ module it unloads, which a suppression cannot name, so the test runs GL
 under a sanitizer only when `PSYGFX_TEST_DEVICES` asks for it. Locally,
 with GL on, everything passed under ASan and UBSan apart from that leak.
 
+## v0.10.1: the default cache folder
+
+Before v0.10.1 the program cache was used only when a caller passed
+`--cache DIR`, so most runs compiled every program (2.3 to 5.3 s on the
+Iris Xe, "v0.4: the program cache"). The header still reads and writes no
+file unless the caller gives a cache. `psygfx_default_cache_dir()` gives
+the folder to use, and the examples use it.
+
+### The folder
+
+| Platform | Folder | Read with |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\psy\progcache` | `GetEnvironmentVariableW`, converted to UTF-8 |
+| Linux | `$XDG_CACHE_HOME/psy/progcache`, else `$HOME/.cache/psy/progcache` | `getenv` |
+| macOS | `$HOME/Library/Caches/psy/progcache` | `getenv` |
+
+The function makes no folder: the file cache makes it at the first store.
+`GetEnvironmentVariableW` and not `SHGetKnownFolderPath`, because the
+second needs shell32 and ole32 at link time; the variable is set for each
+interactive user. A relative value is refused (the XDG specification says
+to ignore one).
+
+### Why there is no fallback
+
+The function fails, and the caller uses no cache, when the variable is
+missing, the path does not fit, on the web, and on POSIX when a part of
+the path that exists can be written by all users or belongs to another
+user (root excepted). It never falls back to `/tmp` or another shared
+folder. The entry hash finds damage, not attack: it is not keyed, so
+anyone who can write the folder can put an entry there with a correct
+hash, and the GL driver parses that binary inside the experiment's
+process. The owner check also refuses a folder that another user made
+under `/tmp` before the first run.
+
+### The describe line
+
+`psygfx_describe()` now names the folder of a `psygfx_file_cache` and
+gives hits and misses:
+
+```
+... origin top, program cache C:\Users\me\AppData\Local\psy\progcache: 14 hit / 0 miss (0 rejected)
+```
+
+It says `(caller)` for a cache of the caller's own and `off` for none. When
+the backend has no program binaries (the null backend of `--sim`, WebGL),
+`(unused: no binary format)` follows the folder. A rejected entry is also
+a miss. The counts are those of the open; `psygfx_program_stats()` gives
+the later builds too.
+
+### The examples
+
+`gfx_bench`, `gfx_gallery`, `gfx_text`, `gfx_layout`, `gfx_hello`,
+`gfx_trial`, `gfx_load`, `gfx_rdk` and `gfx_rdk_bench` use the default
+folder when `--cache` is not given. `--no-cache` turns the cache off.
+Each prints the describe line.
+
+| Run (Windows, Iris Xe, ANGLE D3D11; empty folder first) | First | Second |
+|---|---|---|
+| `gfx_hello --frames 3` | 0 hit / 14 miss | 14 hit / 0 miss |
+| `gfx_trial`, `gfx_load`, `gfx_rdk`, `gfx_gallery`, `gfx_text`, `gfx_rdk_bench` (after the run above) | 14 hit | 14 hit |
+| any example with `--sim` | unused | unused |
+| `gfx_hello --frames 3 --no-cache` | off, 14 miss | off, 14 miss |
+
+On WSL (Ubuntu, gcc 11.4, Mesa llvmpipe), with `XDG_CACHE_HOME` set to a
+private folder, `gfx_bench --device llvmpipe --open-only` opened in 244 ms
+(14 compiled and stored) and then in 42 ms (14 loaded). With the real
+environment the folder was `/home/adf44/.cache/psy/progcache`;
+`XDG_CACHE_HOME=/tmp` and `HOME=/tmp` gave none.
+
+### Tests and mutations
+
+The CPU half sets the environment and puts it back: a non-ASCII
+`LOCALAPPDATA` comes out as UTF-8 without its trailing slash, a UNC path is
+kept, a relative or missing value and a short buffer fail with the output
+empty; on Linux `XDG_CACHE_HOME` first, a relative one ignored, `/tmp` as
+either variable refused, and a missing `HOME` refused. The describe line is
+checked for `(caller)` and `off` with the fake backend.
+
+| # | Fault | Result |
+|---|---|---|
+| v10-05 | a relative `LOCALAPPDATA` accepted | caught |
+| v10-06 | the describe line's hits and misses swapped | caught |
+
+Builds: MSVC 19.44 C11 and C++17, MinGW gcc C11 and C++17 (warnings as
+errors); `gfx_layout.c` is checked by MinGW gcc only, because this build
+leaves `PSY_BUILD_LAYOUT` off. The default test passes on Windows and on
+WSL (CPU half and llvmpipe).
+
 ## Not measured
 
 - Light. A CLUT, a dither, a calibration: all checked as arithmetic, none

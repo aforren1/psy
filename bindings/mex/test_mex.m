@@ -21,6 +21,7 @@ function test_mex()
     test_gp();
     test_trials();
     test_trials_v02();
+    test_trials_jitter();
     fprintf('PASS\n');
 end
 
@@ -434,4 +435,43 @@ function test_trials_v02()
     check(isequal(psy_trials('schedule', h).', [4 1 1 3]), 'order list');
     psy_trials('close', h);
     fprintf('psy_trials v0.2: ok\n');
+end
+
+% ---------------------------------------------------------------------------
+
+function test_trials_jitter()
+    % Jitter (v0.2.1): drawn per trial, logged, replayed by a fresh open.
+    d = struct('n_conditions', 3, 'reps', 4, 'order', 'full_random', 'rng', 31);
+    d.jitters = [psy_trials('uniform', 'iti', 0.8, 1.2, [60000 1001]), ...
+                 psy_trials('exponential', 'fp', 0.5, 2.0, 0.4), ...
+                 psy_trials('choice', 'soa', [0.1 0.2 0.4])];
+    h = psy_trials('open', d);
+    check(isequal(psy_trials('jitter_names', h), {'iti', 'fp', 'soa'}), 'jitter names');
+    k = 0;
+    ti = psy_trials('next', h);
+    while ~isempty(ti)
+        k = k + 1;
+        v = psy_trials('jitter', h, ti.index, 'iti');
+        check(v.frames >= 48 && v.frames <= 71, 'iti frames');
+        check(v.ns == int64(round(double(v.frames) * 1001e9 / 60000)), 'iti ns');
+        v = psy_trials('jitter', h, ti.index, 2);
+        check(v.s >= 0.5 && v.s <= 2.0 && v.frames == -1, 'fp bounds');
+        psy_trials('update', h, 1);
+        ti = psy_trials('next', h);
+    end
+    check(k == 12, 'jitter session length');
+    hdr = psy_trials('format_header', h);
+    check(~isempty(strfind(hdr, ',iti,fp,soa')), 'jitter columns in the header');
+    h2 = psy_trials('open', d);
+    psy_trials('restore', h2, ones(1, 12));
+    for i = 1:12
+        check(strcmp(psy_trials('format_row', h, i), psy_trials('format_row', h2, i)), 'jitter replay');
+    end
+    psy_trials('close', h); psy_trials('close', h2);
+    v = psy_trials('jitter_map', psy_trials('uniform', 'x', 0.8, 1.2, [60000 1001]), 0);
+    check(v.frames == 48 && v.ns == int64(800800000), 'jitter_map');
+    expect_error('psy_trials:arg', @() psy_trials('jitter_map', psy_trials('uniform', 'x', 1.2, 0.8), 0.5));
+    expect_error('psy_trials:open', @() psy_trials('open', struct('n_conditions', 1, 'reps', 1, ...
+        'jitters', psy_trials('uniform', 'x', 0.801, 0.81, 60))));
+    fprintf('psy_trials v0.2.1 jitter: ok\n');
 end

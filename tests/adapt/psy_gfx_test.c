@@ -3405,6 +3405,66 @@ static psygfx_pipe user_pipe(psygfx_gfx* g, const char* body) {
     return psygfx_pipeline(g, &d);
 }
 
+/* v0.10.1: the per-user folder from the environment, and none (never a
+ * shared one) when the environment gives no private one. The process's
+ * environment is changed and put back. */
+static void test_default_cache_dir(void) {
+    char d[512], few[8];
+    CHECK(psygfx_default_cache_dir(NULL, sizeof d) == PSYGFX_ERR_ARG);
+    CHECK(psygfx_default_cache_dir(d, 0) == PSYGFX_ERR_ARG);
+    few[0] = 'x';
+    CHECK(psygfx_default_cache_dir(few, sizeof few) == PSYGFX_ERR_ARG && few[0] == '\0');
+#if defined(_WIN32)
+    {
+        wchar_t old[512];
+        DWORD k = GetEnvironmentVariableW(L"LOCALAPPDATA", old, 512);
+        /* a non-ASCII user name comes out as UTF-8; the trailing slash goes */
+        SetEnvironmentVariableW(L"LOCALAPPDATA", L"C:\\Users\\t\u00e9st\\AppData\\Local\\");
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_OK &&
+              strcmp(d, "C:\\Users\\t\xc3\xa9st\\AppData\\Local\\psy\\progcache") == 0);
+        CHECK(psygfx_default_cache_dir(d, 30) == PSYGFX_ERR_ARG && d[0] == '\0');   /* does not fit */
+        SetEnvironmentVariableW(L"LOCALAPPDATA", L"\\\\server\\share");
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_OK && strcmp(d, "\\\\server\\share\\psy\\progcache") == 0);
+        SetEnvironmentVariableW(L"LOCALAPPDATA", L"relative\\x");
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_ERR_ARG && d[0] == '\0');
+        SetEnvironmentVariableW(L"LOCALAPPDATA", NULL);
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_ERR_ARG && d[0] == '\0');
+        SetEnvironmentVariableW(L"LOCALAPPDATA", k > 0 && k < 512 ? old : NULL);
+        if (k > 0 && k < 512) CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_OK);
+    }
+#else
+    {
+        char home[512] = "", xdg[512] = "";
+        const char* e = getenv("HOME");
+        int had_home = e != NULL, had_xdg;
+        if (e) snprintf(home, sizeof home, "%s", e);
+        e = getenv("XDG_CACHE_HOME");
+        had_xdg = e != NULL;
+        if (e) snprintf(xdg, sizeof xdg, "%s", e);
+        setenv("HOME", "/nonexistent-psygfx/home//", 1);
+        setenv("XDG_CACHE_HOME", "/nonexistent-psygfx/xdg/", 1);
+#if defined(__APPLE__)
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_OK && strcmp(d, "/nonexistent-psygfx/home/Library/Caches/psy/progcache") == 0);
+#else
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_OK && strcmp(d, "/nonexistent-psygfx/xdg/psy/progcache") == 0);
+        setenv("XDG_CACHE_HOME", "relative", 1);   /* the spec: ignored */
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_OK && strcmp(d, "/nonexistent-psygfx/home/.cache/psy/progcache") == 0);
+        setenv("XDG_CACHE_HOME", "/tmp", 1);       /* 1777: refused, no other folder tried */
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_ERR_ARG && d[0] == '\0');
+        unsetenv("XDG_CACHE_HOME");
+#endif
+        setenv("HOME", "/tmp", 1);
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_ERR_ARG && d[0] == '\0');
+        setenv("HOME", "home", 1);
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_ERR_ARG && d[0] == '\0');
+        unsetenv("HOME");
+        CHECK(psygfx_default_cache_dir(d, sizeof d) == PSYGFX_ERR_ARG && d[0] == '\0');
+        if (had_home) setenv("HOME", home, 1);
+        if (had_xdg) setenv("XDG_CACHE_HOME", xdg, 1); else unsetenv("XDG_CACHE_HOME");
+    }
+#endif
+}
+
 static void test_v04_cache_cpu(void) {
     static psygfx_gfx g;
     static memcache mc;
@@ -3427,6 +3487,12 @@ static void test_v04_cache_cpu(void) {
     psygfx_close(&g);
     CHECK(fb_open_gfx(&g, &c, &st));
     CHECK(st.loaded == FB_PROGS && st.compiled == 0 && st.rejected == 0 && st.stored == 0);
+    {   /* v0.10.1: the describe line names the cache and gives hits and misses */
+        char line[600], want[80];
+        psygfx_describe(&g, line, sizeof line);
+        snprintf(want, sizeof want, "program cache (caller): %d hit / 0 miss (0 rejected)", FB_PROGS);
+        CHECK(strstr(line, want) != NULL);
+    }
     CHECK(user_pipe(&g, "float psy_main(vec2 p) { return 0.5; }\n").id != 0);
     psygfx_program_stats(&g, &st);
     CHECK(st.loaded == FB_PROGS + 1);
@@ -3481,6 +3547,12 @@ static void test_v04_cache_cpu(void) {
     /* no cache, a cache without store */
     CHECK(fb_open_gfx(&g, NULL, &st));
     CHECK(st.compiled == FB_PROGS && st.stored == 0 && mc.loads > 0);
+    {
+        char line[600], want[80];
+        psygfx_describe(&g, line, sizeof line);
+        snprintf(want, sizeof want, "program cache off: 0 hit / %d miss (0 rejected)", FB_PROGS);
+        CHECK(strstr(line, want) != NULL);
+    }
     psygfx_close(&g);
     mc_clear(&mc);
     /* the file cache's arguments */
@@ -3494,6 +3566,7 @@ static void test_v04_cache_cpu(void) {
         CHECK(psygfx_file_cache_init(&fc, big) == NULL);
         CHECK(psygfx_file_cache_init(&fc, "x/y/") == &fc.cache && strcmp(fc.dir, "x/y") == 0);
     }
+    test_default_cache_dir();
 }
 
 /* Draws one frame of stimuli from most programs and the output stage. */

@@ -36,6 +36,7 @@ that a restart loses nothing.
 | Round 2: fixes | A data race on the free queue after a PENDING decode, found with a new threaded case under ThreadSanitizer; fixed ("Builds and mutations") |
 | Round 2: missed bars | DXVA's cold open at 1080p60 (259 to 308 ms, bar 300 ms; M3); the software decoder's seek (M4); 2 Media Foundation mutations not caught (why, in "Builds and mutations") |
 | Round 2: not built | `PSYVID_PATH_SHARED`; HEVC's VUI |
+| v0.2.1 (2026-10-08): recovery after a decoder outage | Fixed: after `PSYVID_PENDING` the decode thread slept until the next seek. Tested (a deterministic threaded case and the real-time one); 2 of 2 mutations caught. See "Recovery after a decoder outage" |
 | Not in this task | Capture, FFmpeg, AVFoundation |
 
 ## Decisions that changed the design
@@ -128,6 +129,63 @@ stalls of 1, 3 and 20 frames at GOP 1 and 10).
 
 A decoder failure ends the movie only after the frames decoded before it
 are shown: they are good frames.
+
+### Recovery after a decoder outage
+
+The question (2026-10-08): in the threaded test, a scripted decoder at
+250 frames per second on a 250 Hz display was `PSYVID_PENDING` for 300 ms
+from frame 40, and no frame was shown between the end of the stall and a
+seek at display frame 200, on Windows and on CI's macOS runner.
+
+The cause was not the drop rule. The decode thread runs as the idle
+callback of a psy_rt pump. When the callback says there is no more to do,
+the pump blocks until a message arrives. `psyvid_update()` sends one only
+when the decode thread marked itself idle, and before v0.2.1 it did that
+only when it had no free slot. After `PSYVID_PENDING` it returned without
+the mark, so nothing woke it until the seek posted a message. The
+decoder's contract says "call again later"; the core did not. The
+built-in backends (Media Foundation, pl_mpeg, the frame sequence) never
+return `PSYVID_PENDING`, so only a custom decoder met this. In inline mode
+`psyvid_update()` steps the decoder on every display frame, so the
+virtual-clock stall tests passed.
+
+The fix: after `PSYVID_PENDING`, the decode thread marks itself idle, and
+the next `psyvid_update()` wakes it. The decoder is asked again once a
+display frame.
+
+The catch-up rule was already there, and it is unchanged:
+
+- The frame thread publishes the due frame before it takes a frame. The
+  decode thread decodes toward the larger of its next frame and the due
+  frame. When the due frame is past the next keyframe, it seeks to the due
+  frame's keyframe and discards forward from there. Thus it catches up as
+  fast as the decoder can seek and discard, not one frame per display
+  frame.
+- The frame thread takes the newest ready frame that is not later than
+  the due frame, and frees the older ones. Any number of frames can drop
+  on one display frame; one DROP record holds the run.
+- The frames passed over are DROPPED with reason DECODE_LATE (they were
+  due before they were ready), and the display frames without a new frame
+  are REPEATED with DECODE_LATE. A DUE reason would say that the frames
+  were dropped on schedule, which they were not, so no DUE drop was added.
+  No per-display bound on the drops is needed: the drops cost the frame
+  thread nothing but one record.
+
+Psychtoolbox does the same in kind: `Screen('PlayMovie')` "will return the
+number of frames that needed to be dropped in order to keep video playback
+in sync with realtime and audio playback". psy_video gives each run its
+display frame and reason as well.
+
+Measured after the fix (Windows, MSVC and MinGW gcc; WSL gcc and
+ThreadSanitizer):
+
+| Case | Before | After |
+|---|---|---|
+| Deterministic: outage from frame 40 until display frame 120, the frame thread waiting for the decode thread to settle after each update | no frame after display frame 40; the wait for the decode thread timed out (2 s) | the due frame (121) on display frame 121; 81 frames DROPPED with DECODE_LATE, 81 display frames REPEATED; a new frame on every display frame after |
+| Real time: outage of 300 ms from frame 40, then a seek at display frame 200 | after the stall 0 frames; shown 239 of 400 | the first frame 1 or 2 display frames after the stall; after the stall 100; shown 359 to 368 of 400 |
+
+The real-time case checks the recovery against a loose bound, 50 display
+frames, for a loaded CI runner. The deterministic case checks it exactly.
 
 ## Pause, resume and seek
 
@@ -738,6 +796,11 @@ decode thread ("Builds and mutations": it found a data race). The GPU
 path needs a screen, so the core test checks only its refusals;
 `examples/video_check.c` compares it with UPLOAD on hardware.
 
+v0.2.1 makes the threaded case's stall an outage (every frame from 40 on
+is PENDING until the time, so a seek cannot pass it), checks that a frame
+is shown within 50 display frames of its end, and adds a deterministic
+threaded case ("Recovery after a decoder outage"). Both failed on v0.2.0.
+
 ## Builds and mutations
 
 Warnings as errors everywhere.
@@ -794,6 +857,7 @@ the base-rate list was not kept:
 | Soundtrack | 10 of 10, re-run on the final header: the length rounded down; the loop check removed; the follow from the device's stream (caught after the test checked for the CLOCK record); ASAP without the audio lead; a resume at the frozen sample; a movie time's sample rounded down and the base anchored at the landing onset (both caught after a test without the follow was added); a seek that does not stop the sound; no refusal at a base rate other than 1; the shared ASAP target not put on a display onset (the test now wants the first frame within 1 us of the sound's target; it allowed half a period). With the target on an onset, the anchor at the landing onset equals the anchor at the target unless the first frame lands late, so the base test now makes the display miss the target's vblank, and catches it again | |
 | Base rates | 9 of 9 ("Base rates") | |
 | Decode-ahead | 1 of 1 under ThreadSanitizer: the slot of a PENDING decode pushed back onto the free queue from the decode thread | |
+| v0.2.1: PENDING on the decode thread (`v021-00`, `v021-01` in video.toml) | 2 of 2: PENDING does not mark the thread idle; PENDING while discarding toward the due frame not retried (an outage meets it when the due frame is in the same GOP) | |
 
 **A data race, found by the new threaded case.** The free queue is
 single-producer: the frame thread frees slots, the decode thread takes
@@ -804,6 +868,10 @@ threaded case never had a PENDING decode, so it did not show. With a
 reports "data race ... in psyvid__free_push". The decode thread now keeps
 that slot for its next decode; ThreadSanitizer is quiet, and putting the
 old push back makes it report again.
+
+v0.2.1 builds: MSVC 19.44 C11 (`/W4 /WX`) and C++ (the compile checks),
+MinGW gcc C11 (warnings as errors); WSL gcc 11.4 at -O2 and under
+ThreadSanitizer (no report). The core test passes on all of them.
 
 ## Needed from the other headers
 
@@ -835,4 +903,9 @@ old push back makes it report again.
 - `examples/movie_play.c` was asked for; the example is
   `examples/video_play.c`, because CMake builds `examples/<lib>_*.c` for
   each header.
+- Recovery after a decoder stall: fixed in v0.2.1 (a lost wake-up after
+  `PSYVID_PENDING`, not the drop rule; "Recovery after a decoder
+  outage"). Not measured: the recovery after a hiccup of a built-in
+  decoder (a slow `next()`, not PENDING) on real media, which the same
+  catch-up rule covers.
 - AVFoundation, FFmpeg, capture.

@@ -7,7 +7,10 @@ our own layout code. It also records a probe of HarfBuzz's GPU glyph
 renderer, hb-gpu, against `psy_gfx.h`'s curve runs (section 8). The plan
 that asked for both is [rig_spec.md](rig_spec.md) section 5.2 (Font row),
 section 6 and section 7. The probe code was in a session scratchpad and is
-not kept; the numbers below are the record.
+not kept; the numbers below are the record. The corpus texts and the
+Chromium reference were lost with it; on 2026-10-07 a new corpus of the
+same items and a new Edge reference were made by the same method and kept
+in `tests/layout/` (docs/psy_layout.md, Checks).
 
 ## Recommendation
 
@@ -193,8 +196,8 @@ largest position difference in font units, along the line / across it.
 
 ### 2.3 The Skribidi bugs and the patch
 
-Both bugs are in `skb__add_layout_run()` (`skb_layout.c` line 1033 at
-`dee63d6`). It merges a shaping run into the previous layout run when
+Both bugs are in `skb__line_append_shaping_run()` (`skb_layout.c` line
+1033 at `dee63d6`; this note first named it `skb__add_layout_run()`). It merges a shaping run into the previous layout run when
 their direction, font and content run are equal. It does not compare the
 bidi level, and it merges RTL runs.
 
@@ -213,7 +216,7 @@ bidi level, and it merges RTL runs.
 The patch, tested against Chromium and against Skribidi's own tests:
 
 ```c
-// skb_layout.c, skb__add_layout_run(), the merge condition
+// skb_layout.c, skb__line_append_shaping_run(), the merge condition
 if (shaping_run->direction == cur_layout_run->direction
     && !skb_is_rtl(shaping_run->direction)
     && shaping_run->bidi_level == cur_layout_run->bidi_level

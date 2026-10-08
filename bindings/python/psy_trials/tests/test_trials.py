@@ -517,3 +517,101 @@ def test_balance_pairs_and_leadin():
                   constraints=[pt.balance("lvl", no_repeat=True, no_leadin=True)])
     s = t.schedule()
     assert len(s) == 12 and all(a != b for a, b in zip(s, s[1:]))
+
+
+# ------------------------------------------------------------------- v0.2.1
+# Jitter: per-trial durations drawn from the session's generator, logged in
+# the data line, reproduced by a replay.
+
+def test_jitter_values_and_log():
+    t = pt.Trials(n_conditions=3, reps=4, order=pt.ORDER_FULL_RANDOM, rng=31,
+                  jitters=[pt.uniform("iti", 0.8, 1.2, rate=(60000, 1001)),
+                           pt.exponential("fp", 0.5, 2.0, 0.4),
+                           pt.choice("soa", [0.1, 0.2, 0.4])])
+    assert t.jitters == ["iti", "fp", "soa"]
+    rows = []
+    while (ti := t.next()) is not None:
+        iti = t.jitter(ti.index, "iti")
+        assert 48 <= iti.frames <= 71
+        assert iti.ns == (iti.frames * 1001 * 10**9 + 30000) // 60000
+        fp = t.jitter(ti.index, 1)
+        assert 0.5 <= fp.s <= 2.0 and fp.frames == -1 and fp.ns == round(fp.s * 1e9)
+        assert t.jitter(ti.index, 2).s in (0.1, 0.2, 0.4)
+        t.update(1)
+        rows.append(t.format_row(ti.index))
+    assert t.format_header().endswith(",iti,fp,soa\n")
+    last = rows[-1].rstrip("\n").split(",")
+    assert int(round(float(last[-2]) * 1e9)) == t.jitter(len(rows) - 1, "fp").ns
+    assert "jitter iti uniform 0.8 1.2 rate=60000/1001" in t.format_rules()
+    # A replay from the same seed and outcomes gives the same durations.
+    u = pt.Trials(n_conditions=3, reps=4, order=pt.ORDER_FULL_RANDOM, rng=31,
+                  jitters=[pt.uniform("iti", 0.8, 1.2, rate=(60000, 1001)),
+                           pt.exponential("fp", 0.5, 2.0, 0.4),
+                           pt.choice("soa", [0.1, 0.2, 0.4])])
+    u.restore([1] * len(rows))
+    assert [u.format_row(i) for i in range(len(rows))] == rows
+    with pytest.raises(IndexError):
+        t.jitter(0, 3)
+    with pytest.raises(pt.ArgumentError):
+        t.jitter(0, "nope")
+
+
+def test_jitter_columns_rules_and_errors():
+    tab = pt.Table("target,fp_lo,fp_hi\na,0.5,0.7\nb,1.0,1.5\n")
+    t = pt.Trials(table=tab, reps=5, order=pt.ORDER_FULL_RANDOM, rng=2,
+                  jitters=[pt.uniform("fp", "fp_lo", "fp_hi")])
+    while (ti := t.next()) is not None:
+        lo, hi = tab.value(ti.condition, "fp_lo"), tab.value(ti.condition, "fp_hi")
+        assert lo <= t.jitter(ti.index, "fp").s <= hi
+        t.update(0)
+    r = pt.Trials(table=tab, rng=2, rules="order full_random\nreps 5\njitter fp uniform fp_lo fp_hi\n")
+    s = pt.Trials(table=tab, reps=5, order=pt.ORDER_FULL_RANDOM, rng=2,
+                  jitters=[pt.uniform("fp", "fp_lo", "fp_hi")])
+    for i in range(10):
+        r.next(); s.next()
+        assert r.jitter(i, 0) == s.jitter(i, 0)
+        r.update(1); s.update(1)
+    with pytest.raises(pt.ArgumentError, match="no whole frame of 60/1 Hz"):
+        pt.Trials(n_conditions=1, reps=1, rng=1, jitters=[pt.uniform("x", 0.801, 0.81, rate=60)])
+    with pytest.raises(pt.ArgumentError, match="desc.rng is required for jitter draws"):
+        pt.Trials(n_conditions=1, reps=1, jitters=[pt.uniform("x", 0.1, 0.2)])
+    with pytest.raises(pt.ArgumentError, match="rules line 1"):
+        pt.Trials(table=tab, rng=1, rules="jitter fp gaussian 1 2\n")
+
+
+def test_jitter_map_against_numpy_free_oracles():
+    # The maps, written here from their definitions: uniform over the
+    # nanoseconds in [lo, hi]; the exponential's inverse CDF folded into
+    # [lo, hi) modulo hi - lo (exactly the truncated exponential).
+    u_list = [0.0, 0.1, 0.37, 0.5, 0.9, 0.999999]
+    for u in u_list:
+        v = pt.jitter_map(pt.uniform("u", 0.8, 1.2), u)
+        assert v.ns == 800000000 + int(u * 2**53) * 400000001 // 2**53
+        assert v.s == v.ns / 1e9
+        e_ns = 0.4e9 * -math.log1p(-u)
+        want = 500000000 + math.fmod(e_ns, 1.5e9)
+        assert abs(pt.jitter_map(pt.exponential("e", 0.5, 2.0, 0.4), u).ns - want) <= 1.0
+    v = pt.jitter_map(pt.uniform("f", 0.8, 1.2, rate=(60000, 1001)), 0.0)
+    assert v.frames == 48 and v.ns == 800800000
+    with pytest.raises(pt.ArgumentError, match="lo <= hi"):
+        pt.jitter_map(pt.uniform("u", 1.2, 0.8), 0.5)
+
+
+def test_jitter_golden_digests_match_c():
+    # tests/adapt/psy_trials_jitter_golden.h: the same 200000 draws per
+    # distribution must give the same digests here as in every C build.
+    vals = [0.1, 0.25, 0.333333333333, 0.5]
+    specs = [pt.uniform("a", 0.8, 1.2), pt.uniform("b", 0.8, 1.2, rate=(60000, 1001)),
+             pt.choice("c", vals), pt.choice("d", vals, rate=60),
+             pt.exponential("e", 0.5, 2.0, 0.4), pt.exponential("f", 0.5, 2.0, 0.4, rate=(60000, 1001))]
+    want = [0xd2e231de82a90abc, 0xfa91de69b65221e5, 0xc4d62850f9f90fd5,
+            0xd74230f52068797a, 0xf4a23384d974cceb, 0xc2c66e03f8a80f1a]
+    mask = (1 << 64) - 1
+    for spec, w in zip(specs, want):
+        st, h = 2026, 0xCBF29CE484222325
+        for _ in range(200000):
+            u, st = pt.splitmix(st)
+            v = pt.jitter_map(spec, u)
+            h = ((h ^ (v.ns & mask)) * 0x100000001B3) & mask
+            h = ((h ^ (v.frames & mask)) * 0x100000001B3) & mask
+        assert h == w, spec["name"]

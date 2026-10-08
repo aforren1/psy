@@ -1,0 +1,4 @@
+# Vendored files stay byte for byte as upstream has them (no line-ending
+# conversion), so tools/vendor_layout.py can verify them and the patch
+# applies on every checkout. Windows runners check out with autocrlf=true.
+* -text

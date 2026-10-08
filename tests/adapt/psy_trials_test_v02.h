@@ -9,10 +9,13 @@
 #if PSYTR_MAX_TRIALS == 4096
 #include "psy_trials_pins_run.h"
 #include "psy_trials_pins.h"
+#include "psy_trials_pins_v02_run.h"
+#include "psy_trials_pins_v02.h"
 #endif
 
-/* The hash of test_v02_digest()'s sessions (see there). */
-#define PSYTR_TEST_V02_DIGEST 0xc9b59a3bb40a8f68ULL
+/* The hash of test_v02_digest()'s sessions (see there); v0.2.0 and later
+ * give the same value, since the rules text's version line is left out. */
+#define PSYTR_TEST_V02_DIGEST 0xded5b4d1602c8f90ULL
 
 static double chi_crit(int df) { return df + 3.1 * sqrt(2.0 * df); }
 
@@ -58,6 +61,15 @@ static void test_pins(void) {
     CHECK_I(bad, 0);
     printf("  v0.1 pins: %d sessions (30 designs x 20 seeds) against %s, %d differ\n",
            PIN_N_DESIGNS * PIN_N_SEEDS, PIN_VERSION, bad);
+    bad = 0;
+    for (k = 0; k < PIN2_N_DESIGNS; k++)
+        for (s = 0; s < PIN_N_SEEDS; s++)
+            if (pin2_run(k, s) != pin2_want[k][s]) {
+                if (bad++ < 5) fprintf(stderr, "psy_trials_test: FAIL v0.2 pin design %d seed %d\n", k, s);
+            }
+    CHECK_I(bad, 0);
+    printf("  v0.2 pins: %d sessions (%d designs x 20 seeds) against %s, %d differ\n",
+           PIN2_N_DESIGNS * PIN_N_SEEDS, PIN2_N_DESIGNS, PIN2_VERSION, bad);
 #endif
 }
 
@@ -1196,7 +1208,12 @@ static uint64_t dg_session(uint64_t h, psytr_desc* d, uint64_t seed) {
         if (psytr_format_row(&g_t, i, line, sizeof(line)) > 0) h = dg_fnv(h, line, strlen(line));
     }
     if (psytr_format_header(&g_t, line, sizeof(line)) > 0) h = dg_fnv(h, line, strlen(line));
-    if (psytr_format_rules(&g_t, line, sizeof(line)) > 0) h = dg_fnv(h, line, strlen(line));
+    if (psytr_format_rules(&g_t, line, sizeof(line)) > 0) {
+        /* Past the first line, which names the version. */
+        const char* body = strchr(line, '\n');
+        body = body ? body + 1 : line;
+        h = dg_fnv(h, body, strlen(body));
+    }
     len = psytr_save(&g_t, snap, sizeof(snap));
     if (len > 0) h = dg_fnv(h, snap, (size_t)len);
     return dg_int(h, len);
@@ -1259,6 +1276,8 @@ static void test_v02_digest(void) {
 #endif
 }
 
+#include "psy_trials_test_jitter.h"
+
 static void test_v02(void) {
     test_pins();
     test_table_conditions();
@@ -1272,4 +1291,5 @@ static void test_v02(void) {
     test_rules();
     test_snapshot_v2();
     test_v02_digest();
+    test_jitter();
 }

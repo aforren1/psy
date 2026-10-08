@@ -859,3 +859,23 @@ env = { PSYGFX_TEST_PARTS = "v0.10 simplex", PSYGFX_TEST_DEVICES = "hardware" }
 why = "The polygon's vertices and the octaves share the block: one would overwrite the other."
 find = '    if (s->shape == PSYGFX_POLYGON) return "SIMPLEX keeps its octaves where a POLYGON aperture keeps its vertices: use MASK_TEX";'
 replace = ''
+
+[[mutant]]
+id = "v10-05"
+name = "a relative LOCALAPPDATA accepted as the cache folder"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "A relative folder depends on the working directory, which may be one other users can write; the default folder must be absolute or none."
+find = '''        if (k == 0 || k >= 512 || !((k >= 3 && w[1] == L':' && (w[2] == L'\\' || w[2] == L'/')) || (w[0] == L'\\' && w[1] == L'\\')))'''
+replace = '''        if (k == 0 || k >= 512)'''
+
+[[mutant]]
+id = "v10-06"
+name = "the describe line's hits and misses swapped"
+test = "gfx"
+env = { PSYGFX_TEST_PARTS = "none", PSYGFX_TEST_DEVICES = "none" }
+why = "The describe line is how a user sees that the second run loaded its programs; swapped counts say the opposite."
+find = '''                    g->progs.loaded, g->progs.compiled, g->progs.rejected);
+}'''
+replace = '''                    g->progs.compiled, g->progs.loaded, g->progs.rejected);
+}'''

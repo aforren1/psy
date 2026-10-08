@@ -1,0 +1,22 @@
+# The layout corpus: one line of horizontal text per item, no wrapping.
+# Written 2026-10-07 for docs/psy_layout.md (the probe's corpus of
+# docs/layout_probe.md 2.2 was lost; these items cover the same scripts,
+# fonts and features with new sentences). Fields:
+#   id|font file in C:/Windows/Fonts|face|dir (ltr, rtl, auto)|lang|text
+# layout_ref.py writes Chromium's glyphs for these to corpus_ref.txt;
+# psy_layout_test.c compares the glue's with them.
+latin_segoe|segoeui.ttf|0|ltr|en|Avoid tiny Wafers! Today, Yolanda’s office affixed 47 flyers: “Try AV, To, VA” – efficient fjords.
+latin_calibri|calibri.ttf|0|ltr|en|Fluffy waffles filled the office kitchen; Theo found five of them by 9:30 – a fine haul.
+latin_arial|arial.ttf|0|ltr|en|We value quality: Yvonne’s team ranked first in 2023, ahead of AVL & Tycho’s “fastest” crew.
+arabic_rtl_arial|arial.ttf|0|rtl|ar|كَتَبَ الطّالِبُ 3 رَسائِلَ إلى Maria في عام 2024، ثُمَّ نامَ مُبَكِّرًا.
+arabic_rtl_segoe|segoeui.ttf|0|rtl|ar|كَتَبَ الطّالِبُ 3 رَسائِلَ إلى Maria في عام 2024، ثُمَّ نامَ مُبَكِّرًا.
+arabic_in_ltr|arial.ttf|0|ltr|en|The word مَرْحَبًا بِالْعَالَمِ 123 means hello world.
+hebrew_arial|arial.ttf|0|rtl|he|הַיֶּלֶד קָרָא 12 סְפָרִים עַל Python בַּשָּׁנָה שֶׁעָבְרָה.
+hebrew_segoe|segoeui.ttf|0|rtl|he|הַיֶּלֶד קָרָא 12 סְפָרִים עַל Python בַּשָּׁנָה שֶׁעָבְרָה.
+devanagari|Nirmala.ttc|0|ltr|hi|धर्म और कर्म के विषय में छात्र ने शिक्षक से प्रश्न पूछा।
+bengali|Nirmala.ttc|0|ltr|bn|বিজ্ঞানের ছাত্রেরা কৌতূহলে নতুন বোধ খোঁজে।
+tamil|Nirmala.ttc|0|ltr|ta|ஸ்ரீ ராமன் கொடியை தோளில் ஏந்தி பௌர்ணமி இரவில் நடந்தார்.
+thai|LeelawUI.ttf|0|ltr|th|ผู้ใหญ่ที่นั่นน่ารักมาก แต่เด็กๆ ก็ชอบเล่นกีฬาเช่นกัน
+chinese|msyh.ttc|0|ltr|zh-Hans|今天下午，我们在图书馆里读了三本书：历史、科学和诗歌。
+japanese|YuGothR.ttc|0|ltr|ja|昨日、私は友達と駅の近くで新しいカフェを見つけました。「また行こう」と話しました。
+rtl_latin_waw|arial.ttf|0|rtl|ar|مع English و 123

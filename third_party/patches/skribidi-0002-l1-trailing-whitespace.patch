@@ -1,0 +1,133 @@
+Subject: [PATCH] layout: apply bidi rule L1 per line (line-end whitespace)
+
+Skribidi runs the bidi algorithm once per paragraph, before it breaks
+lines, so Unicode's rule L1 was never applied at the line ends it chose.
+In an LTR paragraph, a line that ended with an RTL word and the space
+after it kept the space at the RTL level: it was drawn between the text
+before the word and the word, and the line breaker counted it in the
+width (it left trailing whitespace out only when its run had the
+paragraph's direction), so the line broke one space early.
+
+- skb__apply_rule_l1(), called by skb__finalize_line() while the line is
+  still in logical order: whitespace and isolate formatting characters
+  at the line end and before a segment or paragraph separator, and the
+  separators, take the paragraph level; a layout run that is partly
+  reset is split.
+- The line breaker leaves trailing whitespace out of the fit in either
+  direction, since L1 puts it at the line end.
+
+Found and checked against Edge by psy's editing comparison
+(docs/psy_layout.md, "Editing against Edge"). Applies to skribidi
+dee63d6 after skribidi-0001-bidi-run-merge.patch.
+
+diff --git a/src/skb_layout.c b/src/skb_layout.c
+index d25c842..9fb73d2 100644
+--- a/src/skb_layout.c
++++ b/src/skb_layout.c
+@@ -1572,6 +1572,80 @@ typedef struct skb__calculated_layout_size_t {
+ 	float first_line_cap_height;
+ } skb__calculated_layout_size_t;
+ 
++// Unicode bidi rule L1, for one line: whitespace and isolate formatting characters at the end of
++// the line, and before a segment or paragraph separator, take the paragraph embedding level, as do
++// the separators. The bidi levels come from one pass over the whole paragraph, before line breaking,
++// so this runs per line once its extent is known. Where a layout run is partly reset, it is split.
++// The line must still be in logical order and its runs the last in the layout.
++static bool skb__is_l1_reset_type(SBBidiType type)
++{
++	return type == SBBidiTypeWS || type == SBBidiTypeLRI || type == SBBidiTypeRLI || type == SBBidiTypeFSI || type == SBBidiTypePDI;
++}
++
++static void skb__apply_rule_l1(skb_layout_t* layout, skb_layout_line_t* line)
++{
++	if (line->layout_run_range.start == line->layout_run_range.end)
++		return;
++	assert(line->layout_run_range.end == layout->layout_runs_count);
++
++	const uint8_t base_level = skb_is_rtl(layout->resolved_direction) ? 1 : 0;
++	bool reset = true; // The line end resets the whitespace before it.
++
++	for (int32_t ri = line->layout_run_range.end - 1; ri >= line->layout_run_range.start; ri--) {
++		skb_layout_run_t* run = &layout->layout_runs[ri];
++		if (run->type != SKB_CONTENT_RUN_UTF8 && run->type != SKB_CONTENT_RUN_UTF32) {
++			reset = false;
++			continue;
++		}
++		// Walk the run's clusters back from its logical end; split where the reset state changes.
++		int32_t seg_end = run->cluster_range.end;
++		bool seg_reset = false;
++		for (int32_t ci = run->cluster_range.end - 1; ci >= run->cluster_range.start; ci--) {
++			const skb_cluster_t* cluster = &layout->clusters[ci];
++			bool is_separator = false;
++			bool is_whitespace = cluster->text_count > 0;
++			for (int32_t ti = cluster->text_offset; ti < cluster->text_offset + cluster->text_count; ti++) {
++				const SBBidiType type = SBCodepointGetBidiType(layout->text[ti]);
++				if (type == SBBidiTypeS || type == SBBidiTypeB)
++					is_separator = true;
++				else if (!skb__is_l1_reset_type(type))
++					is_whitespace = false;
++			}
++			if (is_separator)
++				reset = true;
++			else if (!is_whitespace)
++				reset = false;
++			const bool cluster_reset = is_separator || (is_whitespace && reset);
++
++			if (ci == run->cluster_range.end - 1) {
++				seg_reset = cluster_reset;
++			} else if (cluster_reset != seg_reset) {
++				// Split off clusters [ci+1, seg_end) as their own run after this one.
++				SKB_ARRAY_RESERVE(layout->layout_runs, layout->layout_runs_count + 1);
++				run = &layout->layout_runs[ri];
++				memmove(&layout->layout_runs[ri + 2], &layout->layout_runs[ri + 1], (size_t)(layout->layout_runs_count - (ri + 1)) * sizeof(skb_layout_run_t));
++				layout->layout_runs_count++;
++				line->layout_run_range.end++;
++				skb_layout_run_t* tail = &layout->layout_runs[ri + 1];
++				*tail = *run;
++				tail->cluster_range.start = ci + 1;
++				tail->cluster_range.end = seg_end;
++				if (seg_reset)
++					tail->bidi_level = base_level;
++				SKB_SET_FLAG(tail->flags, SKB_LAYOUT_RUN_HAS_START, false);
++				skb__update_glyph_range(layout, tail);
++				run->cluster_range.end = ci + 1;
++				SKB_SET_FLAG(run->flags, SKB_LAYOUT_RUN_HAS_END, false);
++				skb__update_glyph_range(layout, run);
++				seg_end = ci + 1;
++				seg_reset = cluster_reset;
++			}
++		}
++		if (seg_reset)
++			run->bidi_level = base_level;
++	}
++}
++
+ static bool skb__finalize_line(skb_layout_t* layout, skb_layout_line_t* line, bool is_last_line, const skb_attribute_list_marker_t* list_marker, const float line_break_width, skb__calculated_layout_size_t* layout_size)
+ {
+ 	// Do not finalize line if it's empty.
+@@ -1604,7 +1678,8 @@ static bool skb__finalize_line(skb_layout_t* layout, skb_layout_line_t* line, bo
+ 		line->last_grapheme_offset = layout->text_count;
+ 	}
+ 
+-	// Sort in visual order
++	// Trailing whitespace takes the paragraph level (rule L1), then sort in visual order
++	skb__apply_rule_l1(layout, line);
+ 	skb__reorder_runs(layout, line->layout_run_range);
+ 
+ 	// Add list marker on first line if it exists.
+@@ -2197,12 +2272,12 @@ void skb__layout_lines(skb__layout_build_context_t* build_context, skb_layout_t*
+ 			}
+ 
+ 			// Keep track of the white space after the run end, it will not be taken into account for the line breaking.
+-			// When the direction does not match, the space will be inside the line (not end of it), so we ignore that.
++			// Whitespace at the line end takes the paragraph level in either direction (rule L1, skb__apply_rule_l1()),
++			// so it sits at the line end.
+ 			// Treat tab as non-whitespace so that it allocates space at the end of the line too.
+-			const bool codepoint_is_rtl = skb_is_rtl(layout->shaping_runs[end_it.shaping_run_idx].direction);
+ 			const bool codepoint_is_whitespace = (layout->text_props[cp_offset].flags & SKB_TEXT_PROP_WHITESPACE);
+ 			const bool codepoint_is_control = (layout->text_props[cp_offset].flags & SKB_TEXT_PROP_CONTROL);
+-			if (codepoint_is_rtl == layout_is_rtl && (codepoint_is_whitespace || codepoint_is_control) && !codepoint_is_tab) {
++			if ((codepoint_is_whitespace || codepoint_is_control) && !codepoint_is_tab) {
+ 				run_end_whitespace_width += cluster_width;
+ 			} else {
+ 				if (run_end_whitespace_width > 0.f) {

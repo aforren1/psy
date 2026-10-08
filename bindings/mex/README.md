@@ -582,7 +582,8 @@ or an n x 2 cell), `reps`, `cond_reps`, `order` (`'sequential'`,
 `track_rate`, `block_size`, `constraints_span_blocks`, `n_practice`,
 `n_warmup`, `warmup_conditions` (1-based), `requeue_gap`, `rng`,
 `record_size`, and from v0.2: `table`, `order_list` (1-based), `draws`,
-`weights`, `subset`, `groups`, `rules` and `participant`. `order` also
+`weights`, `subset`, `groups`, `rules` and `participant`; from v0.2.1,
+`jitters`. `order` also
 takes `'list'` and `'with_replacement'`.
 
 **Tables and rules (v0.2).** `desc.table` is CSV text, or
@@ -609,6 +610,23 @@ after the other fields. `desc.participant` is the participant number for
 1-based levels or a cell of values). MATLAB holds text as UTF-16, and the
 binding converts it to UTF-8 before the parse; Octave's text is UTF-8
 already.
+
+**Jitter (v0.2.1).** `desc.jitters` is a struct array from
+`psy_trials('uniform', name, lo, hi [, rate])`,
+`psy_trials('choice', name, values [, rate])` and
+`psy_trials('exponential', name, lo, hi, scale [, rate])`: a duration in
+seconds drawn per trial from the session's generator, logged in
+`format_row` and reproduced by `restore` and `load`. `lo`, `hi` and `scale`
+may be a table column's name; `rate` is `NUM` or `[NUM DEN]` Hz and snaps the
+draws to whole frames.
+
+```matlab
+d.jitters = [psy_trials('exponential', 'fp', 0.5, 2.0, 0.4, [60000 1001]), ...
+             psy_trials('uniform', 'iti', 0.8, 1.2)];
+h = psy_trials('open', d);
+ti = psy_trials('next', h);
+fp = psy_trials('jitter', h, ti.index, 'fp');   % fp.s, fp.ns (int64), fp.frames
+```
 
 **Constraints** come from module commands. Put them in `desc.constraints`
 as a struct array (`[c1 c2]`) or as a cell. A factor is a 1-based index, a
@@ -673,6 +691,8 @@ level = typecast(psy_trials('record', h, i), 'double');
 | `'n_conditions'`, `'n_factors'`, `'n_run'`, `'n_done'`, `'swaps'`, `'record_size'` (each with `h`) | double | |
 | `'close', h` | none | |
 | `'format_rules', h` | string | the session's settings as rules text (v0.2) |
+| `'jitter', h, i, j`, `'jitter_names', h` | struct, cell | trial `i`'s draw of jitter `j` (1-based, or a name): `s`, `ns` (int64), `frames` (-1 unless snapped); the names (v0.2.1) |
+| `'uniform'`, `'choice'`, `'exponential'`, `'jitter_map', j, u` | struct | a jitter for `desc.jitters`; a variate mapped with no session (v0.2.1) |
 | `'values', h, c` | struct | condition `c`'s table row, one field per column (v0.2) |
 | `'table_info', h`, `'table', csv` | struct | `columns`, `types`, `n_rows`, `n_skipped`, `levels`, `values` (a cell), `hash` (v0.2) |
 | `'latin', n, row [, balanced]` | `[items, rows]` | row `row` (0-based, taken modulo `rows`) of a cyclic or Williams square, 1-based items (v0.2) |

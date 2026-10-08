@@ -13,9 +13,11 @@
  *
  * Usage: gfx_bench [--device hardware|warp|swiftshader|mesa|llvmpipe]
  *                  [--size W H] [--frames N] [--only NAME] [--scene 16|32]
- *                  [--cache DIR] [--open-only]
+ *                  [--cache DIR] [--no-cache] [--open-only]
  *   --scene  the scene format of the workloads after the empty frames
- *   --cache  a program cache in DIR (psygfx_file_cache_init); :mem: one in memory
+ *   --cache  a program cache in DIR (psygfx_file_cache_init); :mem: one in memory;
+ *            the default is the per-user folder of psygfx_default_cache_dir()
+ *   --no-cache  compile every program; read and write no cache file
  *   --open-only  print psygfx_open()'s time and what the cache did, then exit
  * Exit code: 0, 1 when no GL ES 3.0 context opened, 2 for a bad argument.
  * On Windows set PSYSCR_ANGLE_DIR to ANGLE's directory.
@@ -45,7 +47,8 @@ static psygfx_gfx gfx;
 static int W = 1920, H = 1200, FRAMES = 120;
 static const char* only = NULL;
 static psygfx_format scene_fmt = PSYGFX_FORMAT_NONE;   /* the workloads' scene; 0 = the default */
-static psygfx_file_cache pcache;          /* --cache DIR */
+static psygfx_file_cache pcache;          /* --cache DIR or the default */
+static char cache_dir[512];
 static const psygfx_cache* cache_desc = NULL;
 static int open_only = 0;
 static void (GLCALL *glFinish_)(void);
@@ -1310,8 +1313,8 @@ int main(int argc, char** argv) {
     psyscr_desc d;
     psygfx_stim g[1000], one;
     psygfx_gabor_desc gd;
-    int i;
-    char line[400];
+    int i, no_cache = 0;
+    char line[640];
     hl.device = PSYGFX_HL_HARDWARE;
 #if !defined(_WIN32)
     hl.device = PSYGFX_HL_MESA;
@@ -1334,6 +1337,8 @@ int main(int argc, char** argv) {
         } else if (!strcmp(argv[i], "--cache") && i + 1 < argc) {
             i++;
             cache_desc = strcmp(argv[i], ":mem:") ? psygfx_file_cache_init(&pcache, argv[i]) : &memc_cache;
+        } else if (!strcmp(argv[i], "--no-cache")) {
+            no_cache = 1;
         } else if (!strcmp(argv[i], "--open-only")) {
             open_only = 1;
         } else if (!strcmp(argv[i], "--scene") && i + 1 < argc) {
@@ -1341,10 +1346,15 @@ int main(int argc, char** argv) {
             scene_fmt = !strcmp(argv[i], "16") ? PSYGFX_RGBA16F : (!strcmp(argv[i], "32") ? PSYGFX_RGBA32F : PSYGFX_FORMAT_NONE);
         } else {
             fprintf(stderr, "usage: gfx_bench [--device hardware|warp|swiftshader|mesa|llvmpipe] [--size W H] "
-                            "[--frames N] [--only NAME] [--scene 16|32] [--cache DIR] [--open-only]\n");
+                            "[--frames N] [--only NAME] [--scene 16|32] [--cache DIR] [--no-cache] [--open-only]\n");
             return 2;
         }
     }
+    /* The per-user folder unless told otherwise, so that a second run loads
+     * the programs instead of compiling them (PROGRAM CACHE). */
+    if (no_cache) cache_desc = NULL;
+    else if (!cache_desc && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
+        cache_desc = psygfx_file_cache_init(&pcache, cache_dir);
     if (W < 256 || H < 256 || FRAMES < 10 || FRAMES > MAXF) { fprintf(stderr, "gfx_bench: bad size or frames\n"); return 2; }
     hl.w = W; hl.h = H;
     memset(&d, 0, sizeof d);
@@ -1366,6 +1376,8 @@ int main(int argc, char** argv) {
             printf("open_ms %.1f internal_ms %.1f loaded %u compiled %u rejected %u stored %u store_ms %.1f\n",
                    (double)(psyrt_now_ns() - t0) * 1e-6, (double)ps.open_ns * 1e-6, ps.loaded, ps.compiled,
                    ps.rejected, ps.stored, (double)ps.store_ns * 1e-6);
+            psygfx_describe(&gfx, line, sizeof line);
+            printf("%s\n", line);
             psygfx_close(&gfx);
             psyscr_close(&scr);
             return 0;

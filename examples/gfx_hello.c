@@ -6,10 +6,13 @@
  * of each frame. Low contrast and small, because the display may be
  * somebody's working screen.
  *
- * Usage: gfx_hello [--sim] [--frames N]
+ * Usage: gfx_hello [--sim] [--frames N] [--cache DIR] [--no-cache]
  *   --sim       no window and no GL: the simulated display and the null
  *               backend, for CI
  *   --frames N  stop after N frames (default: until Shift+Esc or the window closes)
+ *   --cache DIR keep compiled programs in DIR; the default is the per-user
+ *               folder of psygfx_default_cache_dir(), when there is one
+ *   --no-cache  compile every program; read and write no cache file
  * Exit code: 0, 1 when the screen or the gfx did not open, 2 for a bad
  * argument.
  */
@@ -30,16 +33,26 @@ int main(int argc, char** argv) {
     psygfx_stim g;
     psyscr_frame f;
     int64_t t0 = 0, frames = -1;
-    int i;
-    char line[300];
+    static psygfx_file_cache pcache;
+    static char cache_dir[512];
+    const psygfx_cache* cache = NULL;
+    int i, no_cache = 0;
+    char line[600];
 
     memset(&sd, 0, sizeof sd);
     sd.windowed = true;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--sim")) sd.backend = PSYSCR_BACKEND_SIM;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoll(argv[++i]);
-        else { fprintf(stderr, "usage: gfx_hello [--sim] [--frames N]\n"); return 2; }
+        else if (!strcmp(argv[i], "--cache") && i + 1 < argc && (cache = psygfx_file_cache_init(&pcache, argv[i + 1])) != NULL) i++;
+        else if (!strcmp(argv[i], "--no-cache")) no_cache = 1;
+        else { fprintf(stderr, "usage: gfx_hello [--sim] [--frames N] [--cache DIR] [--no-cache]\n"); return 2; }
     }
+    /* The per-user folder unless told otherwise, so that a second run loads
+     * the programs instead of compiling them (PROGRAM CACHE). */
+    if (no_cache) cache = NULL;
+    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
+        cache = psygfx_file_cache_init(&pcache, cache_dir);
 
     /* In C99 these are compound literals with designated initializers:
      *   psyscr_open(&scr, &(psyscr_desc){ .windowed = true });
@@ -50,6 +63,7 @@ int main(int argc, char** argv) {
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.5f;
+    gd.cache = cache;
     if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_hello: %s\n", psygfx_error(&gfx)); return 1; }
     memset(&gab, 0, sizeof gab);
     gab.sf = 1 / 32.0f;

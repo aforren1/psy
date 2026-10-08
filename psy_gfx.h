@@ -1,4 +1,4 @@
-/* psy_gfx.h - v0.10.0 - public domain single-header stimulus graphics library
+/* psy_gfx.h - v0.10.1 - public domain single-header stimulus graphics library
  *   (with MIT-licensed parts: see below)
  *
  *   Stimuli on GL ES 3.0, on top of psy_screen.h: signed-distance shapes
@@ -37,6 +37,9 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.10.1 - PROGRAM CACHE: psygfx_default_cache_dir() gives the per-user
+ *          cache folder (it makes no file or folder). The describe line names
+ *          the cache folder and gives hits and misses.
  *   v0.10.0 - NOISE: dist PSYGFX_SIMPLEX, 3D simplex gradient noise as fBm
  *          (noise_desc.scale, z, octaves, lacunarity, gain; stimulus fields
  *          gn_*; parameters PSYGFX_P_NOISE_SCALE, _Z, _LACUNARITY, _GAIN,
@@ -1155,7 +1158,26 @@
  *   store bytes under a 64-bit key, in storage the caller owns. psy_gfx
  *   reads or writes no file unless the caller gives a cache that does:
  *       static psygfx_file_cache pc;
- *       desc.cache = psygfx_file_cache_init(&pc, "C:/Users/me/AppData/Local/psy/gfx");
+ *       char dir[512];
+ *       if (psygfx_default_cache_dir(dir, sizeof dir) == PSYGFX_OK)
+ *           desc.cache = psygfx_file_cache_init(&pc, dir);
+ *   psygfx_default_cache_dir() gives the per-user cache folder (v0.10.1).
+ *   It makes no folder; on POSIX it reads the owner and mode of the parts
+ *   of the path that exist.
+ *     Windows  %LOCALAPPDATA%\psy\progcache (read with the wide API, given
+ *              as UTF-8)
+ *     Linux    $XDG_CACHE_HOME/psy/progcache when that is an absolute path,
+ *              else $HOME/.cache/psy/progcache
+ *     macOS    $HOME/Library/Caches/psy/progcache
+ *   It fails (PSYGFX_ERR_ARG, out empty) when the variable is missing or
+ *   not absolute, when the path does not fit, on the web, and on POSIX
+ *   when a part of the path that exists can be written by all users or
+ *   belongs to another user (not root). Then use no cache. Never fall
+ *   back to a shared folder such as /tmp: the entry hash finds damage, not
+ *   attack. Anyone who can write the folder can put an entry with a
+ *   correct hash there, and the GL driver parses that binary in the
+ *   experiment's process. Give psygfx_file_cache_init() only a folder that
+ *   the user alone can write.
  *   The key covers the GL vendor, renderer (ANGLE puts the adapter and the
  *   driver version in it), version (the ANGLE build) and GLSL strings, the
  *   binary format and the program's whole text. An entry is a 48-byte
@@ -1169,8 +1191,13 @@
  *   writes each entry whole under a temporary name and renames it; it
  *   never deletes, so each ANGLE build and driver pair adds about 0.5 MB
  *   until the folder is emptied by hand. psygfx_program_stats() and the
- *   describe line give what the open did. User pipelines, the video
- *   program and the instanced programs use the same cache. WebGL has no
+ *   describe line give what the open did. The describe line names the
+ *   folder of a psygfx_file_cache ("program cache <folder>: N hit / M
+ *   miss (R rejected)"; a rejected entry is also a miss), or says
+ *   "(caller)" for another cache and "off" for none; "(unused: no binary
+ *   format)" follows when the backend has no program binaries (the null
+ *   backend, WebGL). User pipelines, the video program and
+ *   the instanced programs use the same cache. WebGL has no
  *   binaries: the cache is then unused (PSYGFX_FEAT_PROGRAM_CACHE clear).
  *
  *   ---------------------------------------------------------------------
@@ -1437,8 +1464,8 @@
 
 #define PSYGFX_VERSION_MAJOR 0
 #define PSYGFX_VERSION_MINOR 10
-#define PSYGFX_VERSION_PATCH 0
-#define PSYGFX_VERSION_STRING "0.10.0"
+#define PSYGFX_VERSION_PATCH 1
+#define PSYGFX_VERSION_STRING "0.10.1"
 
 #include "psy_screen.h"
 #include "psy_color.h"
@@ -2590,6 +2617,10 @@ PSYGFX_API uint32_t       psygfx_features(const psygfx_gfx* g);
  * renamed. Nothing is ever deleted. NULL when dir is NULL, empty or too
  * long. fc must outlive the gfx. */
 PSYGFX_API const psygfx_cache* psygfx_file_cache_init(psygfx_file_cache* fc, const char* dir);
+/* v0.10.1: the per-user program cache folder (UTF-8, no trailing slash)
+ * into out (PROGRAM CACHE): PSYGFX_OK, or PSYGFX_ERR_ARG with out empty
+ * when there is none that only this user can write. Makes no folder. */
+PSYGFX_API int psygfx_default_cache_dir(char* out, size_t cap);
 
 /* Stimuli. Zero desc fields take defaults; the result has real values in
  * every field (visible 1, gate 1, contrast and opacity 1 unless set). */
@@ -2816,7 +2847,8 @@ PSYGFX_API int psygfx_cset_winding(const psygfx_cset_desc* d, uint32_t glyph, do
 #include <stdarg.h>
 #include <math.h>
 #if !defined(_WIN32)
-    #include <sys/stat.h>   /* mkdir, for the file cache */
+    #include <sys/stat.h>   /* mkdir, stat: the file cache and its default folder */
+    #include <unistd.h>     /* geteuid: the default folder */
 #endif
 
 #ifdef __cplusplus
@@ -5758,16 +5790,33 @@ PSYGFX_API const char* psygfx_error(const psygfx_gfx* g) { return g ? g->error :
 PSYGFX_API bool psygfx_is_open(const psygfx_gfx* g) { return g && g->open; }
 PSYGFX_API uint64_t psygfx_clipped(const psygfx_gfx* g) { return g ? g->clipped_total : 0; }
 
+static size_t psygfx__fc_load(void* user, uint64_t key, void* dst, size_t cap);
+
+/* Truncation is the contract here, as for snprintf: the return value is the
+ * length needed. gcc 16 at -O2 inlines a caller's fixed buffer and warns that
+ * the cache folder (up to 511 bytes) may not fit. */
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 7
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 PSYGFX_API int psygfx_describe(const psygfx_gfx* g, char* buf, size_t cap) {
     static const char* const dith[] = { "none", "ordered", "noise" };
+    const char* where = "off";
+    const char* unused = "";
     if (!g || !g->open) return snprintf(buf, cap, "psy_gfx: closed");
-    return snprintf(buf, cap, "psy_gfx %s: %s, %s, %dx%d, scene %s, CLUT %d%s, dither %s, %.4g px/unit, origin %s, programs %u cached / %u compiled / %u rejected",
+    if (g->cache && g->cache->load == psygfx__fc_load) where = ((const psygfx_file_cache*)g->cache->user)->dir;
+    else if (g->cache) where = "(caller)";
+    if (g->cache && (!g->caps.binary_format || !g->be->pipeline_binary)) unused = " (unused: no binary format)";
+    return snprintf(buf, cap, "psy_gfx %s: %s, %s, %dx%d, scene %s, CLUT %d%s, dither %s, %.4g px/unit, origin %s, program cache %s%s: %u hit / %u miss (%u rejected)",
                     PSYGFX_VERSION_STRING, g->be->name, g->caps.renderer, g->w, g->h,
                     g->scene_format == PSYGFX_RGBA32F ? "RGBA32F" : "RGBA16F", g->lut_n,
                     g->cal_crc ? " (calibration)" : " (identity)", dith[g->dither <= 2 ? g->dither : 0],
-                    (double)g->ppu, g->origin_top ? "top" : "bottom",
+                    (double)g->ppu, g->origin_top ? "top" : "bottom", where, unused,
                     g->progs.loaded, g->progs.compiled, g->progs.rejected);
 }
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 7
+#pragma GCC diagnostic pop
+#endif
 
 PSYGFX_API psyscr_screen* psygfx_screen(const psygfx_gfx* g) { return g && g->open ? g->screen : NULL; }
 PSYGFX_API bool psygfx_calibrated(const psygfx_gfx* g) { return g && g->open && g->calibrated; }
@@ -5885,6 +5934,91 @@ PSYGFX_API const psygfx_cache* psygfx_file_cache_init(psygfx_file_cache* fc, con
     fc->cache.store = psygfx__fc_store;
     fc->cache.user = fc;
     return &fc->cache;
+}
+
+/* Only a folder that this user alone can write: the entry hash finds
+ * damage, but anyone who can write the folder can plant an entry with a
+ * correct hash, and the driver parses the binary (PROGRAM CACHE). */
+PSYGFX_API int psygfx_default_cache_dir(char* out, size_t cap) {
+    static const char tail[] =
+#if defined(_WIN32)
+        "\\psy\\progcache";
+#elif defined(__APPLE__)
+        "/Library/Caches/psy/progcache";
+#else
+        "/psy/progcache";
+#endif
+    size_t n = 0;
+    if (!out || cap == 0) return PSYGFX_ERR_ARG;
+    out[0] = '\0';
+#if defined(__EMSCRIPTEN__)
+    (void)n; (void)tail;
+    return PSYGFX_ERR_ARG;                  /* WebGL has no program binaries */
+#elif defined(_WIN32)
+    {
+        wchar_t w[512];
+        DWORD k = GetEnvironmentVariableW(L"LOCALAPPDATA", w, 512);
+        int m;
+        /* Absolute only: a drive and a root, or a UNC path. */
+        if (k == 0 || k >= 512 || !((k >= 3 && w[1] == L':' && (w[2] == L'\\' || w[2] == L'/')) || (w[0] == L'\\' && w[1] == L'\\')))
+            return PSYGFX_ERR_ARG;
+        while (k > 3 && (w[k - 1] == L'\\' || w[k - 1] == L'/')) w[--k] = L'\0';
+        m = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)(cap < 0x7FFFFFFF ? cap : 0x7FFFFFFF), NULL, NULL);
+        if (m <= 1) { out[0] = '\0'; return PSYGFX_ERR_ARG; }
+        n = (size_t)m - 1;
+    }
+#else
+    {
+        const char* base = NULL;
+        size_t i, end;
+        uid_t me = geteuid();
+#if !defined(__APPLE__)
+        base = getenv("XDG_CACHE_HOME");
+        if (!base || base[0] != '/') base = NULL;
+#endif
+        if (!base) {
+            const char* home = getenv("HOME");
+            if (!home || home[0] != '/') return PSYGFX_ERR_ARG;
+            n = strlen(home);
+            if (n + 1 > cap) return PSYGFX_ERR_ARG;
+            memcpy(out, home, n + 1);
+#if !defined(__APPLE__)
+            if (n + 7 >= cap) { out[0] = '\0'; return PSYGFX_ERR_ARG; }
+            while (n > 1 && out[n - 1] == '/') out[--n] = '\0';
+            memcpy(out + n, "/.cache", 8);
+            n += 7;
+#endif
+        } else {
+            n = strlen(base);
+            if (n + 1 > cap) return PSYGFX_ERR_ARG;
+            memcpy(out, base, n + 1);
+        }
+        while (n > 1 && out[n - 1] == '/') out[--n] = '\0';
+        if (n + sizeof tail > cap) { out[0] = '\0'; return PSYGFX_ERR_ARG; }
+        memcpy(out + n, tail, sizeof tail);
+        /* Each part of the path that exists, from the root: refused when all
+         * users can write it (/tmp is 1777) or another user owns it (a
+         * folder planted under /tmp before the first run). */
+        end = n + sizeof tail - 1;
+        for (i = 1; i <= end; i++) {
+            if (out[i] == '/' || i == end) {
+                struct stat st;
+                char c = out[i];
+                int bad;
+                out[i] = '\0';
+                bad = stat(out, &st) == 0 && ((st.st_mode & S_IWOTH) != 0 || (st.st_uid != me && st.st_uid != 0));
+                out[i] = c;
+                if (bad) { out[0] = '\0'; return PSYGFX_ERR_ARG; }
+            }
+        }
+        return PSYGFX_OK;
+    }
+#endif
+#if defined(_WIN32)
+    if (n + sizeof tail > cap) { out[0] = '\0'; return PSYGFX_ERR_ARG; }
+    memcpy(out + n, tail, sizeof tail);
+    return PSYGFX_OK;
+#endif
 }
 
 PSYGFX_API void psygfx_reset_state(psygfx_gfx* g) {

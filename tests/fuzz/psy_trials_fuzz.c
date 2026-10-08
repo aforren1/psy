@@ -2,8 +2,8 @@
  * and a run. The first input byte is the participant number, the rest is
  * rules text applied with psytr_rules() against a fixed table; when the
  * rules parse, psytr_open() runs with a small repair budget, then up to 300
- * trials with re-queues, psytr_format_rules() and psytr_format_meta(), and
- * a save and load of the session. Every input must return without a
+ * trials with re-queues, every jitter's draw (v0.2.1), psytr_format_rules()
+ * and psytr_format_meta(), and a save and load of the session. Every input must return without a
  * sanitizer report; a refusal is a correct answer.
  *
  * libFuzzer, MSVC 2022 x64 (from the repository root, in a vcvars shell):
@@ -76,6 +76,8 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     g_sink += (unsigned)psytr_format_rules(&g_t, g_buf, sizeof(g_buf));
     g_sink += (unsigned)psytr_format_meta(&g_t, g_buf, sizeof(g_buf));
     for (i = 0; i < 300 && psytr_next(&g_t, &ti) >= 0; i++) {
+        int j;
+        for (j = 0; j < 4; j++) g_sink += (unsigned)psytr_jitter(&g_t, ti.index, j).ns;
         if (i == 40) {
             /* A save and a load mid-run, then the loaded copy continues. */
             len = psytr_save(&g_t, g_snap, sizeof(g_snap));
@@ -111,6 +113,9 @@ int main(int argc, char** argv) {
         "# comment\nmin_gap word=\"new york\" 2\norder constrained\nreps 4\nblock_size 6\nwarmup 1\nrequeue_gap 2\n",
         "order constrained\nreps 3\npreceded_by target b a\nmax_in_window @row=4 3 1\nfirst_not contrast=0\n",
         "order constrained\ncond_reps 1 2 0 3 1 1\nno_transition target a b\nspan_blocks\nblock_size 4\n",
+        "order full_random\nreps 2\njitter iti uniform 0.8 1.2 rate=60000/1001\njitter fp exponential 0.5 2 0.4\n",
+        "order random\nreps 2\njitter soa choice 0.1 0.2 0.4 rate=60\njitter w exponential contrast 1 0.2 rate=120\n",
+        "order sequential\nreps 1\npractice 2\njitter a uniform contrast n\nrequeue_gap 1\n",
     };
     size_t i;
     char path[1024];

@@ -1,0 +1,34 @@
+Subject: [PATCH] layout: do not merge layout runs across bidi levels or in RTL
+
+skb__line_append_shaping_run() merged a shaping run into the previous
+layout run when direction, font and content run were equal. It did not
+compare the bidi level, and it merged RTL runs:
+
+- A level-2 LTR run (a number after Arabic) merged with a following
+  level-0 LTR run, so the reorder moved the rest of the line with the
+  number. "The word <Arabic phrase> 123 means hello world." showed the
+  Arabic phrase after "world.".
+- In an RTL paragraph, the space after a Latin word is an RTL shaping run
+  of script Latin. It merged with the next RTL run, and the merged run's
+  glyph range dropped glyphs: "<mE> English <waw> 123" lost the waw.
+
+Found and checked against Chromium by psy's layout probe
+(docs/layout_probe.md, section 2.3). Applies to skribidi dee63d6.
+
+diff --git a/src/skb_layout.c b/src/skb_layout.c
+index bdc692b..d25c842 100644
+--- a/src/skb_layout.c
++++ b/src/skb_layout.c
+@@ -1030,7 +1030,11 @@ static skb_layout_run_t* skb__line_append_shaping_run(skb_layout_t* layout, skb_
+ 	if (cur_layout_run) {
+ 		// Note: we're not using script here as might cause too many splits e.g. for Hira/Hani sequences, which come from same font, but different script.
+ 		// Text direction is important due to how cluster vs glyphs are arranged.
+-		if (shaping_run->direction == cur_layout_run->direction && shaping_run->font_handle == cur_layout_run->font_handle && shaping_run->content_run_idx == cur_layout_run->content_run_idx) {
++		if (shaping_run->direction == cur_layout_run->direction
++			&& !skb_is_rtl(shaping_run->direction)
++			&& shaping_run->bidi_level == cur_layout_run->bidi_level
++			&& shaping_run->font_handle == cur_layout_run->font_handle
++			&& shaping_run->content_run_idx == cur_layout_run->content_run_idx) {
+ 			// Must be adjacent to the current run
+ 			if (cluster_range.start == cur_layout_run->cluster_range.end) {
+ 				cur_layout_run->cluster_range.end = cluster_range.end;

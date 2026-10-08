@@ -9,11 +9,14 @@
  * flicker: the display may be somebody's working screen.
  *
  * Usage: gfx_load [--sim] [--gabors N] [--dots N] [--seconds S] [--composition]
- *                 [--topmost] [--allocs | --allocs-control]
+ *                 [--topmost] [--allocs | --allocs-control] [--cache DIR] [--no-cache]
  *   --topmost         keep the window on top and take the foreground (Windows)
  *   --allocs          count C runtime heap calls in the frame loop after
  *                     frame 30 (MSVC debug builds)
  *   --allocs-control  the same, with one malloc per frame the count must see
+ *   --cache DIR       keep compiled programs in DIR; the default is the
+ *                     per-user folder of psygfx_default_cache_dir()
+ *   --no-cache        compile every program; read and write no cache file
  * Exit code: 0, 1 when the screen or the gfx did not open, 2 for a bad
  * argument.
  */
@@ -81,7 +84,11 @@ int main(int argc, char** argv) {
     double seconds = 10;
     long dropped = 0, late = 0, flips = 0;
     uint32_t seed = 1;
-    char line[400];
+    static psygfx_file_cache pcache;
+    static char cache_dir[512];
+    const psygfx_cache* cache = NULL;
+    int no_cache = 0;
+    char line[640];
 
     memset(&sd, 0, sizeof sd);
     sd.windowed = true;
@@ -94,12 +101,19 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--topmost")) topmost = 1;
         else if (!strcmp(argv[i], "--allocs")) allocs = 1;
         else if (!strcmp(argv[i], "--allocs-control")) allocs = 2;
+        else if (!strcmp(argv[i], "--cache") && i + 1 < argc && (cache = psygfx_file_cache_init(&pcache, argv[i + 1])) != NULL) i++;
+        else if (!strcmp(argv[i], "--no-cache")) no_cache = 1;
         else {
             fprintf(stderr, "usage: gfx_load [--sim] [--gabors N] [--dots N] [--seconds S] [--composition] "
-                            "[--topmost] [--allocs | --allocs-control]\n");
+                            "[--topmost] [--allocs | --allocs-control] [--cache DIR] [--no-cache]\n");
             return 2;
         }
     }
+    /* The per-user folder unless told otherwise, so that a second run loads
+     * the programs instead of compiling them (PROGRAM CACHE). */
+    if (no_cache) cache = NULL;
+    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
+        cache = psygfx_file_cache_init(&pcache, cache_dir);
     if (n_gabors < 0 || n_gabors > 1000 || n_dots < 0 || n_dots > 100000 || !(seconds > 0)) {
         fprintf(stderr, "gfx_load: gabors 0..1000, dots 0..100000, seconds > 0\n");
         return 2;
@@ -114,6 +128,7 @@ int main(int argc, char** argv) {
     gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.5f;
     gd.max_draws = 1024;
+    gd.cache = cache;
     if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_load: %s\n", psygfx_error(&gfx)); return 1; }
     psyscr_describe(&scr, line, sizeof line);
     printf("%s\n", line);

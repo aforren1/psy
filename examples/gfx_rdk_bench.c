@@ -18,7 +18,11 @@
  * GPU. Nothing is shown. Take the measurement lock first.
  *
  * Usage: gfx_rdk_bench [--device hardware|warp|swiftshader|mesa|llvmpipe]
- *                      [--size W H] [--frames N] [--only NAME]
+ *                      [--size W H] [--frames N] [--only NAME] [--cache DIR]
+ *                      [--no-cache]
+ *   --cache DIR  keep compiled programs in DIR; the default is the per-user
+ *                folder of psygfx_default_cache_dir(), when there is one
+ *   --no-cache   compile every program; read and write no cache file
  * Exit code: 0, 1 when no GL ES 3.0 context opened or a call failed, 2 for
  * a bad argument.
  * On Windows set PSYSCR_ANGLE_DIR to ANGLE's directory.
@@ -161,7 +165,10 @@ int main(int argc, char** argv) {
     psygfx_gabor_desc gbd;
     psygfx_instances_desc id;
     psyscr_proc p;
-    int i, round;
+    static psygfx_file_cache pcache;
+    static char cache_dir[512];
+    const psygfx_cache* cache = NULL;
+    int i, round, no_cache = 0;
     hl.device = PSYGFX_HL_HARDWARE;
 #if !defined(_WIN32)
     hl.device = PSYGFX_HL_MESA;
@@ -181,12 +188,21 @@ int main(int argc, char** argv) {
             FRAMES = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--only") && i + 1 < argc) {
             only = argv[++i];
+        } else if (!strcmp(argv[i], "--cache") && i + 1 < argc && (cache = psygfx_file_cache_init(&pcache, argv[i + 1])) != NULL) {
+            i++;
+        } else if (!strcmp(argv[i], "--no-cache")) {
+            no_cache = 1;
         } else {
             fprintf(stderr, "usage: gfx_rdk_bench [--device hardware|warp|swiftshader|mesa|llvmpipe] [--size W H] "
-                            "[--frames N] [--only NAME]\n");
+                            "[--frames N] [--only NAME] [--cache DIR] [--no-cache]\n");
             return 2;
         }
     }
+    /* The per-user folder unless told otherwise, so that a second run loads
+     * the programs instead of compiling them (PROGRAM CACHE). */
+    if (no_cache) cache = NULL;
+    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
+        cache = psygfx_file_cache_init(&pcache, cache_dir);
     if (W < 256 || H < 256 || FRAMES < 10 || FRAMES > MAXF) { fprintf(stderr, "gfx_rdk_bench: bad size or frames\n"); return 2; }
     hl.w = W; hl.h = H;
     memset(&d, 0, sizeof d);
@@ -201,6 +217,7 @@ int main(int argc, char** argv) {
     gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.5f;
     gd.max_instances = MAXN;
+    gd.cache = cache;
     if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_rdk_bench: %s\n", psygfx_error(&gfx)); return 1; }
     buf_a = psygfx_buffer(&gfx, sizeof xy);
     buf_b = psygfx_buffer(&gfx, sizeof xy);
@@ -215,7 +232,7 @@ int main(int argc, char** argv) {
     gab_tmpl = psygfx_gabor(&gbd);
     psygfx_inst_grid(items, MAXN, 1, 0, 0);
     {
-        char line[400];
+        char line[640];
         psygfx_describe(&gfx, line, sizeof line);
         printf("%s\npsy_rdk.h %s; %d frames a row; CPU in us, GPU ms per frame\n\n", line, psyrdk_version(), FRAMES);
     }

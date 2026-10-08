@@ -1,6 +1,8 @@
 # psy_trials.h design
 
-Status: **v0.2.0, implemented, 2026-10-07.** v0.2 adds conditions files
+Status: **v0.2.1, implemented, 2026-10-07.** v0.2.1 adds jitter: a
+duration drawn per trial, logged and replayed (see "v0.2.1: jitter in the
+trial handler" and "Verification and cost (v0.2.1)"). v0.2 adds conditions files
 and trial lists as tables (psy_table.h, docs/psy_table.md), order lists,
 draws with replacement, subsets, blocked and alternating groups in
 Latin-square order, units ("b always follows a"), first-order transition
@@ -428,6 +430,111 @@ fields and the rules text, and adds the commands `table`, `latin`,
 `balance`, `chunk`, `followed_by`, `preceded_by`, `values`, `table_info`
 and `format_rules`. Both builds stage psy_table.h beside psy_trials.h.
 
+### v0.2.1: jitter in the trial handler
+
+A foreperiod, an inter-trial interval or an SOA that varies from trial
+to trial is a random draw like the order, so it belongs to the same
+generator and the same contract (rig_spec 14.7 rank 9). In the session
+it gets three things a caller's own draw does not: `psytr_restore()` and
+`psytr_load()` reproduce it, the data line logs it, and a table column
+can set its interval per condition. The header draws and logs; the
+caller waits.
+
+Decisions, each with its reason:
+
+- Seconds, the user's unit for definitions and data (decided
+  2026-10-07), with `ns` as int64 for a clock and `frames` for a snapped
+  draw. A draw is a whole number of nanoseconds; `s` is that number
+  over 1e9, correctly rounded. The data line prints the seconds as the
+  exact decimal of `ns` (`1.184516667`), so the logged value is the value
+  waited.
+- One variate per jitter per trial. No rejection loop, so the generator's
+  position after a trial does not depend on the values drawn, and a
+  mutant or a bug that changes a value cannot shift the later draws.
+- Integer arithmetic only, from the variate's 53 bits. The first version
+  mapped the exponential through the C library's `log1p` and `expm1`, and
+  the libraries round those differently: over 1,000,000 draws the
+  doubles' bits differed between glibc 2.35, mingw-w64 and the UCRT,
+  though the nanoseconds agreed. Agreement on a sample is not a
+  guarantee (a last-bit difference can flip a rounding on some draw),
+  and the Python binding must regenerate a Windows session exactly, so
+  the coordinator asked for psy_rdk.h's standard: the same bits on every C
+  library, compiler and flag set. Every draw is now integer arithmetic,
+  with no libm call and no floating-point operation that -Ofast,
+  /fp:fast or FMA contraction could change; the seconds-to-nanoseconds
+  conversion reads the double's bits. Golden digests of 200,000 draws of
+  each kind are checked by the test on every CI platform and by
+  `tests/adapt/psy_trials_jitter_repro.c` under -O3 -march=native and
+  -Ofast.
+- The exponential is the untruncated inverse CDF, E = s (-ln(1 - u)),
+  folded into the interval: lo + (E mod (hi - lo)). The exponential is
+  memoryless, so the folded value is exactly the truncated exponential,
+  and no exp() is needed, only one logarithm. The cost is that the map is
+  no longer monotone in u; nothing in the header needs it to be.
+- -ln(1 - u) is a Q58 fixed-point logarithm: y = 1 - u as m 2^e, m
+  times a table reciprocal of 1 + i/128 (i its next 7 bits, rounded up
+  so 0 <= t < 2^-7), and ln(1 + t) by an integer Horner series of degree
+  8. The 128 reciprocals and their logarithms come from mpmath at 300
+  bits (`tests/compare/trials_jitter_ref.py tables`). Error by analysis
+  under 2^-57; measured 0.71 x 2^-58 at worst over 1,000,000 values
+  against mpmath (`trials_jitter_ref.py check` on the output of
+  `tests/compare/trials_jitter_dump.c`), and the test checks 123 points
+  within 1 unit of the rounded reference. The duration is then within
+  0.5 ns + s x 7e-18 of s (-ln(1 - u)) for the variate's 53 bits.
+- 128-bit products and quotients use the compiler's `unsigned __int128`,
+  or MSVC's `_umul128` and `_udiv128`, where they exist, and 32-bit
+  pieces elsewhere. Both give the same exact integers; the test and the
+  digests also run with the pieces forced (`-DPSYTR__NO_U128`).
+- The jitter draws come after all of next()'s own draws for the trial,
+  and open() draws none. A desc without jitters therefore draws exactly
+  as v0.2.0 did (the v0.2.0 pins below), and a desc with jitters has the
+  schedule it would have without them; the test checks both by logging
+  the generator.
+- Three distributions. UNIFORM is the common case. CHOICE covers a list
+  of SOAs or a hand-made distribution (repeat a value to weight it).
+  EXPONENTIAL truncated to [lo, hi] is the non-aging foreperiod: its
+  constant hazard keeps the observer's expectancy flat. Normal, log-normal
+  and gamma foreperiods were left out: their hazards rise, which is the
+  aging the exponential exists to avoid, and CHOICE can approximate any of
+  them.
+- Snapping draws the frame, not a continuous value then rounded.
+  Rounding a uniform draw gives the two end frames half the weight of the
+  others; drawing the frame index makes every whole frame in [lo, hi]
+  equally likely. The snapped exponential is a geometric over the frames,
+  exactly memoryless on the frame grid.
+- A frame is inside [lo, hi] when its time rounded to the nanosecond
+  is, computed in integers. In binary 0.07 x 100 is 7.000000000000001 and
+  0.29 x 100 is 28.999999999999996, so a floating-point test would drop
+  the frames at 0.07 s and 0.29 s; the first version needed a tolerance
+  of 1e-9 frames for that, which integer arithmetic made unnecessary.
+  Mutants j-01 and j-02 check both ends. No frame inside is an error at
+  open that names the rate and the interval.
+- Storage: 8 bytes per trial per jitter, PSYTR_MAX_JITTERS (4) of them,
+  so the handle grew from 110528 to 243344 bytes; `-DPSYTR_MAX_JITTERS=1`
+  makes it 143744. Storing the variate instead costs the same, and
+  recomputing the value on access would run the inverse CDF on every
+  read.
+- The call level (`psytr_jitter_draw`, `psytr_jitter_map`) touches no
+  session. A draw from the session's generator between next() and
+  update() would move every later draw and `psytr_restore()` would not
+  repeat it, so the manual sends replayable designs to `desc.jitters`.
+
+The hazard of the snapped exponential, 0.5 to 2.0 s, scale 0.4 s, at 60
+Hz, measured by the test on 1,000,000 draws as count(k) / count(>= k):
+
+| Quantity | Value |
+|---|---|
+| Flat per-frame hazard, 1 - e^-(T/s) | 0.04081 (2.4486 /s against 1/s = 2.5 /s; 2.1 % low) |
+| Truncation factor 3 s before hi, 1 / (1 - e^-3) (theory) | 1.052 |
+| Measured per-frame hazard against flat, up to 0.8 s (hi - 3 s) | within 6.2 % |
+| Measured against the truncated geometric's exact hazard, while at least 20,000 draws survive (to 1.75 s) | within 4.4 % (sampling noise) |
+| Mass the truncation moves from beyond hi into [lo, hi], e^-(hi-lo)/s | 2.4 % |
+
+Snapping itself adds no deviation from a flat per-frame hazard; the
+deviation is the truncation's, as for the continuous distribution, and
+it is under 6 % until 3 scales before hi.
+
+
 ## Verification (v0.2)
 
 All on Windows 11 with MinGW-w64 gcc 16.1 (C11, C99, C++17, warnings as
@@ -524,6 +631,101 @@ the subset's check of the remaining counts went from O(n k) to a
 histogram (30 ms to 0.2 ms for 5,000 of 10,000), and draws with
 replacement from a linear scan to bisection (39 ms to 1 to 2 ms).
 
+
+## Verification and cost (v0.2.1)
+
+All on Windows 11 with MinGW-w64 gcc 16.1 (C11, C99, C++17, warnings as
+errors) and MSVC 19.44 (/W4 /WX, C and C++17), on Linux (WSL2) with gcc
+11.4 as C11 and C++17 under AddressSanitizer and
+UndefinedBehaviorSanitizer, and at `PSYTR_MAX_TRIALS` 256 and
+`PSYTR_MAX_JITTERS` 1.
+
+- Bit identity of the jitter draws: `tests/adapt/psy_trials_jitter_golden.h`
+  digests 200,000 draws of each of six kinds (uniform, choice and the
+  truncated exponential, each continuous and snapped). The test checks
+  them, so CI checks them on Linux (gcc, clang), macOS arm64, Windows MSVC
+  and MinGW; CI also builds `tests/adapt/psy_trials_jitter_repro.c` with
+  -O3 -march=native (-mcpu=native on macOS), -Ofast and -Ofast native.
+  By hand: MinGW gcc 16.1 at -O0, -O2, -O3 -march=native, -Ofast, -Ofast
+  -march=native -ffp-contract=fast; MSVC 19.44 at /Od, /O2, /O2 /fp:fast,
+  /O2 /arch:AVX2 /fp:fast; WSL gcc 11.4 at -O2, -O3 -march=native,
+  -Ofast, -Ofast -march=native, with ASan and UBSan, and as C++ at -Ofast;
+  each with the 128-bit types and with `-DPSYTR__NO_U128`: every digest
+  the same. The Python binding computes the same six digests from
+  `pt.splitmix` and `pt.jitter_map` in its tests.
+- The fixed-point logarithm against mpmath: 0.71 x 2^-58 at worst over
+  1,000,000 values; 123 points checked by the test within 1 unit of the
+  rounded reference; the conversions (seconds to nanoseconds from the
+  double's bits, frames to nanoseconds, the frames inside an interval)
+  against exact values, including a frame at 0.5 ns that rounds outside.
+- Bit identity of v0.2.0: `tests/adapt/psy_trials_pins_v02.h` holds the
+  hashes of 320 sessions (16 v0.2 designs x 20 seeds, through the v0.1 pin
+  script: re-queues, marked breaks, records, a mid-session snapshot, the
+  tallies and the format lines but the version token), generated by
+  v0.2.0 (`psy_trials_pin_gen.c -DPIN_V02`). They and the 600 v0.1.1 pins
+  match on every build above. The v0.2 digest now leaves out the rules
+  text's version line, and v0.2.0 and v0.2.1 give the same value.
+- `tests/adapt/psy_trials_test_jitter.h`: every refusal by name; values
+  at fixed variates and frame ends (frames 7 and 29 for [0.07, 0.29] s at
+  100 Hz); each distribution against its CDF on 200,000 draws (the
+  snapped exponential on 1,000,000), worst chi-square at 0.80 of its
+  99.9 % bound, and the truncated exponential's mean within 5 standard
+  errors; 20,000 random intervals and rates whose snapped draws stay
+  inside; `ns` against k x den x 1e9 / num in integer arithmetic; the draw
+  order against a logged generator (open() draws none, each trial's own
+  draws are those of the same session without jitters, then one per
+  jitter; the pending trial draws none); `psytr_restore()` and
+  save/load at cut points (format 3) reproduce every draw and data line;
+  per-condition columns and their 9 refusals; the rules text round trip
+  and 12 messages.
+- Fuzzing: `tests/fuzz/psy_trials_fuzz.c` now reads every jitter's draw
+  each trial and seeds three jitter rule texts. MSVC 19.44 libFuzzer with
+  AddressSanitizer, 1201 s from its 18 seeds with the first (libm)
+  version: 9,003,538 inputs; then 601 s more on that corpus with the
+  integer version: 4,221,162 inputs, 9353 coverage features, 2495 corpus
+  files. No crash and no timeout; the corpus replayed on Linux gcc 11.4
+  under ASan and UBSan, C11 and C++17, with no report.
+- Mutations: 18 jitter mutants in `tests/mutate/trials.toml`, all killed
+  (47 in the file, all as expected), among them both frame ends, the
+  fold into the interval, the log series' sign, the ln 2 count, the
+  rounding of seconds and of frames to nanoseconds, and the seconds as a
+  product with 1e-9 instead of a division. j-10 (the data line without
+  zero padding) survived its first run; the test now checks a 2 s draw
+  prints as `2.000000000`. A mutant that skipped normalizing the frame
+  scale to 63 bits survived as equivalent, and the normalization was
+  removed (62 bits are kept).
+- Python binding: 156 tests pass (4 for jitter: the session and its
+  replay, columns, rules and errors, `jitter_map` against the maps
+  written from their definitions, and the six golden digests). MEX: `test_mex.m` passes in
+  MATLAB R2023a and Octave 10.1, the jitter part included.
+
+Cost, measured on the Iris Xe laptop, AC, the measurement lock held,
+2026-10-07, `examples/trials_bench.c`, 21 rounds:
+
+| Measure | gcc 16.1 -O2 | MSVC 19.44 /O2 |
+|---|---|---|
+| `psytr_jitter_draw`, uniform snapped to 60000/1001 Hz, median | 66.0 ns | 53.8 ns |
+| exponential snapped, median | 81.6 ns | 108.6 ns |
+| exponential, median | 32.4 ns | 62.1 ns |
+| choice of 4, median | 12.4 ns | 15.5 ns |
+| next() + update(), units design with 5 % re-queues, mean / worst | 0.05 / 4.3 us | 0.05 / 3.0 us |
+| the same with 4 jitters, mean / worst | 0.16 / 5.2 us | 0.20 / 4.8 us |
+
+The draws include a splitmix step and the desc check that
+`psytr_jitter_draw` repeats on every call; a session's draws skip it.
+The snapped kinds pay for 128-bit divisions (the frames inside the
+interval, then the frame's nanoseconds). Measured on the way: with the
+divisions as a bit-by-bit loop the snapped draws took 580 to 680 ns
+(gcc), and with MSVC's 128-bit product from 32-bit pieces the
+exponential took 88 ns, so the header uses the compilers' 128-bit types
+and `_umul128` / `_udiv128` where they exist. The first, libm version
+took 47 / 25 ns (uniform snapped), 149 / 50 ns (exponential snapped),
+118 / 34 ns (exponential) and 26 / 18 ns (choice). The larger handle costs a design
+without jitters nothing measurable: the v0.2.0 bench, built against the
+v0.2.0 header and against v0.2.1 (4 slots and 1) and run interleaved
+twice under the lock, gave open() medians within 0.01 ms for the cheap
+designs and within 0.2 ms (3 %, inside the run-to-run spread) for the
+units design.
 
 ## Verification (v0.1)
 

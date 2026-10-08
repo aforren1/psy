@@ -1,7 +1,10 @@
 
 # psy_screen.h mutants: the v0.3.1 list (aborts, panic, icon), the 12 of the
-# 41 that psy_screen.h's header comment counts. The 29 earlier mutants
-# (docs/psy_screen.md, "Mutations") were run from scripts that were not kept.
+# 41 that psy_screen.h's header comment counts, v0.3.2's 2 (text input,
+# both killed on 2026-10-07), v0.3.3's 5 (input), v0.3.4's 3 (devices),
+# v0.3.5's 5 (raw mice; the 2 on its queue went with the queue) and
+# v0.4.0's 6 (the input bridge). The 29 earlier mutants (docs/psy_screen.md,
+# "Mutations") were run from scripts that were not kept.
 header = "psy_screen.h"
 
 [test.screen]
@@ -108,3 +111,182 @@ test = "screen"
 why = "Entries written over in the 16-entry lock-free log must be skipped, not reported with another entry's data."
 find = '        if (s1 != k || psyscr__a_load(&e->seq) != k) continue;   /* written over: lost */'
 replace = ''
+
+[[mutant]]
+id = "text-00"
+name = "text input flag not set"
+test = "screen"
+why = "Flips planned while text input is on must say so: their keys came from the message path, not the raw timed path (v0.3.2)."
+find = '    if (s->text_input) flags |= PSYSCR_FLIP_TEXT_INPUT;'
+replace = ''
+
+[[mutant]]
+id = "text-01"
+name = "text input record per call"
+test = "screen"
+why = "The ring gets a text-input record per change of on or off, not per caret move (v0.3.2)."
+find = '    if (s->text_input == on) return;'
+replace = ''
+
+[[mutant]]
+id = "input-00"
+name = "raw keyboard inverted"
+test = "screen"
+why = "psy_response.h labels key stamps by caps.raw_keyboard; a screen with no window has no raw keyboard path (v0.3.3)."
+find = '    out->raw_keyboard = psyscr__raw_keyboard(s);'
+replace = '    out->raw_keyboard = !psyscr__raw_keyboard(s);'
+
+[[mutant]]
+id = "input-01"
+name = "gamepads on by default"
+test = "screen"
+why = "Every earlier default stays: the gamepad subsystem starts only when asked (v0.3.3)."
+find = '{ "gamepads",        "bool", 0, 1, 0, "",'
+replace = '{ "gamepads",        "bool", 0, 1, 1, "",'
+
+[[mutant]]
+id = "input-02"
+name = "abort merge 30 ms"
+test = "screen"
+why = "A key injected by virtual key comes twice, up to 34.2 ms apart; at 30 ms two presses through a remote-desktop or assistive tool count as four and end the program (v0.3.3)."
+find = '#define PSYSCR__AB_SAME_NS  50000000'
+replace = '#define PSYSCR__AB_SAME_NS  30000000'
+
+[[mutant]]
+id = "input-03"
+name = "text input not observed"
+test = "screen"
+why = "Another library (Dear ImGui's SDL3 backend) can start text input; its keys then come 11.4 ms late, and the record must say so (v0.3.3)."
+find = '        int ti = PSYSCR__TEXT_INPUT_ACTIVE(s);'
+replace = '        int ti = s->text_input;'
+
+[[mutant]]
+id = "input-04"
+name = "observed change not marked external"
+test = "screen"
+why = "The ring record must tell a change the program made from one another library made (v0.3.3)."
+find = '        if (ti != s->text_input) psyscr__text_input_set(s, ti, 1, 0, 0, 0, 0);'
+replace = '        if (ti != s->text_input) psyscr__text_input_set(s, ti, 0, 0, 0, 0, 0);'
+
+[[mutant]]
+id = "dev-00"
+name = "a device logged twice"
+test = "screen"
+why = "SDL sends ADDED events for devices it listed at open; one record per change keeps the device list readable (v0.3.4)."
+find = '        if (at >= 0) return;'
+replace = ''
+
+[[mutant]]
+id = "dev-01"
+name = "a removal of an unknown device logged"
+test = "screen"
+why = "A removal is logged once, for a device that was there (v0.3.4)."
+find = '        if (at < 0) return;'
+replace = ''
+
+[[mutant]]
+id = "dev-02"
+name = "device name not cut"
+test = "screen"
+why = "The name has 24 bytes in the record; a longer one must be cut, not run past the payload (v0.3.4)."
+find = '    if (n > 23) n = 23;'
+replace = '    if (n > 24) n = 24;'
+
+[[mutant]]
+id = "rm-00"
+name = "raw mouse up and down swapped"
+test = "screen"
+why = "RI_MOUSE_*_DOWN is the even bit of each pair; a swap reports releases as presses (v0.3.5)."
+find = '''        if (bflags & (1u << (2 * i))) e->down |= button[i];
+        if (bflags & (2u << (2 * i))) e->up |= button[i];'''
+replace = '''        if (bflags & (2u << (2 * i))) e->down |= button[i];
+        if (bflags & (1u << (2 * i))) e->up |= button[i];'''
+
+[[mutant]]
+id = "rm-03"
+name = "relative mode suspends every frame"
+test = "screen"
+why = "The SUSPENDED record is written once per relative-mode period, not every frame (v0.3.5)."
+find = '''        if (*suspended) return 0;
+        *suspended = 1;'''
+replace = '''        *suspended = 1;'''
+
+[[mutant]]
+id = "rm-04"
+name = "lost registration not renewed"
+test = "screen"
+why = "After SDL's relative mode ends, nobody is registered for mice; the reader must register again (v0.3.5)."
+find = '    return registered ? 0 : (int)PSYSCR_RAW_MICE_REGISTERED;'
+replace = '    return registered * 0;'
+
+[[mutant]]
+id = "rm-05"
+name = "unlisted mouse not flagged"
+test = "screen"
+why = "Reports from devices SDL does not list (31 HID mouse collections here, 3 listed) must be told apart (v0.3.5)."
+find = '        if (s->rm_unlisted[i] == device) return 1;'
+replace = '        if (s->rm_unlisted[i] == device) return 0;'
+
+[[mutant]]
+id = "rm-06"
+name = "raw mice accepted on the simulated display"
+test = "screen"
+why = "No reader runs without a window on Windows; open() must say so instead of delivering nothing (v0.3.5)."
+find = '    return "desc.raw_mice is Windows only, with a window";'
+replace = '    return NULL;'
+
+[[mutant]]
+id = "br-00"
+name = "overwrites not counted"
+test = "screen"
+why = "A record overwritten before anyone decoded it is a lost event; the ring record and the stats must count it (v0.4.0)."
+find = '    if (psyscr__a_load(&sl->state) == 1) psyscr__a_inc(&psyscr__in.overwritten);'
+replace = ''
+
+[[mutant]]
+id = "br-01"
+name = "decode ignores the sequence"
+test = "screen"
+why = "A doorbell must find its own record: decoded late or out of order, it must not take another producer's (v0.4.0)."
+find = '''    if (psyscr__a_load(&sl->seq) != seq) return 0;
+    copy = sl->e;
+    o = sl->origin;
+    if (psyscr__a_load(&sl->seq) != seq) return 0;           /* torn: rewritten meanwhile */'''
+replace = '''    copy = sl->e;
+    o = sl->origin;'''
+[[mutant.also]]
+find = '''    if (!psyscr__a_cas(&sl->state, 1, 2)) return psyscr__a_load(&sl->seq) == seq ? -1 : 0;
+    if (psyscr__a_load(&sl->seq) != seq) return 0;'''
+replace = '''    if (!psyscr__a_cas(&sl->state, 1, 2)) return psyscr__a_load(&sl->seq) == seq ? -1 : 0;'''
+
+[[mutant]]
+id = "br-02"
+name = "a record decoded twice"
+test = "screen"
+why = "Each record is delivered once; a second decode of its doorbell must return nothing (v0.4.0)."
+find = '    if (!psyscr__a_cas(&sl->state, 1, 2)) return psyscr__a_load(&sl->seq) == seq ? -1 : 0;'
+replace = '    psyscr__a_store(&sl->state, 2);'
+
+[[mutant]]
+id = "br-03"
+name = "refused doorbells never rung again"
+test = "screen"
+why = "When SDL's queue is full, the record waits and its doorbell must be pushed again, or the event never reaches the loop (v0.4.0)."
+find = '        if (!PSYSCR__DOORBELL(seq)) { waiting = 1; break; }'
+replace = '        waiting = 1; break;'
+
+[[mutant]]
+id = "br-04"
+name = "lost decodes not counted"
+test = "screen"
+why = "A doorbell whose record was overwritten is a lost event; the count goes in the ring record (v0.4.0)."
+find = '    if (r == 0) psyscr__a_inc(&psyscr__in.lost);'
+replace = ''
+
+[[mutant]]
+id = "br-05"
+name = "the loss record every frame"
+test = "screen"
+why = "The PSYSCR_EV_INPUT_LOST record is written when a count moves, not every frame (v0.4.0)."
+find = '    if (v[0] == psyscr__in.logged[0] && v[1] == psyscr__in.logged[1] && v[2] == psyscr__in.logged[2]) {'
+replace = '    if (0) {'

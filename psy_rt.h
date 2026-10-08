@@ -1,8 +1,9 @@
-/* psy_rt.h - v0.5.0 - public domain single-header real-time timing library
+/* psy_rt.h - v0.6.0 - public domain single-header real-time timing library
  *
  *   The clock, the waits, the scheduling ladder, the one-shot deadline
  *   worker, the background-compute pump, the event ring, the clock
- *   correlation and the instrumentation macros that a psychophysics rig
+ *   correlation, the device clock fit and the instrumentation macros that a
+ *   psychophysics rig
  *   needs, factored out of the transport headers so experiment code and
  *   future transports share one clock base and one set of timing claims.
  *
@@ -18,6 +19,17 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.6.0 - The device clock fit: psyrt_fit maps a device's own counter
+ *          (a response box's ms timer, a board's micros(), a tracker's
+ *          clock) to the psy_rt clock from (ticks, host time) pairs. Three
+ *          estimators: LATE (the lower envelope, for stamps that are late
+ *          and never early), BRACKET (the least late of bracketed reads,
+ *          wide brackets refused) and UNBIASED (least squares). Counter
+ *          unwrap, a restart on a clock reset, a fixed window of 1024
+ *          points, no allocation. With a ring it logs the thinned pairs
+ *          (PSYRT_KIND_CLOCK) and each fit (PSYRT_KIND_FIT, new) for an
+ *          offline refit. PSYRT_SRC_DEVICE (12) reserved for psy_device.h.
+ *          See DEVICE CLOCK FIT. Nothing else changed.
  *   v0.5.0 - The event ring: psyrt_ring, a wait-free ring of 64-byte
  *          psyrt_event records in memory the caller supplies, pushed from
  *          any number of threads (an audio callback included) and drained
@@ -122,7 +134,31 @@
  *          now builds this header without /std:c11.
  *   v0.1 - first release.
  *
- *   STATUS: v0.5.0. The event ring, the correlation and the macros (v0.5.0)
+ *   STATUS: v0.6.0. The device clock fit (v0.6.0) is built with warnings
+ *   as errors by MSVC 19.44 (/W4 /WX, C11 and C++17), MinGW-w64 gcc 16.1
+ *   (C99, C11, C++17) and gcc 11.4 on WSL2 (C99, C++17), and its tests in
+ *   tests/adapt/psy_rt_test_fit.h pass on all three, also under ASan and
+ *   UBSan on WSL2. They run seeded synthetic devices against the true line
+ *   (computed in long double) and against a brute-force envelope and the
+ *   closed form of least squares (both within 2 ns). Map minus truth at
+ *   each new pair's tick, over four seed sets, from 10 s on and (in
+ *   brackets) from 205 s on, when the window is full: LATE, a ms timer at
+ *   100 pairs a second behind a 1 ms USB frame, an exponential tail, 16 ms
+ *   bursts and 60 to 200 ms stalls, -75 to +240 us (-47 to +91); LATE, a
+ *   us counter that wraps, -12 to +46 us (-5 to +18); BRACKET, 0.4 to 3 ms
+ *   brackets every 100 ms, -327 to +628 us (-42 to +110); UNBIASED, SD
+ *   115 us, -23 to +22 us (-5 to +7); LATE, a press every 2 to 4 s behind a
+ *   16 ms latency timer, up to +8.7 ms at 2 min and -1.4 to +3.2 ms from
+ *   205 s. Before the slope (the first 5 s), a 500 ppm clock: -541 to +160
+ *   us at the pair, -641 to +60 us 200 ms ahead. Rates within 0.9 ppm of
+ *   the truth at the end of each run. A counter reset gives
+ *   one restart 1.0 to 1.3 s later; a 300 ms stall gives none. With a full
+ *   window a pair costs 0.1 us at p99 without a refit, and a refit 9 to 23
+ *   us at p50 (up to 50 us max; one per 200 ms bucket), measured with gcc
+ *   and MSVC on the laptop below. 17 of 17 mutants are caught
+ *   (tests/mutate/rt.toml). No device has fed it: every number here is
+ *   synthetic.
+ *   v0.5.0's event ring, the correlation and the macros (v0.5.0)
  *   are built with warnings as errors by MSVC 19.44 (/W4 /WX, its default C
  *   dialect, /std:c11 and /std:c++17), by MinGW-w64 gcc 16.1 (C99, C11,
  *   C++17) on Windows 11, and by gcc 11.4 on WSL2 (C99, C11, C++17), in all
@@ -895,10 +931,101 @@
  *                      count with psyrt_now_ns() at callback entry and use
  *                      that pair as it is. To turn frames into time you also
  *                      need the device's true rate, which only repeated pairs
- *                      over a long time give; psy_audio.h will fit that.
+ *                      over a long time give: psy_audio.h fits it itself,
+ *                      and DEVICE CLOCK FIT below does it for other devices.
  *
  *   Push a correlation into the log as a PSYRT_KIND_CLOCK record, so the
  *   analysis can convert the other clock's stamps again later.
+ *
+ *   ---------------------------------------------------------------------
+ *   DEVICE CLOCK FIT (psyrt_fit)
+ *   ---------------------------------------------------------------------
+ *   A device with its own clock (a Cedrus XID box's ms timer, a
+ *   microcontroller's micros(), an eye tracker) stamps its events with
+ *   that clock. psyrt_fit maps those stamps to the psy_rt clock. Feed it
+ *   pairs: the device's counter and the psy_rt time that goes with it.
+ *
+ *       static psyrt_fit fit;                  // about 40 KB: not on a stack
+ *       psyrt_fit_init(&fit, &(psyrt_fit_desc){ .mode = PSYRT_FIT_LATE,
+ *                                                .ns_per_tick = 1000.0,
+ *                                                .tick_bits = 32 });
+ *       // the reader thread, for each sync frame:
+ *       psyrt_fit_add(&fit, frame_us, (int64_t)t_read, 0);
+ *       // for each event the device stamped:
+ *       ev.t = psyrt_fit_map(&fit, event_us);
+ *
+ *   MODES (desc.mode), by what the pair's host time is worth:
+ *     LATE      The host time is when the reader got the bytes: late by
+ *               the device's send, the USB poll, a bridge chip's latency
+ *               timer, the driver and the thread's wake-up, never early.
+ *               The map is the line under every point with the smallest
+ *               summed gap, the edge of the lower convex hull that spans
+ *               the mean x (Moon, Skelly and Towsley, INFOCOM 1999), as
+ *               psy_audio.h fits callback times. It finds the least late
+ *               deliveries, so the map is the device's time plus the
+ *               path's MINIMUM delay, which only a loopback measures.
+ *     BRACKET   The device's time was read inside a bracket: a timer query
+ *               sent at t0 and answered by t1, or a register latched by a
+ *               write between t0 and t1. host_ns = t1, width_ns = t1 - t0.
+ *               Brackets wider than max_width_ns (1.3 ms by default, as
+ *               Psychtoolbox's DataPixx sync) are refused; the rest are
+ *               fitted as LATE pairs, so per bucket the pair with the
+ *               smallest t1 minus device time wins (PsychDataPixx's
+ *               filter). The map is late by 0 to the width of the pairs it
+ *               rests on (info.width_ns). Probing (how often, a random
+ *               sub-millisecond wait between tries to leave the USB frame's
+ *               phase) is the caller's.
+ *     UNBIASED  The host time scatters both ways around the truth: a
+ *               position report the API stamped at the source. Bucket
+ *               means, least squares.
+ *   THE WINDOW. One point per bucket of host time (desc.bucket_ns, 200
+ *   ms): the least late pair (LATE, BRACKET) or the mean (UNBIASED).
+ *   PSYRT_FIT_POINTS (1024) points, 205 s at 200 ms; the oldest leaves.
+ *   The map is anchored at the newest point, so a recent event is mapped
+ *   over a short distance. Until the points span desc.slope_span_ns (5 s)
+ *   the slope stays nominal (ns_per_tick) and the offset comes from the
+ *   last second's points, because a slope from a shorter span was worse
+ *   than the drift it corrects (psy_audio.h measured it); after that the
+ *   slope is fitted, and info.ppm says how far the device's crystal is
+ *   from nominal. A refit happens at every new bucket, at every pair
+ *   while the window has 16 points or fewer, and when a LATE or BRACKET
+ *   pair lies under the current line; otherwise a pair costs about 0.1 us
+ *   (STATUS).
+ *   WRAP. desc.tick_bits = 32 for a uint32 counter: XID's ms timer wraps
+ *   after 49.7 days, micros() after 71.6 minutes. psyrt_fit_add() unwraps
+ *   a counter by the time the map expects at the pair's host time;
+ *   psyrt_fit_map() and psyrt_fit_unwrap() unwrap against the newest pair,
+ *   so map an event within half a wrap period of it (35 minutes for
+ *   micros()). Pass the counter as the device sent it.
+ *   RESTART. A pair farther than desc.restart_ns (50 ms) from the map is
+ *   held, not used (PSYRT_FIT_PENDING). Held pairs that agree with each
+ *   other at the nominal tick for desc.restart_hold_ns (1 s) are a new
+ *   clock: the device's timer was reset (XID's e5), the board rebooted.
+ *   The fit starts a new epoch from them (PSYRT_FIT_RESTART, info.epoch),
+ *   with the slope nominal again. A normal pair ends the hold, and the
+ *   held pairs count as rejected: a burst of late pairs after an OS stall
+ *   arrives within milliseconds, so it never holds for a second. Map an
+ *   event with the epoch it belongs to: an event stamped before a restart
+ *   and mapped after it maps wrong. The nominal tick must be right to
+ *   restart_ns over the longest gap between pairs in the first
+ *   slope_span_ns, or the first pairs look like a new clock.
+ *   ERROR. Synthetic devices in STATUS: a map within tens of us of the
+ *   truth for dense LATE pairs, within 2 ns of the estimator's exact
+ *   value. Few pairs behind a coarse timer (a press every few seconds
+ *   behind a 16 ms FTDI latency timer) give ms errors for minutes; such a
+ *   device needs BRACKET probes or a lower latency timer. info.spread_ns is
+ *   the p99 distance of the points from the map (above it for LATE and
+ *   BRACKET): a stamp's uncertainty for psy_input.h's unc_us, not an
+ *   error bound of the map; only a loopback gives that.
+ *   RECORDS. With desc.ring, each closed bucket's point is a
+ *   PSYRT_KIND_CLOCK record (the device's unwrapped ticks, the width, the
+ *   epoch; aux = desc.clock_id) and each refit at a new bucket a
+ *   PSYRT_KIND_FIT record (the anchor, ns per tick, the spread, the
+ *   epoch, the points). An analysis can fit the whole session again from
+ *   the CLOCK records, with the points after each event too, which an
+ *   online fit cannot see. At most one of each per bucket.
+ *   THREADS. A fit belongs to one thread (the device's reader); it takes
+ *   no lock and allocates nothing. Exists in a PSYRT_NO_THREADS build.
  *
  *   ---------------------------------------------------------------------
  *   INSTRUMENTATION
@@ -1099,9 +1226,9 @@
 /* The version of this header, for a binding's __version__ and for a log line.
  * The string always matches the three numbers. */
 #define PSYRT_VERSION_MAJOR  0
-#define PSYRT_VERSION_MINOR  5
+#define PSYRT_VERSION_MINOR  6
 #define PSYRT_VERSION_PATCH  0
-#define PSYRT_VERSION_STRING "0.5.0"
+#define PSYRT_VERSION_STRING "0.6.0"
 
 /* Feature-test macro for clock_nanosleep() and mlockall() in the Linux
  * implementation. Defined here, before the first system header, so it takes
@@ -1563,6 +1690,7 @@ typedef struct psyrt_event {
 #define PSYRT_SRC_TRIALS     9u
 #define PSYRT_SRC_NET       10u
 #define PSYRT_SRC_GFX       11u
+#define PSYRT_SRC_DEVICE    12u   /* psy_device.h, planned (docs/devices_spec.md) */
 #define PSYRT_SRC_EXTENSION 256u   /* first extension source           */
 #define PSYRT_SRC_USER    32768u   /* first source for your own program */
 
@@ -1579,7 +1707,18 @@ typedef struct psyrt_event {
 #define PSYRT_KIND_CLOCK       7u  /* a correlation, pushed by whoever made
                                     * it: u.u64[0] = psyrt_corr.other,
                                     * u.u64[1] = width_ns, t_ns = rt_ns, aux =
-                                    * the caller's number for the clock      */
+                                    * the caller's number for the clock.
+                                    * psyrt_fit (DEVICE CLOCK FIT) pushes one
+                                    * per closed bucket: u.u64[0] the device's
+                                    * unwrapped ticks, u.u64[1] the pair's
+                                    * width, u.u64[2] the fit's epoch       */
+#define PSYRT_KIND_FIT         8u  /* a device clock fit (DEVICE CLOCK FIT):
+                                    * t_ns = the newest pair's host time,
+                                    * u.i64[0] host ns at the anchor,
+                                    * u.u64[1] unwrapped ticks at the anchor,
+                                    * u.f64[2] ns per tick, u.i64[3] the
+                                    * spread (p99, ns), u.u32[8] the epoch,
+                                    * u.u32[9] the points; aux = the clock    */
 
 /* Bytes of desc.memory that hold exactly n records: n slots of 64 bytes and
  * up to 64 bytes lost to aligning the start. */
@@ -1698,6 +1837,121 @@ typedef struct psyrt_corr {
  * mode saw no change in timeout_ns. Allocates nothing; spins, so call it
  * between trials, not inside a frame. */
 PSYRT_API int psyrt_correlate(const psyrt_corr_desc* desc, psyrt_corr* out);
+
+/* --- device clock fit --------------------------------------------------- */
+
+/* Points the fit keeps: one per bucket, so 205 s of 200 ms buckets. Fixed,
+ * because the struct's size must agree in every translation unit. */
+#define PSYRT_FIT_POINTS 1024
+
+/* What the pairs' host times are worth; see DEVICE CLOCK FIT. */
+typedef enum psyrt_fit_mode {
+    PSYRT_FIT_LATE     = 0, /* host stamps are late, never early: the lower
+                             * envelope (USB reports read by a thread)      */
+    PSYRT_FIT_BRACKET  = 1, /* the device time was read inside a bracket:
+                             * host_ns is the bracket's end, width_ns its
+                             * length; the least late pair per bucket, wide
+                             * brackets refused                            */
+    PSYRT_FIT_UNBIASED = 2  /* stamps scatter both ways around the truth:
+                             * bucket means and least squares              */
+} psyrt_fit_mode;
+
+/* Zero-initialize, then set ns_per_tick (required) and what you need. */
+typedef struct psyrt_fit_desc {
+    int         mode;            /* psyrt_fit_mode                              */
+    double      ns_per_tick;     /* the device clock's nominal tick: 1e6 for a
+                                  * ms timer, 1e3 for micros(). Required, > 0 */
+    uint32_t    tick_bits;       /* the device counter's width: 1 to 63 wrap
+                                  * (32 for a uint32 timer); 0 or 64 = none    */
+    uint32_t    clock_id;        /* `aux` of the CLOCK and FIT records          */
+    int64_t     bucket_ns;       /* one point per bucket; 0 = 200 ms            */
+    int64_t     slope_span_ns;   /* the slope stays nominal until the points
+                                  * span this; 0 = 5 s                         */
+    int64_t     restart_ns;      /* a pair this far from the map is held as a
+                                  * possible restart; 0 = 50 ms                */
+    int64_t     restart_hold_ns; /* held pairs that agree with each other for
+                                  * this long start a new epoch; 0 = 1 s       */
+    int64_t     max_width_ns;    /* BRACKET: wider pairs are refused; 0 = 1.3 ms */
+    psyrt_ring* ring;            /* CLOCK and FIT records; NULL = none          */
+} psyrt_fit_desc;
+
+/* psyrt_fit_add()'s result bits. */
+#define PSYRT_FIT_POINT    0x01  /* the pair is a point, or improved one     */
+#define PSYRT_FIT_REFIT    0x02  /* the map changed                          */
+#define PSYRT_FIT_RESTART  0x04  /* a new epoch started (a clock reset)      */
+#define PSYRT_FIT_REJECTED 0x08  /* not used: too wide or out of order, or
+                                  * held pairs that a normal pair proved to
+                                  * be outliers                             */
+#define PSYRT_FIT_PENDING  0x10  /* held as a possible restart               */
+
+typedef struct psyrt_fit_info {
+    int64_t  t0_ns;        /* the map's anchor: host ns at...                */
+    uint64_t ticks0;       /* ...these unwrapped device ticks                */
+    double   ns_per_tick;  /* the fitted tick                                */
+    double   ppm;          /* the fitted tick against the nominal one        */
+    int64_t  spread_ns;    /* p99 distance of the points from the map:
+                            * above it for LATE and BRACKET, either side for
+                            * UNBIASED                                       */
+    int64_t  width_ns;     /* BRACKET: the widest bracket the map rests on   */
+    int64_t  span_ns;      /* host time from the oldest point to the newest  */
+    uint32_t points;       /* in the window                                  */
+    uint32_t pairs;        /* added since init                               */
+    uint32_t epoch;        /* restarts since init                            */
+    uint32_t rejected;
+    uint32_t pending;      /* pairs held now                                 */
+    bool     ready;        /* a map exists                                   */
+    bool     slope;        /* the slope is fitted, not nominal               */
+} psyrt_fit_info;
+
+/* The fit. About 40 KB; treat every field as opaque. */
+typedef struct psyrt_fit {
+    psyrt_fit_desc d;
+    uint64_t modulus;           /* 2^tick_bits; 0 = no wrap                    */
+    uint64_t base_ticks;        /* unwrapped ticks of the epoch's origin       */
+    int64_t  base_host;
+    uint64_t last_ticks;        /* unwrapped ticks of the newest pair used     */
+    int64_t  bucket;            /* the newest point's bucket                   */
+    int64_t  fx, fy;            /* the map: host = fy + (x - fx) * k          */
+    double   k;
+    int64_t  spread_ns, width_ns;
+    double   ux, uy;            /* UNBIASED: the newest bucket's sums, from
+                                 * its first pair...                           */
+    int64_t  ux0, uy0;
+    uint32_t un;                /* ...and its count                            */
+    int32_t  head, n;
+    int32_t  have, slope;
+    uint32_t epoch, rejected, pairs;
+    int32_t  pend_n;
+    uint64_t pend_t[8];         /* held pairs: raw ticks, host, width          */
+    int64_t  pend_y[8];
+    int64_t  pend_w[8];
+    int64_t  px[PSYRT_FIT_POINTS];  /* ticks since base_ticks                  */
+    int64_t  py[PSYRT_FIT_POINTS];  /* host ns                                 */
+    int64_t  pw[PSYRT_FIT_POINTS];  /* bracket width                           */
+    int32_t  hull[PSYRT_FIT_POINTS];
+    int64_t  scratch[PSYRT_FIT_POINTS];
+} psyrt_fit;
+
+/* Start a fit. PSYRT_OK, or PSYRT_ERR_ARG for a NULL pointer, an unknown
+ * mode, ns_per_tick <= 0 or tick_bits > 64. Allocates nothing. */
+PSYRT_API int psyrt_fit_init(psyrt_fit* f, const psyrt_fit_desc* desc);
+
+/* One pair: the device's counter as it reported it (wrapped), the host time
+ * of the pair on the psy_rt clock, and for BRACKET the bracket's length
+ * (host_ns is its end; 0 otherwise). Pairs in arrival order. Returns
+ * PSYRT_FIT_* bits, or PSYRT_ERR_ARG. One thread at a time; a refit costs
+ * O(PSYRT_FIT_POINTS). */
+PSYRT_API int psyrt_fit_add(psyrt_fit* f, uint64_t ticks, int64_t host_ns, int64_t width_ns);
+
+/* The psy_rt time of a device counter value (wrapped as reported, unwrapped
+ * against the newest pair), from the current epoch's map. 0 before the
+ * first pair. */
+PSYRT_API int64_t  psyrt_fit_map(const psyrt_fit* f, uint64_t ticks);
+
+/* A wrapped counter value unwrapped against the newest pair used. */
+PSYRT_API uint64_t psyrt_fit_unwrap(const psyrt_fit* f, uint64_t ticks);
+
+PSYRT_API void     psyrt_fit_get(const psyrt_fit* f, psyrt_fit_info* out);
 
 /* --- instrumentation ---------------------------------------------------- */
 
@@ -3577,6 +3831,373 @@ int psyrt_correlate(const psyrt_corr_desc* d, psyrt_corr* out) {
     out->width_ns = best_w < step ? step : best_w;
     out->tries    = taken;
     return taken;
+}
+
+/* ======================================================================= *
+ *  DEVICE CLOCK FIT
+ *
+ *  Points are kept as x = device ticks since the epoch's first pair and y =
+ *  host ns, one per bucket of host time, in a ring of PSYRT_FIT_POINTS. A
+ *  refit works on doubles relative to the oldest point, with the nominal
+ *  slope taken out, so the numbers stay small: 205 s of a us clock is 2e8.
+ *  The map is anchored at the newest point, so a map read for a recent
+ *  event multiplies a small tick difference.
+ * ======================================================================= */
+
+/* Before the slope is fitted, the offset comes from the last second only:
+ * the drift the nominal slope ignores then costs at most a second's worth
+ * (100 us at 100 ppm). psy_audio.h measured the same rule. */
+#define PSYRT__FIT_OFFSET_NS 1000000000LL
+/* While the window is this small a refit is cheap, and every pair can
+ * still move the offset by a lot, so each pair refits. */
+#define PSYRT__FIT_EAGER     16
+
+static int64_t psyrt__fit_round(double v) {
+    return v >= 0.0 ? (int64_t)(v + 0.5) : -(int64_t)(-v + 0.5);
+}
+
+/* Floor division for a positive divisor: a pair stamped before the epoch's
+ * first pair falls in a negative bucket, not in bucket 0. */
+static int64_t psyrt__floordiv(int64_t a, int64_t b) {
+    int64_t q = a / b;
+    if (a % b != 0 && a < 0) q--;
+    return q;
+}
+
+/* The unwrapped value of a wrapped counter nearest to ref. Differences are
+ * taken modulo 2^64, so a value just before an unwrapped 0 becomes a
+ * negative x, which the map handles as any other x. */
+static uint64_t psyrt__fit_unwrap_to(const psyrt_fit* f, uint64_t ticks, uint64_t ref) {
+    uint64_t m = f->modulus, u;
+    int64_t  d, half;
+    if (m == 0) return ticks;
+    ticks &= m - 1u;
+    u = (ref & ~(m - 1u)) | ticks;
+    d = (int64_t)(u - ref);
+    half = (int64_t)(m / 2u);
+    if (d > half) u -= m;
+    else if (d < -half) u += m;
+    return u;
+}
+
+static int64_t psyrt__fit_at(const psyrt_fit* f, int64_t x) {
+    return f->fy + psyrt__fit_round((double)(x - f->fx) * f->k);
+}
+
+/* The unwrapped ticks the map expects at host time y: the reference that
+ * picks a wrapped counter's period. */
+static uint64_t psyrt__fit_expect(const psyrt_fit* f, int64_t y) {
+    int64_t x = f->fx + psyrt__fit_round((double)(y - f->fy) / f->k);
+    return f->base_ticks + (uint64_t)x;
+}
+
+/* The kth smallest of v[0..n) (Hoare's selection), reordering v. */
+static int64_t psyrt__fit_select(int64_t* v, int32_t n, int32_t kth) {
+    int32_t lo = 0, hi = n - 1;
+    while (lo < hi) {
+        int64_t pivot = v[lo + (hi - lo) / 2], t;
+        int32_t i = lo, j = hi;
+        while (i <= j) {
+            while (v[i] < pivot) i++;
+            while (v[j] > pivot) j--;
+            if (i <= j) { t = v[i]; v[i] = v[j]; v[j] = t; i++; j--; }
+        }
+        if (kth <= j) hi = j;
+        else if (kth >= i) lo = i;
+        else break;
+    }
+    return v[kth];
+}
+
+static void psyrt__fit_record(psyrt_fit* f, uint16_t kind, int32_t i) {
+    psyrt_event ev;
+    if (!f->d.ring) return;
+    memset(&ev, 0, sizeof ev);
+    ev.source = (uint16_t)PSYRT_SRC_RT;
+    ev.kind   = kind;
+    ev.aux    = f->d.clock_id;
+    if (kind == PSYRT_KIND_CLOCK) {
+        ev.t_ns     = (uint64_t)f->py[i];
+        ev.u.u64[0] = f->base_ticks + (uint64_t)f->px[i];
+        ev.u.u64[1] = (uint64_t)f->pw[i];
+        ev.u.u64[2] = f->epoch;
+    } else {
+        ev.t_ns     = (uint64_t)f->py[(f->head + f->n - 1) % PSYRT_FIT_POINTS];
+        ev.u.i64[0] = f->fy;
+        ev.u.u64[1] = f->base_ticks + (uint64_t)f->fx;
+        ev.u.f64[2] = f->k;
+        ev.u.i64[3] = f->spread_ns;
+        ev.u.u32[8] = f->epoch;
+        ev.u.u32[9] = (uint32_t)f->n;
+    }
+    (void)psyrt_ring_push(f->d.ring, &ev);
+}
+
+/* LATE and BRACKET: the line under every point with the smallest summed gap,
+ * which is the edge of the lower convex hull that spans the mean x (Moon,
+ * Skelly and Towsley, INFOCOM 1999), the estimator psy_audio.h measured for
+ * callback times. UNBIASED: least squares. Before the points span
+ * slope_span_ns the slope stays nominal, because a slope from a short span
+ * was worse than the drift it corrects (psy_audio.h). */
+static void psyrt__fit_refit(psyrt_fit* f) {
+    const int32_t N = PSYRT_FIT_POINTS;
+    int32_t n = f->n, i, j = 0, h = 0, lo, hi = -1, kth;
+    int32_t i0 = f->head, il = (f->head + n - 1) % N;
+    int64_t x0 = f->px[i0], y0 = f->py[i0], from;
+    double  kn = f->d.ns_per_tick, a, b = 0.0, sx = 0.0, xm, xl, r;
+    bool    envelope = f->d.mode != PSYRT_FIT_UNBIASED;
+    int32_t* hull = f->hull;
+#define PSYRT__X(q) ((double)(f->px[((q) + i0) % N] - x0))
+#define PSYRT__Y(q) ((double)(f->py[((q) + i0) % N] - y0) - PSYRT__X(q) * kn)
+    for (i = 0; i < n; i++) sx += PSYRT__X(i);
+    xm = sx / n;
+    /* the offset alone, from the last second */
+    from = f->py[il] - PSYRT__FIT_OFFSET_NS;
+    lo = n - 1;
+    a = PSYRT__Y(n - 1);
+    {
+        double sum = 0.0;
+        int32_t m = 0;
+        for (i = 0; i < n; i++) {
+            if (f->py[(i + i0) % N] < from) continue;
+            if (PSYRT__Y(i) < a) { a = PSYRT__Y(i); lo = i; }
+            sum += PSYRT__Y(i);
+            m++;
+        }
+        if (!envelope) a = sum / m;
+    }
+    f->slope = 0;
+    if (n >= 2 && f->py[il] - y0 >= f->d.slope_span_ns) {
+        if (!envelope) {
+            double sxx = 0.0, sxy = 0.0, sy = 0.0, dx;
+            for (i = 0; i < n; i++) sy += PSYRT__Y(i);
+            for (i = 0; i < n; i++) {
+                dx = PSYRT__X(i) - xm;
+                sxx += dx * dx;
+                sxy += dx * (PSYRT__Y(i) - sy / n);
+            }
+            if (sxx > 0.0) {
+                b = sxy / sxx;
+                a = sy / n - b * xm;
+                f->slope = 1;
+            }
+        } else {
+            for (i = 0; i < n; i++) {
+                while (h >= 2) {
+                    double x1 = PSYRT__X(hull[h - 2]), y1 = PSYRT__Y(hull[h - 2]);
+                    double x2 = PSYRT__X(hull[h - 1]), y2 = PSYRT__Y(hull[h - 1]);
+                    double x3 = PSYRT__X(i), y3 = PSYRT__Y(i);
+                    if ((x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1) <= 0.0) h--; else break;
+                }
+                hull[h++] = i;
+            }
+            while (j + 1 < h - 1 && PSYRT__X(hull[j + 1]) <= xm) j++;
+            if (h >= 2 && PSYRT__X(hull[j + 1]) > PSYRT__X(hull[j])) {
+                double x1 = PSYRT__X(hull[j]), y1 = PSYRT__Y(hull[j]);
+                double x2 = PSYRT__X(hull[j + 1]), y2 = PSYRT__Y(hull[j + 1]);
+                b = (y2 - y1) / (x2 - x1);
+                a = y1 - b * x1;
+                lo = hull[j];
+                hi = hull[j + 1];
+                f->slope = 1;
+            }
+        }
+    }
+    /* the spread: the p99 distance above the line (envelope) or either side */
+    for (i = 0; i < n; i++) {
+        r = PSYRT__Y(i) - a - b * PSYRT__X(i);
+        if (!envelope && r < 0.0) r = -r;
+        f->scratch[i] = psyrt__fit_round(r);
+    }
+    kth = (99 * n + 99) / 100 - 1;
+    f->spread_ns = psyrt__fit_select(f->scratch, n, kth);
+    f->width_ns = 0;
+    if (f->d.mode == PSYRT_FIT_BRACKET) {
+        f->width_ns = f->pw[(lo + i0) % N];
+        if (hi >= 0 && f->pw[(hi + i0) % N] > f->width_ns) f->width_ns = f->pw[(hi + i0) % N];
+    }
+    xl = PSYRT__X(n - 1);
+    f->fx = x0 + (int64_t)xl;
+    f->fy = y0 + psyrt__fit_round(a + b * xl + xl * kn);
+    f->k = kn + b;
+    f->have = 1;
+#undef PSYRT__X
+#undef PSYRT__Y
+}
+
+/* A pair the map accepts: a new point, a better point for the newest
+ * bucket, or nothing. `below`: the pair lies under the current line, which
+ * the envelope must then go through. */
+static int psyrt__fit_point(psyrt_fit* f, uint64_t u, int64_t y, int64_t w, bool below) {
+    const int32_t N = PSYRT_FIT_POINTS;
+    int64_t x = (int64_t)(u - f->base_ticks);
+    int64_t bk = psyrt__floordiv(y - f->base_host, f->d.bucket_ns);
+    int32_t i;
+    bool closed = false, changed = false, first = !f->have;
+    int rc = 0;
+    if (f->n > 0 && bk < f->bucket) { f->rejected++; return PSYRT_FIT_REJECTED; }
+    f->last_ticks = u;
+    if (f->n > 0 && bk == f->bucket) {
+        i = (f->head + f->n - 1) % N;
+        if (f->d.mode != PSYRT_FIT_UNBIASED) {
+            /* the less late of the two, at the nominal tick */
+            if ((double)(y - f->py[i]) < (double)(x - f->px[i]) * f->d.ns_per_tick) {
+                f->px[i] = x; f->py[i] = y; f->pw[i] = w;
+                changed = true;
+            }
+        } else {
+            f->ux += (double)(x - f->ux0);
+            f->uy += (double)(y - f->uy0);
+            f->un++;
+            f->px[i] = f->ux0 + psyrt__fit_round(f->ux / f->un);
+            f->py[i] = f->uy0 + psyrt__fit_round(f->uy / f->un);
+            changed = true;
+        }
+    } else {
+        if (f->n > 0) {
+            psyrt__fit_record(f, (uint16_t)PSYRT_KIND_CLOCK, (f->head + f->n - 1) % N);
+            closed = true;
+        }
+        if (f->n == N) { f->head = (f->head + 1) % N; f->n--; }
+        i = (f->head + f->n) % N;
+        f->n++;
+        f->px[i] = x; f->py[i] = y; f->pw[i] = w;
+        f->bucket = bk;
+        f->ux0 = x; f->uy0 = y; f->ux = 0.0; f->uy = 0.0; f->un = 1;
+        changed = true;
+    }
+    if (changed) rc |= PSYRT_FIT_POINT;
+    if (first || closed || (changed && (below || f->n <= PSYRT__FIT_EAGER ||
+                                        (f->d.mode == PSYRT_FIT_UNBIASED && !f->slope)))) {
+        psyrt__fit_refit(f);
+        rc |= PSYRT_FIT_REFIT;
+        if (first || closed) psyrt__fit_record(f, (uint16_t)PSYRT_KIND_FIT, 0);
+    }
+    return rc;
+}
+
+static int psyrt__fit_add1(psyrt_fit* f, uint64_t ticks, int64_t y, int64_t w);
+
+/* A pair far from the map is held. Held pairs that agree with each other at
+ * the nominal tick for restart_hold_ns are a new clock (a reset, a replug):
+ * a new epoch starts from them. A burst of late pairs after a stall arrives
+ * within milliseconds, so it never holds long enough; a normal pair clears
+ * the hold. Eight are kept: the first, which times the hold, and the newest
+ * seven. */
+static int psyrt__fit_hold(psyrt_fit* f, uint64_t ticks, int64_t y, int64_t w) {
+    int32_t i, n;
+    uint64_t t[8], u0, u;
+    int64_t  yy[8], ww[8], o, omin = 0, omax = 0;
+    double   kn = f->d.ns_per_tick;
+    int      rc = PSYRT_FIT_PENDING;
+    if (f->pend_n == 8) {
+        /* keep the first held pair: the hold is timed from it */
+        for (i = 2; i < 8; i++) {
+            f->pend_t[i - 1] = f->pend_t[i]; f->pend_y[i - 1] = f->pend_y[i];
+            f->pend_w[i - 1] = f->pend_w[i];
+        }
+        f->pend_n--;
+        f->rejected++;
+    }
+    f->pend_t[f->pend_n] = ticks; f->pend_y[f->pend_n] = y; f->pend_w[f->pend_n] = w;
+    f->pend_n++;
+    n = f->pend_n;
+    if (n < 2 || f->pend_y[n - 1] - f->pend_y[0] < f->d.restart_hold_ns) return rc;
+    u0 = f->modulus ? (f->pend_t[0] & (f->modulus - 1u)) : f->pend_t[0];
+    for (i = 1; i < n; i++) {
+        u = psyrt__fit_unwrap_to(f, f->pend_t[i],
+                                 u0 + (uint64_t)psyrt__fit_round((double)(f->pend_y[i] - f->pend_y[0]) / kn));
+        o = (f->pend_y[i] - f->pend_y[0]) - psyrt__fit_round((double)(int64_t)(u - u0) * kn);
+        if (o < omin) omin = o;
+        if (o > omax) omax = o;
+    }
+    if (omax - omin > f->d.restart_ns) return rc;
+    for (i = 0; i < n; i++) { t[i] = f->pend_t[i]; yy[i] = f->pend_y[i]; ww[i] = f->pend_w[i]; }
+    f->pend_n = 0;
+    f->n = 0; f->head = 0; f->have = 0; f->slope = 0; f->un = 0;
+    f->epoch++;
+    rc = PSYRT_FIT_RESTART;
+    for (i = 0; i < n; i++) rc |= psyrt__fit_add1(f, t[i], yy[i], ww[i]);
+    return rc & ~PSYRT_FIT_PENDING;
+}
+
+static int psyrt__fit_add1(psyrt_fit* f, uint64_t ticks, int64_t y, int64_t w) {
+    uint64_t u;
+    int64_t  res;
+    int      rc = 0;
+    if (!f->have) {
+        f->base_ticks = f->modulus ? (ticks & (f->modulus - 1u)) : ticks;
+        f->base_host = y;
+        return psyrt__fit_point(f, f->base_ticks, y, w, true);
+    }
+    u = psyrt__fit_unwrap_to(f, ticks, psyrt__fit_expect(f, y));
+    res = y - psyrt__fit_at(f, (int64_t)(u - f->base_ticks));
+    if (res > f->d.restart_ns || res < -f->d.restart_ns) return psyrt__fit_hold(f, ticks, y, w);
+    if (f->pend_n) {
+        f->rejected += (uint32_t)f->pend_n;
+        f->pend_n = 0;
+        rc |= PSYRT_FIT_REJECTED;
+    }
+    /* below the line matters to the envelope only: UNBIASED pairs are below
+     * it half the time, and a refit for each would cost 10 to 20 us */
+    return rc | psyrt__fit_point(f, u, y, w, res < 0 && f->d.mode != PSYRT_FIT_UNBIASED);
+}
+
+int psyrt_fit_init(psyrt_fit* f, const psyrt_fit_desc* d) {
+    if (!f || !d) return PSYRT_ERR_ARG;
+    if (d->mode < PSYRT_FIT_LATE || d->mode > PSYRT_FIT_UNBIASED) return PSYRT_ERR_ARG;
+    if (!(d->ns_per_tick > 0.0) || d->tick_bits > 64u) return PSYRT_ERR_ARG;
+    memset(f, 0, sizeof *f);
+    f->d = *d;
+    if (f->d.bucket_ns <= 0)       f->d.bucket_ns = 200000000LL;
+    if (f->d.slope_span_ns <= 0)   f->d.slope_span_ns = 5000000000LL;
+    if (f->d.restart_ns <= 0)      f->d.restart_ns = 50000000LL;
+    if (f->d.restart_hold_ns <= 0) f->d.restart_hold_ns = 1000000000LL;
+    if (f->d.max_width_ns <= 0)    f->d.max_width_ns = 1300000LL;
+    f->modulus = (d->tick_bits > 0u && d->tick_bits < 64u) ? (1ull << d->tick_bits) : 0u;
+    f->k = d->ns_per_tick;
+    return PSYRT_OK;
+}
+
+int psyrt_fit_add(psyrt_fit* f, uint64_t ticks, int64_t host_ns, int64_t width_ns) {
+    if (!f || !(f->d.ns_per_tick > 0.0)) return PSYRT_ERR_ARG;
+    f->pairs++;
+    if (f->d.mode == PSYRT_FIT_BRACKET && (width_ns < 0 || width_ns > f->d.max_width_ns)) {
+        f->rejected++;
+        return PSYRT_FIT_REJECTED;
+    }
+    return psyrt__fit_add1(f, ticks, host_ns, width_ns);
+}
+
+uint64_t psyrt_fit_unwrap(const psyrt_fit* f, uint64_t ticks) {
+    if (!f) return ticks;
+    return psyrt__fit_unwrap_to(f, ticks, f->last_ticks);
+}
+
+int64_t psyrt_fit_map(const psyrt_fit* f, uint64_t ticks) {
+    if (!f || !f->have) return 0;
+    return psyrt__fit_at(f, (int64_t)(psyrt_fit_unwrap(f, ticks) - f->base_ticks));
+}
+
+void psyrt_fit_get(const psyrt_fit* f, psyrt_fit_info* out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    if (!f) return;
+    out->pairs    = f->pairs;
+    out->epoch    = f->epoch;
+    out->rejected = f->rejected;
+    out->pending  = (uint32_t)f->pend_n;
+    out->points   = (uint32_t)f->n;
+    if (!f->have) return;
+    out->ready       = true;
+    out->slope       = f->slope != 0;
+    out->t0_ns       = f->fy;
+    out->ticks0      = f->base_ticks + (uint64_t)f->fx;
+    out->ns_per_tick = f->k;
+    out->ppm         = (f->k / f->d.ns_per_tick - 1.0) * 1e6;
+    out->spread_ns   = f->spread_ns;
+    out->width_ns    = f->width_ns;
+    out->span_ns     = f->py[(f->head + f->n - 1) % PSYRT_FIT_POINTS] - f->py[f->head];
 }
 
 /* ======================================================================= *

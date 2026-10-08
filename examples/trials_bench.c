@@ -264,9 +264,21 @@ static void bench_open(void) {
     }
 }
 
+static const double g_soa[4] = { 0.1, 0.2, 0.3, 0.4 };
+
+/* Four jitters, one of each kind, two snapped to 60000/1001 Hz frames. */
+static void add_jitters(psytr_desc* d) {
+    d->jitters[0] = psytr_frames(psytr_uniform("iti", 0.8, 1.2), 60000, 1001);
+    d->jitters[1] = psytr_frames(psytr_exponential("fp", 0.5, 2.0, 0.4), 60000, 1001);
+    d->jitters[2] = psytr_exponential("fp2", 0.5, 2.0, 0.4);
+    d->jitters[3] = psytr_choice("soa", g_soa, 4);
+    d->n_jitters = 4;
+}
+
 /* The worst next() + update() over whole runs: with units and re-queues
- * (forward moves of whole units after re-queues), and plain. */
-static void bench_loop(void) {
+ * (forward moves of whole units after re-queues), and plain; with four
+ * jitters when `jit`. */
+static void bench_loop(int jit) {
     psytr_desc d;
     psytr_trial_info ti;
     int r, n;
@@ -280,6 +292,7 @@ static void bench_loop(void) {
         d.rng_ctx = &g_seed;
         d_units(&d);
         d.block_size = 100;
+        if (jit) add_jitters(&d);
         if (!psytr_open(&g_t, &d)) { printf("loop open: %s\n", psytr_error(&g_t)); return; }
         n = 0;
         for (;;) {
@@ -295,8 +308,34 @@ static void bench_loop(void) {
             if (n > 16000) break;
         }
     }
-    printf("next() + update() over 5 runs of the units design with 5%% re-queues: %ld calls, "
-           "mean %.2f us, worst %.1f us\n", calls, total / (double)calls * 1e3, worst * 1e3);
+    printf("next() + update() over 5 runs of the units design with 5%% re-queues%s: %ld calls, "
+           "mean %.2f us, worst %.1f us\n", jit ? " and 4 jitters" : "", calls,
+           total / (double)calls * 1e3, worst * 1e3);
+}
+
+/* One psytr_jitter_draw() of each kind: the median over the rounds of the
+ * mean over 100000 draws. */
+static void bench_draw(void) {
+    psytr_desc d;
+    double v[MAX_ROUNDS], t0, sink = 0;
+    int k, r, i;
+    memset(&d, 0, sizeof(d));
+    add_jitters(&d);
+    printf("psytr_jitter_draw(), %d rounds of 100000 (splitmix included):\n", g_rounds);
+    for (k = 0; k < 4; k++) {
+        stat3 st;
+        for (r = 0; r < g_rounds; r++) {
+            t0 = now_ms();
+            for (i = 0; i < 100000; i++) sink += psytr_jitter_draw(&d.jitters[k], psytr_splitmix, &g_seed).s;
+            v[r] = (now_ms() - t0) * 1e6 / 100000.0;
+        }
+        st = stats(v, g_rounds);
+        printf("  %-4s %s: min %.1f ns, median %.1f ns, max %.1f ns\n", d.jitters[k].name,
+               k == 0 ? "uniform, frames    " : k == 1 ? "exponential, frames" : k == 2 ? "exponential        "
+                                                                                       : "choice of 4        ",
+               st.min, st.med, st.max);
+    }
+    if (sink == 42.0) printf("\n");
 }
 
 int main(int argc, char** argv) {
@@ -310,6 +349,8 @@ int main(int argc, char** argv) {
     printf("psy_table %s, psy_trials %s\n", psytb_version(), psytr_version());
     bench_parse();
     bench_open();
-    bench_loop();
+    bench_loop(0);
+    bench_loop(1);
+    bench_draw();
     return 0;
 }

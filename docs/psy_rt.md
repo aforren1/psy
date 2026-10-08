@@ -168,13 +168,101 @@ default is 4 edges, which measured 62 ms per call.
 SyncQPCTime) needs no correlation at all. It is the function
 `psyrt_now_ns()` uses, and the test checks it against a 128-bit reference.
 
-## Drift is for psy_audio.h
+## Drift was for psy_audio.h; v0.6.0 has a device clock fit
 
-v0.5.0 has no drift fit. Nothing in it uses one, and the estimator a device
+v0.5.0 had no drift fit. Nothing in it used one, and the estimator a device
 clock needs is not ordinary least squares: callback stamps are late and
-never early, so the fit wants a lower envelope. `psy_audio.h` will fit
-offset and rate from repeated correlations against a real device, where
-the estimator can be measured.
+never early, so the fit wants a lower envelope. `psy_audio.h` then fitted
+offset and rate itself and measured the estimators. v0.6.0 adds a fit for
+other devices; see [The device clock fit (v0.6.0)](#the-device-clock-fit-v060).
+
+## The device clock fit (v0.6.0)
+
+A response box, a microcontroller or an eye tracker stamps events with its
+own clock. `docs/devices_spec.md` (section 6) asked for one fit that maps
+such a clock to the psy_rt clock, in `psy_rt.h`, because three places
+already needed one: `psy_audio.h` has its own, the photodiode loopback had
+an ad hoc line, and the response-box proposal had a third. The user
+approved the home on 2026-10-08 (devices_spec section 16, default 1).
+`psy_audio.h` keeps its own fit until a measurement shows the same results
+with this one.
+
+### Decisions
+
+| Question | Decision | Why |
+|---|---|---|
+| Estimators | LATE: the lower envelope. BRACKET: LATE on the bracket ends, with wide brackets refused. UNBIASED: bucket means and least squares | A USB report is late, never early: least squares would put the mean delay into the map. `psy_audio.h` measured the envelope against least squares on callback times (207 against 359 us). BRACKET is PsychDataPixx's minimum-offset filter with Psychtoolbox's 1.3 ms acceptance bound (devices_spec section 2) |
+| Which line under the points | The hull edge that spans the mean x (Moon, Skelly and Towsley, INFOCOM 1999) | It minimizes the summed gap. The test checks it against a brute force over every pair of points, within 2 ns |
+| Thinning | One point per 200 ms bucket of host time: the least late pair, or the mean | Fixed memory, and the minimum per bucket keeps what the envelope needs. `psy_audio.h` measured 200 ms |
+| Window | 1024 points, fixed in the struct (about 40 KB) | The struct's size must agree in every translation unit. 205 s at 200 ms |
+| Anchor | The newest point | A recent event maps over a short tick distance, so slope error matters less |
+| Slope | Nominal until the points span 5 s; the offset from the last second until then | `psy_audio.h` measured that a slope from a shorter span was worse than the drift |
+| Wrap | Unwrap by the tick the map expects at the pair's host time | `micros()` wraps every 71.6 minutes of a board's uptime; a run can cross it |
+| Restart | Hold a pair more than 50 ms off the map; restart when held pairs agree with each other for 1 s | A timer reset (XID's `e5`) is permanent; a burst after an OS stall arrives within milliseconds. The first version shifted the oldest held pair out after eight, so at 100 pairs a second the hold never spanned 1 s: the restart test found it, and mutant `fit-07` keeps it found |
+| Refit | At each new bucket, at each pair while 16 points or fewer, and for a LATE or BRACKET pair under the line | A full refit costs 9 to 23 us. The first version also refitted UNBIASED pairs under the line, which is half of them; the benchmark found it (95,576 refits instead of 950) |
+| Records | `PSYRT_KIND_CLOCK` per closed bucket (the existing kind, plus the epoch in `u.u64[2]`), `PSYRT_KIND_FIT` (new, 8) per refit at a new bucket | An offline fit of the whole session sees the points after each event too. Psychtoolbox's PsychRTBox and XDF files keep the raw pairs for the same reason |
+| The map's API | `int64_t psyrt_fit_map()`, 0 before the first pair | The spec's draft. 0 is never a psy_rt time a rig sees |
+
+### Measured on synthetic devices
+
+Seeded devices with a known offset and rate; the error is the map minus
+the true line at each new pair's tick, which is when a reader maps an
+event. Four seed sets (the test's, +100, +200, +300). "From 205 s" is with
+a full window.
+
+| Scenario | Path | From 10 s, us | From 205 s, us | Rate error |
+|---|---|---|---|---|
+| LATE, ms timer, 100 pairs/s, +100 ppm | 1 ms USB frame, 0.1 ms exponential tail, 16 ms bursts (1%), 60 to 200 ms stalls (0.2%) | -75 to +240 | -47 to +91 | 0.3 ppm or less |
+| LATE, us counter wrapping at 200 s, -80 ppm | as above | -12 to +46 | -5 to +18 | 0.05 ppm or less |
+| LATE, ms timer, counter reset at 300 s | as above, no stalls | -98 to +284 (10 s after the reset excluded) | -98 to +247 | 0.9 ppm or less (the second epoch is short) |
+| LATE, 300 ms stall at 200 s | as above | -70 to +214 | +4 to +113 | 0.4 ppm or less |
+| LATE, a press every 2 to 4 s | a 16 ms latency timer's phase | -1359 to +8663 (from 2 min) | -1359 to +3201 | 0.6 ppm or less |
+| BRACKET, a query every 100 ms | brackets of 0.4 to 3 ms, over 1.3 ms refused | -327 to +628 | -42 to +110 | 0.1 ppm or less |
+| UNBIASED, us counter, -50 ppm | symmetric noise, SD 115 us | -23 to +22 | -5 to +7 | 0.02 ppm or less |
+| LATE, the first 5 s (0.3 to 4.9 s), +500 ppm | 1 ms frame, 0.1 ms tail | -541 to +160 at the pair; -641 to +60 200 ms ahead | | nominal slope |
+
+What the table says:
+
+- Dense pairs give a map within tens of us of the truth once the window
+  holds a few minutes. The early minutes are worse: the BRACKET case was
+  327 us early between 10 and 20 s, from a slope fitted over a short span.
+- Sparse pairs behind a coarse timer give millisecond errors for minutes:
+  the envelope needs many deliveries to find the timer's floor. A box that
+  reports only presses needs BRACKET probes (XID's `_e5` query) or a 1 ms
+  latency timer, or both. This is the case `psy_device.h` must handle.
+- The rate converges to the truth within a ppm in every case.
+- None of this is a device. The table bounds the estimator on modeled
+  paths; the path's minimum delay, which LATE cannot see, needs a loopback
+  (devices_spec section 12).
+
+A counter reset restarted the fit once, 1.0 to 1.3 s after the reset (the
+1 s hold plus the bucket). A 300 ms stall, whose 30 late pairs arrive
+together, did not restart it.
+
+Cost, `fit_bench.c` (a scratch program, not kept): 1000 pairs a second
+with a full window, `psyrt_thread_elevate()`, under the timing guard, two
+runs with MinGW gcc 16.1 -O2 and one with MSVC 19.44 /O2, AC:
+
+| Mode | Refit, p50 / p99 / max us | Pair without a refit, p99 | Refits per second |
+|---|---|---|---|
+| LATE | 11.1 to 22.5 / 14.9 to 28.3 / 19.7 to 49.8 | 0.1 us | 5 (one per bucket) |
+| BRACKET | 11.0 to 22.2 / 14.1 to 28.0 / 19.8 to 40.1 | 0.1 us | 5 |
+| UNBIASED | 9.2 to 9.7 / 13.0 / 13.4 to 36.0 | 0.1 us | 5 |
+
+The clock ticks at 100 ns, so "0.1 us" is one tick. The first gcc run was
+about 1.7 times slower than the second for every refit; the cause (a core
+type, a clock speed) was not looked for.
+
+Mutants (`tests/mutate/rt.toml`, the fit's part of the test only, about 1
+s a run): 17 of 17 caught. `fit-03` (the offset from the whole window) and
+`fit-15` (a slope at once) survived the first run, because no check looked
+at the first 5 s; `test_fit_early` was added for them.
+
+Not done: any real device. The first is the MCU photodiode of
+`tests/loopback/psy_screen_loopback.c`, which uses this fit from
+2026-10-08 (LATE, `micros()`, 32 bits) instead of its line through the
+least-late pair of the first and last quarters. It prints the old line's
+distance from the fit over the edges, for the first hardware runs.
 
 ## Windows 11 power throttling
 

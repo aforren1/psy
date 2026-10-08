@@ -8,7 +8,10 @@
  * offset events, the grating's contrast from a keyed track. Each fired
  * event is printed with its frame and residual.
  *
- * Usage: gfx_trial [--sim]
+ * Usage: gfx_trial [--sim] [--cache DIR] [--no-cache]
+ *   --cache DIR keep compiled programs in DIR; the default is the per-user
+ *               folder of psygfx_default_cache_dir(), when there is one
+ *   --no-cache  compile every program; read and write no cache file
  * Exit code: 0, 1 when the screen or the gfx did not open, 2 for a bad
  * argument.
  */
@@ -57,15 +60,26 @@ int main(int argc, char** argv) {
     psygfx_grating_desc grd;
     psyscr_frame f;
     psytl_event fired[8], e[5];
-    int i, n;
+    static psygfx_file_cache pcache;
+    static char cache_dir[512];
+    const psygfx_cache* cache = NULL;
+    int i, n, no_cache = 0;
     int64_t t0 = 0;
+    char line[600];
 
     memset(&sd, 0, sizeof sd);
     sd.windowed = true;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--sim")) sd.backend = PSYSCR_BACKEND_SIM;
-        else { fprintf(stderr, "usage: gfx_trial [--sim]\n"); return 2; }
+        else if (!strcmp(argv[i], "--cache") && i + 1 < argc && (cache = psygfx_file_cache_init(&pcache, argv[i + 1])) != NULL) i++;
+        else if (!strcmp(argv[i], "--no-cache")) no_cache = 1;
+        else { fprintf(stderr, "usage: gfx_trial [--sim] [--cache DIR] [--no-cache]\n"); return 2; }
     }
+    /* The per-user folder unless told otherwise, so that a second run loads
+     * the programs instead of compiling them (PROGRAM CACHE). */
+    if (no_cache) cache = NULL;
+    else if (!cache && psygfx_default_cache_dir(cache_dir, sizeof cache_dir) == PSYGFX_OK)
+        cache = psygfx_file_cache_init(&pcache, cache_dir);
     memset(&td, 0, sizeof td);
     td.events = storage; td.event_capacity = 64; td.n_channels = N_CHANNELS;
     if (!psytl_open(&tl, &td)) { fprintf(stderr, "%s\n", psytl_error(&tl)); return 1; }
@@ -81,7 +95,10 @@ int main(int argc, char** argv) {
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.5f;
+    gd.cache = cache;
     if (!psygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_trial: %s\n", psygfx_error(&gfx)); return 1; }
+    psygfx_describe(&gfx, line, sizeof line);
+    printf("%s\n", line);
 
     memset(&fd, 0, sizeof fd);
     fd.shape = PSYGFX_CROSS; fd.w = fd.h = 16; fd.shape_p[0] = 3;

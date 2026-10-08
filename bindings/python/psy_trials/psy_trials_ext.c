@@ -51,6 +51,7 @@ static PyObject* TFull;
 static PyObject* TInfoType;     /* namedtuple TrialInfo */
 static PyObject* TTrialType;    /* namedtuple Trial     */
 static PyObject* TTableType;    /* psy.trials.Table     */
+static PyObject* TJitterType;   /* namedtuple Jitter    */
 
 /* Heap-type instances visit their type in tp_traverse from 3.9 on only. */
 static int g_visit_type = 1;
@@ -102,6 +103,8 @@ typedef struct TrialsObject {
     double*   weights;
     int*      group_list;
     uint64_t* rules_arena;                /* psytr_rules() output, until open */
+    double    jit_vals[PSYTR_MAX_JITTERS][PSYTR_MAX_JITTER_VALUES]; /* CHOICE values,
+                                           * until open copies them    */
     int       busy;
     PyObject *cb_type, *cb_value, *cb_tb;
     t_track_ctx track_ctx[PSYTR_MAX_TRACKS];
@@ -684,28 +687,120 @@ static int t_parse_constraint(PyObject* c, const psytr_desc* d, psytr_constraint
     return 0;
 }
 
+/* A number of seconds, or a column name (kept as bytes in `names`). */
+static int t_jit_num(PyObject* dict, const char* key, double* out, const char** col, PyObject* names) {
+    PyObject* v = PyDict_GetItemString(dict, key);
+    if (!v || v == Py_None) return 0;
+    if (PyUnicode_Check(v)) {
+        PyObject* b = PyUnicode_AsUTF8String(v);
+        if (!b) return -1;
+        if (PyList_Append(names, b) < 0) { Py_DECREF(b); return -1; }
+        *col = PyBytes_AsString(b);
+        Py_DECREF(b);   /* the list holds it */
+        return 0;
+    }
+    *out = PyFloat_AsDouble(v);
+    if (*out == -1.0 && PyErr_Occurred()) return -1;
+    return 0;
+}
+
+/* {"name", "dist", "lo", "hi", "scale", "values", "rate"} from uniform(),
+ * choice() or exponential() into j. Strings in `names`, values in vals. */
+static int t_jitter_desc(PyObject* dict, psytr_jitter_desc* j, double* vals, PyObject* names) {
+    static const char* const dists[] = { "uniform", "choice", "exponential" };
+    PyObject *v, *b;
+    Py_ssize_t n, i;
+    int k;
+    memset(j, 0, sizeof(*j));
+    if (!PyDict_Check(dict)) { PyErr_SetString(PyExc_TypeError, "a jitter is a dict from uniform(), choice() or exponential()"); return -1; }
+    v = PyDict_GetItemString(dict, "name");
+    if (v && v != Py_None) {
+        if (!PyUnicode_Check(v)) { PyErr_SetString(PyExc_TypeError, "a jitter's name must be a str"); return -1; }
+        b = PyUnicode_AsUTF8String(v);
+        if (!b) return -1;
+        if (PyList_Append(names, b) < 0) { Py_DECREF(b); return -1; }
+        j->name = PyBytes_AsString(b);
+        Py_DECREF(b);
+    }
+    v = PyDict_GetItemString(dict, "dist");
+    if (!v || !PyUnicode_Check(v)) { PyErr_SetString(TArgumentError, "a jitter needs dist 'uniform', 'choice' or 'exponential'"); return -1; }
+    {
+        PyObject* keep;
+        const char* nm = t_utf8(v, &keep);
+        if (!nm) return -1;
+        for (k = 0; k < 3 && strcmp(nm, dists[k]) != 0; k++) {}
+        Py_DECREF(keep);
+        if (k == 3) { PyErr_SetString(TArgumentError, "dist is 'uniform', 'choice' or 'exponential'"); return -1; }
+        j->dist = (psytr_jitter_dist)k;
+    }
+    if (t_jit_num(dict, "lo", &j->lo, &j->lo_column, names) < 0) return -1;
+    if (t_jit_num(dict, "hi", &j->hi, &j->hi_column, names) < 0) return -1;
+    if (t_jit_num(dict, "scale", &j->scale, &j->scale_column, names) < 0) return -1;
+    v = PyDict_GetItemString(dict, "values");
+    if (v && v != Py_None) {
+        n = PySequence_Size(v);
+        if (n < 0) { PyErr_Clear(); PyErr_SetString(PyExc_TypeError, "values must be a sequence of numbers"); return -1; }
+        if (n > PSYTR_MAX_JITTER_VALUES) {
+            PyErr_Format(TArgumentError, "%zd values; the maximum is %d", n, PSYTR_MAX_JITTER_VALUES);
+            return -1;
+        }
+        for (i = 0; i < n; i++) {
+            PyObject* it = PySequence_GetItem(v, i);
+            if (!it) return -1;
+            vals[i] = PyFloat_AsDouble(it);
+            Py_DECREF(it);
+            if (vals[i] == -1.0 && PyErr_Occurred()) return -1;
+        }
+        j->values = vals;
+        j->n_values = (int)n;
+    }
+    v = PyDict_GetItemString(dict, "rate");
+    if (v && v != Py_None) {
+        long num, den = 1;
+        if (PyTuple_Check(v) && PyTuple_Size(v) == 2) {
+            num = PyLong_AsLong(PyTuple_GetItem(v, 0));
+            den = PyLong_AsLong(PyTuple_GetItem(v, 1));
+        } else {
+            num = PyLong_AsLong(v);
+        }
+        if (PyErr_Occurred()) { PyErr_Clear(); PyErr_SetString(PyExc_TypeError, "rate is an int or (num, den)"); return -1; }
+        if (num < 1 || den < 1 || num > 0x7FFFFFFF || den > 0x7FFFFFFF) {
+            PyErr_SetString(TArgumentError, "rate needs positive num and den");
+            return -1;
+        }
+        j->rate_num = (int)num;
+        j->rate_den = (int)den;
+    }
+    return 0;
+}
+
+static PyObject* t_jitter_value(psytr_jitter_value v) {
+    return PyObject_CallFunction(TJitterType, "dLL", v.s, (long long)v.ns, (long long)v.frames);
+}
+
 static int t_build(TrialsObject* o, PyObject* args, PyObject* kwds, psytr_desc* d) {
     static char* kw[] = { "n_conditions", "factors", "reps", "cond_reps", "order",
                           "constraints", "max_swaps", "tracks", "interleave",
                           "track_rate", "block_size", "constraints_span_blocks",
                           "n_practice", "n_warmup", "warmup_conditions", "requeue_gap",
                           "rng", "record_size", "table", "order_list", "draws", "weights",
-                          "subset", "groups", "rules", "participant", NULL };
+                          "subset", "groups", "rules", "participant", "jitters", NULL };
     PyObject *factors = Py_None, *cond_reps = Py_None, *constraints = Py_None,
              *tracks = Py_None, *warmup = Py_None, *rng = Py_None, *table = Py_None,
-             *order_list = Py_None, *weights = Py_None, *groups = Py_None, *rules = Py_None;
+             *order_list = Py_None, *weights = Py_None, *groups = Py_None, *rules = Py_None,
+             *jitters = Py_None;
     int order = 0, interleave = 0, span = 0, participant = 0;
     Py_ssize_t record_size = 0, n, i;
 
     memset(d, 0, sizeof(*d));
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$iOiOiOiOidipiiOiOnOOiOiOOi", kw,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$iOiOiOiOidipiiOiOnOOiOiOOiO", kw,
                                      &d->n_conditions, &factors, &d->reps, &cond_reps,
                                      &order, &constraints, &d->max_swaps, &tracks,
                                      &interleave, &d->track_rate, &d->block_size, &span,
                                      &d->n_practice, &d->n_warmup, &warmup,
                                      &d->requeue_gap, &rng, &record_size, &table, &order_list,
                                      &d->draws, &weights, &d->subset, &groups, &rules,
-                                     &participant))
+                                     &participant, &jitters))
         return -1;
     if (table != Py_None) {
         if (!PyObject_TypeCheck(table, (PyTypeObject*)TTableType)) {
@@ -913,6 +1008,24 @@ static int t_build(TrialsObject* o, PyObject* args, PyObject* kwds, psytr_desc* 
         }
     }
 
+    if (jitters != Py_None) {
+        n = PySequence_Size(jitters);
+        if (n < 0) { PyErr_Clear(); PyErr_SetString(PyExc_TypeError, "jitters must be a list"); return -1; }
+        if (n > PSYTR_MAX_JITTERS) {
+            PyErr_Format(TArgumentError, "%zd jitters; the maximum is %d", n, PSYTR_MAX_JITTERS);
+            return -1;
+        }
+        for (i = 0; i < n; i++) {
+            PyObject* it = PySequence_GetItem(jitters, i);
+            int rc;
+            if (!it) return -1;
+            rc = t_jitter_desc(it, &d->jitters[i], o->jit_vals[i], o->names);
+            Py_DECREF(it);
+            if (rc < 0) return -1;
+        }
+        d->n_jitters = (int)n;
+    }
+
     /* Tracks: an object, or (object, weight). */
     if (tracks != Py_None) {
         n = PySequence_Size(tracks);
@@ -974,7 +1087,8 @@ static int t_build(TrialsObject* o, PyObject* args, PyObject* kwds, psytr_desc* 
         PyObject *keep;
         char err[512];
         int line, rows = d->table ? d->table->n_rows : PSYTR_MAX_CONDITIONS;
-        size_t sz = (size_t)4 * PSYTR_MAX_TRIALS + (size_t)32 * (size_t)(rows > 0 ? rows : 1) + 1024;
+        size_t sz = (size_t)4 * PSYTR_MAX_TRIALS + (size_t)32 * (size_t)(rows > 0 ? rows : 1) + 1024 +
+                    (size_t)320 * PSYTR_MAX_JITTERS;
         const char* txt;
         if (!PyUnicode_Check(rules)) { PyErr_SetString(PyExc_TypeError, "rules must be a str"); return -1; }
         txt = t_utf8(rules, &keep);
@@ -1358,6 +1472,40 @@ static PyObject* Trials_values(PyObject* self, PyObject* arg) {
     return tb_row(TB(o->table_obj), (int)c);
 }
 
+static PyObject* Trials_jitter(PyObject* self, PyObject* args) {
+    TrialsObject* o = TO(self);
+    PyObject* jo;
+    long i;
+    int j;
+    if (!PyArg_ParseTuple(args, "lO", &i, &jo)) return NULL;
+    if (!o->t.open) return t_fail(PSYTR_ERR_CLOSED);
+    if (PyUnicode_Check(jo)) {
+        PyObject* keep;
+        const char* nm = t_utf8(jo, &keep);
+        if (!nm) return NULL;
+        j = psytr_jitter_index(&o->t, nm);
+        Py_DECREF(keep);
+        if (j < 0) { PyErr_SetString(TArgumentError, "no jitter of that name"); return NULL; }
+    } else {
+        long jl = PyLong_AsLong(jo);
+        if (jl == -1 && PyErr_Occurred()) return NULL;
+        if (jl < 0 || jl >= o->t.n_jit) { PyErr_Format(PyExc_IndexError, "jitter %ld out of range", jl); return NULL; }
+        j = (int)jl;
+    }
+    if (i < 0 || i >= psytr_n_run(&o->t)) { PyErr_Format(PyExc_IndexError, "trial %ld has not run", i); return NULL; }
+    return t_jitter_value(psytr_jitter(&o->t, (int)i, j));
+}
+
+static PyObject* Trials_get_jitters(PyObject* self, void* Py_UNUSED(c)) {
+    TrialsObject* o = TO(self);
+    PyObject* l;
+    int j;
+    l = PyList_New(o->t.open ? o->t.n_jit : 0);
+    if (!l || !o->t.open) return l;
+    for (j = 0; j < o->t.n_jit; j++) PyList_SetItem(l, j, PyUnicode_FromString(o->t.jit[j].name));
+    return l;
+}
+
 static PyObject* Trials_get_table(PyObject* self, void* Py_UNUSED(c)) {
     TrialsObject* o = TO(self);
     if (!o->table_obj) Py_RETURN_NONE;
@@ -1528,6 +1676,7 @@ static PyGetSetDef Trials_getset[] = {
     { "is_open", Trials_get_is_open, NULL, "True after a successful open or load.", NULL },
     { "record_size", Trials_get_record_size, NULL, "Bytes per trial record.", NULL },
     { "table", Trials_get_table, NULL, "The Table, or None.", NULL },
+    { "jitters", Trials_get_jitters, NULL, "The jitters' names, in order.", NULL },
     { "rng_state", Trials_get_rng_state, Trials_set_rng_state,
       "The splitmix64 state when rng was an int seed (None otherwise). Save it "
       "beside save(); pass it as rng= to load().", NULL },
@@ -1576,6 +1725,9 @@ static PyMethodDef Trials_methods[] = {
     { "format_rules", Trials_format_rules, METH_NOARGS,
       "format_rules() -> str: the order settings as rules text, which pastes "
       "back as rules=." },
+    { "jitter", Trials_jitter, METH_VARARGS,
+      "jitter(trial, j) -> Jitter(s, ns, frames): trial's draw of jitter j (an index "
+      "or a name). frames is -1 unless the jitter snaps to frames." },
     { "values", Trials_values, METH_O,
       "values(condition) -> dict: the table row of a condition." },
     { "save", Trials_save, METH_NOARGS, "save() -> bytes: a snapshot of the session." },
@@ -1598,11 +1750,12 @@ static PyType_Slot Trials_slots[] = {
       "constraints_span_blocks=False, n_practice=0, n_warmup=0, "
       "warmup_conditions=None, requeue_gap=0, rng=None, record_size=0, "
       "table=None, order_list=None, draws=0, weights=None, subset=0, "
-      "groups=None, rules=None, participant=0)\n\n"
+      "groups=None, rules=None, participant=0, jitters=None)\n\n"
       "One psy_trials.h session. factors is a list of (name, n_levels); "
       "table is a Table whose rows are the conditions (names then resolve "
       "against its columns and levels); rules is rules text (psytr_rules) "
-      "applied over the keywords; groups comes from groups(); "
+      "applied over the keywords; groups comes from groups(); jitters "
+      "come from uniform(), choice() and exponential(); "
       "constraints come from max_run() and friends; tracks are objects with "
       "is_done() or a done attribute, or (object, weight); rng is a callable "
       "returning [0, 1) or an int seed for the header's splitmix64." },
@@ -1777,6 +1930,57 @@ static PyObject* mod_latin_rows(PyObject* Py_UNUSED(m), PyObject* args, PyObject
     return PyLong_FromLong((bal && n % 2) ? 2 * n : n);
 }
 
+static PyObject* t_jit_dict(const char* name, const char* dist, PyObject* lo, PyObject* hi,
+                            PyObject* scale, PyObject* values, PyObject* rate) {
+    return Py_BuildValue("{s:s,s:s,s:O,s:O,s:O,s:O,s:O}", "name", name, "dist", dist, "lo", lo,
+                         "hi", hi, "scale", scale, "values", values, "rate", rate);
+}
+
+static PyObject* mod_uniform(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "name", "lo", "hi", "rate", NULL };
+    const char* name;
+    PyObject *lo, *hi, *rate = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "sOO|$O", kw, &name, &lo, &hi, &rate)) return NULL;
+    return t_jit_dict(name, "uniform", lo, hi, Py_None, Py_None, rate);
+}
+
+static PyObject* mod_choice(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "name", "values", "rate", NULL };
+    const char* name;
+    PyObject *vals, *rate = Py_None, *lst, *r;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "sO|$O", kw, &name, &vals, &rate)) return NULL;
+    lst = PySequence_List(vals);
+    if (!lst) return NULL;
+    r = t_jit_dict(name, "choice", Py_None, Py_None, Py_None, lst, rate);
+    Py_DECREF(lst);
+    return r;
+}
+
+static PyObject* mod_exponential(PyObject* Py_UNUSED(m), PyObject* args, PyObject* kwds) {
+    static char* kw[] = { "name", "lo", "hi", "scale", "rate", NULL };
+    const char* name;
+    PyObject *lo, *hi, *scale, *rate = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "sOOO|$O", kw, &name, &lo, &hi, &scale, &rate)) return NULL;
+    return t_jit_dict(name, "exponential", lo, hi, scale, Py_None, rate);
+}
+
+static PyObject* mod_jitter_map(PyObject* Py_UNUSED(m), PyObject* args) {
+    PyObject *spec, *names;
+    psytr_jitter_desc j;
+    double vals[PSYTR_MAX_JITTER_VALUES], u;
+    char err[256];
+    PyObject* r = NULL;
+    if (!PyArg_ParseTuple(args, "Od", &spec, &u)) return NULL;
+    names = PyList_New(0);
+    if (!names) return NULL;
+    if (t_jitter_desc(spec, &j, vals, names) == 0) {
+        if (!psytr_jitter_check(&j, err, sizeof(err))) PyErr_SetString(TArgumentError, err);
+        else r = t_jitter_value(psytr_jitter_map(&j, u));
+    }
+    Py_DECREF(names);
+    return r;
+}
+
 static PyObject* mod_splitmix(PyObject* Py_UNUSED(m), PyObject* arg) {
     unsigned long long s = PyLong_AsUnsignedLongLongMask(arg);
     uint64_t st;
@@ -1827,6 +2031,19 @@ static PyMethodDef module_methods[] = {
     { "latin_rows", (PyCFunction)(void (*)(void))mod_latin_rows, METH_VARARGS | METH_KEYWORDS,
       "latin_rows(n, balanced=False) -> int: rows of the design (2n for a "
       "balanced square of odd n)." },
+    { "uniform", (PyCFunction)(void (*)(void))mod_uniform, METH_VARARGS | METH_KEYWORDS,
+      "uniform(name, lo, hi, *, rate=None) -> dict for Trials(jitters=): a duration "
+      "uniform on [lo, hi] s. lo and hi are seconds or a table column's name; rate "
+      "is an int or (num, den) Hz to snap to whole frames." },
+    { "choice", (PyCFunction)(void (*)(void))mod_choice, METH_VARARGS | METH_KEYWORDS,
+      "choice(name, values, *, rate=None) -> dict: one of the values (s), each "
+      "equally likely." },
+    { "exponential", (PyCFunction)(void (*)(void))mod_exponential, METH_VARARGS | METH_KEYWORDS,
+      "exponential(name, lo, hi, scale, *, rate=None) -> dict: lo + an exponential "
+      "of mean scale, truncated at hi (a non-aging foreperiod)." },
+    { "jitter_map", mod_jitter_map, METH_VARARGS,
+      "jitter_map(spec, u) -> Jitter(s, ns, frames): the duration for a variate u "
+      "in [0, 1), with no session (psytr_jitter_map)." },
     { "splitmix", mod_splitmix, METH_O,
       "splitmix(state) -> (u, new_state): one psytr_splitmix step, for a "
       "caller that wants to reproduce the header's generator." },
@@ -1992,6 +2209,12 @@ PyMODINIT_FUNC PyInit_trials(void) {
     if (!TTrialType) goto fail;
     Py_INCREF(TTrialType);
     if (PyModule_AddObject(m, "Trial", TTrialType) < 0) { Py_DECREF(TTrialType); goto fail; }
+    fields = Py_BuildValue("[sss]", "s", "ns", "frames");
+    TJitterType = fields ? t_namedtuple(mod, "Jitter", fields) : NULL;
+    Py_XDECREF(fields);
+    if (!TJitterType) goto fail;
+    Py_INCREF(TJitterType);
+    if (PyModule_AddObject(m, "Jitter", TJitterType) < 0) { Py_DECREF(TJitterType); goto fail; }
     Py_CLEAR(mod);
 
     /* From the compiled implementation, so it names the header actually built
@@ -2011,6 +2234,8 @@ PyMODINIT_FUNC PyInit_trials(void) {
     PyModule_AddIntConstant(m, "MAX_FACTORS", PSYTR_MAX_FACTORS);
     PyModule_AddIntConstant(m, "MAX_CONSTRAINTS", PSYTR_MAX_CONSTRAINTS);
     PyModule_AddIntConstant(m, "MAX_TRACKS", PSYTR_MAX_TRACKS);
+    PyModule_AddIntConstant(m, "MAX_JITTERS", PSYTR_MAX_JITTERS);
+    PyModule_AddIntConstant(m, "MAX_JITTER_VALUES", PSYTR_MAX_JITTER_VALUES);
     PyModule_AddIntConstant(m, "FLAG_PRACTICE", PSYTR_FLAG_PRACTICE);
     PyModule_AddIntConstant(m, "FLAG_REQUEUED", PSYTR_FLAG_REQUEUED);
     PyModule_AddIntConstant(m, "FLAG_DONE", PSYTR_FLAG_DONE);

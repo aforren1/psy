@@ -1,0 +1,475 @@
+# psy_response.h mutants: the window and its bounds, onset refinement, the
+# double-report rule, held keys, releases, crossings, the trace, the log
+# reserve, sources and the data row. docs/psy_response.md lists the results.
+header = "psy_response.h"
+
+[test.response]
+source = "tests/adapt/psy_response_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 300
+
+# --- the window ------------------------------------------------------------
+
+[[mutant]]
+id = "w-01"
+name = "minimum exclusive"
+test = "response"
+why = "A press exactly at minimum_valid_rt is a response; > would call it an anticipation."
+find = 'if (rt < c->min_rt_ns) return PSYRSP_E_ANTICIPATION;'
+replace = 'if (rt <= c->min_rt_ns) return PSYRSP_E_ANTICIPATION;'
+
+[[mutant]]
+id = "w-02"
+name = "deadline inclusive"
+test = "response"
+why = "The window is half-open: a press exactly at the deadline is late."
+find = 'if (c->duration_ns > 0 && rt >= c->duration_ns) return PSYRSP_E_LATE;'
+replace = 'if (c->duration_ns > 0 && rt > c->duration_ns) return PSYRSP_E_LATE;'
+
+[[mutant]]
+id = "w-03"
+name = "early against arm"
+test = "response"
+why = "EARLY is before the stimulus onset, not before the window opened at the fixation."
+find = '''    rt = t - c->onset.t;
+    if (rt < 0) return PSYRSP_E_EARLY;'''
+replace = '''    rt = t - c->onset.t;
+    if (t < c->t_arm) return PSYRSP_E_EARLY;'''
+
+[[mutant]]
+id = "w-04"
+name = "deadline from arm"
+test = "response"
+why = "duration runs from the onset; from arm() the window would close a fixation early."
+find = 'if (c->have_onset && c->duration_ns > 0 && now >= c->onset.t + c->duration_ns + c->settle_ns) {'
+replace = 'if (c->have_onset && c->duration_ns > 0 && now >= c->t_arm + c->duration_ns + c->settle_ns) {'
+
+[[mutant]]
+id = "w-05"
+name = "settle ignored"
+test = "response"
+why = "settle delays ENDED so late-delivered presses still count before the trial moves on."
+find = 'now >= c->onset.t + c->duration_ns + c->settle_ns'
+replace = 'now >= c->onset.t + c->duration_ns'
+
+[[mutant]]
+id = "w-06"
+name = "seconds truncated"
+test = "response"
+why = "0.1 s in double is 0.1000000000000000055; truncation still gives 100 ms, but 0.29 s gives 289999999 ns: durations round to nearest."
+find = '*out = (int64_t)llround(s * PSYRSP__NS_PER_S);'
+replace = '*out = (int64_t)(s * PSYRSP__NS_PER_S);'
+
+[[mutant]]
+id = "w-07"
+name = "rt sign"
+test = "response"
+why = "RT is response minus onset."
+find = 'r->rt = (double)(e->t - c->onset.t) / PSYRSP__NS_PER_S;'
+replace = 'r->rt = (double)(c->onset.t - e->t) / PSYRSP__NS_PER_S;'
+
+[[mutant]]
+id = "w-08"
+name = "anticipation ends the window"
+test = "response"
+why = "Anticipations are logged, never responses: they must not end the trial."
+find = '    if (rt < c->min_rt_ns) return PSYRSP_E_ANTICIPATION;'
+replace = '    if (rt < c->min_rt_ns) return 0;'
+
+[[mutant]]
+id = "w-09"
+name = "first arrival, not earliest"
+test = "response"
+why = "A box report read late but stamped earlier is the response; arrival order is not time order."
+find = '''            if (best < 0 || e->t < c->log[best].t) best = i;
+        }
+        if (e->flags & PSYRSP_E_EARLY) r->n_early++;'''
+replace = '''            if (best < 0) best = i;
+        }
+        if (e->flags & PSYRSP_E_EARLY) r->n_early++;'''
+
+[[mutant]]
+id = "w-10"
+name = "max_responses off by one"
+test = "response"
+why = "persist with max_responses 2 ends at the second response."
+find = '    need = c->d.persist ? c->d.max_responses : 1;'
+replace = '    need = c->d.persist ? c->d.max_responses + 1 : 1;'
+
+[[mutant]]
+id = "w-11"
+name = "after-end not marked"
+test = "response"
+why = "A press after the one that ended the trial is no response (jsPsych cancels the listener)."
+find = '''        in->t >= c->t_end)
+        flags |= PSYRSP_E_AFTER_END;'''
+replace = '''        in->t >= c->t_end)
+        flags |= 0;'''
+
+[[mutant]]
+id = "w-12"
+name = "timeout without a deadline"
+test = "response"
+why = "TIMEOUT means a deadline passed; with no deadline there is none."
+find = '''    } else if (c->duration_ns > 0) {
+        r->flags |= PSYRSP_R_TIMEOUT;'''
+replace = '''    } else {
+        r->flags |= PSYRSP_R_TIMEOUT;'''
+
+[[mutant]]
+id = "w-13"
+name = "kinds 0 means all"
+test = "response"
+why = "In ALL mode kinds 0 is the keyboard only, so a focus click does not end a keyboard trial."
+find = 'if (c->d.kinds == 0) c->d.kinds = PSYRSP_KIND_BIT(PSYRSP_KIND_KEYBOARD);'
+replace = 'if (c->d.kinds == 0) c->d.kinds = PSYRSP_KINDS_ALL;'
+
+[[mutant]]
+id = "w-14"
+name = "keycode reads the scancode"
+test = "response"
+why = "match = KEYCODE matches the layout's key, a different field."
+find = 'if (h->match == PSYRSP_MATCH_KEYCODE ? h->code == in->code : h->control == in->control) return i;'
+replace = 'if (h->control == in->control) return i;'
+
+[[mutant]]
+id = "w-15"
+name = "device filter ignored"
+test = "response"
+why = "A choice on one box must not take another box's button."
+find = '''        if (h->device && h->device != in->device) continue;
+        if (h->match'''
+replace = '        if (h->match'
+
+# --- onset refinement --------------------------------------------------------
+
+[[mutant]]
+id = "o-01"
+name = "no reclassification"
+test = "response"
+why = "The final onset (a frame later after a drop) must move every entry's class."
+find = '''    c->have_onset = 1;
+    psyrsp__reclassify(c);'''
+replace = '    c->have_onset = 1;'
+[[mutant.also]]
+find = '''    memset(r, 0, sizeof *r);
+    r->rt = r->rt_key_duration = PSYRSP__NAN;
+    r->response = -1;
+    r->entry = -1;
+    r->onset_frame = -1;
+    psyrsp__reclassify(c);'''
+replace = '''    memset(r, 0, sizeof *r);
+    r->rt = r->rt_key_duration = PSYRSP__NAN;
+    r->response = -1;
+    r->entry = -1;
+    r->onset_frame = -1;'''
+
+[[mutant]]
+id = "o-02"
+name = "ended early never set"
+test = "response"
+why = "The data row must say when the trial ended on a press that no longer counts."
+find = '        r->flags |= PSYRSP_R_ENDED_EARLY;'
+replace = ''
+
+[[mutant]]
+id = "o-03"
+name = "a plan replaces the final onset"
+test = "response"
+why = "A late plan must not overwrite the flip record's onset."
+find = 'if (c->have_onset && c->onset.final && !o->final) return c->status;'
+replace = ''
+
+[[mutant]]
+id = "o-04"
+name = "set_onset does not end"
+test = "response"
+why = "A press that arrived before its onset was known ends the window when the onset comes."
+find = '''    psyrsp__reclassify(c);
+    psyrsp__check_end(c);
+    return c->status;'''
+replace = '''    psyrsp__reclassify(c);
+    return c->status;'''
+
+[[mutant]]
+id = "o-05"
+name = "plan flag lost"
+test = "response"
+why = "An RT measured from a prediction must say so."
+find = '        if (!c->onset.final) r->flags |= PSYRSP_R_ONSET_PLAN;'
+replace = ''
+
+# --- double reports and held keys -------------------------------------------
+
+[[mutant]]
+id = "d-01"
+name = "dedup inclusive"
+test = "response"
+why = "Two presses exactly dedup apart are two presses."
+find = 'if (dt < c->dedup_ns && dt > -c->dedup_ns) return true;'
+replace = 'if (dt <= c->dedup_ns && dt >= -c->dedup_ns) return true;'
+
+[[mutant]]
+id = "d-02"
+name = "dedup one direction"
+test = "response"
+why = "The message report can be stamped before the raw one (a tick-quantized time)."
+find = 'if (dt < c->dedup_ns && dt > -c->dedup_ns) return true;'
+replace = 'if (dt >= 0 && dt < c->dedup_ns) return true;'
+
+[[mutant]]
+id = "d-03"
+name = "duplicate marks the key down"
+test = "response"
+why = "A second report must not make the key down: its release would pair and shorten rt_key_duration."
+find = '''        return;
+    }
+    held = repeat || psyrsp__is_down(c, in);'''
+replace = '''        psyrsp__set_down(c, in, true);
+        return;
+    }
+    held = repeat || psyrsp__is_down(c, in);'''
+
+[[mutant]]
+id = "d-04"
+name = "default dedup 30 ms"
+test = "response"
+why = "A second report came 34.2 ms after the first in the measurement; 30 ms would take it for a press."
+find = 'd->dedup == 0 ? 0.050 : d->dedup'
+replace = 'd->dedup == 0 ? 0.030 : d->dedup'
+
+[[mutant]]
+id = "d-05"
+name = "repeat not held"
+test = "response"
+why = "R1: an OS repeat of a key held from before the window is not a press (jsPsych allow_held_key false)."
+find = '    held = repeat || psyrsp__is_down(c, in);'
+replace = '    held = psyrsp__is_down(c, in);'
+
+[[mutant]]
+id = "d-06"
+name = "release does not clear"
+test = "response"
+why = "After a release the key can be pressed again."
+find = '''    psyrsp__set_down(c, in, false);
+    if (!c->armed) return;'''
+replace = '    if (!c->armed) return;'
+
+[[mutant]]
+id = "d-07"
+name = "allow_held_key inverted"
+test = "response"
+why = "allow_held_key true lets a held key's report be the response."
+find = 'if (choice >= -1 && c->d.allow_held_key) {'
+replace = 'if (choice >= -1 && !c->d.allow_held_key) {'
+
+[[mutant]]
+id = "d-08"
+name = "held at open lost"
+test = "response"
+why = "The data row says when a choice key was already down as the window opened."
+find = '''                    psyrsp__same_dev(c->held[k].device, h->device))
+                    c->held_at_open = 1;'''
+replace = '''                    psyrsp__same_dev(c->held[k].device, h->device))
+                    (void)0;'''
+
+# --- devices (v0.1.1) -------------------------------------------------------
+
+[[mutant]]
+id = "dv-01"
+name = "devices ignored"
+test = "response"
+why = "Two keyboards pressing one key within 50 ms are two participants' presses, not one press reported twice."
+find = 'static bool psyrsp__same_dev(uint32_t a, uint32_t b) { return a == b || a == 0 || b == 0; }'
+replace = 'static bool psyrsp__same_dev(uint32_t a, uint32_t b) { (void)a; (void)b; return true; }'
+
+[[mutant]]
+id = "dv-02"
+name = "device 0 is a device"
+test = "response"
+why = "SDL's message path carries device 0: its report of a raw-path press must merge with it."
+find = 'static bool psyrsp__same_dev(uint32_t a, uint32_t b) { return a == b || a == 0 || b == 0; }'
+replace = 'static bool psyrsp__same_dev(uint32_t a, uint32_t b) { return a == b; }'
+
+[[mutant]]
+id = "dv-03"
+name = "repeat from another keyboard held"
+test = "response"
+why = "SDL keeps one key state for all keyboards: keyboard B's first press of a key A holds comes as a repeat."
+find = '    if (repeat && !psyrsp__is_down(c, in) && psyrsp__down_elsewhere(c, in)) repeat = false;'
+replace = ''
+
+# --- releases ---------------------------------------------------------------
+
+[[mutant]]
+id = "r-01"
+name = "a release closes one entry"
+test = "response"
+why = "A press and its HELD repeats are one press: the release closes them all, so the response's duration is right."
+find = '''            c->ended_by = 1;
+        }
+    }
+}'''
+replace = '''            c->ended_by = 1;
+        }
+        return;
+    }
+}'''
+
+[[mutant]]
+id = "r-02"
+name = "wait_for_key_release ignored"
+test = "response"
+why = "With wait_for_key_release the trial ends at the release, so the hold is measured."
+find = '''    if (c->d.wait_for_key_release && !(c->log[best].flags & PSYRSP_E_CROSSING) &&'''
+replace = '''    if (0 && c->d.wait_for_key_release && !(c->log[best].flags & PSYRSP_E_CROSSING) &&'''
+
+[[mutant]]
+id = "r-03"
+name = "max_hold default 0"
+test = "response"
+why = "max_hold 0 means 2 s; 0 ns would end every waiting trial at once."
+find = 'if (c->max_hold_ns == 0) c->max_hold_ns = 2000000000;'
+replace = ''
+
+# --- crossings, trace, log ---------------------------------------------------
+
+[[mutant]]
+id = "x-01"
+name = "no hysteresis"
+test = "response"
+why = "Jitter around the level must not give a second crossing."
+find = 'return h->cross == PSYRSP_CROSS_FALLING ? v > h->level + h->hysteresis : v < h->level - h->hysteresis;'
+replace = 'return h->cross == PSYRSP_CROSS_FALLING ? v > h->level : v < h->level;'
+
+[[mutant]]
+id = "x-02"
+name = "rising exclusive"
+test = "response"
+why = "A sample at the level crosses."
+find = 'return h->cross == PSYRSP_CROSS_FALLING ? v <= h->level : v >= h->level;'
+replace = 'return h->cross == PSYRSP_CROSS_FALLING ? v <= h->level : v > h->level;'
+
+[[mutant]]
+id = "x-03"
+name = "held channel crosses"
+test = "response"
+why = "A trigger already pressed at arm() is held, like a key."
+find = '            else if (psyrsp__past(h, ch->v)) ch->armed = 0;'
+replace = '            else ch->armed = 1;'
+
+[[mutant]]
+id = "x-04"
+name = "distance from the first sample"
+test = "response"
+why = "Movement onset is measured from where the pointer was at arm()."
+find = '            ch->has_ref = ch->has;'
+replace = '            ch->has_ref = 0;'
+
+[[mutant]]
+id = "t-01"
+name = "trace kinds ignored"
+test = "response"
+why = "trace_kinds limits the trace to the kinds asked for."
+find = '(c->d.trace_kinds == 0 || ((c->d.trace_kinds >> in->kind) & 1u))'
+replace = '(1)'
+
+[[mutant]]
+id = "l-01"
+name = "no reserve"
+test = "response"
+why = "Presses of other keys must not push the response out of the log."
+find = 'int cap = match ? PSYRSP_LOG_CAP : PSYRSP_LOG_CAP - PSYRSP_LOG_RESERVE;'
+replace = 'int cap = PSYRSP_LOG_CAP;'
+
+[[mutant]]
+id = "s-01"
+name = "kind's source wins"
+test = "response"
+why = "A device's own source entry is more specific than its kind's."
+find = '        if (c->src[i].device == device && device != 0) return &c->src[i];'
+replace = ''
+
+[[mutant]]
+id = "s-02"
+name = "stamp override keeps the table's bounds"
+test = "response"
+why = "Bounds belong to the tier they were measured for."
+find = '        if (s && s->tier == e->stamp) {'
+replace = '        if (s) {'
+
+[[mutant]]
+id = "f-01"
+name = "NaN written as 0"
+test = "response"
+why = "No response is an empty rt, not 0 s."
+find = '''    if (s != s) out[0] = 0;
+    else snprintf(out, cap, "%.9f", s);'''
+replace = '''    if (s != s) s = 0;
+    snprintf(out, cap, "%.9f", s);'''
+
+[[mutant]]
+id = "f-02"
+name = "names not quoted"
+test = "response"
+why = "A choice name with a comma must not shift the columns."
+find = '    bool q = strpbrk(s, ",\"\r\n") != NULL;'
+replace = '    bool q = false;'
+
+[[mutant]]
+id = "n-01"
+name = "US layout: z and y swapped"
+test = "response"
+why = "Key names resolve to US-layout scancodes; a lookup off by one is a wrong key."
+find = '''if (ch >= 'a' && ch <= 'z') { *sc = (uint32_t)(4 + ch - 'a'); *kc = (uint32_t)ch; return true; }'''
+replace = '''if (ch >= 'a' && ch <= 'z') { *sc = (uint32_t)(3 + ch - 'a'); *kc = (uint32_t)ch; return true; }'''
+
+# --- raw mice (v0.1.2) -------------------------------------------------------
+
+[[mutant]]
+id = "ms-01"
+name = "raw mouse buttons in bit order"
+test = "response"
+why = "Buttons follow SDL's numbers (left 1, middle 2, right 3), so a raw click and an SDL click of one button are one choice."
+file = "psy_input.h"
+find = '''    static const uint8_t bit[5] = { PSYIN_MOUSE_LEFT, PSYIN_MOUSE_MIDDLE, PSYIN_MOUSE_RIGHT,
+                                    PSYIN_MOUSE_X1, PSYIN_MOUSE_X2 };'''
+replace = '''    static const uint8_t bit[5] = { PSYIN_MOUSE_LEFT, PSYIN_MOUSE_RIGHT, PSYIN_MOUSE_MIDDLE,
+                                    PSYIN_MOUSE_X1, PSYIN_MOUSE_X2 };'''
+
+[[mutant]]
+id = "ms-02"
+name = "cursor gain ignored"
+test = "response"
+why = "The gain is the design's counts-to-pixels ratio, stated in the data."
+find = '    c->x += g * in->x;'
+replace = '    c->x += in->x;'
+
+[[mutant]]
+id = "ms-03"
+name = "cursor takes every mouse"
+test = "response"
+why = "One participant's cursor moves with that participant's mouse only."
+find = '    if (c->device && in->device != c->device) return 0;'
+replace = ''
+
+[[mutant]]
+id = "ms-04"
+name = "SDL absolute mouse not tier 3"
+test = "response"
+why = "SDL's absolute-mode mouse events carry the window message's time; the record must say so."
+file = "psy_input.h"
+find = '    return (uint8_t)(which ? 0 : PSYIN_TIER_3);'
+replace = '    return (uint8_t)0 * which;'
+
+# --- v0.1.4: SYNC in ALL mode ---------------------------------------------------
+
+[[mutant]]
+id = "sync-01"
+name = "every kind takes SYNC"
+test = "response"
+why = "A scanner pulse or a photodiode edge in an ALL_KEYS trial must not end it."
+find = '    if (c->d.kinds == PSYRSP_KINDS_ALL) c->d.kinds = (uint16_t)(c->d.kinds & ~PSYRSP_KIND_BIT(PSYRSP_KIND_SYNC));'
+replace = '    (void)0;'

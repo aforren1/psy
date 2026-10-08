@@ -38,6 +38,20 @@ jobs:
       - name: Compile checks
         run: ctest --test-dir build -C Release --output-on-failure
 
+      # psy_trials.h's jitter draws are integer arithmetic and must give the
+      # same golden digests under any optimization (ctest above checks the
+      # default build; MSVC /fp:fast was checked by hand).
+      - name: Jitter digests under -O3 native and -Ofast
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          set -eu
+          if [ "$RUNNER_OS" = macOS ]; then native=-mcpu=native; else native=-march=native; fi
+          for flags in "-O3 $native" "-Ofast" "-Ofast $native"; do
+            cc -std=c11 $flags -I. tests/adapt/psy_trials_jitter_repro.c -o jitter_repro -lm
+            ./jitter_repro
+          done
+
       # tests/loopback/ needs two device names wired together, so CI can never
       # run it. Build it on one platform anyway, or it rots unnoticed.
       - name: Build loopback tests (build only)
@@ -295,6 +309,37 @@ jobs:
           curl -sL -o pl_mpeg.h https://raw.githubusercontent.com/phoboslab/pl_mpeg/c871f2be022ece7ef4f64230b4fb8e1fb9eb6023/pl_mpeg.h
           echo "3a8cb30c83c2a1147719c30fe0c8b93da2987aa43140077c575b39aaa75fc2c9  pl_mpeg.h" | sha256sum -c -
           emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I. -DPSYSCR_NO_SDL -c -o compile_video_plm.o tests/compile/psy_video.c
+
+      # pack/psy_layout and its test (docs/psy_layout.md), as the player's
+      # WebAssembly build will compile them: the vendored libraries with
+      # their warnings off, the glue and the test with ours. No fonts here:
+      # the corpus check says it skipped them; the order checks run.
+      - name: Layout library under emcc
+        shell: bash
+        run: |
+          set -eu
+          emcc() { command emcc "$@" || exit $?; }
+          em++() { command em++ "$@" || exit $?; }
+          T=third_party
+          W="-O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -I."
+          mkdir -p lo
+          em++ -O2 -std=c++17 -fno-exceptions -fno-rtti -w -c $T/harfbuzz/src/harfbuzz.cc -o lo/hb.o
+          emcc -O2 -w -DSB_CONFIG_UNITY -I$T/sheenbidi/Headers -I$T/sheenbidi/Source -c $T/sheenbidi/Source/SheenBidi.c -o lo/sb.o
+          for f in linebreak linebreakdata linebreakdef wordbreak graphemebreak eastasianwidthdef emojidef unibreakbase unibreakdef; do
+            emcc -O2 -w -c $T/libunibreak/src/$f.c -o lo/ub_$f.o
+          done
+          emcc -O2 -w -I$T/budouxc/include -c $T/budouxc/src/budoux.c -o lo/bx.o
+          for f in attribute_collection attributes common editor editor_rules font_collection icon_collection layout rich_layout rich_text text; do
+            emcc -O2 -w -std=gnu17 -I$T/skribidi/include -I$T/skribidi/src -I$T/harfbuzz/src -I$T/sheenbidi/Headers \
+              -I$T/libunibreak/src -I$T/budouxc/include -c $T/skribidi/src/skb_$f.c -o lo/skb_$f.o
+          done
+          P=$(for f in skribidi-0001-bidi-run-merge skribidi-0002-l1-trailing-whitespace; do
+                printf 'sha256:%s,' "$(sha256sum $T/patches/$f.patch | cut -c1-64)"; done)
+          emcc $W -isystem $T/skribidi/include -isystem $T/harfbuzz/src -DPSYLAY_PATCHES="\"${P%,}\"" -c pack/psy_layout.c -o lo/psy_layout.o
+          emcc $W -Ipack -isystem $T/skribidi/include -DPSYSCR_NO_SDL -DPSYLAY_TEST_DIR='"tests/layout"' -DPSYLAY_TEST_FONTS='"/no-fonts"' -c tests/layout/psy_layout_test.c -o lo/test.o
+          # HarfBuzz needs the C++ library: link with em++.
+          em++ -O2 -sNODERAWFS=1 -sSTACK_SIZE=16MB -sINITIAL_MEMORY=64MB -sALLOW_MEMORY_GROWTH=1 -o lo/test_layout.js lo/*.o
+          node lo/test_layout.js
 
   # --------------------------------------------------------------------- #
   # Python: cibuildwheel builds one abi3 wheel (Limited API, cp38+) per     #
@@ -628,13 +673,13 @@ jobs:
 
       - name: Configure
         shell: bash
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_PL_MPEG=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DPSY_BUILD_LOOPBACK=ON -DPSY_FETCH_PL_MPEG=ON ${{ runner.os != 'macOS' && '-DPSY_BUILD_LAYOUT=ON' || '' }}
 
       # The Headers job has no SDL3, so a screen, gfx or video program left
       # out of this list is compiled nowhere on CI. ctest below runs every
       # test that matches its pattern, built or not.
       - name: Build
-        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_rdk gfx_rdk_bench compile_psy_video_c compile_psy_video_cxx compile_psy_video_com test_psy_video video_play video_bench video_check
+        run: cmake --build build --config Release --target compile_psy_screen_c compile_psy_screen_cxx compile_psy_screen_com test_psy_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma psy_screen_loopback compile_psy_gfx_c compile_psy_gfx_cxx test_psy_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_rdk gfx_rdk_bench compile_psy_video_c compile_psy_video_cxx compile_psy_video_com test_psy_video video_play video_bench video_check test_psy_response_sdl test_psy_input_sdl trial_keyboard
 
       # psy_gfx.h's pixel checks must run where software GL exists; macOS has
       # no EGL, so its test runs the CPU checks only.
@@ -642,7 +687,7 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" != macOS ]; then export PSYGFX_TEST_REQUIRE_GL=1; fi
-          ctest --test-dir build -C Release -R "screen|gfx|video" --output-on-failure
+          ctest --test-dir build -C Release -R "screen|gfx|video|response_sdl|input_sdl" --output-on-failure
 
       - name: Run examples (simulated display)
         shell: bash
@@ -662,6 +707,9 @@ jobs:
           # psy_gfx.h on the simulated display: its null backend draws nothing.
           expect 0 "$bin/gfx_hello" --sim --frames 30
           expect 0 "$bin/gfx_trial" --sim
+          # psy_response.h: the keyboard trial with a synthetic participant; 1 if a trial does not come out as scripted.
+          expect 0 "$bin/trial_keyboard" --sim --out "$RUNNER_TEMP/trial_keyboard.csv"
+          expect 2 "$bin/trial_keyboard" --bogus
           expect 0 "$bin/gfx_load" --sim --gabors 10 --dots 100 --seconds 1
           expect 0 "$bin/gfx_calib"                 # no args: the synthetic display
           expect 0 "$bin/gfx_gallery" --sim         # each page once; 1 if a tile's draw is refused
@@ -682,6 +730,23 @@ jobs:
           expect 0 "$bin/video_play" --sim --yuv --size 64x48 --frames 20
           expect 0 "$bin/video_bench" --size 64x48 --reps 3
           expect 2 "$bin/video_play" --bogus
+
+      # pack/psy_layout (docs/psy_layout.md): the vendored Skribidi and
+      # HarfBuzz, the glue's test, and gfx_layout on the simulated display.
+      # Windows runners have the corpus fonts (another version than the
+      # reference's is skipped by its hash); Linux runners have none, so the
+      # test runs its order checks on the font it writes.
+      - name: Layout (Windows, Linux)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          cmake --build build --config Release --target test_psy_layout gfx_layout
+          ctest --test-dir build -C Release -R layout --output-on-failure
+          if [ "$RUNNER_OS" = Windows ]; then bin=build/pack/Release; else bin=build/pack; fi
+          "$bin/gfx_layout" --sim
+          "$bin/gfx_layout" --sim --fonts no-such-dir
+          if "$bin/gfx_layout" --page 9; then echo "::error::gfx_layout --page 9 exited 0"; exit 1; fi
 
       # The runner's MinGW-w64 gcc, warnings as errors, on the same sources.
       - name: MinGW compile checks (Windows)

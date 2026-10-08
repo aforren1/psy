@@ -34,11 +34,17 @@
  *         if (micros() - last >= 100000) { last = micros(); send(0x5A, 0, last); }
  *     }
  *
- * The device's microseconds are put on the psy_rt clock from the sync
- * frames: for each, host arrival minus device time; the smallest of those
- * at the start and at the end of the run (the fastest USB deliveries) fix
- * an offset and a drift, so an edge is timed by the device's interrupt,
- * not by USB arrival.
+ * The device's microseconds are put on the psy_rt clock by psy_rt.h's
+ * device clock fit (psyrt_fit, LATE mode: an arrival is late, never
+ * early), fed with the sync frames' (device time, arrival) pairs; the fit
+ * after the run maps every edge, so an edge is timed by the device's
+ * interrupt, not by USB arrival. The fit unwraps micros() (it wraps every
+ * 71.6 minutes of the board's uptime, which a run can cross) and reports
+ * a restart of the board's clock; a run with one is refused, because the
+ * edges before it would be mapped by the new clock. Until 2026-10-08 this
+ * program fitted a line through the least-late pair of the first and of
+ * the last quarter of the run; it still prints how far that line is from
+ * the fit, for the first hardware runs.
  *
  * The patch runs a pseudo-random sequence of black and white runs of 1 to 5
  * frames, so a missed or a doubled frame shows as an edge out of place.
@@ -75,6 +81,7 @@
 
 typedef struct edge { int64_t t; int level; int used; } edge;
 typedef struct sync { int64_t arrival; uint32_t dev_us; } sync_t;
+static psyrt_fit g_fit;   /* 40 KB: static */
 
 static psyscr_record g_rec[MAX_FRAMES];
 static int g_have[MAX_FRAMES];
@@ -138,7 +145,9 @@ int main(int argc, char** argv) {
     char line[512];
     int frames = 3600, i, run = 0, level = 0, nd = 0, missing = 0, extra = 0, late = 0, dropped = 0;
     uint32_t rng = 2463534242u;
-    double off0, off1, t_mid0, t_mid1, mean = 0, sd2 = 0;
+    double off0, off1, t_mid0, t_mid1, mean = 0, sd2 = 0, old_lo = 1e300, old_hi = -1e300;
+    psyrt_fit_desc fd;
+    psyrt_fit_info fi;
 
     if (argc < 2) {
         fprintf(stderr, "usage: psy_screen_loopback <serial_device> [frames] [out.csv] [dxgi|composition]\n");
@@ -223,7 +232,25 @@ int main(int argc, char** argv) {
     frames = i;
 
     if (g_ns < 4) { fprintf(stderr, "fewer than 4 sync frames from the device: check its sketch\n"); return 2; }
-    {   /* device clock to psy_rt: lower envelope at each end of the run */
+    {   /* device clock to psy_rt: the fit, over every sync frame */
+        int k;
+        memset(&fd, 0, sizeof fd);
+        fd.mode = PSYRT_FIT_LATE;
+        fd.ns_per_tick = 1000.0;   /* micros() */
+        fd.tick_bits = 32;
+        if (psyrt_fit_init(&g_fit, &fd) != PSYRT_OK) { fprintf(stderr, "fit: init\n"); return 2; }
+        for (k = 0; k < g_ns; k++) (void)psyrt_fit_add(&g_fit, g_sync[k].dev_us, g_sync[k].arrival, 0);
+        psyrt_fit_get(&g_fit, &fi);
+        printf("device clock fit: %u pairs, %u points over %.1f s, %+.2f ppm, spread (p99 above) %.1f us, "
+               "rejected %u, epoch %u%s\n", fi.pairs, fi.points, (double)fi.span_ns / 1e9, fi.ppm,
+               (double)fi.spread_ns / 1e3, fi.rejected, fi.epoch, fi.slope ? "" : ", slope nominal");
+        if (fi.epoch > 0) {
+            fprintf(stderr, "the device's clock restarted during the run (a board reset?): run again\n");
+            return 2;
+        }
+        for (k = 0; k < g_ne; k++) g_edge[k].t = psyrt_fit_map(&g_fit, g_edge_dev[k]);
+    }
+    {   /* the line of v0.3: the least-late pair at each end of the run */
         int q = g_ns / 4, k;
         off0 = 1e300; off1 = 1e300;
         t_mid0 = 0; t_mid1 = 0;
@@ -238,8 +265,13 @@ int main(int argc, char** argv) {
         for (k = 0; k < g_ne; k++) {
             double dv = (double)g_edge_dev[k] * 1000.0;
             double off = t_mid1 > t_mid0 ? off0 + (off1 - off0) * (dv - t_mid0) / (t_mid1 - t_mid0) : off0;
-            g_edge[k].t = (int64_t)(dv + off);
+            double dd = (dv + off) - (double)g_edge[k].t;
+            if (dd < old_lo) old_lo = dd;
+            if (dd > old_hi) old_hi = dd;
         }
+        if (g_ne > 0)
+            printf("the two-quarter line of v0.3 minus the fit, over the edges: %+.1f .. %+.1f us%s\n",
+                   old_lo / 1e3, old_hi / 1e3, fi.ticks0 >= (1ull << 32) ? " (micros() wrapped: the old line is wrong)" : "");
     }
     if (csv) fprintf(csv, "frame,level,onset_ns,photodiode_ns,diff_us,path,flags\n");
     for (i = 1; i < frames; i++) {

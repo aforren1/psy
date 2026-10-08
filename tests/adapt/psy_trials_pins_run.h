@@ -197,8 +197,10 @@ static uint64_t pin_info(uint64_t h, const psytr_trial_info* ti) {
     return h;
 }
 
-/* The hash of design k under seed s. */
-static uint64_t pin_run(int k, int s) {
+typedef bool (*pin_design_fn)(int k, psytr_desc* d, pin_track* tr, uint64_t* seed);
+
+/* The hash of design k of `design` under seed s. */
+static uint64_t pin_run_with(pin_design_fn fill, int k, int s) {
     psytr_desc d;
     pin_track tr[PSYTR_MAX_TRACKS];
     uint64_t seed = 0x5EED0000ULL + (uint64_t)(unsigned)s * 7919u;
@@ -212,7 +214,7 @@ static uint64_t pin_run(int k, int s) {
 
     memset(tr, 0, sizeof(tr));
     memset(pin_records, 0, sizeof(pin_records));
-    if (!pin_design(k, &d, tr, &seed)) return 0;
+    if (!fill(k, &d, tr, &seed)) return 0;
     if (!psytr_open(&pin_t, &d)) return pin_str(h, psytr_error(&pin_t));
     h = pin_str(h, psytr_error(&pin_t));
     n = psytr_n_scheduled(&pin_t);
@@ -270,5 +272,7 @@ static uint64_t pin_run(int k, int s) {
         h = pin_fnv(h, pin_snap, sz);
     return pin_int(h, (long)sz);
 }
+
+static uint64_t pin_run(int k, int s) { return pin_run_with(pin_design, k, s); }
 
 #endif /* PSY_TRIALS_PINS_RUN_H */

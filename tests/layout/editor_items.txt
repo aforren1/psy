@@ -1,0 +1,14 @@
+# Items of the wrapping, selection and caret comparison against Edge
+# (editor_ref.py, psy_layout_test.c, docs/psy_layout.md "Editing against
+# Edge"). Fields:
+#   id|font files in C:/Windows/Fonts, in fallback order|dir|lang|text
+# user_bidi is the line a user tried in gfx_layout's editor; page4 is that
+# page's text; the others are the mixed-direction lines of corpus.txt.
+user_bidi|segoeui.ttf|ltr|en|abc مرحبا 123 def.
+page4|segoeui.ttf,msyh.ttc|ltr|en|abc مرحبا 123 def. Type here: the caret moves through the bidi runs in logical order. שלום 2026 参加者
+arabic_rtl_arial|arial.ttf|rtl|ar|كَتَبَ الطّالِبُ 3 رَسائِلَ إلى Maria في عام 2024، ثُمَّ نامَ مُبَكِّرًا.
+arabic_rtl_segoe|segoeui.ttf|rtl|ar|كَتَبَ الطّالِبُ 3 رَسائِلَ إلى Maria في عام 2024، ثُمَّ نامَ مُبَكِّرًا.
+arabic_in_ltr|arial.ttf|ltr|en|The word مَرْحَبًا بِالْعَالَمِ 123 means hello world.
+hebrew_arial|arial.ttf|rtl|he|הַיֶּלֶד קָרָא 12 סְפָרִים עַל Python בַּשָּׁנָה שֶׁעָבְרָה.
+hebrew_segoe|segoeui.ttf|rtl|he|הַיֶּלֶד קָרָא 12 סְפָרִים עַל Python בַּשָּׁנָה שֶׁעָבְרָה.
+rtl_latin_waw|arial.ttf|rtl|ar|مع English و 123

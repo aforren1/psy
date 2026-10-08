@@ -1,6 +1,8 @@
 /* psy_rt_test.c - self-checking test for psyrt_pump, the event ring, the
- * trace macros and the clock correlation in psy_rt.h. No framework: it
- * returns 0 when every check passed and 1 after printing each failure.
+ * trace macros, the clock correlation and the device clock fit
+ * (psy_rt_test_fit.h) in psy_rt.h. No framework: it returns 0 when every
+ * check passed and 1 after printing each failure. With PSYRT_TEST_FIT_ONLY
+ * it runs the fit's part only, as tests/mutate/rt.toml does.
  *
  * The ring's stress test runs 2, 4 and 8 producers on deadline workers into
  * a 256-slot ring against one draining thread, and checks every record and
@@ -1455,11 +1457,22 @@ static void test_version(void) {
     printf("  version %s: ok\n", psyrt_version());
 }
 
+#include "psy_rt_test_fit.h"
+
 /* -------------------------------------------------------------------- main */
 
 int main(void) {
     static unsigned char caller_ring[8 * sizeof(order_msg)];
     uint64_t t0 = psyrt_now_ns();
+
+    test_fit();
+#ifdef PSYRT_TEST_FIT_ONLY
+    /* the mutation runs of tests/mutate/rt.toml: the fit alone, in seconds */
+    printf("psy_rt_pump_test: %s (%d failures, fit only)\n",
+           g_failures ? "FAILED" : "all checks passed", g_failures);
+    (void)caller_ring;
+    return g_failures ? 1 : 0;
+#endif
 
     printf("psy_rt_pump_test: psyrt_pump, %d-byte handle\n",
            (int)sizeof(psyrt_pump));
