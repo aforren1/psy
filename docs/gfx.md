@@ -2965,6 +2965,36 @@ pinned digests equal; emcc 6.0.10, the CPU half 1.1 s. All pass.
    `ygfx_end_setup()`).
 10. Done for v0.10.0: gradient noise (NOISE SIMPLEX), integer, with an
    exact CPU twin. Left: its cost (1.6 ms per octave full screen).
+11. **Stimulus capture during a trial** (requested 2026-10-08), opt-in: the
+   presented output of chosen frames (every Nth, or marked ones) copied
+   asynchronously with pixel buffer objects and fences (GL ES 3.0), collected
+   a few frames later without a stall, and written to files off the frame
+   thread, each tagged with its frame index and flip record. Measure first:
+   the GPU cost per captured frame at 1920 x 1200, and that no flip moves
+   (flip records with and without capture). Today's ygfx_read_output()
+   blocks and is for checks only. Shared with it: one small image-file
+   writer, replacing the examples' own PPM writers.
+12. **Lower input-to-photon latency for closed-loop trials** (requested
+   2026-10-09; cursor feedback, mouse tracking), opt-in per trial, with
+   ysp/screen.h:
+   - Late frame start: wake at the planned vblank minus a budget, then
+     poll input, draw and present. The budget is a high percentile of the
+     measured frame-start-to-present-return time plus a margin, raised
+     after a miss and lowered only on evidence (as the depth learner's
+     slack histogram does). Misses are logged. Expected gain: most of the
+     idle time after the previous flip, about 10 to 12 ms at 60 Hz.
+   - Late layer: the static scene drawn into a render target early, then
+     after the late input poll only the input-dependent items and the
+     target's composite. This shrinks the budget to the late draws.
+   - Late latching (GPU reads the newest input from a persistently mapped
+     buffer, as in nlguillemot/LateLatching): GL ES 3.0 cannot do it;
+     probe only whether ANGLE's D3D11 backend exposes
+     GL_EXT_buffer_storage. Its gain over the late layer is the late draws'
+     GPU time, so build it only if a measurement shows that is large.
+   - Measure first: input-to-photon with a Teensy as a USB HID mouse
+     (1 kHz polling) that also reads the photodiode on its own clock, late
+     start off and on, on DXGI_FLIP and COMPOSITION, with the photodiode's
+     screen position recorded (scanout runs top to bottom).
 
 ## CI
 
@@ -2985,6 +3015,24 @@ the CPU half: under ASan, Mesa leaves 112 bytes in 2 allocations from a
 module it unloads, which a suppression cannot name, so the test runs GL
 under a sanitizer only when `YGFX_TEST_DEVICES` asks for it. Locally,
 with GL on, everything passed under ASan and UBSan apart from that leak.
+
+## v0.10.3: the shader contract version
+
+`YGFX_SHADER_CONTRACT` (1) names the SHADER CONTRACT. The pack stores it
+with each shader entry (docs/pack.md, SHADER) and the player refuses a
+shader built for another version, so a pack never runs a body under a
+wrapper that means something else. The number changes when what the
+wrapper does to a body changes: the names it gives the body, their
+meaning, the blend. A change to the wrapper's text that keeps its meaning
+(a comment, a reordered declaration) keeps the number; the player then
+logs that the wrap hash differs.
+
+The test pins the FNV-1a 64 of the wrapper's text for one body per mode.
+A change to the text fails the test with the new hashes printed, which
+forces the decision: raise the contract or not, then update the pins.
+Mutant v10-07 (`#line 1` with a space) checks that the pin catches a
+one-byte change. The constant is compared through a volatile copy, because
+MSVC's `/W4 /WX` refuses a constant condition (C4127).
 
 ## v0.10.1: the default cache folder
 

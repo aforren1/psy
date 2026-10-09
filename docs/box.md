@@ -1,10 +1,10 @@
 # ysp/box.h
 
-Status: v0.1.0, 2026-10-08. The header's manual (its comment block) is the
-reference for each frame and query. This page records why the header has
-its form, what its bytes were checked against, and what is not checked.
-The plan is `docs/devices_spec.md` (sections 4.3 and 10); this header is
-part of its step 2.
+Status: v0.2.0, 2026-10-08. The header's manual (its comment block) is the
+reference for each frame, query and output. This page records why the
+header has its form, what its bytes were checked against, and what is not
+checked. The plan is `docs/devices_spec.md` (sections 4.3 and 10); this
+header is part of its steps 2 and 3.
 
 ## Why a pure header
 
@@ -25,6 +25,45 @@ allocates nothing (devices_spec principle 3). So:
 | `YBOX_LINE` | text lines (below) | the board's microsecond counter | `"q <seq>"`, `"i"` | this repository's own protocol and firmware |
 | `YBOX_PHOTO` | `0xA5`, level, uint32 LE us; `0x5A`, 0, uint32 LE us | the board's microsecond counter | none | `tests/loopback/screen_loopback.c` |
 
+XID also decodes the StimTracker 2 frame since v0.2.0: `'o'`, port, key
+(0 means 8), `'1'` or `'0'`, uint32 LE ms, 0 (9 bytes; pyxid2
+`unpack('<ccBcIB')`, Cedrus: "a terminating null byte").
+
+## Outputs (v0.2.0)
+
+`ybox_encode(family, op, code, arg, buf, cap)` gives the bytes; the
+manual's OUTPUTS section has every byte. Each family's bytes are pinned to
+a source:
+
+| Family | Bytes | Who ends a pulse | Source |
+|---|---|---|---|
+| `YBOX_XID` | set `'m' 'h' lo hi`; width `'m' 'p'` + uint32 LE ms | the box, with the width of the last `mp`; `mp 0` makes `mh` hold | Cedrus [XID commands](https://www.cedrus.com/support/xid/commands.htm): "If the duration is 0 [default], then an mh command will set the output lines and hold them"; pyxid2 `d5b0a73`: `pack('<ccI', b'm', b'p', duration)`, `'mh'+chr(lines & 0xFF)+chr((lines >> 8) & 0xFF)` |
+| `YBOX_LINE` | `o <code>\n`; `p <code> <us>\n` | the board | this repository (`firmware/ysp_line/`) |
+| `YBOX_TRIGGERBOX` | one byte; `0xFF` before closing | the host | Brain Products, "TriggerBox Programming Examples" Rev03 ([PDF](https://www.nmr.mgh.harvard.edu/~tatiana/BrainVisionManuals/TriggerBox/TriggerBox_Programming_Examples_Rev03.pdf)): "Each byte written to the COM port is transmitted to the eight output lines (Bit 0 - Bit 7)"; "the output line should be reset to their default levels by writing a 0xFF"; port settings have no influence |
+| `YBOX_BIOSEMI` | one byte | the interface, after 8 ms | BioSemi, [USB Trigger interface cable](https://www.biosemi.com/faq/USB%20Trigger%20interface%20cable.htm): 115200 baud, 8N1; "will hold this value for 8mS", then "all pins will be reset to zero". The USB-C model takes 1 to 99 ms by a command ([BioSemi](https://biosemi.com/faq/USB_Trigger_interface_ProgramPulseLength.htm)), not encoded |
+| `YBOX_MMBTS` | one byte at 9600 baud | the box after 8 ms (switch P, factory) or the host (switch S) | Not the vendor's manual: chrplr/goxpyriment `triggers/notes/mmbts.md` (written from the manual v2.3, 2024: 9600 baud fixed, P and S modes, 1200 baud resets the box) and ebadier/NeurospecTriggerBox-Unity `SerialPort_MMBTS.cs` (9600 baud, one byte per trigger) |
+| `YBOX_LINES` | none: DTR (bit 0) and RTS (bit 1) | the host | `ysp/serial.h` |
+| `YBOX_PARALLEL` | one byte, the data lines | the host | `ysp/parallel.h` |
+
+Left out: XID 1 devices' `ah` command (pyxid2 sends the inverted lines,
+one byte), the BioSemi USB-C pulse-length command, BBTK TTL modules (no
+byte protocol found), and the TriggerBox's input byte (counted as garbage).
+
+## XID input layout: checked again (v0.2.0)
+
+The v0.1.0 layout was checked a second time on 2026-10-08 against
+pyxid2 at `d5b0a73` (fetched with `gh`, identical to the copy used for
+v0.1.0) and Cedrus's command page:
+
+| Item | v0.1.0 | Sources | Result |
+|---|---|---|---|
+| Key frame | `'k'`, info, uint32 LE ms; 6 bytes | Cedrus "six bytes ... `<"k"><key info><RT>`"; pyxid2 `'<cBI'` | Same |
+| Info byte | bits 0 to 3 port, bit 4 pressed, bits 5 to 7 key, key 0 means 8; port bits 2 and 3 set: broken | Cedrus; pyxid2 `INVALID_PORT_BITS = 0x0C`, `KEY_RELEASE_BITMASK = 0x10` | Same |
+| Timer answer | `"_e5"` + uint32 LE; 7 bytes | Cedrus; pyxid2 `'<cccI'` | Same |
+| StimTracker 2 | not decoded | pyxid2 `'<ccBcIB'`, 9 bytes, for firmware 2 and product `S` | Missing: added in v0.2.0 |
+| A broken frame | drop one byte, find the next frame | pyxid2 empties its buffer and flushes the port | Different on purpose: a resync keeps the frames after the noise |
+| Baud | 115200 | pyxid2 tries 115200, 19200, 9600, 57600 and 38400 (a box's switches set it) | Different: `desc.baud` must be set for a box not at 115200 |
+| Gaps between bytes | 1 ms per byte, every command | pyxid2: 1 ms; Cedrus: "XID 2 devices ... eliminates the need for an inter-byte delay" | Kept for queries; outputs go whole (docs/device.md) |
 ## The ysp line protocol
 
 The plan's first draft had comma-separated lines (`t,<us>,<button>,<0|1>`).
@@ -36,8 +75,14 @@ E <t> <ch> <0|1>       edge
 A <t> <ch> <value>     sample
 Q <seq> <t>            answer to "q <seq>"
 I <text>               answer to "i"
+O <t> <code>           the outputs changed (v0.2.0)
 # <text>               comment
 ```
+
+Host to board: `q <seq>`, `i`, and since v0.2.0 `o <code>` (hold) and
+`p <code> <us>` (a pulse the board times). A board stamps `O` after its
+pin writes, so the host has the board's own time of each output change.
+Firmware without outputs ignores `o` and `p`.
 
 Why:
 
@@ -57,12 +102,14 @@ Why:
 
 | Question | Decision | Why |
 |---|---|---|
-| Output | The caller's arrays of events and pairs; the decoder stops when one is full and returns the bytes it used | No allocation, and a bounded output per call. A byte finishes at most one frame (a broken frame shows by its third byte, and the two bytes fed again cannot hold one), so arrays of one entry suffice; mutant `box-11` writes one past them and the test catches it |
+| Output | The caller's arrays of events and pairs; the decoder stops when one is full, and after one LINE `O` report, and returns the bytes it used | No allocation, and a bounded output per call. A byte finishes at most one frame (a broken frame shows by its ninth byte at the latest, and the eight bytes fed again hold at most one frame of 6 bytes or more), so arrays of one entry suffice; mutant `box-11` writes one past them and the test catches it |
 | A broken frame | Drop its first byte and feed the rest again | A frame that starts inside a broken one is still found. XID frames with port bits 2 or 3 set are broken, as pyxid2 says |
 | Garbage | Counted per call and in total, never an event | A misaligned stream must not give a press. The device layer logs the total at most once a second |
 | Event time | The read time given; `ticks` the device time with `YIN_DEVTICKS` | The decoder reads no clock; the device layer maps `ticks` through the fit |
 | XID writes | `ybox_slow_write()`: one byte at a time, 1 ms apart | pyxid2 writes every command this way. Its reason is not stated; it is kept until a box shows it is not needed |
 | A text line | At most 94 characters; printable ASCII only; an overlong line or a control byte drops the whole line | The rest of an overlong line must not read as a line of its own |
+| Encoders | One function, `ybox_encode()`, with an op; capabilities in `ybox_caps()` | The device layer asks what a family can do (who ends a pulse, lines or bytes) instead of naming families |
+| Output-only families | `ybox_init()` takes them; every byte is garbage | One decoder path for every instance; a TriggerBox that reports its inputs cannot be mistaken for frames |
 
 ## Verification
 
@@ -71,15 +118,20 @@ gcc 11.4 on WSL2 (C99, C11, C++17, `-Werror`), ASan and UBSan on WSL2:
 
 | Check | Result |
 |---|---|
-| `tests/adapt/box_test.c` | 135 checks pass. Each family: 1000 generated frames decoded whole, byte by byte and in random chunks, with output arrays of 64 and of 1, every field compared; 3 garbage bytes before each frame counted exactly; broken frames with a real frame inside found again; the line rules (seq 0, channel 0 and 256, level 2, missing and extra fields, 64-bit overflow, signs and exponents in samples, identity, comments, overlong lines, control bytes); 200,000 random bytes per family |
+| `tests/adapt/box_test.c`, v0.2.0 | 234 checks pass: the v0.1.0 checks, StimTracker 2 frames in every generated XID stream (whole, byte by byte, in chunks, with garbage), a broken StimTracker 2 frame with a key frame inside, `O` reports in every generated line stream and one per call, the bytes of every encoder and op, and 200,000 random bytes for each of the eight families (output-only families: every byte garbage) |
+| `tests/adapt/box_test.c`, v0.1.0 | 135 checks pass. Each family: 1000 generated frames decoded whole, byte by byte and in random chunks, with output arrays of 64 and of 1, every field compared; 3 garbage bytes before each frame counted exactly; broken frames with a real frame inside found again; the line rules (seq 0, channel 0 and 256, level 2, missing and extra fields, 64-bit overflow, signs and exponents in samples, identity, comments, overlong lines, control bytes); 200,000 random bytes per family |
 | `tests/compile/box.c`, `.cpp` | Build and run on both compilers |
-| Mutants (`tests/mutate/box.toml`) | 13 of 13 caught. The first run caught 11: `box-11` (the reserve of 2 entries) was equivalent, which showed the reserve's reason was wrong (now 1 entry, and the mutant writes past the array), and `box-13` (an overlong line's tail read as a line) needed a check |
-| Firmware (`firmware/ysp_line/ysp_line.ino`) | Compiles with arduino-cli 1.5.1 for `teensy:avr:teensy41` and `teensy40` (core 1.62.0) and `rp2040:rp2040:rpipico` (core 6.3.0, earlephilhower), in digital and analog mode. Installed as a user, in `C:\tmp\psy-work\devices\arduino\`, not in the repository |
+| Mutants (`tests/mutate/box.toml`), v0.2.0 | 24 of 24 caught, the 11 new ones (`box-14` to `box-24`: XID byte order, ms rounding, a 0 ms pulse, the TriggerBox close byte, StimTracker 2 checks, one O report per call, output-only decoding, the DTR code range, single-byte pulses, the O code range) on the first run |
+| Mutants, v0.1.0 | 13 of 13 caught. The first run caught 11: `box-11` (the reserve of 2 entries) was equivalent, which showed the reserve's reason was wrong (now 1 entry, and the mutant writes past the array), and `box-13` (an overlong line's tail read as a line) needed a check |
+| Firmware (`firmware/ysp_line/ysp_line.ino`) | Compiles with arduino-cli 1.5.1 for `teensy:avr:teensy41` and `teensy40` (core 1.62.0) and `rp2040:rp2040:rpipico` (core 6.3.0, earlephilhower), in digital and analog mode; v0.2.0's outputs (`o`, `p`, `O`) also with three output pins in analog mode. Installed as a user, in `C:\tmp\psy-work\devices\arduino\`, not in the repository |
 
 Not checked:
 
-- Any byte from a Cedrus device. The XID decoder follows pyxid2's struct
-  formats; a capture from a real box pins it before a timing claim.
+- Any byte from or to a Cedrus device. The XID decoder and encoders follow
+  pyxid2's struct formats and Cedrus's page; a capture from a real box pins
+  them before a timing claim. Whether the StimTracker 2 port byte is a
+  number or an ASCII digit: pyxid2 keeps the raw byte, and so does `code`.
+- Any byte to a TriggerBox, BioSemi interface or MMBT-S. The MMBT-S bytes
+  come from open-source drivers, not from Neurospec's manual.
 - The firmware on a board: not flashed, not run.
-- StimTracker 2's 9-byte frame (`'<ccBcIB'` in pyxid2), and XID1 devices,
-  which have no timer query.
+- XID1 devices, which have no timer query and use `ah` for outputs.

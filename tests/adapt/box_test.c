@@ -6,8 +6,10 @@
  * cannot start one (counted exactly), with broken frames whose rest holds
  * a real frame (found again), with output arrays too small for a read, and
  * as random bytes (no crash, progress, counts that add up). The XID bytes
- * follow pyxid2's struct formats ('<cBI' frames, '<cccI' timer answers);
- * no byte from a Cedrus device was available.
+ * follow pyxid2's struct formats ('<cBI' frames, '<ccBcIB' StimTracker 2
+ * frames, '<cccI' timer answers); no byte from a Cedrus device was
+ * available. The encoders' bytes are checked against the sources the
+ * header cites.
  *
  *     gcc -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -Iinclude \
  *         -o box_test tests/adapt/box_test.c
@@ -44,6 +46,8 @@ typedef struct expect {
     float    value;
     uint64_t ticks;
     uint32_t probe;
+    int      is_out;         /* LINE "O": has_out with this code and ticks */
+    uint32_t out_code;
 } expect;
 
 #define MAXF 4096
@@ -63,7 +67,7 @@ static void put_le32(uint32_t v) {
 static uint8_t garbage_byte(int family) {
     for (;;) {
         uint8_t b = (uint8_t)rnd(256);
-        if (family == YBOX_XID && (b == 'k' || b == '_')) continue;
+        if (family == YBOX_XID && (b == 'k' || b == '_' || b == 'o')) continue;
         if (family == YBOX_PHOTO && (b == 0xA5 || b == 0x5A)) continue;
         if (family == YBOX_LINE && b == '\n') continue;
         return b;
@@ -82,6 +86,22 @@ static void gen_xid(int frames, int garbage) {
             put("_e5", 3);
             put_le32((uint32_t)e->ticks);
             e->probe = 1;
+        } else if (rnd(3) == 0) {
+            /* StimTracker 2: 'o', port, key (0 = 8), '1' or '0', ms, 0 */
+            uint32_t key = rnd(9), port = rnd(256), pressed = rnd(2);
+            uint8_t hdr[4], z = 0;
+            hdr[0] = 'o';
+            hdr[1] = (uint8_t)port;
+            hdr[2] = (uint8_t)key;
+            hdr[3] = pressed ? '1' : '0';
+            put(hdr, 4);
+            put_le32((uint32_t)e->ticks);
+            put(&z, 1);
+            e->is_event = 1;
+            e->type = pressed ? YIN_PRESS : YIN_RELEASE;
+            e->control = key == 0 ? 8 : key;
+            e->code = port;
+            e->value = (float)pressed;
         } else {
             uint32_t key = 1 + rnd(8), port = rnd(4), pressed = rnd(2);
             uint8_t hdr[2];
@@ -103,7 +123,7 @@ static void gen_line(int frames, int garbage) {
     for (i = 0; i < frames; i++) {
         expect* e = &g_exp[g_nexp++];
         char s[128];
-        int n = 0, k, what = (int)rnd(5);
+        int n = 0, k, what = (int)rnd(6);
         memset(e, 0, sizeof *e);
         e->ticks = ((uint64_t)rnd(0xFFFFFFFFu) << (rnd(2) ? 20 : 0)) + rnd(1000);
         if (garbage) {
@@ -119,6 +139,11 @@ static void gen_line(int frames, int garbage) {
         case 1:
             e->probe = 1 + rnd(0xFFFFFFFEu);
             n = snprintf(s, sizeof s, "Q %lu %llu\r\n", (unsigned long)e->probe, (unsigned long long)e->ticks);
+            break;
+        case 5:
+            e->is_out = 1;
+            e->out_code = rnd(256);
+            n = snprintf(s, sizeof s, "O %llu %lu\n", (unsigned long long)e->ticks, (unsigned long)e->out_code);
             break;
         case 2: case 3: {
             uint32_t ch = 1 + rnd(255), lvl = rnd(2);
@@ -175,6 +200,9 @@ static yin_event g_ev[MAXF * 2];
 static ybox_pair g_pair[MAXF * 2];
 static int g_nev, g_npair;
 static uint64_t g_garbage;
+static uint32_t g_out_code[MAXF];
+static uint64_t g_out_ticks[MAXF];
+static int g_nout;
 
 /* chunk 0: whole; 1: a byte at a time; 2: random sizes. cap: the output
  * arrays' size per call; the decoder must never write past it. */
@@ -184,7 +212,7 @@ static void decode_all(int family, int chunk, int cap) {
     ybox_pair pr[64];
     ybox_out o;
     size_t at = 0;
-    g_nev = g_npair = 0;
+    g_nev = g_npair = g_nout = 0;
     g_garbage = 0;
     CHECK(ybox_init(&d, family, YIN_KIND_BOX, 7));
     memset(&o, 0, sizeof o);
@@ -203,6 +231,10 @@ static void decode_all(int family, int chunk, int cap) {
             used += u;
             for (i = 0; i < o.n_ev; i++) g_ev[g_nev++] = ev[i];
             for (i = 0; i < o.n_pair; i++) g_pair[g_npair++] = pr[i];
+            if (o.has_out && g_nout < MAXF) {
+                g_out_code[g_nout] = o.out_code;
+                g_out_ticks[g_nout++] = o.out_ticks;
+            }
             g_garbage += o.garbage;
         }
         at += n;
@@ -212,11 +244,15 @@ static void decode_all(int family, int chunk, int cap) {
 
 /* Every expected frame in order, every field. */
 static void compare(int family, const char* what) {
-    int i, ie = 0, ip = 0, bad = 0;
+    int i, ie = 0, ip = 0, io = 0, bad = 0;
     for (i = 0; i < g_nexp; i++) {
         const expect* e = &g_exp[i];
         if (ip >= g_npair || g_pair[ip].ticks != e->ticks || g_pair[ip].probe != e->probe) bad++;
         ip++;
+        if (e->is_out) {
+            if (io >= g_nout || g_out_code[io] != e->out_code || g_out_ticks[io] != e->ticks) bad++;
+            io++;
+        }
         if (!e->is_event) continue;
         if (ie >= g_nev) { bad++; continue; }
         {
@@ -227,7 +263,7 @@ static void compare(int family, const char* what) {
                 bad++;
         }
     }
-    if (ie != g_nev || ip != g_npair) bad++;
+    if (ie != g_nev || ip != g_npair || io != g_nout) bad++;
     if (bad) fprintf(stderr, "box_test: %s %s: %d frames wrong (%d events, %d pairs decoded)\n",
                      ybox_family_name(family), what, bad, g_nev, g_npair);
     CHECK_I(bad, 0);
@@ -283,6 +319,18 @@ static void test_resync(void) {
     CHECK(g_nev == 1 && g_ev[0].type == YIN_PRESS && g_ev[0].ticks == 0x20);
     CHECK(g_npair == 2 && g_pair[0].ticks == 0x10);
     CHECK_I(g_garbage, 4);
+    /* a StimTracker 2 frame broken at its null byte, a key frame inside */
+    {
+        static const uint8_t st2[] = { 'o', 'k', 0x30, '1', 0x05, 0x00, 0x00, 0x00, 0x09,   /* last byte not 0 */
+                                       'o', 0x02, 0x03, '0', 0x40, 0x00, 0x00, 0x00, 0x00 };
+        g_nbytes = 0; put(st2, sizeof st2);
+        decode_all(YBOX_XID, 1, 1);
+        CHECK_I(g_nev, 2);
+        CHECK(g_nev == 2 && g_ev[0].control == 1 && g_ev[0].type == YIN_PRESS && g_ev[0].ticks == 0x0531);   /* bytes 2 to 7 */
+        CHECK(g_nev == 2 && g_ev[1].control == 3 && g_ev[1].code == 2 && g_ev[1].type == YIN_RELEASE &&
+              g_ev[1].ticks == 0x40);
+        CHECK_I(g_garbage, 3);    /* the 'o', and the 0x00 and 0x09 after the key frame */
+    }
     /* key 8 is sent as 0 */
     {
         static const uint8_t k8[] = { 'k', 0x03, 1, 0, 0, 0 };
@@ -372,7 +420,7 @@ static void test_queries(void) {
     CHECK(!ybox_init(NULL, YBOX_XID, 0, 0));
     {
         ybox_decoder d;
-        CHECK(!ybox_init(&d, 0, 0, 0) && !ybox_init(&d, 4, 0, 0));
+        CHECK(!ybox_init(&d, 0, 0, 0) && !ybox_init(&d, 9, 0, 0) && ybox_init(&d, YBOX_PARALLEL, 0, 0));
     }
     CHECK(strcmp(ybox_family_name(YBOX_LINE), "line") == 0);
     CHECK(strcmp(ybox_version(), YBOX_VERSION_STRING) == 0);
@@ -382,19 +430,116 @@ static void test_queries(void) {
 /* Random bytes: no crash, every call progresses while there is room, and
  * the counts add up (each frame gives one pair; events never outnumber
  * pairs). */
+/* Bytes for each output op, against the sources ysp/box.h cites. */
+static void test_encoders(void) {
+    uint8_t b[64];
+    static const uint8_t mh[] = { 'm', 'h', 0x34, 0x12 };
+    static const uint8_t mp_mh[] = { 'm', 'p', 0x05, 0x00, 0x00, 0x00, 'm', 'h', 0x01, 0x00 };
+    static const uint8_t mp0[] = { 'm', 'p', 0, 0, 0, 0 };
+    int f;
+    /* XID: mh + low, high (pyxid2 'mh'+chr(lo)+chr(hi)); mp + uint32 LE ms
+     * (pack('<ccI')); 0 ms means SETs hold (Cedrus) */
+    CHECK_I(ybox_encode(YBOX_XID, YBOX_OP_SET, 0x1234, 0, b, 64), 4);
+    CHECK(memcmp(b, mh, 4) == 0);
+    CHECK_I(ybox_encode(YBOX_XID, YBOX_OP_PULSE, 1, 4600, b, 64), 10);   /* 4.6 ms rounds to 5 */
+    CHECK(memcmp(b, mp_mh, 10) == 0);
+    CHECK_I(ybox_encode(YBOX_XID, YBOX_OP_PULSE, 1, 100, b, 64), 10);    /* never 0 ms: that holds */
+    CHECK(b[2] == 1 && b[3] == 0);
+    CHECK_I(ybox_encode(YBOX_XID, YBOX_OP_WIDTH, 0, 0, b, 64), 6);
+    CHECK(memcmp(b, mp0, 6) == 0);
+    CHECK_I(ybox_encode(YBOX_XID, YBOX_OP_WIDTH, 0, 4000000000u, b, 64), 6);
+    CHECK(b[2] == 0x00 && b[3] == 0x09 && b[4] == 0x3D && b[5] == 0x00);  /* 4,000,000 ms */
+    CHECK_I(ybox_encode(YBOX_XID, YBOX_OP_SET, 0x10000, 0, b, 64), -1);
+    CHECK_I(ybox_encode(YBOX_XID, YBOX_OP_PULSE, 1, 5000, b, 9), -1);
+    CHECK_I(ybox_encode(YBOX_XID, YBOX_OP_CLOSE, 0, 0, b, 64), 0);
+    /* LINE */
+    CHECK_I(ybox_encode(YBOX_LINE, YBOX_OP_SET, 5, 0, b, 64), 4);
+    CHECK(memcmp(b, "o 5\n", 4) == 0);
+    CHECK_I(ybox_encode(YBOX_LINE, YBOX_OP_PULSE, 255, 2000, b, 64), 11);
+    CHECK(memcmp(b, "p 255 2000\n", 11) == 0);
+    CHECK_I(ybox_encode(YBOX_LINE, YBOX_OP_PULSE, 1, 0, b, 64), -1);
+    CHECK_I(ybox_encode(YBOX_LINE, YBOX_OP_SET, 256, 0, b, 64), -1);
+    CHECK_I(ybox_encode(YBOX_LINE, YBOX_OP_PULSE, 1, 2000, b, 8), -1);
+    CHECK_I(ybox_encode(YBOX_LINE, YBOX_OP_WIDTH, 1, 2000, b, 64), 0);
+    /* one byte: TriggerBox, BioSemi, MMBT-S, parallel; no device-timed pulse */
+    for (f = YBOX_TRIGGERBOX; f <= YBOX_PARALLEL; f++) {
+        if (f == YBOX_LINES) continue;
+        CHECK_I(ybox_encode(f, YBOX_OP_SET, 0xA5, 0, b, 64), 1);
+        CHECK_I(b[0], 0xA5);
+        CHECK_I(ybox_encode(f, YBOX_OP_SET, 256, 0, b, 64), -1);
+        CHECK_I(ybox_encode(f, YBOX_OP_PULSE, 1, 2000, b, 64), 0);
+        CHECK_I(ybox_encode(f, YBOX_OP_SET, 1, 0, b, 0), -1);
+        CHECK_I(ybox_code_max(f), 255);
+    }
+    CHECK_I(ybox_encode(YBOX_TRIGGERBOX, YBOX_OP_CLOSE, 0, 0, b, 64), 1);
+    CHECK_I(b[0], 0xFF);   /* "reset to their default levels by writing a 0xFF" */
+    CHECK_I(ybox_encode(YBOX_BIOSEMI, YBOX_OP_CLOSE, 0, 0, b, 64), 0);
+    /* DTR and RTS: no bytes, a 2-bit code */
+    CHECK_I(ybox_encode(YBOX_LINES, YBOX_OP_SET, 3, 0, b, 64), 0);
+    CHECK_I(ybox_encode(YBOX_LINES, YBOX_OP_SET, 4, 0, b, 64), -1);
+    CHECK_I(ybox_code_max(YBOX_LINES), 3);
+    /* no outputs */
+    CHECK_I(ybox_encode(YBOX_PHOTO, YBOX_OP_SET, 1, 0, b, 64), -1);
+    CHECK_I(ybox_encode(9, YBOX_OP_SET, 1, 0, b, 64), -1);
+    CHECK_I(ybox_encode(YBOX_LINE, 7, 1, 0, b, 64), -1);
+    CHECK_I(ybox_code_max(YBOX_PHOTO), 0);
+    CHECK_I(ybox_code_max(YBOX_XID), 65535);
+    /* caps, widths, rates */
+    CHECK(ybox_caps(YBOX_XID) & YBOX_CAP_PULSE);
+    CHECK(ybox_caps(YBOX_LINE) & YBOX_CAP_PULSE);
+    CHECK(!(ybox_caps(YBOX_TRIGGERBOX) & (YBOX_CAP_PULSE | YBOX_CAP_FIXED | YBOX_CAP_IN)));
+    CHECK(ybox_caps(YBOX_LINES) & YBOX_CAP_LINES);
+    CHECK_I(ybox_fixed_pulse_ns(YBOX_BIOSEMI), 8000000);
+    CHECK_I(ybox_fixed_pulse_ns(YBOX_MMBTS), 8000000);
+    CHECK_I(ybox_fixed_pulse_ns(YBOX_TRIGGERBOX), 0);
+    CHECK_I(ybox_default_baud(YBOX_MMBTS), 9600);
+    CHECK_I(ybox_default_baud(YBOX_BIOSEMI), 115200);
+    CHECK_I(ybox_caps(0), 0);
+    CHECK(strcmp(ybox_family_name(YBOX_MMBTS), "mmbts") == 0 && strcmp(ybox_family_name(YBOX_LINES), "lines") == 0);
+    printf("  encoders: XID mh and mp, line o and p, single bytes, TriggerBox close, caps: ok\n");
+}
+
+/* LINE "O": one per call, then the rest. */
+static void test_line_out(void) {
+    static const char two[] = "O 100 3\nO 200 0\nS 300\n";
+    ybox_decoder d;
+    yin_event ev[4];
+    ybox_pair pr[4];
+    ybox_out o;
+    size_t u;
+    memset(&o, 0, sizeof o);
+    o.ev = ev; o.ev_cap = 4; o.pair = pr; o.pair_cap = 4;
+    ybox_init(&d, YBOX_LINE, YIN_KIND_BOX, 1);
+    ybox_out_clear(&o);
+    u = ybox_decode(&d, (const uint8_t*)two, sizeof two - 1, 0, &o);
+    CHECK_I(u, 8);
+    CHECK(o.has_out && o.out_code == 3 && o.out_ticks == 100 && o.n_pair == 1 && pr[0].ticks == 100);
+    ybox_out_clear(&o);
+    u += ybox_decode(&d, (const uint8_t*)two + u, sizeof two - 1 - u, 0, &o);
+    CHECK(o.has_out && o.out_code == 0 && o.out_ticks == 200);
+    ybox_out_clear(&o);
+    u += ybox_decode(&d, (const uint8_t*)two + u, sizeof two - 1 - u, 0, &o);
+    CHECK(!o.has_out && o.n_pair == 1 && pr[0].ticks == 300 && u == sizeof two - 1);
+    ybox_out_clear(&o);
+    CHECK_I(ybox_decode(&d, (const uint8_t*)"O 1 4294967296\nO 1\n", 19, 0, &o), 19);
+    CHECK(!o.has_out && o.garbage == 19);
+    printf("  line O reports: ok\n");
+}
+
 static void test_fuzz(void) {
     int family;
-    for (family = YBOX_XID; family <= YBOX_PHOTO; family++) {
+    for (family = YBOX_XID; family <= YBOX_FAMILY_LAST; family++) {
         size_t i;
         g_nbytes = 0;
         for (i = 0; i < 200000; i++) {
             uint8_t b = (uint8_t)rnd(256);
-            if (family == YBOX_LINE && rnd(4) == 0) b = (uint8_t)" SEQAI0123456789\n"[rnd(17)];
-            if (family == YBOX_XID && rnd(8) == 0) b = 'k';
+            if (family == YBOX_LINE && rnd(4) == 0) b = (uint8_t)" SEQAIO0123456789\n"[rnd(18)];
+            if (family == YBOX_XID && rnd(8) == 0) b = rnd(2) ? 'k' : 'o';
             put(&b, 1);
         }
         decode_all(family, 2, 1 + (int)rnd(8));
         CHECK(g_nev <= g_npair);
+        if (!(ybox_caps(family) & YBOX_CAP_IN)) CHECK(g_npair == 0 && g_garbage == 200000);
         printf("  fuzz %s: 200000 bytes, %d events, %d pairs, %llu garbage\n", ybox_family_name(family), g_nev,
                g_npair, (unsigned long long)g_garbage);
     }
@@ -408,6 +553,8 @@ int main(void) {
     test_resync();
     test_line_rules();
     test_queries();
+    test_encoders();
+    test_line_out();
     test_fuzz();
     if (g_failures) {
         fprintf(stderr, "box_test: %d of %d checks FAILED\n", g_failures, g_checks);

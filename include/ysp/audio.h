@@ -1,4 +1,4 @@
-/* ysp/audio.h - v0.2.0 - public domain single-header audio library
+/* ysp/audio.h - v0.2.1 - public domain single-header audio library
  *
  *   Sound at a time on the ysp/rt.h clock. A buffer is played with
  *   yau_play_at(buf, t); the header plans its first sample on the device
@@ -26,6 +26,12 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.1 - yau_wav_probe(): the WAV parse without a device, for the pack
+ *          tool (docs/pack.md, AUDIO), with the same refusals except the
+ *          device's rate, channels and speaker map, which the caller
+ *          compares with the project's. The parse is split into that scan
+ *          and the device checks; yau_wav_open() and yau_wav_load() give
+ *          the same results and messages as v0.2.0.
  *   v0.2.0 - streams: yau_stream, a ring-fed voice played by yau_play()
  *          with .stream (or yau_play_stream), planned, recorded and
  *          confirmed as a buffer is; sample s on stream frame origin + s,
@@ -641,8 +647,8 @@
 
 #define YAU_VERSION_MAJOR 0
 #define YAU_VERSION_MINOR 2
-#define YAU_VERSION_PATCH 0
-#define YAU_VERSION_STRING "0.2.0"
+#define YAU_VERSION_PATCH 1
+#define YAU_VERSION_STRING "0.2.1"
 
 #include "ysp/rt.h"
 
@@ -1378,6 +1384,12 @@ YAU_API bool      yau_wav_step(void* w);
 YAU_API void      yau_wav_on_msg(void* w, const void* msg, uint32_t seq);
 YAU_API const char* yau_wav_error(const yau_wav* w);
 YAU_API yau_buf yau_wav_load(yau_audio* au, const yau_wav_desc* d);
+/* v0.2.1: the WAV file's form without a device (the pack tool): the same
+ * parse and refusals as yau_wav_open(), except the rate, the channel count
+ * and the speaker map, which info gives for the caller to compare. 0 or a
+ * negative code with the message in err. No allocation; a path is opened
+ * and closed. */
+YAU_API int       yau_wav_probe(const yau_wav_desc* d, yau_wav_info* info, char* err, size_t cap);
 
 /* The table of desc fields a designer sets; *n gets the count. */
 YAU_API const yau_param* yau_params(int* n);
@@ -3686,8 +3698,9 @@ static int yau__wav_bytes(int format) {
 
 /* RIFF, RF64 or BW64 (ds64 sizes); PCM 16 and 24, 24 in 32, float 32,
  * plain or WAVE_FORMAT_EXTENSIBLE. Everything else is refused by name: a
- * resource in another form is converted offline (rig_spec 5.2). */
-static int yau__wav_parse(yau__wsrc* s, const yau_audio* au, yau_wav_info* out, char* err, size_t cap) {
+ * resource in another form is converted offline (rig_spec 5.2). The form
+ * only; yau__wav_parse() adds the device's checks. */
+static int yau__wav_scan(yau__wsrc* s, yau_wav_info* out, char* err, size_t cap) {
     static const unsigned char ext_guid_tail[14] = { 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 };
     unsigned char h[64];
     int64_t pos = 12, ds64_data = -1, data_size = -1;
@@ -3755,6 +3768,22 @@ static int yau__wav_parse(yau__wsrc* s, const yau_audio* au, yau_wav_info* out, 
                  (long long)data_size, (long long)out->data_offset, (long long)s->size);
         return YAU_ERR_FORMAT;
     }
+    out->rate = rate;
+    out->channels = ch;
+    out->frames = data_size / block;
+    out->channel_mask = mask;
+    out->rf64 = rf64 && ds64_data >= 0;
+    return 0;
+}
+
+static int yau__wav_parse(yau__wsrc* s, const yau_audio* au, yau_wav_info* out, char* err, size_t cap) {
+    uint32_t rate, mask;
+    uint16_t ch;
+    int rc = yau__wav_scan(s, out, err, cap);
+    if (rc < 0) return rc;
+    rate = out->rate;
+    ch = out->channels;
+    mask = out->channel_mask;
     if (rate != au->dcaps.rate) {
         snprintf(err, cap, "ysp_audio: WAV file is %u Hz; the device runs at %u Hz. ysp_audio never "
                  "resamples: resample it offline (the pack tool)", (unsigned)rate, (unsigned)au->dcaps.rate);
@@ -3779,12 +3808,20 @@ static int yau__wav_parse(yau__wsrc* s, const yau_audio* au, yau_wav_info* out, 
             c++;
         }
     }
-    out->rate = rate;
-    out->channels = ch;
-    out->frames = data_size / block;
-    out->channel_mask = mask;
-    out->rf64 = rf64 && ds64_data >= 0;
     return 0;
+}
+
+YAU_API int yau_wav_probe(const yau_wav_desc* d, yau_wav_info* info, char* err, size_t cap) {
+    yau__wsrc src;
+    char tmp[8];
+    int rc;
+    if (!err || !cap) { err = tmp; cap = sizeof tmp; }
+    if (!d || !info) { snprintf(err, cap, "ysp_audio: yau_wav_probe needs desc and info"); return YAU_ERR_ARG; }
+    rc = yau__wsrc_open(&src, d, err, cap);
+    if (rc < 0) return rc;
+    rc = yau__wav_scan(&src, info, err, cap);
+    yau__wsrc_close(&src);
+    return rc;
 }
 
 /* n samples (frames x channels) of raw bytes to float, exactly. In place

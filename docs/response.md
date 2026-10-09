@@ -1,11 +1,15 @@
 # ysp/response.h
 
-Status: v0.1.4, 2026-10-08. The input event lives in `ysp/input.h` from v0.1.3
-(`docs/input.md`); this header keeps its names as aliases. v0.1.4:
-`YRSP_KINDS_ALL` takes every kind but SYNC. The header's manual (its comment block) is
+Status: v0.2.0, 2026-10-09. v0.2.0 is a trim: the second-report rule
+moved to `ysp/screen.h` v0.4.1's input bridge, and `yrsp_format_header()`,
+`yrsp_format_row()` and `desc.settle` are gone ("The trim of v0.2.0").
+The input event lives in `ysp/input.h` from v0.1.3 (`docs/input.md`);
+this header keeps its names as aliases. v0.1.4: `YRSP_KINDS_ALL` takes
+every kind but SYNC. The header's manual (its comment block) is
 the reference for each rule. This page has a tutorial built on
 `examples/response/trial_keyboard.c`, how-to guides for other devices, the data
-columns, and the decisions with their evidence.
+columns, the decisions with their evidence, and what the seven example
+trials show about the header.
 
 ## Tutorial: a keyboard trial with RT from the flip onset
 
@@ -34,7 +38,8 @@ trial  3 square rt - response - (too slow)
 
 The trial order comes from the seed, so the stimuli in your output can
 differ. Trial 1 has an anticipation at 0.05 s before its response. Trial 2
-has a key that SDL reported two times, 9 ms apart. Each trial counts one
+has a key that SDL reported two times, 9 ms apart: the input bridge's
+filter drops the second report (`n_duplicates` 1). Each trial counts one
 response.
 
 ### 2. Run it with a keyboard
@@ -74,8 +79,9 @@ The example has five parts.
    flip record completes (in `f.done[]` of a later `begin()`),
    `yrsp_onset_flip()` gives the final onset with its tier. RT is
    measured from the final onset.
-5. **Every frame.** Each SDL event goes through `yrsp_from_sdl()` into
-   `yrsp_feed()`. `yrsp_update(&rsp, f.onset)` returns
+5. **Every frame.** Each SDL event goes through `yscr_event_input()` into
+   `yrsp_feed()`. `yscr_event_input()` drops a key's second report
+   (`ysp/screen.h`, "Second key reports"). `yrsp_update(&rsp, f.onset)` returns
    `YRSP_ENDED` at the first response or at the deadline. The example
    then hides the stimulus on that frame and shows the feedback. At the
    end of the inter-trial interval, `yrsp_finish()` fills the result,
@@ -96,7 +102,8 @@ The example has five parts.
 | `onset_frame` | The frame the stimulus landed on |
 | `rsp_tier` | The response stamp's tier (0 not measured end to end) |
 | `rsp_flags` | `YRSP_R_*` |
-| `n_anticipations`, `n_duplicates` | Counts in the window |
+| `n_anticipations` | Anticipations in the window |
+| `n_duplicates` | Second key reports that the input bridge dropped during the trial (`yscr_get_input_stats()`) |
 | `iti` | The drawn inter-trial interval, seconds |
 
 A row with `onset_tier` 3, or `onset_src` 3, has an RT that is good for
@@ -129,9 +136,9 @@ yrsp_feed(&rsp, &in);
 
 Another library can turn SDL text input on for the stimulus window (Dear
 ImGui's SDL3 backend does, on the window with the focus). Keys then come
-on the message path, about 11 ms late (`docs/imgui_probe.md`). Read the
-path each frame and give it to the adapter, as `examples/response/trial_keyboard.c`
-does:
+on the message path, about 11 ms late (`docs/imgui_probe.md`).
+`yscr_event_input()` reads the path for each event. With your own
+adapter, read the path each frame and give it to `yrsp_from_sdl()`:
 
 ```c
 yscr_get_caps(&scr, &caps);              /* about 0.2 us */
@@ -290,8 +297,8 @@ RESULT: one report per press
 ```
 
 `RESULT: some keys reported twice` means that SDL sends those keys from
-both paths on this machine. `ysp/response.h` removes the second reports,
-but tell the maintainers: it is not what was expected.
+both paths on this machine. `yscr_event_input()` drops the second reports
+and counts them, but tell the maintainers: it is not what was expected.
 
 `which` is the keyboard's device id on SDL's raw path, and 0 on the
 message path. A second report from the message path shows `which=0`.
@@ -309,8 +316,7 @@ The header's comment block lists every field and flag. In short:
 | `yrsp_update(&c, now)` | The deadline, and `max_hold` while waiting for a release. |
 | `yrsp_finish(&c, &r)` | The result. Call it again after a late release or onset. |
 | `yrsp_entries(&c, &n)` | Every press of the window. |
-| `yrsp_format_header`, `yrsp_format_row` | A CSV row of the result. |
-| `yrsp_from_sdl`, `yrsp_sdl_source` | SDL3 events and their source entries (inline, with SDL3). |
+| `yrsp_from_sdl`, `yrsp_sdl_source` | SDL3 events and their source entries (inline, with SDL3). Without the bridge's filter: see "The double report". |
 | `yrsp_onset_flip`, `_audio`, `_landing` | Onsets from ysp/screen.h, ysp/audio.h, ysp/timeline.h records (inline). |
 
 jsPsych option to ysp field:
@@ -409,11 +415,25 @@ A physical key carries a scan code, so it most likely reports once.
 `screen_input --hand` lets a user check keys pressed by hand; this was
 not run here.
 
-The rule (R3 in the manual): a press of the same kind and control within
-`dedup` (50 ms) of the last accepted press, in either time order, is a
-second report. The first report to arrive is kept. 50 ms covers the
-largest measured gap (34.2 ms). Pressing one key two times within 50 ms
-is not a response a person makes.
+The rule (R3 in v0.1): a press of the same key within 50 ms of the last
+kept press, in either time order, is a second report. The first report to
+arrive is kept. 50 ms covers the largest measured gap (34.2 ms). Pressing
+one key two times within 50 ms is not a response a person makes.
+
+v0.2.0 moved the rule out of the collector into `ysp/screen.h` v0.4.1's
+input bridge (`yscr_event_input()`). In v0.1 only the collector got it:
+`trial_adjustment` stepped its bar from the same events, so a
+virtual-key tap stepped two times. The bridge also drops the second
+report's key-up, so a program sees one key-down and one key-up per
+press. `ysp/screen.h`'s manual (INPUT, "Second key reports") has the rule,
+its counts (`yscr_get_input_stats()`), its ring record
+(`YSCR_EV_KEY_DOUBLE`) and the opt-out (`desc.key_dedup_ns` < 0). A
+program that feeds `yrsp_from_sdl()` itself, or any other producer of
+key events that are not from the bridge, must drop second reports before
+`yrsp_feed()`: call `yscr_key_filter()` when `ysp/screen.h` is there, or
+apply the rule of the manual's REPEATS, HELD KEYS AND DOUBLE REPORTS. The
+collector itself takes a second report as a new press: AFTER_END when the
+first ended the window, a second response with `persist`.
 
 v0.1.1 adds the device to the rule. On the raw path, SDL gives each key
 the Raw Input handle of its keyboard (`which`); the message path gives 0.
@@ -421,8 +441,9 @@ SendInput gave 0 on both paths: every report in the table above had
 `which` 0, because injected input has no device handle. So two reports
 merge only when their devices are equal or one of them is 0. Two
 different keyboards pressing one key within 50 ms are two presses (two
-participants, or two hands on two boxes). The same rule decides whether a
-key is down (R2) and which press a release closes.
+participants, or two hands on two boxes). The collector uses the same
+device rule to decide whether a key is down (R2) and which press a release
+closes.
 
 SDL 3.4 keeps one key state for all keyboards. While keyboard A holds F,
 keyboard B's press of F arrives marked as a repeat, and B's release ends
@@ -447,6 +468,141 @@ bounds side by side. The two rest on different evidence (an OS vblank
 time, a measured host-side stamp), and a sum would hide which part is
 unknown.
 
+## What the examples show
+
+Status: 2026-10-08, the seven programs in `examples/response/`. The
+question was whether `ysp/response.h` does work that plain SDL events
+would leave to each program. This section gives the facts per example. It
+does not recommend.
+
+How the lines were counted: "trial logic" is the non-blank, non-comment
+lines of the frame loop in `main()` and of its input helpers (`adjust()`,
+`pointer()`, `inside()`), without the `--sim` code. "yrsp lines" is the
+lines of that logic that name a `yrsp_` function or type. Setup (window,
+conditions, the collector's description) and the data file's header are
+not counted.
+
+| Example | jsPsych | Trial logic | yrsp lines | `ysp/response.h` features used | Plain SDL events would need |
+|---|---|---|---|---|---|
+| `trial_keyboard` | `html-keyboard-response` | 123 | 12 | Choices by scancode; `duration` from the onset; `minimum_valid_rt`; the onset as a plan, then the flip record; R3 duplicates; release pairing (`rt_key_duration`); counts; the stamp tier | A list of presses kept until the flip record arrives, then classified against it; a deadline that moves with the onset; a table of keys that are down; a second-report filter; release pairing |
+| `trial_same_different` | `same-different-html` | 121 | 13 | As `trial_keyboard`, and EARLY: the window opens at the fixation, so presses during the first bar and the gap are logged and counted (`n_early`), not responses | As `trial_keyboard`. The SOA (second onset minus first, from flip records) is the example's own code with or without the header |
+| `trial_srt` | `serial-reaction-time` | 100 | 11 | Four choices, no deadline, the first key ends the window; the onset as a plan, then the flip record; presses in the RSI are AFTER_END, because `yrsp_finish()` comes at the end of the RSI (`n_rsi_presses`) | A map from scancode to position; the first key-down at or after the onset, with OS repeats skipped; a counter for key-downs in the RSI. With no deadline and no minimum RT, no press needs a class before the final onset |
+| `trial_adjustment` | `reconstruction` | 152 | 16 | The confirm key only: RT from the flip onset, the down state of the key across trials | The confirm key: one scancode test and the repeat flag. The adjustment steps read `ysp/input.h` events in both versions |
+| `trial_mouse_tracking` | `extension-mouse-tracking` (MouseTracker style) | 150 | 17 | A DISTANCE crossing (movement onset, 10 px from the position at `yrsp_arm()`); `persist`; the trace (one entry per event); the source's tier (3 for SDL's pointer, 0 for raw mice); `yrsp_cursor` for raw counts; `yrsp_entries()` for an EARLY crossing | A start point and a distance test; an array of samples; the onset kept to subtract. The hit tests, the conversion of raw counts to positions and the choice between SDL's and the bridge's mouse events are the example's own code in both versions |
+| `trial_audio_keyboard` | `audio-keyboard-response` | 66 | 8 | The onset from the tone's record (`yrsp_onset_audio()`: the target time, then the fit's time); `duration` from that onset; EARLY in the foreperiod; anticipations; the onset tier in the row | As `trial_keyboard`, with the record from `yau_result()` in place of the flip record |
+| `trial_stop_signal` | contrib `plugin-stop-signal` | 120 | 9 | As `trial_keyboard`; TIMEOUT is a successful stop, a response on a signal trial a failed one | As `trial_keyboard`. The SSD as shown (tone record minus go flip onset) and the staircase are the example's code with `ysp/audio.h` and `ysp/stair.h` |
+
+### Where the header removed work
+
+- A late onset. In each example with a response window, presses can
+  arrive before the final onset is known: the flip record completes one
+  frame or more after the onset, and the tone's record about a buffer after
+  the tone starts. The collector keeps absolute times and classifies every
+  press again at each `yrsp_set_onset()`, and it ends the window live
+  (`yrsp_update()`) against the onset it has.
+- Presses that are not responses are data. `n_early` (presses from the
+  fixation to the second bar in `trial_same_different`: 2, 1, 1 and 0 in
+  the four trials of the window run), `n_anticipations`, and AFTER_END
+  presses (the RSI of `trial_srt`) are each one field of the result.
+- Tiers in the row. Each row has the onset's tier and source and the
+  response stamp's tier. In `trial_mouse_tracking` the movement onset has
+  tier 3 on SDL's pointer (window message times) and the raw mouse
+  source's tier (0, not measured end to end) with `--raw-mice`.
+
+### Where the header added nothing or got in the way
+
+- `trial_srt` has no deadline, no minimum RT and no release rule. What is
+  left for the header is the choice table and the RSI count.
+- `trial_adjustment`: the collector models one window that ends at a
+  response, and a stream of steps does not fit it. Its log holds 64
+  entries per window, 8 of them kept for choices, so more than 56 taps of
+  G or H in one trial set LOG_FULL (the confirm still fits; OS repeats are
+  counted, not logged). The double-report rule (R3) worked only inside the
+  collector, so the steps did not get it: a key that SDL reports two times
+  (a virtual-key tap, "The double report") stepped two times. Fixed in
+  v0.2.0: the rule is in the input bridge (see the next section).
+- `trial_mouse_tracking`: the collector has no spatial choices, and an
+  entry has no position. The example tests the click's position itself
+  (`ygfx_hit()` of an outlined box is its band only, so it uses
+  `ygfx_bounds()`). With raw mice the example integrates the counts
+  (`yrsp_cursor`) and rewrites each DELTA sample as a POSITION sample,
+  because DISTANCE reads positions. SDL's own mouse events still arrive
+  with raw mice on, so the example drops the events that do not come from
+  the input bridge. The trace stops at `yrsp_finish()`, so the example
+  calls it at the response click and again at the end of the trial for
+  the final onset. A movement of 10 px between the start click and the
+  disc's onset makes the crossing EARLY, and the channel arms again only
+  within 10 px of the start: that trial has no movement onset
+  (`early_move` 1). `n_early` counts the start click too, so the example
+  reads the entries for this flag.
+- One onset per window. The first bar (`trial_same_different`) and the
+  stop signal (`trial_stop_signal`) are second onsets; each example reads
+  their records itself.
+- Held keys with no deadline. The first synthetic participant of
+  `trial_adjustment --sim` pressed space with no release. The next trial's
+  press of space was then a held key (R2), not a response, and with no
+  deadline the run did not end. A keyboard sends the release; the rule is
+  jsPsych's.
+- Not used by any of the seven examples: `wait_for_key_release` and
+  `max_hold`, `allow_held_key`, `settle`, KEYCODE matching, RISING and
+  FALLING crossings, `yrsp_format_header()` and `yrsp_format_row()`. Each
+  example writes its own columns, with jsPsych's names first. The how-to
+  guides use the crossings; no example runs them. v0.2.0 removed some of
+  these (next section).
+
+### The trim of v0.2.0
+
+On 2026-10-09 the user approved a trim based on the findings above.
+
+| Feature | Decision | Why |
+|---|---|---|
+| R3, the double-report rule (`desc.dedup`, `YRSP_E_DUPLICATE`, `n_duplicates`) | Moved to `ysp/screen.h` v0.4.1's input bridge | Every consumer of `yscr_event_input()` needs it, not only the collector (`trial_adjustment`'s steps). |
+| `yrsp_format_header()`, `yrsp_format_row()` | Removed | No example used them: each writes its own columns, with jsPsych's names first. |
+| `desc.settle` | Removed | It only delayed `YRSP_ENDED`. A press stamped before the deadline counts when it is fed after the end, until the next `yrsp_arm()` (the collector classifies by time), and each example's feedback and inter-trial interval give a late report that time. |
+| `wait_for_key_release`, `max_hold` | Kept | A jsPsych option that ported designs set; about 20 lines; tests and mutants cover it. |
+| `allow_held_key` | Kept | A jsPsych option; 2 lines beyond the held table, which R1 and R2 need anyway. |
+| KEYCODE matching | Kept | The only way to match the key a layout types (jsPsych's `KeyboardEvent.key`); about 10 lines. |
+| RISING and FALLING crossings | Kept | The how-to guides use them (a gamepad trigger, pen pressure); FALLING is 2 lines beside DISTANCE, which `trial_mouse_tracking` runs. |
+
+Lines: `ysp/response.h` went from 1551 to 1415 lines (136 fewer: 128
+lines of code out, 11 in, the rest its manual and changelog).
+`ysp/screen.h` went from 7697 to 7860 (163 more: 96 lines of code in,
+with the struct fields and the parameter table, 4 out; the rest its
+manual and changelog). The filter costs 9.6 ns per keyboard event at p50 (9.1 to 11.0
+ns, 15 runs of 1,000,000 events through a full 16-key table; MinGW gcc
+16.1 -O2, AC, under the timing guard).
+
+The examples, by `wc -l`: `trial_keyboard.c` 402 to 418,
+`trial_same_different.c` 373 to 384, `trial_srt.c` 354 to 365,
+`trial_adjustment.c` 415 to 427; the other three did not change. Trial
+logic (counted as above, without the `--sim` code): `trial_keyboard` 123
+to 123 (2 lines for the key path went, since `yscr_event_input()` reads
+it, and 2 came for the per-trial count), `trial_same_different` 121 to
+123 and `trial_srt` 100 to 101 (the count of dropped reports per trial:
+`n_duplicates` now comes from `yscr_get_input_stats()`),
+`trial_adjustment` unchanged (its steps get the filter through
+`yscr_event_input()`, which it called already). The `--sim` participant
+of `trial_adjustment` now reports one G tap two times, 9 ms apart, through
+`yscr_key_filter()`: the bar steps once (5 steps in trial 0, as before).
+`trial_keyboard --sim` sends its doubled wrong key through the same
+filter.
+
+### The runs
+
+On 2026-10-08, Windows 11, the Iris Xe laptop, MSVC 19.44 (`/W4 /WX`,
+`msvc-full`) and MinGW-w64 gcc 16.1 (C11, `-Wall -Wextra -Wpedantic
+-Wshadow -Werror`). In a window, an injector sent keys by scan code and
+mouse input with SendInput, only while the program's window was in front.
+
+| Example | `--sim`, both compilers | In a window (MSVC) |
+|---|---|---|
+| `trial_same_different` | 4 trials as scripted | 4 trials; SOA 0.79996 to 0.80000 s from flip records (planned 0.8 s); onset tiers 1 and 2 |
+| `trial_srt` | 24 trials as scripted | 24 trials (blocks S and R); onset tier 1 |
+| `trial_adjustment` | 3 trials as scripted | 3 trials; steps in the trajectory file |
+| `trial_mouse_tracking` | 2 trials as scripted, SDL's pointer and `--raw-mice` | SDL's pointer: 34 and 37 samples of 40 injected moves 10 ms apart, movement onset tier 3. `--raw-mice`: 40 and 40 samples, tier 0. The first two of eight `--raw-mice` runs lost the focus after the first click and got no more input (one before and one after the example confined the cursor); the cause was not found. The example confines the hidden system cursor to its window (`SDL_SetWindowMouseGrab()`), since a click goes to the window under that cursor |
+| `trial_audio_keyboard` | 4 trials as scripted; tone tier 4 (null device) | 4 trials; WASAPI shared, tone tier 2, residuals within 6 us, every onset confirmed |
+| `trial_stop_signal` | 8 trials as scripted; SSD 0.25 then 0.30 s | 8 trials; SSD as shown within 2 us of the plan (0.249998 and 0.199999 s); go onset tiers 1 and 2, tone tier 2 |
+
 ## Verification
 
 All on 2026-10-07, Windows 11, the Iris Xe laptop of `ysp/screen.h`'s
@@ -455,6 +611,7 @@ STATUS, with MinGW-w64 gcc 16.1 (C11, C99, C++17; `-Wall -Wextra
 
 | Check | Result |
 |---|---|
+| v0.2.0 (2026-10-09) | `tests/adapt/response_test.c`: 20,576 checks pass; 20,641 with `YRSP_TEST_SDL` (MSVC 19.44 `/W4 /WX` and MinGW-w64 gcc 16.1 `-Werror`, through CMake). The double-report cases now check what the collector makes of a second report (AFTER_END, or a second response with `persist`; R2 when it comes before the first's key-up). Mutations: 43 of 43 caught (`w-05`, `d-01` to `d-04`, `f-01` and `f-02` went with the features; the `d-` four became `ysp/screen.h`'s `kd-01` to `kd-07`). The seven examples' `--sim` runs as scripted on both compilers, `trial_mouse_tracking` also with `--raw-mice`. |
 | `tests/adapt/response_test.c` | v0.1.4 (2026-10-08): 20,617 checks pass; a SYNC press in ALL mode with `YRSP_KINDS_ALL` is not a response, with the SYNC bit named it is, and a hand-made mask of every bit but one keeps SYNC. v0.1.2: 20,604 checks pass; 20,669 with `YRSP_TEST_SDL`. Raw mice: a report into presses, releases, movement and wheel in order, the cap, absolute devices, a choice on one mouse, the cursor's gain, clamp and device. v0.1.1: 20,545 checks pass; 20,608 with `YRSP_TEST_SDL` (the SDL adapter on `SDL_Event` structs filled by hand, SDL 3.4.0 headers, nothing linked). Devices: two keyboards 5 ms apart (two responses, also when SDL marks the second a repeat), a raw report and its device-0 report (one), releases per device, HELD_AT_OPEN per device |
 | Random streams | 20,000 streams of 40 presses, releases and repeats with random onsets, rules and deadlines: one class per entry, every VALID entry eligible, the result's response the earliest VALID entry |
 | Mutations (`tests/mutate/response.toml`) | v0.1.4: 50 of 50 caught (`sync-01`, SYNC in ALL mode). v0.1.2: 49 of 49 caught (`ms-01` to `ms-04`; `ms-04` survived until the SDL mouse tier moved into a helper the SDL-free test reaches). v0.1.1: 45 of 45 caught (`dv-01` devices ignored, `dv-02` device 0 not a wildcard, `dv-03` another keyboard's "repeat" held). v0.1.0: 42 of 42 caught. The first run caught 37; the 5 survivors (rounding of seconds to ns, TIMEOUT without a deadline, a repeat whose press was never seen, release pairing, NaN in a row) each got a test. The release one found a fault: a release closed only the newest entry, so with `allow_held_key` a response followed by its HELD repeats had no duration. A release now closes the press and its repeats. |
@@ -463,7 +620,7 @@ STATUS, with MinGW-w64 gcc 16.1 (C11, C99, C++17; `-Wall -Wextra
 | `screen_input --reports` | The table in "The double report" |
 
 Not run: a key pressed by hand (`screen_input --hand` is the check); Linux
-and macOS (CI runs the test and `trial_keyboard --sim` there); mouse,
+and macOS (CI runs the test and the examples' `--sim` runs there); mouse,
 touch, pen and gamepad events from a device (the adapter is checked on
 filled structs only); any response box.
 

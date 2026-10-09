@@ -142,7 +142,10 @@
  *   SDL3 (yin_from_sdl, defined when SDL_events.h came first)
  *   ---------------------------------------------------------------------
  *   Converts keyboard, mouse button and motion, touch, pen and gamepad
- *   events. It reads fields only and calls no SDL function. It drops the
+ *   events. It passes SDL 3.4's second key reports (a key with no scan
+ *   code comes from two paths); ysp/screen.h's yscr_event_input() converts
+ *   through it and drops them (ysp/screen.h INPUT, "Second key reports").
+ *   It reads fields only and calls no SDL function. It drops the
  *   mouse events SDL makes from pen and touch input (which =
  *   SDL_PEN_MOUSEID, SDL_TOUCH_MOUSEID) and the touch events it makes from
  *   a pen (SDL_PEN_TOUCHID) and a mouse, unless ctx.keep_synthetic.

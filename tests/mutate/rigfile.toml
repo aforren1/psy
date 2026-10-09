@@ -1,0 +1,209 @@
+# ysp/rigfile.h mutants: the format's checks, the file checks at load, the
+# tier, binding and the canonical form. docs/device.md ("The rig profile")
+# lists the results.
+header = "ysp/rigfile.h"
+
+[test.rig]
+source = "tests/adapt/rigfile_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lsetupapi", "-lm"]
+timeout = 120
+
+[[mutant]]
+id = "rig-01"
+name = "unknown keys accepted"
+test = "rig"
+why = "A misspelled field would be a silent default, not an error."
+find = '''        if (!ok) {
+            uint32_t line, col;'''
+replace = '''        if (0) {
+            uint32_t line, col;'''
+
+[[mutant]]
+id = "rig-02"
+name = "any format version"
+test = "rig"
+why = "A newer format's fields mean something this reader does not know."
+find = '''        else if (strcmp(v->u.s, YRIG_FORMAT) != 0)'''
+replace = '''        else if (0)'''
+
+[[mutant]]
+id = "rig-03"
+name = "any role name"
+test = "rig"
+why = "A role name is a ydev_roles name and a field path; a space or a dot breaks both."
+find = '''    if (!yrig__name_ok(m->key, 31, true)) {'''
+replace = '''    if (0) {'''
+
+[[mutant]]
+id = "rig-04"
+name = "any family"
+test = "rig"
+why = "An unknown family fails at the session's start instead of at load."
+find = '''    if (!ro->family_id) return yrig__bad(r, yjs_get(o, "family"), f, "\"%s\" is not a ysp/box.h family", ro->family);'''
+replace = '''    if (0) return yrig__bad(r, yjs_get(o, "family"), f, "\"%s\" is not a ysp/box.h family", ro->family);'''
+
+[[mutant]]
+id = "rig-05"
+name = "latched on any family"
+test = "rig"
+why = "Only the MMBT-S has the switch; elsewhere the option would be ignored silently."
+find = '''            if (ro->latched && ro->family_id != YBOX_MMBTS) return'''
+replace = '''            if (0) return'''
+
+[[mutant]]
+id = "rig-06"
+name = "percentiles in any order"
+test = "rig"
+why = "A summary whose p5 is above its median was not computed from one distribution."
+find = '''        if (!(lb->p5_ns <= lb->median_ns && lb->median_ns <= lb->p95_ns && lb->p95_ns <= lb->max_ns))'''
+replace = '''        if (0)'''
+
+[[mutant]]
+id = "rig-07"
+name = "uppercase hashes"
+test = "rig"
+why = "The file is named by the lowercase hex; another spelling names no file."
+find = '''        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return yrig__bad(r, v, f, "must be 64 lowercase hex digits");'''
+replace = '''        if (0) return yrig__bad(r, v, f, "must be 64 lowercase hex digits");'''
+
+[[mutant]]
+id = "rig-08"
+name = "any date"
+test = "rig"
+why = "Month 13 and hour 25 are not dates; the data file copies them."
+find = '''    return mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && h <= 23 && mi <= 59 && se <= 60;'''
+replace = '''    return true;'''
+
+[[mutant]]
+id = "rig-09"
+name = "the hash not compared"
+test = "rig"
+why = "A changed loopback file would keep its role's tier."
+find = '''    rc = strcmp(hex, sha) == 0 ? YRIG_CHECK_OK : YRIG_CHECK_CHANGED;'''
+replace = '''    rc = YRIG_CHECK_OK;'''
+
+[[mutant]]
+id = "rig-10"
+name = "the summary not compared"
+test = "rig"
+why = "A hand-edited median with a genuine file would pass as measured."
+find = '''            rc = YRIG_CHECK_DIFFERS;'''
+replace = '''            rc = YRIG_CHECK_OK;'''
+
+[[mutant]]
+id = "rig-11"
+name = "a missing file passes"
+test = "rig"
+why = "A missing file is no evidence."
+find = '''    if (rc != YRIG_OK) return rc == YRIG_ERR_MISSING ? YRIG_CHECK_MISSING : YRIG_CHECK_CHANGED;'''
+replace = '''    if (rc != YRIG_OK) return YRIG_CHECK_OK;'''
+
+[[mutant]]
+id = "rig-12"
+name = "failed checks not noted"
+test = "rig"
+why = "A role that runs with tier UNKNOWN must say why in the log."
+find = '''            if (lb->check != YRIG_CHECK_OK)
+                yrig__note(p,'''
+replace = '''            if (0)
+                yrig__note(p,'''
+
+[[mutant]]
+id = "rig-13"
+name = "tier 1 without the check"
+test = "rig"
+why = "Tier 1 rests on a loopback; an unchecked file is no loopback."
+find = '''    if (r && r->bounds.set && r->bounds.check == YRIG_CHECK_OK && yrig__family_id(r->family) == dev->d.family &&'''
+replace = '''    if (r && r->bounds.set && yrig__family_id(r->family) == dev->d.family &&'''
+
+[[mutant]]
+id = "rig-14"
+name = "tier 1 for an output"
+test = "rig"
+why = "Tier 1 is a device clock mapped by a checked fit; a trigger box has no clock."
+find = '''        (ybox_caps(dev->d.family) & YBOX_CAP_IN)) {'''
+replace = '''        1) {'''
+
+[[mutant]]
+id = "rig-15"
+name = "a new binding keeps the old latency"
+test = "rig"
+why = "The numbers were measured on the device the role had before."
+find = '''    memset(&r->latency, 0, sizeof r->latency);   /* measured on the old device */'''
+replace = '''    (void)0;'''
+
+[[mutant]]
+id = "rig-16"
+name = "empty options written"
+test = "rig"
+why = "The canonical form leaves defaults out; with them the hash would change with no change of meaning."
+find = '''        if (ok && opt->n) ok = yjs_set(a, o, "options", opt) == YJS_OK;'''
+replace = '''        if (ok) ok = yjs_set(a, o, "options", opt) == YJS_OK;'''
+
+[[mutant]]
+id = "rig-17"
+name = "seconds to the microsecond"
+test = "rig"
+why = "Durations are read exactly to the nanosecond, not through a coarser unit."
+find = '''    rc = yjs_fixed(v, 9, out);'''
+replace = '''    rc = yjs_fixed(v, 6, out);
+    *out *= 1000;'''
+
+[[mutant]]
+id = "rig-18"
+name = "33 roles"
+test = "rig"
+why = "The table has YRIG_MAX_ROLES slots, as ydev_roles."
+find = '''        else if (v->n > YRIG_MAX_ROLES) rc ='''
+replace = '''        else if (v->n > YRIG_MAX_ROLES + 1) rc ='''
+
+[[mutant]]
+id = "rig-19"
+name = "a calibration path with a separator"
+test = "rig"
+why = "The calibration file is in the rig folder; a path could name a file elsewhere."
+find = '''        if (s[i] == '/' || s[i] == '\\' || s[i] == ':' || (unsigned char)s[i] < 0x20) return false;'''
+replace = '''        if ((unsigned char)s[i] < 0x20) return false;'''
+
+[[mutant]]
+id = "rig-20"
+name = "a refused folder used anyway"
+test = "rig"
+why = "A folder another user can write may hold a planted profile."
+find = '''    return yrt_user_dir(YRT_DIR_CONFIG, "rig", out, cap) == YRT_OK ? YRIG_OK : YRIG_ERR_FOLDER;'''
+replace = '''    (void)yrt_user_dir(YRT_DIR_CONFIG, "rig", out, cap);
+    return YRIG_OK;'''
+
+[[mutant]]
+id = "rig-21"
+name = "a profile written without reading it back"
+test = "rig"
+why = "A profile the reader refuses must never be written or hashed."
+find = '''    rc = yrig__parse(back, b, need, NULL, "the profile in memory", err, cap);'''
+replace = '''    rc = YRIG_OK;'''
+
+[[mutant]]
+id = "rig-22"
+name = "the rig's pulse not passed on"
+test = "rig"
+why = "A rig that fixes the pulse width sends that width at every flip."
+find = '''    if (r->pulse_ns >= 0) d->pulse_ns = r->pulse_ns;'''
+replace = '''    (void)0;'''
+
+[[mutant]]
+id = "rig-23"
+name = "17 buttons"
+test = "rig"
+why = "The map has YRIG_MAX_BUTTONS slots."
+find = '''            if (v->n > YRIG_MAX_BUTTONS) return'''
+replace = '''            if (v->n > YRIG_MAX_BUTTONS + 1) return'''
+
+[[mutant]]
+id = "rig-24"
+name = "the summary of a file without its format line"
+test = "rig"
+why = "Only an output latency file has these fields with these meanings."
+find = '''    if (!(have & 1)) return yrig__err(err, cap, YRIG_ERR_FORMAT, "not an output latency file (no format line)");'''
+replace = '''    have |= 1;'''

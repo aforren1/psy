@@ -93,6 +93,11 @@ option(YSP_TRACY_CHECK "Fetch Tracy and build the YRT_TRACY compile check" OFF)
 # vendored Skribidi and HarfBuzz in third_party/, examples/layout/gfx_layout.c and
 # tests/layout/). About 8 MB of sources that no header needs.
 option(YSP_BUILD_LAYOUT "Build the layout library (pack/, third_party/), its test and gfx_layout" OFF)
+# Off by default: the pack tool (pack/pack_tool.c, the ypak CLI, tests/pack/).
+# It needs the layout library (glyph runs) and lodepng in third_party/lodepng/
+# (tools/vendor_pack.py fetches it). ysp/pack.h itself is a header in the
+# list below and needs neither.
+option(YSP_BUILD_PACK "Build the pack tool library, ypak and its tests (needs YSP_BUILD_LAYOUT)" OFF)
 
 # ysp/screen.h needs SDL3 (3.2 or later). Without it only its SDL-free test is
 # built; point SDL3_DIR at an SDL3 CMake package to build the rest. ANGLE is
@@ -167,7 +172,7 @@ endif()
 # program registered with ctest too, and one with YSP_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
 # Y<X>_ASYNC defined, which is the opt-in layer that pulls in ysp/rt.h.
-set(YSP_LIBS rt parallel serial stair quest aep table trials timeline input response box device color rdk outline screen audio gfx video)
+set(YSP_LIBS rt parallel serial stair quest aep table json pack trials timeline input response box device rigfile color rdk outline screen audio gfx video)
 
 # Examples that sit in the folder of the header they mainly show but need
 # another header's build: path, program name (the file's own name, kept from
@@ -180,6 +185,12 @@ set(YSP_EXAMPLES_ACROSS
     timeline/gfx_trial.c       gfx
     layout/gfx_layout.c        -
     response/trial_keyboard.c  -
+    response/trial_same_different.c -
+    response/trial_srt.c       -
+    response/trial_adjustment.c -
+    response/trial_mouse_tracking.c -
+    response/trial_audio_keyboard.c -
+    response/trial_stop_signal.c -
     device/photodiode_check.c  -)
 
 set(YSP_PREFIX_rt          YRT)
@@ -224,6 +235,20 @@ set(YSP_GROUP_table        core)
 set(YSP_PLATFORMS_table    Windows Linux Darwin)
 set(YSP_THREADS_table      OFF)
 
+# The strict JSON reader and canonical writer includes nothing; the pack
+# tool and ysp/rigfile.h read and write JSON through it.
+set(YSP_PREFIX_json        YJS)
+set(YSP_GROUP_json         core)
+set(YSP_PLATFORMS_json     Windows Linux Darwin)
+set(YSP_THREADS_json       OFF)
+
+# The pack reader includes nothing; it maps files through the OS (kernel32 on
+# Windows, mmap on POSIX), which every program links already.
+set(YSP_PREFIX_pack        YPAK)
+set(YSP_GROUP_pack         core)
+set(YSP_PLATFORMS_pack     Windows Linux Darwin)
+set(YSP_THREADS_pack       OFF)
+
 # The trial sequencer requires ysp/table.h beside it (its implementation
 # includes ysp/table.h's, as ysp/gfx.h's does ysp/color.h's), and nothing else.
 set(YSP_PREFIX_trials      YTR)
@@ -258,6 +283,13 @@ set(YSP_PREFIX_device      YDEV)
 set(YSP_GROUP_device       devices)
 set(YSP_PLATFORMS_device   Windows Linux Darwin)
 set(YSP_THREADS_device     OFF)
+
+# The rig profile sits on the device layer (roles, families, keys) and
+# ysp/json.h. ysp/device.h has no NO_THREADS build, so this has none either.
+set(YSP_PREFIX_rigfile     YRIG)
+set(YSP_GROUP_rigfile      devices)
+set(YSP_PLATFORMS_rigfile  Windows Linux Darwin)
+set(YSP_THREADS_rigfile    OFF)
 
 # The timeline includes nothing either; it takes times as arguments.
 set(YSP_PREFIX_timeline    YTL)
@@ -476,8 +508,8 @@ if(TARGET audio_loopback AND WIN32)
 endif()
 
 # ysp/input.h and ysp/response.h with SDL3: their tests again with the SDL
-# adapter (SDL's headers only, nothing linked), and the two examples of
-# YSP_EXAMPLES_ACROSS whose groups are their own: the keyboard trial (on
+# adapter (SDL's headers only, nothing linked), and the examples of
+# YSP_EXAMPLES_ACROSS whose groups are their own: the response trials (on
 # ysp/gfx.h and the methods) and the photodiode check (a device and a
 # screen).
 if(TARGET SDL3::Headers AND YSP_BUILD_TESTS)
@@ -491,7 +523,16 @@ if(TARGET SDL3::Headers AND YSP_BUILD_TESTS)
     add_test(NAME test_input_sdl COMMAND test_input_sdl)
 endif()
 if(TARGET SDL3::SDL3 AND YSP_BUILD_EXAMPLES)
-    ysp_add_program(trial_keyboard examples/response/trial_keyboard.c rig methods)
+    # The jsPsych-style trials of examples/response/ (docs/response.md,
+    # "What the examples show"); the two with a sound need miniaudio.
+    foreach(_t keyboard same_different srt adjustment mouse_tracking)
+        ysp_add_program(trial_${_t} examples/response/trial_${_t}.c rig methods)
+    endforeach()
+    if(TARGET ysp::miniaudio)
+        foreach(_t audio_keyboard stop_signal)
+            ysp_add_program(trial_${_t} examples/response/trial_${_t}.c rig methods)
+        endforeach()
+    endif()
     # The MCU photodiode on ysp/device.h, its events over ysp/screen.h's
     # input bridge: the first real device's hand test.
     ysp_add_program(photodiode_check examples/device/photodiode_check.c rig devices)
@@ -526,8 +567,16 @@ if(YSP_BUILD_LAYOUT)
                 "(or python3 tools/vendor_layout.py --write; it needs git for the patches)")
         endif()
     endforeach()
+    if(YSP_BUILD_PACK AND NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lodepng/lodepng.cpp)
+        message(FATAL_ERROR "YSP_BUILD_PACK: third_party/lodepng is missing. Fetch and verify it once, from the "
+            "repository root:\n"
+            "    uv run --no-project python tools/vendor_pack.py --write\n"
+            "(or python3 tools/vendor_pack.py --write)")
+    endif()
     add_subdirectory(third_party)
     add_subdirectory(pack)
+elseif(YSP_BUILD_PACK)
+    message(FATAL_ERROR "YSP_BUILD_PACK needs YSP_BUILD_LAYOUT=ON (glyph runs are laid out with Skribidi)")
 endif()
 
 if(YSP_TRACY_CHECK AND YSP_BUILD_TESTS)

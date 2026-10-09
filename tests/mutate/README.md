@@ -73,6 +73,8 @@ values change from run to run.
 | `box.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/box_test.c -lm` |
 | `device.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/device_test.c -lsetupapi -lm` (Windows) |
 | `video.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/video_test.c -lm` |
+| `json.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/json_test.c -lm` (`YJS_TEST_NUMBERS=50000`) |
+| `rigfile.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/rigfile_test.c -lsetupapi -lm` (Windows) |
 
 These are the compilers of the original runs. The runner finds gcc in
 this order: the `YSP_MUT_GCC` environment variable,

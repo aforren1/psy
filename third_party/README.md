@@ -127,3 +127,25 @@ checkout with `core.autocrlf=true` keeps the files as upstream has them.
    `tests/layout/corpus_ref.txt` only if Chromium's version is the reason.
    Every difference in glyph ids, order or positions goes in
    docs/layout.md (policy point 4).
+
+## lodepng, for the pack tool
+
+`third_party/lodepng/` holds lodepng (zlib license) at commit
+`e584a8490db1b76b81bf298c11c09d3b55d9c270` (2026-10-06): `lodepng.cpp`,
+`lodepng.h` and `LICENSE`, unchanged. The pack tool (CMake option
+`YSP_BUILD_PACK`, docs/pack.md) decodes PNG textures with it; the layout
+library does not need it. Like the trees above, it is fetched, not
+committed:
+
+```sh
+uv run --no-project python tools/vendor_pack.py --write   # fetch and verify
+uv run --no-project python tools/vendor_pack.py           # verify only
+```
+
+`tools/vendor_pack.py` downloads each file at the full commit SHA and
+compares its SHA-256 with the value in the script; nothing else is
+accepted. CMake compiles `lodepng.cpp` as C from a copy named
+`lodepng.c`, with its warnings off, and records the commit in each
+manifest, with `,tree-differs` when the file's SHA-256 is not the pinned
+one. To update the pin, change `COMMIT` and the three hashes in the script,
+the pin and hash in `pack/CMakeLists.txt`, and this section.

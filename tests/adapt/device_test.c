@@ -11,10 +11,15 @@
  * clock by its timeout, so a minute of device time takes milliseconds and
  * every run is the same. One part runs the reader thread on the real
  * clock. The reference for each event is the true host time of its edge.
+ * The outputs run against a fake trigger box that keeps every write and
+ * its time; their timing part runs on the real clock and the worker.
+ * ysp/screen.h comes first (its declarations only, no SDL) so the trigger
+ * channel glue is built and called with a fake flip.
  *
  *     gcc -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Werror -Iinclude \
  *         -o device_test tests/adapt/device_test.c -lsetupapi   (Windows)
  */
+#include "ysp/screen.h"
 #define YSP_DEVICE_IMPLEMENTATION
 #include "ysp/device.h"
 
@@ -78,6 +83,9 @@ typedef struct board {
     bool     open;
     int      opens;
     int64_t  generated_until;
+    /* LINE outputs: when the board set each code ("o") */
+    int64_t  out_at[64];
+    int      nout;
 } board;
 
 static board g_b;
@@ -170,6 +178,11 @@ static void b_hear(board* b, uint8_t c, int64_t t) {
             b_send(b, at, s, n);
         } else if (b->line[0] == 'i' && !b->no_identity) {
             b_send(b, at, "I ysp-line 1 sim test\n", 22);
+        } else if (b->line[0] == 'o' && b->line[1] == ' ') {
+            char s[64];
+            int n = snprintf(s, sizeof s, "O %lu %s\n", (unsigned long)(uint32_t)b_ticks(b, at), b->line + 2);
+            if (b->nout < 64) b->out_at[b->nout++] = at;
+            b_send(b, at, s, n);
         }
         return;
     }
@@ -637,6 +650,525 @@ static void test_desc(void) {
     printf("  desc checks and the source entry: ok\n");
 }
 
+/* --- outputs ---------------------------------------------------------------------- */
+
+/* A trigger box behind a fake transport: it keeps every write (bytes and
+ * time) and every change of the modem lines. On the virtual clock a read
+ * that finds nothing moves the clock; on the real clock it sleeps 1 ms. */
+typedef struct obox {
+    uint8_t  bytes[65536];
+    int      nbytes;
+    int64_t  wt[16384];       /* each write: time, first byte, size        */
+    int      wfirst[16384], wn[16384];
+    int      nw;
+    uint32_t lcode[256], lchanged[256];
+    int      nl;
+    bool     open, fail;
+    int      opens;
+} obox;
+
+static obox g_o;
+
+static void* o_open(void* user, const char* key, char* found, size_t cap) {
+    obox* o = (obox*)user;
+    if (!ydev_key_match(key, "serial:0403:6001:TB1:A") && strcmp(key, "parallel:") != 0) return NULL;
+    o->open = true;
+    o->opens++;
+    snprintf(found, cap, "TB1");
+    return o;
+}
+
+static int o_read(void* conn, uint8_t* buf, int cap, int timeout_ms) {
+    (void)conn; (void)buf; (void)cap;
+    if (g_real) (void)yrt_sleep_ns(1000000);
+    else g_now += (int64_t)timeout_ms * 1000000;
+    return 0;
+}
+
+static int o_write(void* conn, const uint8_t* buf, int n) {
+    obox* o = (obox*)conn;
+    int64_t t = now_fn(NULL);
+    if (o->fail) return -1;
+    if (o->nw < 16384) { o->wt[o->nw] = t; o->wfirst[o->nw] = o->nbytes; o->wn[o->nw++] = n; }
+    if (o->nbytes + n <= (int)sizeof o->bytes) { memcpy(o->bytes + o->nbytes, buf, (size_t)n); o->nbytes += n; }
+    return n;
+}
+
+static int o_lines(void* conn, uint32_t code, uint32_t changed) {
+    obox* o = (obox*)conn;
+    if (o->nl < 256) { o->lcode[o->nl] = code; o->lchanged[o->nl++] = changed; }
+    return 0;
+}
+
+static void o_close(void* conn) { ((obox*)conn)->open = false; }
+
+static ydev_transport ofake(bool with_read) {
+    ydev_transport tr;
+    memset(&tr, 0, sizeof tr);
+    tr.open = o_open;
+    tr.read = with_read ? o_read : NULL;
+    tr.write = o_write;
+    tr.close = o_close;
+    tr.lines = o_lines;
+    tr.user = &g_o;
+    return tr;
+}
+
+static ydev_desc odesc(int family) {
+    ydev_desc d;
+    memset(&d, 0, sizeof d);
+    d.role = "trig";
+    d.family = family;
+    d.key = family == YBOX_PARALLEL ? "parallel:" : "serial:0403:6001:TB1:";
+    d.device = 5;
+    d.transport = ofake(family != YBOX_PARALLEL);
+    d.ring = &g_ring;
+    d.manual = true;
+    d.now = now_fn;
+    d.probe_ns = -1;
+    d.no_identify = true;
+    return d;
+}
+
+static ydev_device g_out;
+
+/* Polls the output instance until virtual time t. */
+static void orun_until(int64_t t) {
+    while (g_now < t) {
+        int64_t before = g_now;
+        (void)ydev_poll(&g_out, 1);
+        if (g_now == before) g_now += 1000000;
+    }
+}
+
+static bool obytes_are(const uint8_t* want, int n) {
+    int i;
+    if (g_o.nbytes != n) {
+        fprintf(stderr, "device_test: %d bytes written, want %d:", g_o.nbytes, n);
+        for (i = 0; i < g_o.nbytes; i++) fprintf(stderr, " %02X", g_o.bytes[i]);
+        fprintf(stderr, "\n");
+        return false;
+    }
+    return memcmp(g_o.bytes, want, (size_t)n) == 0;
+}
+
+static void ostart(const ydev_desc* d) {
+    memset(&g_o, 0, sizeof g_o);
+    ring_reset();
+    CHECK(ydev_start(&g_out, d));
+    CHECK_I(ydev_poll(&g_out, 1), YDEV_RUNNING);
+}
+
+/* The OUT records in the ring, in order. */
+static int g_nout;
+static yrt_event g_outrec[4096];
+static int g_ntext;
+static char g_text[16][40];
+static void odrain(void) {
+    int i, n = yrt_ring_drain(&g_ring, g_rec, 16384);
+    g_nout = 0;
+    g_ntext = 0;
+    for (i = 0; i < n; i++) {
+        if (g_rec[i].source != YRT_SRC_DEVICE) continue;
+        if (g_rec[i].kind == YDEV_REC_OUT && g_nout < 4096) g_outrec[g_nout++] = g_rec[i];
+        if (g_rec[i].kind == YDEV_REC_TEXT && strncmp(g_rec[i].u.text, "mark ", 5) == 0 && g_ntext < 16)
+            memcpy(g_text[g_ntext++], g_rec[i].u.text, 40);
+    }
+}
+
+/* The bytes of each byte family, from the open to the stop. */
+static void test_out_bytes(void) {
+    ydev_desc d;
+    /* TriggerBox: a 0 after the open; a byte holds; a pulse's 0 from the
+     * host; a set cancels a pending 0; 0 then 0xFF at the stop */
+    {
+        static const uint8_t want[] = { 0x00, 0x05, 0x07, 0x00, 0x09, 0x03, 0x00, 0xFF };
+        int64_t t;
+        d = odesc(YBOX_TRIGGERBOX);
+        ostart(&d);
+        CHECK_I(ydev_out_set(&g_out, 5), YDEV_OK);
+        CHECK_I(ydev_out_pulse(&g_out, 7, 2000000), YDEV_OK);
+        t = g_now;
+        orun_until(t + 3000000);
+        CHECK(g_o.nw == 4 && g_o.wt[3] - g_o.wt[2] >= 2000000 && g_o.wt[3] - g_o.wt[2] < 3000000);
+        CHECK_I(ydev_out_pulse(&g_out, 9, 2000000), YDEV_OK);
+        CHECK_I(ydev_out_set(&g_out, 3), YDEV_OK);
+        orun_until(g_now + 5000000);
+        CHECK_I(ydev_out_pulse(&g_out, 1, 0), YDEV_ERR_ARG);     /* no width: no pulse */
+        CHECK_I(ydev_out_set(&g_out, 256), YDEV_ERR_ARG);
+        ydev_stop(&g_out);
+        CHECK(obytes_are(want, (int)sizeof want));
+    }
+    /* BioSemi: every code is the box's 8 ms pulse; no 0 at the open or the
+     * stop; a width other than 8 ms is refused, at the call and at start */
+    {
+        static const uint8_t want[] = { 0x05, 0x05, 0x05 };
+        d = odesc(YBOX_BIOSEMI);
+        ostart(&d);
+        CHECK_I(ydev_out_set(&g_out, 5), YDEV_OK);
+        CHECK_I(ydev_out_pulse(&g_out, 5, 2000000), YDEV_ERR_ARG);
+        CHECK_I(ydev_out_pulse(&g_out, 5, 0), YDEV_OK);
+        CHECK_I(ydev_out_pulse(&g_out, 5, 8500000), YDEV_OK);
+        orun_until(g_now + 20000000);
+        ydev_stop(&g_out);
+        CHECK(obytes_are(want, (int)sizeof want));
+        d.pulse_ns = 2000000;
+        CHECK(!ydev_start(&g_out, &d) && strstr(ydev_error(&g_out), "8 ms"));
+    }
+    /* MMBT-S at switch P is BioSemi's case; at switch S a byte holds */
+    {
+        static const uint8_t want_p[] = { 0x07 };
+        static const uint8_t want_s[] = { 0x00, 0x07, 0x00 };
+        d = odesc(YBOX_MMBTS);
+        ostart(&d);
+        CHECK_I(ydev_out_pulse(&g_out, 7, 2000000), YDEV_ERR_ARG);
+        CHECK_I(ydev_out_pulse(&g_out, 7, 8000000), YDEV_OK);
+        ydev_stop(&g_out);
+        CHECK(obytes_are(want_p, 1));
+        d.latched = true;
+        ostart(&d);
+        CHECK_I(ydev_out_pulse(&g_out, 7, 2000000), YDEV_OK);
+        orun_until(g_now + 4000000);
+        ydev_stop(&g_out);
+        CHECK(obytes_are(want_s, 3));
+    }
+    /* The parallel port's family on a transport without read */
+    {
+        static const uint8_t want[] = { 0x00, 0x81, 0x00 };
+        d = odesc(YBOX_PARALLEL);
+        ostart(&d);
+        CHECK_I(ydev_out_pulse(&g_out, 0x81, 1000000), YDEV_OK);
+        orun_until(g_now + 2000000);
+        ydev_stop(&g_out);
+        CHECK(obytes_are(want, 3));
+        memset(&d.transport, 0, sizeof d.transport);
+        CHECK(!ydev_start(&g_out, &d) && strstr(ydev_error(&g_out), "ydev_parallel_transport"));
+    }
+    /* DTR and RTS: both low at the open; only the lines that change */
+    {
+        d = odesc(YBOX_LINES);
+        ostart(&d);
+        CHECK_I(ydev_out_set(&g_out, 1), YDEV_OK);
+        CHECK_I(ydev_out_pulse(&g_out, 2, 1000000), YDEV_OK);
+        orun_until(g_now + 2000000);
+        CHECK_I(ydev_out_set(&g_out, 4), YDEV_ERR_ARG);
+        ydev_stop(&g_out);
+        CHECK_I(g_o.nl, 4);
+        CHECK(g_o.lcode[0] == 0 && g_o.lchanged[0] == 3);
+        CHECK(g_o.lcode[1] == 1 && g_o.lchanged[1] == 1);
+        CHECK(g_o.lcode[2] == 2 && g_o.lchanged[2] == 3);
+        CHECK(g_o.lcode[3] == 0 && g_o.lchanged[3] == 2);
+        CHECK_I(g_o.nbytes, 0);
+    }
+    /* XID: mp (whole ms, sent when it changes) then mh, in one write */
+    {
+        static const uint8_t want[] = { 'm', 'p', 0, 0, 0, 0, 'm', 'h', 0x02, 0x01,
+                                        'm', 'h', 0x03, 0x00,
+                                        'm', 'p', 5, 0, 0, 0, 'm', 'h', 0x01, 0x00,
+                                        'm', 'h', 0x02, 0x00,
+                                        'm', 'p', 0, 0, 0, 0, 'm', 'h', 0x00, 0x00 };
+        ydev_out_info oi;
+        d = odesc(YBOX_XID);
+        ostart(&d);
+        CHECK_I(ydev_out_set(&g_out, 0x0102), YDEV_OK);
+        CHECK_I(ydev_out_set(&g_out, 3), YDEV_OK);
+        CHECK_I(ydev_out_pulse(&g_out, 1, 4800000), YDEV_OK);
+        ydev_out_last(&g_out, &oi);
+        CHECK(oi.width_ns == 5000000 && (oi.flags & YDEV_OUT_DEVICE_TIMED) && oi.result == YDEV_OK);
+        CHECK_I(ydev_out_pulse(&g_out, 2, 5000000), YDEV_OK);
+        CHECK_I(ydev_out_set(&g_out, 0), YDEV_OK);
+        CHECK_I(ydev_out_set(&g_out, 0x10000), YDEV_ERR_ARG);
+        ydev_stop(&g_out);
+        CHECK(obytes_are(want, (int)sizeof want));
+        CHECK_I(g_o.nw, 5);
+    }
+    /* The line protocol: o and p */
+    {
+        static const char want[] = "o 5\np 1 2000\n";
+        d = odesc(YBOX_LINE);
+        ostart(&d);
+        CHECK_I(ydev_out_set(&g_out, 5), YDEV_OK);
+        CHECK_I(ydev_out_pulse(&g_out, 1, 2000000), YDEV_OK);
+        ydev_stop(&g_out);     /* the board ends p at 0: nothing held at the stop */
+        CHECK(obytes_are((const uint8_t*)want, (int)sizeof want - 1));
+    }
+    /* No outputs: a photodiode */
+    {
+        d = odesc(YBOX_PHOTO);
+        ostart(&d);
+        CHECK_I(ydev_out_set(&g_out, 1), YDEV_ERR_FAMILY);
+        ydev_stop(&g_out);
+    }
+    printf("  output bytes: TriggerBox, BioSemi, MMBT-S (P and S), parallel, DTR and RTS, XID, line: ok\n");
+}
+
+/* The DEVICE_OUT records: contents, pulses and their trailing edges,
+ * replaced and canceled edges, failures, marks, the trigger channel. */
+static void test_out_records(void) {
+    ydev_desc d = odesc(YBOX_TRIGGERBOX);
+    const yrt_event* r;
+    int64_t lead_t1;
+    d.pulse_ns = 1000000;
+    ostart(&d);
+    odrain();                                   /* the open's 0 */
+    CHECK_I(g_nout, 1);
+    CHECK(g_nout == 1 && g_outrec[0].u.u32[8] == 0 && g_outrec[0].u.u16[18] == 0);
+    /* a pulse and its trailing edge */
+    CHECK_I(ydev_out_pulse(&g_out, 12, 2000000), YDEV_OK);
+    orun_until(g_now + 3000000);
+    odrain();
+    CHECK_I(g_nout, 2);
+    if (g_nout == 2) {
+        r = &g_outrec[0];
+        CHECK(r->aux == 5 && (int64_t)r->t_ns == r->u.i64[0] && r->u.i64[1] >= r->u.i64[0]);
+        CHECK(r->u.i64[2] == 2000000 && r->u.i64[3] == 0 && r->u.u32[8] == 12);
+        CHECK_I(r->u.u16[18], YDEV_OUT_PULSE);
+        lead_t1 = r->u.i64[1];
+        r = &g_outrec[1];
+        CHECK_I(r->u.u16[18], YDEV_OUT_TRAILING);
+        CHECK(r->u.u16[19] == g_outrec[0].u.u16[19] && r->u.u32[8] == 0);
+        CHECK(r->u.i64[0] >= lead_t1 + 2000000 && r->u.i64[0] < lead_t1 + 3000000);
+        CHECK(r->u.i64[2] == r->u.i64[0] - g_outrec[0].u.i64[0]);       /* the host width */
+    }
+    /* a pulse that moves a pending edge; a set that cancels one */
+    CHECK_I(ydev_out_pulse(&g_out, 1, 2000000), YDEV_OK);
+    CHECK_I(ydev_out_pulse(&g_out, 2, 2000000), YDEV_OK);
+    orun_until(g_now + 3000000);
+    CHECK_I(ydev_out_pulse(&g_out, 3, 2000000), YDEV_OK);
+    CHECK_I(ydev_out_set(&g_out, 4), YDEV_OK);
+    orun_until(g_now + 3000000);
+    odrain();
+    CHECK_I(g_nout, 5);
+    if (g_nout == 5) {
+        CHECK(g_outrec[1].u.u16[18] == (YDEV_OUT_PULSE | YDEV_OUT_REPLACED));
+        CHECK(g_outrec[2].u.u16[18] == YDEV_OUT_TRAILING && g_outrec[2].u.u16[19] == g_outrec[1].u.u16[19]);
+        CHECK(g_outrec[3].u.u32[8] == 3 && g_outrec[4].u.u32[8] == 4 && g_outrec[4].u.u16[18] == 0);
+    }
+    /* failures are records too */
+    CHECK_I(ydev_out_set(&g_out, 300), YDEV_ERR_ARG);
+    g_o.fail = true;
+    CHECK_I(ydev_out_set(&g_out, 1), YDEV_ERR_IO);
+    g_o.fail = false;
+    odrain();
+    CHECK(g_nout == 2 && (g_outrec[0].u.u16[18] & YDEV_OUT_FAILED) && (g_outrec[1].u.u16[18] & YDEV_OUT_FAILED));
+    /* a mark: desc.pulse_ns's pulse, then its text */
+    CHECK_I(ydev_out_mark(&g_out, 6, "condition A, block 2, trial 17: the long label"), YDEV_OK);
+    orun_until(g_now + 2000000);
+    odrain();
+    CHECK(g_nout == 2 && g_outrec[0].u.u16[18] == (YDEV_OUT_PULSE | YDEV_OUT_MARK) && g_outrec[0].u.i64[2] == 1000000);
+    CHECK(g_ntext == 2 && strcmp(g_text[0], "mark condition A, block 2, trial 17: th") == 0 &&
+          strcmp(g_text[1], "mark e long label") == 0);
+    /* the trigger channel with a fake flip: the screen's worker would call
+     * this at the planned vblank */
+    {
+        yscr_trigger_desc ch = ydev_trigger_channel(&g_out, 250000);
+        yscr_trigger_info ti;
+        memset(&ti, 0, sizeof ti);
+        ti.deadline_ns = g_now - 20000;
+        ti.fired_ns = g_now;
+        ti.code = 33;
+        CHECK(ch.fn == ydev_trigger_fn && ch.ctx == (void*)&g_out && ch.offset_ns == 250000 &&
+              strcmp(ch.name, "trig") == 0);
+        ch.fn(ch.ctx, &ti);
+        ti.flags = YSCR_TRIG_FLUSHED;           /* the screen's close: nothing */
+        ch.fn(ch.ctx, &ti);
+        orun_until(g_now + 2000000);
+        odrain();
+        CHECK_I(g_nout, 2);
+        CHECK(g_nout == 2 && g_outrec[0].u.u16[18] == (YDEV_OUT_PULSE | YDEV_OUT_FLIP) &&
+              g_outrec[0].u.i64[3] == ti.deadline_ns && g_outrec[0].u.u32[8] == 33);
+        CHECK(g_nout == 2 && g_outrec[1].u.u16[18] == YDEV_OUT_TRAILING);
+    }
+    /* a pending edge at the stop: written at once, flagged */
+    CHECK_I(ydev_out_pulse(&g_out, 8, 50000000), YDEV_OK);
+    ydev_stop(&g_out);
+    odrain();
+    CHECK(g_nout >= 2 && g_outrec[1].u.u16[18] == (YDEV_OUT_TRAILING | YDEV_OUT_FLUSHED));
+    /* not running: refused and recorded */
+    d.key = "serial:0403:6001:NOPE:";
+    memset(&g_o, 0, sizeof g_o);
+    ring_reset();
+    CHECK(ydev_start(&g_out, &d));
+    CHECK_I(ydev_poll(&g_out, 1), YDEV_OPENING);
+    CHECK_I(ydev_out_pulse(&g_out, 1, 1000000), YDEV_ERR_STATE);
+    odrain();
+    CHECK(g_nout == 1 && (g_outrec[0].u.u16[18] & YDEV_OUT_FAILED));
+    CHECK_I(g_o.nbytes, 0);
+    {
+        ydev_stats st;
+        ydev_get_stats(&g_out, &st);
+        CHECK(st.outs == 1 && st.out_errors == 1);
+    }
+    ydev_stop(&g_out);
+    CHECK_I(ydev_out_set(&g_out, 1), YDEV_ERR_STATE);   /* after the stop */
+    printf("  output records: pulse and trailing edge, replaced, canceled, failed, mark, trigger channel: ok\n");
+}
+
+/* A line-protocol board's O reports: mapped through the fit. */
+static void test_out_report(void) {
+    int64_t t_start = g_now;
+    int i, n = 0;
+    ydev_stats st;
+    ring_reset();
+    g_nev = 0;
+    board_init(YBOX_LINE, 15.0, 125000.0, 50000.0);
+    {
+        ydev_desc d = desc_for(YBOX_LINE);
+        CHECK(ydev_start(&g_dev, &d));
+    }
+    run_until(t_start + 10000000000LL);
+    g_b.nout = 0;
+    for (i = 0; i < 20; i++) {
+        CHECK_I(ydev_out_set(&g_dev, (uint32_t)(i & 1)), YDEV_OK);
+        run_until(g_now + 100000000);
+    }
+    ydev_get_stats(&g_dev, &st);
+    CHECK_I(st.reports, 20);
+    odrain();
+    for (i = 0; i < g_nout && n < 20; i++) {
+        const yrt_event* r = &g_outrec[i];
+        double err;
+        if (!(r->u.u16[18] & YDEV_OUT_REPORTED)) continue;
+        err = (double)(r->u.i64[0] - g_b.out_at[n]);
+        CHECK(r->u.u32[8] == (uint32_t)(n & 1) && fabs(err) < 100e3);
+        n++;
+    }
+    CHECK_I(n, 20);
+    ydev_stop(&g_dev);
+    printf("  line O reports: 20 of 20, mapped within 100 us of the board's change: ok\n");
+}
+
+/* Roles: indexes by name, kept across a restart, one instance per role. */
+static void test_roles(void) {
+    static ydev_device a, b;
+    ydev_roles roles;
+    ydev_desc d = odesc(YBOX_TRIGGERBOX), e;
+    memset(&roles, 0, sizeof roles);
+    memset(&g_o, 0, sizeof g_o);
+    ring_reset();
+    d.device = 0;
+    d.roles = &roles;
+    d.role = "trig";
+    CHECK(ydev_start(&a, &d));
+    e = d;
+    e.role = "aux";
+    CHECK(ydev_start(&b, &e));
+    CHECK(a.d.device == 1 && b.d.device == 2);
+    CHECK(ydev_role_index(&roles, "aux") == 2 && ydev_role_index(&roles, "eye") == 0);
+    CHECK(ydev_role_device(&roles, 1) == &a && ydev_role_device(&roles, 2) == &b && ydev_role_device(&roles, 3) == NULL);
+    CHECK(strcmp(ydev_role_name(&roles, 2), "aux") == 0 && ydev_role_name(&roles, 0) == NULL);
+    (void)ydev_poll(&a, 1);
+    (void)ydev_poll(&b, 1);
+    CHECK_I(ydev_out_set(&b, 9), YDEV_OK);
+    odrain();
+    CHECK(g_nout >= 1 && g_outrec[g_nout - 1].aux == 2);
+    /* a second running instance cannot take a role */
+    {
+        static ydev_device c;
+        CHECK(!ydev_start(&c, &e) && strstr(ydev_error(&c), "bound"));
+    }
+    ydev_stop(&a);
+    CHECK(ydev_role_device(&roles, 1) == NULL);
+    CHECK(ydev_start(&a, &d) && a.d.device == 1);        /* the same index again */
+    e.device = 4;
+    {
+        static ydev_device c;
+        CHECK(!ydev_start(&c, &e) && strstr(ydev_error(&c), "leave it 0"));
+    }
+    ydev_stop(&a);
+    ydev_stop(&b);
+    CHECK_I(roles.n, 2);
+    printf("  roles: indexes 1 and 2, kept across a restart, one instance each: ok\n");
+}
+
+static int cmp_i64(const void* x, const void* y) {
+    int64_t a = *(const int64_t*)x, b = *(const int64_t*)y;
+    return a < b ? -1 : a > b;
+}
+
+static int64_t pct(const int64_t* v, int n, double p) {
+    int k = (int)(p * (double)(n - 1) + 0.5);
+    return n ? v[k < 0 ? 0 : k >= n ? n - 1 : k] : 0;
+}
+
+/* Host-timed pulses on the real clock: the worker writes the trailing 0.
+ * Width error = trailing write minus leading write minus the width; the
+ * worker's lateness = trailing write minus its deadline (the leading
+ * write's end plus the width). Run under the guard's time mode for the
+ * numbers (docs/device.md). On a loaded machine the worker can be later
+ * than the gap to the next pulse, which then moves the edge (REPLACED):
+ * that is the contract, so the check is that every pulse has its
+ * trailing edge or was replaced, never that none was. */
+static void test_out_timing(void) {
+    enum { N = 300 };
+    static int64_t werr[N], late[N], call[N], wr[N];
+    ydev_desc d = odesc(YBOX_TRIGGERBOX);
+    int i, k, n = 0, nl = 0, short_ = 0, npulse = 0, ntrail = 0, nrepl = 0;
+    const char* pol;
+    g_real = true;
+    d.manual = false;
+    d.now = NULL;
+    d.no_elevate = false;
+    memset(&g_o, 0, sizeof g_o);
+    ring_reset();
+    CHECK(ydev_start(&g_out, &d));
+    for (i = 0; i < 200 && ydev_state(&g_out) != YDEV_RUNNING; i++) (void)yrt_sleep_ns(1000000);
+    CHECK_I(ydev_state(&g_out), YDEV_RUNNING);
+    for (i = 0; i < N; i++) {
+        ydev_out_info oi;
+        int64_t c0 = (int64_t)yrt_now_ns(), c1;
+        CHECK_I(ydev_out_pulse(&g_out, (uint32_t)(1 + (i % 200)), 2000000), YDEV_OK);
+        c1 = (int64_t)yrt_now_ns();
+        ydev_out_last(&g_out, &oi);
+        call[i] = c1 - c0;
+        wr[i] = oi.t_after - oi.t_before;
+        (void)yrt_sleep_ns(3000000 + (uint64_t)(u01() * 4000000.0));
+    }
+    pol = yrt_policy_name(yrt_worker_policy(&g_out.worker));
+    ydev_stop(&g_out);
+    g_real = false;
+    /* writes: the open's 0, then each code and, unless the next pulse moved
+     * it, its 0; the close's 0xFF */
+    for (k = 1; k + 1 < g_o.nw && n < N; k++) {
+        int64_t w;
+        if (g_o.bytes[g_o.wfirst[k]] == 0 || g_o.bytes[g_o.wfirst[k + 1]] != 0) continue;
+        w = g_o.wt[k + 1] - g_o.wt[k];
+        werr[n++] = w - 2000000;
+        if (w < 2000000) short_++;
+    }
+    CHECK_I(short_, 0);
+    odrain();
+    for (k = 0; k < g_nout; k++) {
+        uint32_t f = g_outrec[k].u.u16[18];
+        if (f & YDEV_OUT_PULSE) npulse++;
+        if (f & YDEV_OUT_REPLACED) nrepl++;
+        if (f & YDEV_OUT_TRAILING) ntrail++;
+        if ((f & YDEV_OUT_PULSE) && k + 1 < g_nout && (g_outrec[k + 1].u.u16[18] & YDEV_OUT_TRAILING) && nl < N)
+            late[nl++] = g_outrec[k + 1].u.i64[0] - (g_outrec[k].u.i64[1] + 2000000);
+    }
+    CHECK_I(npulse, N);
+    CHECK_I(ntrail + nrepl, N);     /* every pulse ended, or moved by the next */
+    CHECK_I(n, ntrail);
+    CHECK(nl > 0 && n > 0);
+    if (nl == 0 || n == 0) { g_real = false; return; }
+    qsort(werr, (size_t)n, sizeof werr[0], cmp_i64);
+    qsort(late, (size_t)nl, sizeof late[0], cmp_i64);
+    qsort(call, N, sizeof call[0], cmp_i64);
+    qsort(wr, N, sizeof wr[0], cmp_i64);
+    printf("  timing: %d pulses, %d ended by the worker, %d moved by the next pulse\n", npulse, ntrail, nrepl);
+    printf("  timing, %d pulses of 2 ms on the worker (%s): width error p50 %+.1f us, p95 %+.1f, p99 %+.1f, max %+.1f\n",
+           n, pol, (double)pct(werr, n, 0.5) / 1e3,
+           (double)pct(werr, n, 0.95) / 1e3, (double)pct(werr, n, 0.99) / 1e3, (double)werr[n - 1] / 1e3);
+    printf("  timing: trailing write minus deadline p50 %.1f us, p95 %.1f, p99 %.1f, max %.1f\n",
+           (double)pct(late, nl, 0.5) / 1e3, (double)pct(late, nl, 0.95) / 1e3, (double)pct(late, nl, 0.99) / 1e3,
+           (double)late[nl - 1] / 1e3);
+    printf("  timing: ydev_out_pulse() call p50 %.2f us, p99 %.2f, max %.2f; bracket (t_after - t_before) p50 %.3f us, "
+           "max %.3f\n", (double)pct(call, N, 0.5) / 1e3, (double)pct(call, N, 0.99) / 1e3, (double)call[N - 1] / 1e3,
+           (double)pct(wr, N, 0.5) / 1e3, (double)wr[N - 1] / 1e3);
+    /* loose enough for a loaded CI machine; the numbers are the guard's */
+    CHECK(pct(werr, n, 0.5) < 1000000);
+}
+
 int main(void) {
     printf("device_test: ysp/device.h %s, %d-byte instance\n", ydev_version(), (int)sizeof(ydev_device));
     test_keys();
@@ -648,6 +1180,11 @@ int main(void) {
     test_silence();
     test_wrong_device();
     test_thread();
+    test_out_bytes();
+    test_out_records();
+    test_out_report();
+    test_roles();
+    test_out_timing();
     if (g_failures) {
         fprintf(stderr, "device_test: %d of %d checks FAILED\n", g_failures, g_checks);
         return 1;

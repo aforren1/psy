@@ -880,3 +880,12 @@ find = '''                    g->progs.loaded, g->progs.compiled, g->progs.rejec
 }'''
 replace = '''                    g->progs.compiled, g->progs.loaded, g->progs.rejected);
 }'''
+
+[[mutant]]
+id = "v10-07"
+name = "the wrapper's text changes without a new contract version"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "none", YGFX_TEST_DEVICES = "none" }
+why = "v0.10.3: the test pins the wrapper's text per mode, so a change to it cannot ship without a decision on YGFX_SHADER_CONTRACT (packs record the version)."
+find = '''    ygfx__sb_add(&b, "#line 1\n");'''
+replace = '''    ygfx__sb_add(&b, "#line 1 \n");'''

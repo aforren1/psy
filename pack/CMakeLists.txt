@@ -31,3 +31,50 @@ if(YSP_BUILD_EXAMPLES AND TARGET SDL3::SDL3)
     ysp_add_program(gfx_layout ${PROJECT_SOURCE_DIR}/examples/layout/gfx_layout.c rig)
     target_link_libraries(gfx_layout PRIVATE ysp_layout)
 endif()
+
+# The pack tool (docs/pack.md): the library, the ypak CLI and its test. The
+# top-level CMakeLists.txt checks that third_party/lodepng was fetched.
+if(YSP_BUILD_PACK)
+    # lodepng.cpp is C code with a C++ name: compiled as C from a copy, so the
+    # tool links its C API without a C++ wrapper. Upstream's warnings off.
+    set(_lp ${PROJECT_SOURCE_DIR}/third_party/lodepng)
+    configure_file(${_lp}/lodepng.cpp ${CMAKE_CURRENT_BINARY_DIR}/lodepng.c COPYONLY)
+    add_library(ysp_lodepng STATIC ${CMAKE_CURRENT_BINARY_DIR}/lodepng.c)
+    target_include_directories(ysp_lodepng SYSTEM PUBLIC ${_lp})
+    target_compile_definitions(ysp_lodepng PUBLIC LODEPNG_NO_COMPILE_CPP LODEPNG_NO_COMPILE_ENCODER LODEPNG_NO_COMPILE_DISK)
+    if(MSVC)
+        target_compile_options(ysp_lodepng PRIVATE /W0)
+    else()
+        target_compile_options(ysp_lodepng PRIVATE -w)
+    endif()
+    # The pin goes into every manifest; a tree that differs from it says so,
+    # as the layout library does for Skribidi's patches.
+    file(SHA256 ${_lp}/lodepng.cpp _lp_hash)
+    set(_lp_pin "e584a8490db1b76b81bf298c11c09d3b55d9c270")
+    if(NOT _lp_hash STREQUAL "6aec876971ec860527859458d3095220fc5ee1258ec37eb59e1e7dd9cf136a81")
+        set(_lp_pin "${_lp_pin},tree-differs")
+    endif()
+
+    add_library(ysp_pack_tool STATIC pack_tool.c pack_impl.c ysp/pack_tool.h)
+    target_include_directories(ysp_pack_tool PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(ysp_pack_tool PUBLIC ysp_layout ysp_lodepng ysp::rig)
+    target_compile_options(ysp_pack_tool PRIVATE ${YSP_WARNINGS})
+    target_compile_definitions(ysp_pack_tool PRIVATE YPT_LODEPNG="${_lp_pin}")
+    set_target_properties(ysp_pack_tool PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
+    add_executable(ypak ypak.c)
+    target_link_libraries(ypak PRIVATE ysp_pack_tool)
+    target_compile_options(ypak PRIVATE ${YSP_WARNINGS})
+    set_target_properties(ypak PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
+    if(YSP_BUILD_TESTS)
+        add_executable(test_pack_tool ${PROJECT_SOURCE_DIR}/tests/pack/tool_test.c)
+        target_link_libraries(test_pack_tool PRIVATE ysp_pack_tool)
+        target_compile_options(test_pack_tool PRIVATE ${YSP_WARNINGS})
+        set_target_properties(test_pack_tool PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+        set(YSP_PACK_TEST_FONTS "C:/Windows/Fonts" CACHE PATH "Font folder of the tool test's system-font cases (YSP_FONTS_DIR overrides it)")
+        target_compile_definitions(test_pack_tool PRIVATE YPT_TEST_DIR="${PROJECT_SOURCE_DIR}/tests/pack"
+            YPT_TEST_FONTS="${YSP_PACK_TEST_FONTS}")
+        add_test(NAME test_pack_tool COMMAND test_pack_tool WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
+endif()

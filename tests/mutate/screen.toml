@@ -2,8 +2,8 @@
 # ysp/screen.h mutants: the v0.3.1 list (aborts, panic, icon), the 12 of the
 # 41 that ysp/screen.h's header comment counts, v0.3.2's 2 (text input,
 # both killed on 2026-10-07), v0.3.3's 5 (input), v0.3.4's 3 (devices),
-# v0.3.5's 5 (raw mice; the 2 on its queue went with the queue) and
-# v0.4.0's 6 (the input bridge). The 29 earlier mutants (docs/screen.md,
+# v0.3.5's 5 (raw mice; the 2 on its queue went with the queue),
+# v0.4.0's 6 (the input bridge) and v0.4.1's 15 (the key filter, kd-). The 29 earlier mutants (docs/screen.md,
 # "Mutations") were run from scripts that were not kept.
 header = "ysp/screen.h"
 
@@ -290,3 +290,130 @@ test = "screen"
 why = "The YSCR_EV_INPUT_LOST record is written when a count moves, not every frame (v0.4.0)."
 find = '    if (v[0] == yscr__in.logged[0] && v[1] == yscr__in.logged[1] && v[2] == yscr__in.logged[2]) {'
 replace = '    if (0) {'
+
+# --- v0.4.1: the second-report filter (INPUT, "Second key reports"; was
+# ysp/response.h's R3 and its d-01 to d-04) ----------------------------------
+
+[[mutant]]
+id = "kd-01"
+name = "window inclusive"
+test = "screen"
+why = "Two key-downs exactly the window apart are two presses."
+find = '        if (dt >= win || dt <= -win) continue;'
+replace = '        if (dt > win || dt < -win) continue;'
+
+[[mutant]]
+id = "kd-02"
+name = "window one direction"
+test = "screen"
+why = "The message report can be stamped before the raw one (a tick-quantized time)."
+find = '        if (dt >= win || dt <= -win) continue;'
+replace = '        if (dt >= win || dt < 0) continue;'
+
+[[mutant]]
+id = "kd-03"
+name = "default 30 ms"
+test = "screen"
+why = "A second report came 34.2 ms after the first in the measurement; 30 ms would pass it as a press."
+find = '#define YSCR__KEY_DEDUP_NS  50000000'
+replace = '#define YSCR__KEY_DEDUP_NS  30000000'
+
+[[mutant]]
+id = "kd-04"
+name = "repeats dropped"
+test = "screen"
+why = "An OS repeat is SDL's mark of a held key; the consumer's held-key rule reads it, so it must pass."
+find = '    if (e->type != YIN_PRESS || (e->flags & YIN_REPEAT)) return 1;'
+replace = '    if (e->type != YIN_PRESS) return 1;'
+
+[[mutant]]
+id = "kd-05"
+name = "dropped report's key-up passes"
+test = "screen"
+why = "The consumer must see one key-down and one key-up per press."
+find = '''            yscr__a_inc(&yscr__in.key_double_ups);
+            return 0;'''
+replace = '''            yscr__a_inc(&yscr__in.key_double_ups);
+            return 1;'''
+
+[[mutant]]
+id = "kd-06"
+name = "keyboards merged"
+test = "screen"
+why = "Two keyboards pressing one key within 50 ms are two participants, two presses."
+find = 'static int yscr__key_dev(uint32_t a, uint32_t b) { return a == b || a == 0 || b == 0; }'
+replace = 'static int yscr__key_dev(uint32_t a, uint32_t b) { (void)a; (void)b; return 1; }'
+
+[[mutant]]
+id = "kd-07"
+name = "device 0 not a wildcard"
+test = "screen"
+why = "The raw report has the keyboard's id and the message report 0: one press."
+find = 'static int yscr__key_dev(uint32_t a, uint32_t b) { return a == b || a == 0 || b == 0; }'
+replace = 'static int yscr__key_dev(uint32_t a, uint32_t b) { return a == b; }'
+
+[[mutant]]
+id = "kd-08"
+name = "one report decoded twice is dropped"
+test = "screen"
+why = "Two calls on one SDL event must give the event twice, not drop it as its own second report."
+find = '        if (dt == 0 && k->device == e->device) return 1;      /* the kept report again */'
+replace = ''
+
+[[mutant]]
+id = "kd-09"
+name = "off ignored"
+test = "screen"
+why = "desc.key_dedup_ns < 0 gives every report as SDL gave it."
+find = '    if (e->kind != YIN_KIND_KEYBOARD || win <= 0) return 1;'
+replace = '    if (e->kind != YIN_KIND_KEYBOARD) return 1;'
+
+[[mutant]]
+id = "kd-10"
+name = "every kind filtered"
+test = "screen"
+why = "The double report is the keyboard's; a mouse's two clicks 5 ms apart are two clicks."
+find = '    if (e->kind != YIN_KIND_KEYBOARD || win <= 0) return 1;'
+replace = '    if (win <= 0) return 1;'
+
+[[mutant]]
+id = "kd-11"
+name = "desc 0 is off"
+test = "screen"
+why = "desc.key_dedup_ns 0 is the 50 ms default, so the filter is on unless a program turns it off."
+find = '    int64_t win = s && s->key_dedup_ns ? s->key_dedup_ns : YSCR__KEY_DEDUP_NS;'
+replace = '    int64_t win = s ? s->key_dedup_ns : YSCR__KEY_DEDUP_NS;'
+
+[[mutant]]
+id = "kd-12"
+name = "no ring record"
+test = "screen"
+why = "Each drop is logged, so the data shows how often the filter acted."
+find = '            ev.kind = (uint16_t)YSCR_EV_KEY_DOUBLE;'
+replace = '            ev.kind = (uint16_t)YSCR_EV_INPUT_LOST;'
+
+[[mutant]]
+id = "kd-13"
+name = "table never advances"
+test = "screen"
+why = "A new key takes the oldest slot; one slot for all would forget a key at the next one's press."
+find = '        yscr__in.key_next = (yscr__in.key_next + 1u) % YSCR__KEYS;'
+replace = ''
+
+[[mutant]]
+id = "kd-14"
+name = "window unchecked at open"
+test = "screen"
+why = "A window over 1 s would merge real presses; open() refuses it."
+find = '    if (desc->key_dedup_ns > 1000000000) {'
+replace = '    if (0) {'
+
+[[mutant]]
+id = "kd-15"
+name = "kept key-up dropped"
+test = "screen"
+why = "The kept press's own key-up passes, whichever report comes first."
+find = '''            k->down = 0;
+            return 1;'''
+replace = '''            k->down = 0;
+            return 0;'''

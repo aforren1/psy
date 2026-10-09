@@ -704,7 +704,7 @@ section can cite the manifest and a reviewer can rebuild the pack.
 | Artwork | Filled paths in the Slug form, one solid color per layer, with the fill rule; strokes expanded to fills in the tool | The tool reads a subset of SVG: paths, basic shapes, transforms, solid fills and strokes. Filters, text, CSS, masks and gradients are refused by name, not ignored. Decided 2026-10-06, replacing MSDF artwork; the subset grows only when an experiment needs it. |
 | Shader | The user's fragment body wrapped in the contract (`ygfx_shader_wrap()`, the same function in the tool and the runtime), as GLSL ES 3.00 text, with reflection | glslang validates it in the tool. GL ES 3.0 has no portable binary, so ANGLE compiles the text on the rig when the pack loads; `ysp/gfx.h` caches each program's binary per ANGLE build, adapter and driver (`desc.cache`, v0.4.0), checked by its own hash before the driver sees it. SPIRV-Cross is for a second backend only. Changed 2026-10-05: "D3D bytecode is finished by the runner" (docs/gfx.md). |
 | Table | Typed binary columns from condition files and from ELAN, Praat or BIDS events exports | Read directly by `ysp/trials.h` and `ysp/timeline.h`. The form is `ysp/table.h`'s PSTB block (v0.1.0, 2026-10-07; docs/table.md): position independent, hashed, int32, double or string columns with levels; the CSV parser in the header builds the same bytes the pack tool stores. |
-| Calibration | The 3x3 matrix and the gamma table, with the photometer readings beside them | `ysp/color.h`'s `.yspcal` file (62528 bytes, CRC-32; the same bytes as `ysp/gfx.h` v0.4's), rebuilt from its readings on load. A participant's luminance from flicker photometry is session data, not pack data: `ysp/color.h`'s `.ysplum` file (changed 2026-10-06). |
+| Calibration | The 3x3 matrix and the gamma table, with the photometer readings beside them | `ysp/color.h`'s `.yspcal` file (62528 bytes, CRC-32; the same bytes as `ysp/gfx.h` v0.4's), rebuilt from its readings on load. A participant's luminance from flicker photometry is session data, not pack data: `ysp/color.h`'s `.ysplum` file (changed 2026-10-06). The display calibration is the rig's, independent of every pack; a `.yspcal` in a pack is for preview and simulation only, and the player never applies it on a rig (decided 2026-10-09, docs/pack.md 4.2). |
 | Experiment | The definition the player interprets | See section 6. |
 
 The canonical in-memory forms are the same as the on-disk forms (audio
@@ -1307,6 +1307,18 @@ extension implements one of these kinds, each a versioned C vtable:
   candidate second implementation behind the `ysp/gfx.h` interface.
 - The first stimulus that needs compute, which would move the plan to
   WebGPU through Dawn.
+- Whether a driver setting that forces vsync off (AMD Software "Wait for
+  Vertical Refresh: Always off", NVIDIA "Vertical sync: Off", Intel
+  "Vertical Sync: Speed") overrides a flip-model `Present(1)`, and on
+  Linux Mesa's `vblank_mode=0` overrides swap interval 1. Prior art: the
+  SDL frame pacing sample (TylerGlaiel/SDL-Frame-Pacing-Sample) detects
+  "not actually vsynced" from the drift between measured and snapped
+  frame times (requested 2026-10-09). If the override is real, add a
+  guard to `ysp/screen.h`: more than one present completed per refresh
+  over N frames, or flips off the vblank grid, marks the screen untimed
+  with a message that names the setting; the records and tiers say so.
+  Measure with each driver panel set to vsync off, on DXGI_FLIP,
+  COMPOSITION and the X11 backend.
 
 ## 14. Coverage of jsPsych
 
@@ -1334,7 +1346,7 @@ Sources, read on 2026-10-07:
 | Need | ysp today | Limit |
 |---|---|---|
 | Show a stimulus at a time, hide it after a duration | `ysp/timeline.h` onset and offset events (`ytl_seq`, op tables), bound to `ysp/gfx.h` stimuli (`ygfx_bind`); each event has a landing record (frame, residual) | None for shapes, gratings, gabors, dots, noise, images, video |
-| Key response | `yscr_poll()`: SDL events restamped on the `ysp/rt.h` clock; raw keyboard path on Windows. `ysp/response.h` v0.1.0 (2026-10-07): choices, a window bound to the flip onset, minimum RT, release, held keys, double-report removal, RT with the onset's tier (`examples/response/trial_keyboard.c`) | Keyboards are ms-grade at best |
+| Key response | `yscr_poll()`: SDL events restamped on the `ysp/rt.h` clock; raw keyboard path on Windows. `ysp/response.h` v0.1.0 (2026-10-07; v0.2.0 trimmed 2026-10-09): choices, a window bound to the flip onset, minimum RT, release, held keys, RT with the onset's tier; double-report removal moved to `ysp/screen.h` v0.4.1's input bridge (`examples/response/trial_keyboard.c`) | Keyboards are ms-grade at best |
 | RT-grade response | `ysp/serial.h` response boxes | None |
 | Mouse click on a stimulus | SDL mouse events through `yscr_poll()`; `ygfx_hit()`, `ygfx_hit_index()` (instances, curve runs, artwork layers) | No drag helper, no pointer trace recorder |
 | Sound at a time | `yau_play_at()`, tones, noise, clicks, WAV load and stream; onset record (fit time, tier 2 at best) | No microphone capture |
@@ -1372,20 +1384,20 @@ Widget 11, Helper 4 (`sketchpad` counted here), Device 8, Out 8.
 | `html-keyboard-response` | Shows HTML, records a key | gfx shapes, curve runs; timeline on and off; `yscr_poll()` | Layout for general HTML text | Text (Now for shapes and one-line Latin labels) | Done: `examples/response/trial_keyboard.c` (fixation, stimulus, response window, RT from the flip onset) |
 | `image-keyboard-response` | Shows an image, records a key | `ygfx_image()`; timeline | Image file decode for C users | Now | Yes, with QOI or procedural images |
 | `canvas-keyboard-response` | Draws through a user function, records a key | Any `ysp/gfx.h` drawing, user shader contract | None (`ysp/response.h` v0.1.0) | Now | Covered by the base trial |
-| `audio-keyboard-response` | Plays a sound, records a key; `trial_ends_after_audio`, `response_allowed_while_playing` | `yau_play_at()`, onset record, buffer length | None: `ysp/response.h` v0.1.0 measures RT from the audio onset fit (`yrsp_onset_audio()`, tier 2) | Now | Yes: RT from a sound onset with its tier |
+| `audio-keyboard-response` | Plays a sound, records a key; `trial_ends_after_audio`, `response_allowed_while_playing` | `yau_play_at()`, onset record, buffer length | None: `ysp/response.h` v0.1.0 measures RT from the audio onset fit (`yrsp_onset_audio()`, tier 2) | Now | Done: `examples/response/trial_audio_keyboard.c` |
 | `video-keyboard-response` | Plays a video, records a key; `start`, `stop`, `rate`, `trial_ends_after_video` | `ysp/video.h` play, seek, end; rate on the movie base (`ytl_rate`) | None (`ysp/response.h` v0.1.0) | Now | Yes: extend `examples/video/play.c` |
 | `animation` | Image sequence at `frame_time`, `frame_isi`, `sequence_reps`; keys during it | Images as timeline onsets; one landing record per frame | Image decode for C users; prompt text | Now | Yes: shows per-frame landing records that jsPsych cannot give |
 | `categorize-image` | Image, key, feedback text by `key_answer` | Images, timeline | Feedback text (`correct_text`, `incorrect_text`) | Text (Now with symbol feedback) | After text |
 | `categorize-html` | HTML, key, feedback text | Shapes | Layout | Text | No |
 | `categorize-animation` | Animation, key, feedback text | Images, timeline | Feedback text | Text | No |
-| `same-different-image` | Two images in sequence: `first_stim_duration`, `gap_duration`, `second_stim_duration`; same or different key | Timeline sequence, images | None (`ysp/response.h` v0.1.0) | Now | Yes: SOA on the frame grid with records |
+| `same-different-image` | Two images in sequence: `first_stim_duration`, `gap_duration`, `second_stim_duration`; same or different key | Timeline sequence, images | None (`ysp/response.h` v0.1.0) | Now | Done: `examples/response/trial_same_different.c` (bars; SOA from flip records) |
 | `same-different-html` | The same with HTML | Shapes | Layout | Text | No |
 | `iat-image` | IAT: image, category labels left and right, error feedback | Images; one-line labels by advances | Layout for labels in general; `html_when_wrong` | Text | No |
 | `iat-html` | IAT with an HTML stimulus | As above | Layout | Text | No |
-| `serial-reaction-time` | Grid of squares, a target lights, key per position; `pre_target_duration`, `fade_duration` | `ygfx_instances()`, `ygfx_inst_grid()`, tween on opacity | None (`ysp/response.h` v0.1.0) | Now | Yes |
+| `serial-reaction-time` | Grid of squares, a target lights, key per position; `pre_target_duration`, `fade_duration` | `ygfx_instances()`, `ygfx_inst_grid()`, tween on opacity | None (`ysp/response.h` v0.1.0) | Now | Done: `examples/response/trial_srt.c` (keys; sequence and random blocks) |
 | `serial-reaction-time-mouse` | The same, click the target | `ygfx_hit_index()` on the grid; mouse events | Mouse times are ms-grade (state it) | Now | Yes, with the SRT above |
 | `visual-search-circle` | Target and foils on a circle; present or absent key | Shapes or images at computed places; instances | None (`ysp/response.h` v0.1.0) | Now | Yes |
-| `reconstruction` | Method of adjustment: keys change a parameter of `stim_function` | Any gfx parameter driven by a key; `ysp/timeline.h` tween of length 0 | Finish key instead of `button_label` | Now | Yes: method of adjustment |
+| `reconstruction` | Method of adjustment: keys change a parameter of `stim_function` | Any gfx parameter driven by a key; `ysp/timeline.h` tween of length 0 | Finish key instead of `button_label` | Now | Done: `examples/response/trial_adjustment.c` |
 
 #### Button and slider trials
 
@@ -1447,7 +1459,7 @@ Widget 11, Helper 4 (`sketchpad` counted here), Device 8, Out 8.
 
 | Extension | What it does | ysp parts | Missing | Class | C ex. |
 |---|---|---|---|---|---|
-| `extension-mouse-tracking` | Records pointer samples and target boxes per trial; `minimum_sample_time`, `targets`, `events` | Restamped mouse events, `ygfx_bounds()`, the event ring | Pointer trace recorder into the ring, with stimulus boxes at each flip | Helper | Yes: pointer trace and boxes in the ring, CSV drain |
+| `extension-mouse-tracking` | Records pointer samples and target boxes per trial; `minimum_sample_time`, `targets`, `events` | Restamped mouse events, `ygfx_bounds()`, the event ring | Pointer trace recorder into the ring, with stimulus boxes at each flip | Helper | Partly: `examples/response/trial_mouse_tracking.c` (the collector's trace, fixed boxes in the file header; not in the ring) |
 | `extension-webgazer` | Gaze samples per trial, ROI targets | None | Input source (12) | Device | No |
 | `extension-record-video` | Camera recording per trial | None | Camera capture (4.6) | Device | No |
 | `extension-pipe` | Sends data to DataPipe (OSF) | None | Out for the native player: data stays on the rig. The web player has no upload path; decide that with the web deploy, not here | Out | No |
@@ -1465,7 +1477,7 @@ tangram and copying games.
 | `plugin-rdk` (contrib) | Random dot kinematogram, key report | `ysp/rdk.h`: `count`, `coherence`, `direction`, `lifetime`, `sets`, aperture CIRCLE and RECT, edge WRAP and REPLOT; transparent motion as two fields | `number_of_apertures` is several fields; `opposite_coherence` has no direct field. Units differ: contrib `move_distance` is px per frame, ysp `speed` is units per second (contrib angle and `dot_life` units not verified) | Now | Yes: `gfx_rdk.c` plus a response window |
 | `plugin-rok` (contrib) | Random object kinematogram: oriented objects | `ysp/rdk.h` into instance records (gabor arrays) | None (`ysp/response.h`) | Now | No (RDK covers it) |
 | `plugin-flanker` (contrib) | Flanker array with SOA | Arrows as polygons or paths; letters as one-line labels; timeline | None (`ysp/response.h`) | Now | Yes |
-| `plugin-stop-signal` (contrib) | Stop-signal task: an animation, button responses (its description; the paradigm details not verified) | Timeline; `ysp/stair.h` for the stop-signal delay; `yau_play_at()` for an auditory signal | Covered by `ysp/response.h` (ysp uses keys or a response box, not buttons) | Now | Yes: staircase, sound and display on one clock |
+| `plugin-stop-signal` (contrib) | Stop-signal task: an animation, button responses (its description; the paradigm details not verified) | Timeline; `ysp/stair.h` for the stop-signal delay; `yau_play_at()` for an auditory signal | Covered by `ysp/response.h` (ysp uses keys or a response box, not buttons) | Now | Done: `examples/response/trial_stop_signal.c` |
 | `plugin-libet-intentional-binding` (contrib) | Libet clock; participant sets the hand to report a time | Repeating rotation track, line shape, tone at a delay, key or mouse adjust | None (`ysp/response.h`) | Now | Yes: timing-critical |
 | `plugin-corsi-blocks` (contrib) | Blocks flash in order; participant clicks the order | Timeline sequence, `ygfx_hit_index()` | Click log helper | Now | Yes |
 | `plugin-spatial-nback` (contrib) | Grid cell lights; n-back responses | Instances grid, timeline | None (`ysp/response.h`) | Now | No |
@@ -1604,7 +1616,7 @@ means a C user writes the code each time.
 | Rank | Gap | Where it goes | Blocks or burdens | Count (official + contrib) | Size |
 |---|---|---|---|---|---|
 | 1 | Experiment flow: nested nodes, timeline variables bound to a pack table, conditional and loop, named data rows | The player (11, item 7) | Blocks every paradigm for users who do not write C | All | Large; planned |
-| 2 | Response helper: key set, double-report removal, RT from the onset record, window, `response_ends_trial`, key release, minimum RT | Done for C: `ysp/response.h` v0.1.0 and `examples/response/trial_keyboard.c` (2026-10-07). Left: `input.key` in the player | Burdened every key response trial | 17 + about 10 | Small |
+| 2 | Response helper: key set, double-report removal (now in `ysp/screen.h` v0.4.1's input bridge), RT from the onset record, window, `response_ends_trial`, key release, minimum RT | Done for C: `ysp/response.h` v0.1.0 and `examples/response/trial_keyboard.c` (2026-10-07). Left: `input.key` in the player | Burdened every key response trial | 17 + about 10 | Small |
 | 3 | Text layout (Skribidi): prompts, instructions, word stimuli, feedback text | Pack tool and player (11, items 6 and 7) | Blocks text-heavy paradigms; `prompt` appears on most plugins | 8 + 3, and every `prompt` | Large; planned |
 | 4 | Widget layer: button, slider, text entry, control layout | Player, above `ysp/gfx.h` | Blocks button and slider responses | 11 + 9 | Medium |
 | 5 | Image file decode for C users | Pack tool; meanwhile QOI or an outside decoder in examples | Burdens image trials | 10 + 3 | Small (in the pack tool) |
@@ -1642,3 +1654,342 @@ them keeps the MIT notice and its copyright line, as the SDF functions in
 - That SDL gamepad and touch events reach `yscr_poll()` when the caller
   starts the gamepad subsystem; their timing is not measured.
 - jsPsych's internal behavior beyond its documentation (no source read).
+
+## 15. Coverage of PsychoPy's demos
+
+Status: reference, 2026-10-09. This section maps each demo that PsychoPy
+ships, Coder and Builder, to the ysp headers. It gives the status of
+each demo, ranks the gaps, merges them with the jsPsych gaps of 14.7, and
+proposes new C examples.
+
+Sources, read on 2026-10-09:
+- PsychoPy `dev` at `9535622` (2026-10-07), `psychopy/demos/`: 97 Coder
+  scripts (the docstring and the first 45 lines of each; two helper
+  modules, `iohub/serial/_parseserial.py` and
+  `iohub/wintab/_wintabgraphics.py`, are counted with their demos), and
+  43 Builder demos (each `README.md` or `readme.md`, and the component
+  and loop types in each `.psyexp`; parameters read for `noise`,
+  `gratings`, `counterbalance`, the EEG, LSL and fMRI demos).
+- ysp: README.md, this document (sections 4, 11, 12, 14),
+  `examples/README.md`, docs/response.md "What the examples show",
+  docs/devices_spec.md 10.1, docs/pack.md (kinds), and the top-of-file
+  manuals of `ysp/gfx.h` (STIMULI, SHADER CONTRACT, STATUS),
+  `ysp/screen.h` (MULTIPLE DISPLAYS, gamepads), `ysp/rdk.h`,
+  `ysp/color.h`, `ysp/video.h`, `ysp/audio.h`, `ysp/device.h`,
+  `ysp/box.h`, `ysp/input.h`, `ysp/pack.h`, `ysp/table.h`,
+  `ysp/stair.h` and `pack/ysp/layout.h`.
+
+License: PsychoPy is GPL-3.0. 70 of the 99 Coder files say that their
+contents are in the public domain; the rest, and the Builder demos, fall
+under the GPL. This section was written from reading only. No code is
+copied, and the proposed examples must not copy code either.
+
+### 15.1 Status values
+
+| Status | Meaning |
+|---|---|
+| Example | An example in `examples/` shows the same thing. The cell names it. |
+| Possible | Every piece is built. A C program can do it today; no example shows it. |
+| Gap | A piece is missing. The cell names it. |
+| Out | Out of scope, with the reason. |
+
+A Builder demo is a C program for a ysp user today. For a user who does
+not write C, every Builder demo needs the player (rank 1 in 15.4). The
+status columns below give the C status.
+
+Totals: 140 demos (97 Coder, 43 Builder). Example 35 (30 + 5), Possible
+59 (35 + 24), Gap 24 (12 + 12), Out 22 (20 + 2).
+
+### 15.2 Coder demos
+
+Paths are from `psychopy/demos/coder/`.
+
+#### Stimuli
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `basic/hello_world.py` | Two lines of text, one with an accented capital | gfx, outline | Example: `gfx_text` |
+| `stimuli/gabor.py` | A gabor with drifting phase | gfx | Example: `gfx_hello` |
+| `stimuli/counterphase.py` | A grating whose contrast follows a sine (counterphase flicker) | gfx, timeline | Possible: a contrast track; the flip records give the achieved frequency |
+| `stimuli/plaid.py` | Two gratings summed into a drifting plaid | gfx | Example: `gfx_gallery` page 1 (plaid tile) |
+| `stimuli/secondOrderGratings.py` | Contrast-modulated gratings and beats on sine and noise carriers | gfx (USER shader, `ysp_hash2()` for a noise carrier) | Possible: no built-in envelope kind |
+| `stimuli/rotatingFlashingWedge.py` | A rotating radial checkerboard wedge that flashes | gfx (USER shader), timeline | Possible: `gfx_gallery` has a radial grating in a USER shader, not the wedge |
+| `stimuli/aperture.py` | A gabor in an irregular aperture | gfx (MASK_TEX, POLYGON) | Example: `gfx_gallery` page 5 (grating in a mask aperture) |
+| `stimuli/customTextures.py` | A radial texture from an array, and a sub-region of it | gfx (IMAGE from planes, USER) | Example: `gfx_gallery` pages 1 and 5 (radial USER shader, R32F image as a modulation) |
+| `stimuli/visual_noise.py` | An array of noise as a texture, drifted by phase | gfx (NOISE, IMAGE) | Example: `gfx_gallery` pages 1 and 8 |
+| `stimuli/dots.py` | A dot kinematogram: signal and noise dot rules (Scase et al.) | rdk, gfx | Example: `gfx_rdk` page 1 (`ysp/rdk.h` names PsychoPy's defaults) |
+| `stimuli/dot_gabors.py` | Gabors as the dots of a kinematogram | rdk, gfx (instances) | Example: `gfx_rdk` page 2 |
+| `stimuli/elementArrays.py` | A global-form array: 500 gabors with orientation coherence | gfx (instances) | Example: `gfx_gallery` page 6 (400 gabors, one draw) |
+| `stimuli/starField.py` | 500 dots moving out from the center | gfx (DOTS or instances) | Possible |
+| `stimuli/maskReveal.py` | An image revealed by element opacities | gfx (instances) | Possible (per-element opacity not verified, 15.6) |
+| `stimuli/shapes.py` | Polygons, a self-crossing shape, a shape with a hole, lines | gfx (POLYGON, COMPOUND, POLYLINE) | Example: `gfx_gallery` pages 2 and 3 |
+| `stimuli/shapeContains.py` | Click inside a polygon; a circle that follows the mouse | gfx (`ygfx_hit()`), screen | Example: `gfx_gallery` page 6 (hit test under the mouse). `overlaps()` has no ysp analog |
+| `stimuli/kanizsa.py` | Four pies make illusory contours | gfx (PIE) | Possible |
+| `stimuli/clockface.py` | Clock hands from polygons, turned by the wall clock | gfx | Possible |
+| `stimuli/face_jpg.py` | A JPEG image, and the image as a grating's mask | gfx (IMAGE), pack (TEXTURE) | Possible for the image (PNG through the pack tool; no JPEG). A graded image as a mask: not verified (15.6) |
+| `stimuli/imagesAndPatches.py` | Images at pixel size, mirrored; an image as a mask; frame intervals | gfx, pack, screen | Possible, with the same mask question |
+| `stimuli/bufferImageStim.py` | Many static stimuli captured into one image, and the speed gain | gfx (targets, setup passes) | Example: `gfx_gallery` page 5 (target drawn once), page 7 (static text rendered at setup) |
+| `stimuli/variousVisualStims.py` | A gabor, a movie, text and an image turned by the mouse | gfx, video, screen | Possible |
+| `stimuli/MovieStim.py` | A movie with sound; play, pause, stop by keys | video, audio | Example: `video_play` (keys for pause not shown) |
+| `stimuli/soundStimuli.py` | Tones by note name and by frequency | audio | Example: `audio_tone` |
+| `stimuli/ratingScale.py` | Rating scales: choices, a line, an accept button | None | Gap: widget layer (14.7 rank 4) |
+| `stimuli/screensAndWindows.py` | Two windows, on one screen or on two | screen (one `yscr_screen` per display) | Possible on two displays. Two windows on one display: gap, untimed screens (4.2 proposal) |
+| `stimuli/embeddedOpenGL.py` | Raw OpenGL calls among stimuli | gfx (USER pipeline) | Possible through the shader contract; raw GL in the frame is not supported. A Renderer extension (12) draws into a target |
+| `stimuli/stim3d.py` | Lit, textured 3D boxes and spheres | None | Out: 3D is a Renderer extension (12), not a header |
+| `stimuli/colors/colors.py` | Type a value in a color space, see the color | color, gfx | Possible: a key cycles the space in place of the slider. `color_convert` shows the conversions without a display |
+| `stimuli/colors/hsvColorPalette.py` | An HSV color picker | color | Out: HSV is device RGB with no calibration, and every `ysp/color.h` conversion goes through one. A lightness and hue picker in CIELAB or Oklab is possible |
+
+#### Text
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `stimuli/text/textStimuli.py` | Fonts, Unicode, turned and mirrored text, bidi Arabic | pack/layout, outline, gfx | Example: `gfx_layout` (seven scripts, bidi), `gfx_gallery` page 8 (turning text) |
+| `stimuli/text/textbox_simple.py` | Two text boxes with options | pack/layout, gfx | Example: `gfx_text`, `gfx_layout` |
+| `stimuli/text/textbox_editable.py` | An editable text box | pack/layout, screen (`yscr_text_input()`) | Example: `gfx_layout` (Skribidi's editor) |
+| `stimuli/text/textbox_glyph_placement.py` | The box of the glyph at a string index, checked by the mouse | pack/layout, gfx (`ygfx_hit_index()` on a curve run) | Possible |
+| `stimuli/text/fontLayout.py` | A diagram of the font metrics that place lines | outline (`yol_font_hmetrics()`, font metrics), gfx | Possible |
+| `stimuli/compare_text_timing.py` | The cost to make, change and draw three text classes | gfx, outline | Example: `gfx_bench`; docs/gfx.md has the page costs |
+
+#### Input
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `input/keyNameFinder.py` | The name of each key pressed | screen | Example: `screen_input --hand` (scancode names) |
+| `input/mouse.py` | Mouse position, relative motion, wheel, buttons | screen, input | Possible; `screen_input --mice` for raw mice |
+| `input/customMouse.py` | A drawn pointer with movement limits, click on release | screen (`show_cursor`), gfx | Possible |
+| `input/joystick_universal.py` | Joystick axes, buttons and hats | screen (`desc.gamepads`), input | Possible for gamepads. Generic joysticks: not verified (15.6) |
+| `input/GUI.py` | A dialog for session fields | None | Out: a desktop dialog. A C example takes arguments; the player's runner gives session fields (6) |
+
+#### Timing
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `timing/timeByFrames.py` | Frame intervals: histogram, drops | screen | Example: `screen_flipstats` |
+| `timing/timeByFramesEx.py` | The same with process priority and no garbage collection | screen, rt | Example: `screen_flipstats --load N` (no GC in C) |
+| `timing/callOnFlip.py` | A function called at the flip, for a trigger | screen (flip hooks), device | Example: `device_trigger_flip` |
+| `timing/clocksAndTimers.py` | Clocks, count-down timers | rt | Possible; `rt_jitter` shows what the waits are worth |
+| `timing/millikeyKeyboardTimingTest.py` | Keyboard stamp error against key presses a MilliKey generates on command | serial (the command), screen (the key) | Possible: a MilliKey is a keyboard-mode box (docs/devices_spec.md 10.1). `screen_input` measures injected keys in software |
+
+#### Experiment control
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `experiment control/trialHandler.py` | A trial loop over a factorial list | trials | Example: `trials_mocs` |
+| `experiment control/trialHandler2.py` | The same, with upcoming trials computed on the fly | trials | Example: `trials_mocs`, `trials_interleave` |
+| `experiment control/stairHandler.py` | A 1-up 1-down staircase with step sizes per reversal | stair | Example: `stair_sim` |
+| `experiment control/JND_staircase_exp.py` | An orientation JND by staircase, with a dialog | gfx, stair, trials, response | Possible (proposed: `trial_2afc_adaptive`, 15.5) |
+| `experiment control/JND_staircase_analysis.py` | A psychometric fit over staircase files | None | Out: offline fitting (4.8) |
+| `experiment control/experimentHandler.py` | One data file over loops, with session fields | trials (`ytr_format_meta()`, rows) | Example: `trial_keyboard --out` |
+| `experiment control/logFiles.py` | Log levels to files and console | rt (the ring) | Example: `rt_ring_csv` |
+| `experiment control/autoDraw_autoLog.py` | Stimuli drawn and logged each frame without a call | timeline, gfx | Out: a Python convenience. Timeline on and off events with their records do this (`gfx_trial`) |
+| `experiment control/piloting.py` | A pilot flag: windowed, short, marked | screen | Possible: a flag; `--sim` in the examples is the nearest form |
+| `experiment control/runtimeInfo.py` | System, Python and window facts at run time | screen (`yscr_describe()`), gfx, audio | Possible |
+| `sysInfo.py` | Paths, OS, library versions | screen, gfx | Possible (the describe lines) |
+| `csvFromPsydat.py` | A `.psydat` file to CSV | None | Out: PsychoPy's own file format |
+
+#### Hardware
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `hardware/parallelPortOutput.py` | A pin held high for N frames with a stimulus | parallel, device, screen | Example: `parallel_trigger`, `device_trigger_flip` |
+| `hardware/cedrusRB730.py` | A Cedrus RB-730: info, round trip, keys | device (XID), box | Possible (no box on hand; docs/devices_spec.md) |
+| `hardware/fMRI_launchScan.py` | Wait for scanner sync pulses, or emulate them | screen (a pulse as a key), device (`YIN_KIND_SYNC` from a board), timeline | Possible; the pulse emulator is caller code |
+| `hardware/monitorDemo.py` | Monitor profiles: distance, calibration by name | color (`ycol_cal` load), gfx (`ygfx_view`) | Possible |
+| `hardware/gammaMotionNull.py` | Display gamma by motion nulling (Ledgeway and Smith 1994) | gfx, stair, response | Possible (proposed: `gfx_gamma_null`, 15.5) |
+| `hardware/gammaMotionAnalysis.py` | Plots of the nulling staircases | None | Out: offline analysis (4.8) |
+| `hardware/testSoundLatency.py` | Sound onset latency measured by a LabJack | audio | Possible by line-in: `tests/loopback/audio_loopback.c` (a test, not an example) |
+| `hardware/VSHD_Distortion.py` | Barrel distortion for an in-scanner display | gfx (target, USER shader) | Possible (a target as a shader texture not verified, 15.6) |
+| `hardware/CRS_BitsBox.py`, `CRS_BitsPlusPlus.py`, `crsBitsAdvancedDemo.py` (3) | Bits++ and Bits# modes, CLUTs, digital I/O | None | Gap: high bit depth output (Bits++, Mono++, Color++). `ysp/gfx.h` refuses it until a device verifies it |
+| `hardware/cameraLiveView.py`, `cameraSideBySide.py` (2) | Live camera feeds in a window | gfx (`ygfx_texture_update()`) | Gap: camera capture (4.6; 14.7 rank 7) |
+| `hardware/labjack_u3.py` | LabJack DAC and digital output | None | Gap: `ysp/labjack.h` (docs/devices_spec.md, later) |
+| `hardware/egi_netstation.py` | EGI NetStation: session, events over TCP | None | Gap: `ysp/net.h` (4.7) and the NetStation protocol (not in docs/devices_spec.md) |
+| `hardware/RiftMinimal.py`, `RiftHeadTrackingExample.py` (2) | Oculus Rift rendering and head tracking | None | Out: HMD VR (4.8) |
+| `hardware/ioLab_bbox.py` | An ioLabs button box | None | Out: not a device ysp targets (not in docs/devices_spec.md) |
+| `hardware/qmixPump.py` | A Cetoni syringe pump | None | Out: not a device ysp targets |
+| `hardware/hdf5_extract.py` | Gaze from an ioHub HDF5 file, animated | None | Out: ioHub's file format; offline |
+
+#### ioHub
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `iohub/keyboard.py` | ioHub key events against `getKeys()`: press, release, modifiers | screen, input | Example: `screen_input --hand` |
+| `iohub/keyboardreactiontime.py` | Key RT in a line-length match | gfx, response | Example: `trial_keyboard` |
+| `iohub/mouse.py` | ioHub mouse events, position set | screen, input | Possible |
+| `iohub/mouse_multi_window.py` | Mouse positions over windows on two monitors | screen | Possible (not verified across two screens, 15.6) |
+| `iohub/serial/customparser.py` (with `_parseserial.py`) | A serial device's bytes parsed into events | serial, box | Possible: a decoder in `ysp/box.h` or caller code on `ysp/serial.h`; `serial_trigger` shows the echo |
+| `iohub/serial/pstbox.py` | A PST Serial Response Box (the file says it does not work in Python 3) | None | Gap: a bit-state box decoder in `ysp/box.h` (docs/devices_spec.md 10.1) |
+| `iohub/wintab/pen_demo.py` (with `_wintabgraphics.py`) | Pen position, pressure and tilt from a Wintab tablet | screen, input (`YIN_KIND_PEN`) | Possible through SDL's pen events (not verified with a tablet, 15.6) |
+| `iohub/eyetracking/simple.py` | An eye tracker: calibrate, record, gaze | None | Gap: eye-tracker input source (12; 14.7 rank 6) |
+| `iohub/eyetracking/validation.py` | Calibrate, validate, gaze cursor | None | Gap: as above |
+| `iohub/eyetracking/gcCursor/run.py` | A gaze cursor over images | None | Gap: as above |
+| `iohub/eyetracking/gcCursor/readTrialEventsByConditionVariables.py`, `readTrialEventsByMessages.py` (2) | Samples from HDF5 split into trials | None | Out: ioHub's file format; offline |
+| `iohub/iodatastore/saveEventReport.py` | Events from HDF5 to text | None | Out: as above |
+| `iohub/launchHub.py` | ioHub server start options | None | Out: ysp has no input server process; events are restamped in the frame thread |
+| `iohub/delaytest.py` | The round trip to the ioHub process | None | Out: as above. `screen_input` measures the stamp error that matters |
+
+#### Misc
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `misc/makeMovie.py` | Frames captured into a movie file | gfx (`ygfx_read_target()`), video (frame sequence writer) | Possible |
+| `misc/encrypt_data.py` | Encrypt a data file | None | Out: a separate tool's job |
+| `misc/hdf5_2_csv` | Eye-tracker HDF5 to CSV | None | Out: ioHub's file format |
+| `misc/rigidBodyTransform.py` | Poses of 3D objects | None | Out: 3D (12) |
+
+### 15.3 Builder demos
+
+Paths are from `psychopy/demos/builder/`. `Experiments/GoNoGo/` and
+`Experiments/goNoGo/` (a README only) are one demo. The three
+`lab_streaming_layer*` variants are one demo.
+
+#### Design templates and experiments
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `Design Templates/branchedExperiment/` | A loop ended early by setting `finished` | trials | Possible in C. Player: conditional and loop nodes (14.5) |
+| `Design Templates/randomisedBlocks/` | Image blocks in random order, images random within a block | trials (groups), gfx, pack | Possible |
+| `Design Templates/psychophysicsStaircase/` | Gabor detection, yes or no, 3-down 1-up on contrast | gfx, stair, response | Possible |
+| `Design Templates/psychophysicsStairsInterleaved/` | 2AFC detection, four interleaved staircases over two spatial frequencies, in deg | gfx, trials (tracks), stair, response | Possible (proposed: `trial_2afc_adaptive`) |
+| `Design Templates/dualWindow/` | A Stroop task with an experimenter window that shows progress | screen | Gap: untimed screens (4.2 proposal) |
+| `Experiments/stroop/` | Colored color words, key per ink color | gfx, pack/layout or outline, trials, table, response | Possible (proposed: `trial_stroop`) |
+| `Experiments/stroopExtended/` | Stroop with practice and feedback; reverse Stroop | as above | Possible |
+| `Experiments/stroopVoice/` | Spoken responses, transcribed by Whisper | None | Gap: microphone capture (14.7 rank 7). Transcription: out (a speech model is not a rig header) |
+| `Experiments/GoNoGo/` | Go and no-go images, 25 % no-go | gfx, pack, trials, response | Possible (`trial_stop_signal` has the no-response outcome) |
+| `Experiments/sternberg/` | A memory set, then a probe: present or absent | gfx, timeline, trials, response | Possible (proposed: `trial_sternberg`) |
+| `Experiments/navon/` | Global and local letters, congruent or not | gfx, pack, trials, response | Possible |
+| `Experiments/mentalRotation/` | Rotated letter pairs, same or different; a plot at the end | gfx (IMAGE `ori`), trials, response | Possible; the plot is out (4.8) |
+| `Experiments/BART/` | Balloon risk task: pump by key, burst sound, earnings | gfx, audio, pack/layout, response | Possible (MP3 converted to WAV) |
+| `Experiments/dragAndDrop/` | Drag shapes into place; positions saved | gfx, screen | Gap: drag helper (14.7 rank 8) |
+| `Experiments/BigFiveInventory/` | Personality questionnaires as forms | None | Out: a survey form (as 14.3 `survey`) |
+
+#### Feature demos
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `Feature Demos/gratings/` | Contrast-modulated sine and noise, beats | gfx (USER shader) | Possible (proposed: `gfx_gratings`) |
+| `Feature Demos/noise/` | Binary, filtered (band-pass), Gabor and image noise; new samples per repeat | gfx (NOISE) | Gap: filtered noise. Binary, uniform, Gaussian and simplex exist; `ysp/gfx.h` lists filtered noise on the GPU as not done |
+| `Feature Demos/movies/` | A movie with play, pause and seek by a button and a slider | video, gfx | Possible with keys for the controls (the widgets: 14.7 rank 4) |
+| `Feature Demos/panorama/` | A 360 degree image, looked around by mouse or keys | gfx (USER shader, IMAGE) | Possible (texture size and target sampling not verified, 15.6) |
+| `Feature Demos/sliders/` | Slider styles, vertical and horizontal | None | Gap: widget layer (14.7 rank 4) |
+| `Feature Demos/progress/` | A progress bar | gfx | Possible |
+| `Feature Demos/pilotMode/` | `PILOTING` skips routines and makes dummy responses | trials, simulated observers | Possible |
+| `Feature Demos/counterbalance/` | A group from a slot counter that persists across runs | trials (`ytr_latin()`) | Possible for the assignment. A slot quota shared across sessions is the runner's (6) |
+| `Feature Demos/buttonBox/` | A button box, or the keyboard in its place, lights circles | device (XID or line board), screen | Possible |
+| `Feature Demos/visualValidator/` | A light sensor checks each stimulus's on and off times | device, screen | Example: `photodiode_check` (edge minus flip onset) |
+
+#### Hardware
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `Hardware/EEG_parallel_component/` | Parallel port codes at a stimulus, a key, a click | device (parallel), screen, response | Example: `device_trigger_flip`, `parallel_trigger`. Response-locked codes are caller code (proposed: `trial_eeg_triggers`) |
+| `Hardware/EEG_serial_component/` | The same through a serial trigger device | device, screen | Example: `device_trigger_flip --out` |
+| `Hardware/EEG_serial_code/` | Serial triggers written from code | serial, device | Example: `serial_trigger`, `device_trigger_flip` |
+| `Hardware/fMRI/` | Wait for the scanner's key, then non-slip timing | screen, input, timeline | Possible (proposed: `trial_scanner_sync`) |
+| `Hardware/EGI_netstation/` | Stroop with NetStation tags | None | Gap: `ysp/net.h` and the NetStation protocol |
+| `Hardware/lab_streaming_layer/` (and `lab_streaming_layer_legacy/`) | LSL markers at a stimulus and a key | None | Gap: `ysp/net.h` LSL outlet (4.7) |
+| `Hardware/eyetracking/` | Calibration, recording, an ROI and a gaze cursor | None | Gap: eye-tracker input source (14.7 rank 6) |
+| `Hardware/eyetracking_custom_cal/` | The same with a custom calibration | None | Gap: as above |
+| `Hardware/Eyetracking_visual_search/` | Gaze-driven instructions, fixation check and search | None | Gap: as above |
+| `Hardware/camera/` | Record a webcam, show it live, replay it | None | Gap: camera capture (14.7 rank 7) |
+| `Hardware/microphone/` | Record and transcribe read phrases | None | Gap: microphone capture; transcription out |
+| `Hardware/pump/` | Fill Cetoni syringe pumps | None | Out: not a device ysp targets |
+
+#### Helper tools
+
+| Demo | What it shows | ysp headers | Status |
+|---|---|---|---|
+| `Helper Tools/keyNameFinder/` | Key names | screen | Example: `screen_input --hand` |
+| `Helper Tools/spatialUnits/` | One square in several units | gfx (`ygfx_view`, `YGFX_DEG`) | Possible |
+| `Helper Tools/clockFace/` | Clock hands turned by routine time | gfx, timeline | Possible |
+| `Helper Tools/colors/` | Type a color in a space, see it | color, gfx | Possible with keys; `color_convert` |
+| `Helper Tools/drawPolygon/` | Click vertices, then change size, position and angle by sliders | gfx (POLYGON to 16 vertices, POLYLINE to 224 points), screen | Possible with keys in place of the sliders |
+| `Helper Tools/achorVSalignment/` | Text anchor against text alignment, set by sliders | gfx (`anchor`), pack/layout | Possible with keys |
+
+### 15.4 Gaps ranked by the demos they block
+
+"Blocks" counts the demos with status Gap. "Burdens" counts demos a C
+user can do today, but with work each time or with a conversion. The
+14.7 column gives the jsPsych rank where the gap is the same.
+
+| Rank | Gap | 14.7 | Where it goes | Blocks | Burdens | Size |
+|---|---|---|---|---|---|---|
+| 1 | Experiment flow: loops, routines, conditions files, branching, session fields | 1 | The player (11, item 7) | All 43 Builder demos for users who do not write C | None in C | Large; planned |
+| 2 | Eye-tracker input source, calibration, validation, ROI and fixation checks | 6 | Extension (12); `ysp/eyelink.h`, `ysp/tobii.h` (docs/devices_spec.md) | 6: `iohub/eyetracking/simple.py`, `validation.py`, `gcCursor/run.py`, `Hardware/eyetracking/`, `eyetracking_custom_cal/`, `Eyetracking_visual_search/` | None | Medium per tracker |
+| 3 | Capture: camera and microphone | 7 | `ysp/video.h` capture (4.6); `ysp/audio.h` input | 5: camera 3 (`cameraLiveView.py`, `cameraSideBySide.py`, `Hardware/camera/`), microphone 2 (`Hardware/microphone/`, `stroopVoice/`) | None | Medium |
+| 4 | Network markers: LSL outlets, EGI NetStation | None (new) | `ysp/net.h` (4.7) | 3: `Hardware/lab_streaming_layer/`, `Hardware/EGI_netstation/`, `hardware/egi_netstation.py` | None | Small for LSL (liblsl at run time); NetStation not specified |
+| 5 | High bit depth output: Bits++, Bits#, Mono++, Color++ | None (new) | `ysp/gfx.h` output stage | 3: the CRS demos | None | Small in code; needs a device to verify |
+| 6 | Widget layer: slider, rating scale, button, text entry | 4 | Player, above `ysp/gfx.h` | 2: `ratingScale.py`, `Feature Demos/sliders/` | 6: `movies/`, `drawPolygon/`, `achorVSalignment/`, both `colors` demos, `BigFiveInventory/` if forms come in scope | Medium |
+| 7 | Drag helper | 8 | Player; an example | 1: `dragAndDrop/` | None | Small |
+| 8 | Filtered noise: band-pass, 1/f, Gabor noise, phase-scrambled images | None (new) | `ysp/gfx.h` (GPU) or a CPU filter into an IMAGE | 1: `Feature Demos/noise/` | None | Small to medium |
+| 9 | Untimed screens: an operator window beside the stimulus | None (new) | `ysp/screen.h` (4.2 proposal) | 1: `dualWindow/` | 1: `screensAndWindows.py` (two windows on one display) | Small |
+| 10 | Bit-state box decoder (PST SRBox) | None | `ysp/box.h` (docs/devices_spec.md 10.1) | 1: `pstbox.py` | None | Small |
+| 11 | LabJack glue | None | `ysp/labjack.h` (docs/devices_spec.md) | 1: `labjack_u3.py` | None | Small |
+| Burden | Source formats: `.xlsx` conditions, JPEG, MP3 | 5 (images) | Pack tool importers (docs/pack.md takes CSV, PNG, WAV) | None | 16 demos load `.xlsx` conditions; 11 use JPEG; 1 uses MP3 | Small each |
+| Burden | Text in C | 3 | Done for C: `pack/layout` v0.1.0 (Skribidi, `YSP_BUILD_LAYOUT`); the player's text is not built | None | Every Builder demo with instructions or word stimuli | None left in C; a build option and `third_party/` |
+
+Notes on the merge with 14.7:
+- 14.7 ranks 1, 4, 6, 7 and 8 are the same gaps here. PsychoPy's demos
+  rank the eye tracker and capture higher than jsPsych's plugins do,
+  because PsychoPy is a lab tool. This agrees with the note in 14.7 rank
+  6.
+- 14.7 rank 3 (text) is closed for C programs since `pack/layout`
+  v0.1.0. It stays open for the player.
+- 14.7 rank 5 (image decode) is closed for PNG by the pack tool
+  (lodepng). JPEG is not taken; PsychoPy's demos use it for photographs.
+- Ranks 4, 5, 8, 9, 10 and 11 have no jsPsych counterpart. Ranks 4,
+  10 and 11 are already in docs/devices_spec.md.
+
+### 15.5 Proposed C examples
+
+Each one uses headers that no windowed example combines today: `ysp/quest.h`
+and `ysp/color.h` in a display, `ysp/rdk.h` and `ysp/video.h` with a
+response, `ysp/pack.h` into `ysp/gfx.h`, `pack/layout` in a timed trial,
+`ysp/input.h` SYNC events, and `ysp/device.h` outputs with a stimulus and
+a response. Frame-interval measurement is not proposed:
+`screen_flipstats` covers `timeByFrames.py`. A rating scale or slider is
+not proposed: it needs the widget layer (15.4 rank 6), and an example
+would build a private one. Sizes are estimates, from
+the response examples (330 to 500 lines).
+
+| Order | Program (file) | Mirrors | Headers | What it shows that no example shows | Lines | Hardware |
+|---|---|---|---|---|---|---|
+| 1 | `trial_2afc_adaptive` (`examples/response/`) | `psychophysicsStairsInterleaved/`, `psychophysicsStaircase/`, `JND_staircase_exp.py` | gfx, color, trials, stair, quest, response, timeline | A spatial 2AFC gabor detection on a display: two staircases and one QUEST+ track interleaved in `ysp/trials.h`; contrast set through the calibration with its gamut check; sizes in deg. Today the adaptive headers run only against simulated observers | 450 | None (a nominal calibration unless a `.yspcal` is given) |
+| 2 | `trial_rdk` (`examples/rdk/`) | `dots.py`, `dot_gabors.py`; contrib `plugin-rdk` (14.4) | rdk, gfx, timeline, trials, response | An RDK direction discrimination with RT from the motion onset's flip record, coherence per trial from a factor, and the field's replay digest in each data row | 350 | None |
+| 3 | `trial_stroop` (`examples/response/`) | `stroop/`, `stroopExtended/`, `EGI_netstation/` (task part) | pack/layout, outline, gfx, table, trials, response | Words as text in a timed trial: color words in an ink color, conditions from a CSV through `ysp/table.h`, a practice block with feedback text, congruency in the row | 400 | None; needs `YSP_BUILD_LAYOUT` (or one-line words by advances, as `outline_font`) |
+| 4 | `trial_movie` (`examples/video/`) | `Feature Demos/movies/`, `MovieStim.py`; jsPsych `video-keyboard-response` (14.3) | video, audio, timeline, gfx, response | RT from a video frame's flip record (the frame named in the trial row); pause and seek by key; each trial's shown, repeated and dropped counts | 350 | A sound device for the soundtrack (none with `--sim`) |
+| 5 | `gfx_gratings` (`examples/gfx/`) | `counterphase.py`, `secondOrderGratings.py`, `rotatingFlashingWedge.py`, `Feature Demos/gratings/` | gfx (GRATING, GABOR, USER), timeline | Phase drift on a timeline track; counterphase flicker as a contrast track, with the achieved frequency from the flip records; contrast-modulated gratings and a noise-carrier envelope in USER shaders; a flashing checkerboard wedge | 400 | None |
+| 6 | `trial_sternberg` (`examples/timeline/`) | `sternberg/`; jsPsych `animation` (14.3) | timeline (`ytl_seq` op tables), gfx, outline, trials, response | A timed sequence: a memory set of 1 to 6 digits at a fixed SOA, a probe, and the landing record of each item; the SOAs measured from the flip records; set size as a factor | 350 | None |
+| 7 | `color_patch` (`examples/color/`) | `monitorDemo.py`, `colors/colors.py`, `Helper Tools/colors/`, `hsvColorPalette.py` (as a CIELAB picker) | color, gfx, screen | A calibrated patch: a `.yspcal` loaded; a color given in CIELAB, xyY or DKL; keys walk hue and chroma; the device RGB, the gamut distance and refusals printed; the OS gamma ramp left alone | 250 | A calibration of the display for a claim about light; a nominal one otherwise (flagged) |
+| 8 | `trial_eeg_triggers` (`examples/device/`) | `EEG_parallel_component/`, `EEG_serial_component/`, `EEG_serial_code/`, `parallelPortOutput.py`, `callOnFlip.py` | device, screen, gfx, timeline, trials, response | A stimulus code at the flip through the trigger channel, a response code at the key event, and an end code; each write's record beside the flip and response records in the row. `device_trigger_flip` has no stimulus or response | 350 | A trigger output for real lines; the in-process box without one |
+| 9 | `trial_images` (`examples/pack/`) | `randomisedBlocks/`, `GoNoGo/`, `navon/`, `mentalRotation/`, `face_jpg.py` | pack, gfx (IMAGE), table, trials (groups), response | The pack path end to end: textures and the conditions table read from a pack built by `ypak`; blocks in random order; images turned for mental rotation | 350 | None; needs a pack (`ypak build`, `YSP_BUILD_PACK`) |
+| 10 | `trial_instructions` (`examples/layout/`) | `hello_world.py`, `textbox_simple.py`; jsPsych `instructions` (14.3) | pack/layout, outline, gfx (setup passes, targets), screen | Paragraph pages laid out once and rendered into targets at setup, turned by keys; the time each page was shown, from the flip records | 250 | None; needs `YSP_BUILD_LAYOUT` |
+| 11 | `trial_scanner_sync` (`examples/timeline/`) | `Hardware/fMRI/`, `fMRI_launchScan.py` | input (`YIN_KIND_SYNC`), device or screen, timeline, trials | Trials on a base anchored at a scanner pulse (non-slip timing): pulses from a key or a line board, each onset as an offset from the volume pulse; an emulator thread for runs without a scanner | 300 | A scanner or a line board for real pulses; the emulator without |
+| 12 | `gfx_gamma_null` (`examples/gfx/`) | `gammaMotionNull.py` | gfx (square-wave gratings, output stage), stair, response, timeline | A psychophysical check of the display's linearization by motion nulling, through the output stage's lookup table, with no photometer | 300 | None |
+
+Examples 1 to 4 close the first-order holes: adaptive methods, RDK and
+video are built and tested but no example runs them with a participant.
+Examples 8 and 11 need hardware for their claims and run without it.
+
+### 15.6 Not verified
+
+- Coder demos past their first 45 lines, including the 780-line
+  `crsBitsAdvancedDemo.py` and the Wintab and eye-tracking demos.
+- Builder demo parameters other than the ones named in the sources
+  above. The status rests on README text and component types.
+- PsychoPy's library behavior: no library source was read.
+- That a `ysp/gfx.h` USER shader can sample a render target as
+  `ysp_tex0` (`VSHD_Distortion.py`, `panorama/`), and the largest
+  texture a panorama can use (`caps.max_texture`).
+- A graded image as a grating's mask (`face_jpg.py`,
+  `imagesAndPatches.py`): MASK_TEX is a distance shape, so the route is
+  a target or a MULTIPLY blend, not tried.
+- Per-element opacity in instance records (`maskReveal.py`).
+- That SDL3's pen events from a Wintab tablet reach `yscr_poll()` with
+  pressure and tilt; that generic joysticks (not mapped as gamepads)
+  give events with `desc.gamepads`; mouse positions over two
+  `yscr_screen` windows.
+- The MilliKey's serial command syntax, the NetStation protocol, and a
+  real Cedrus box with `ysp/device.h`.
+- The asset counts in 15.4 (`.xlsx`, JPEG, MP3) come from the file names
+  in the demo folders and the names in each `.psyexp` and script, not
+  from a run.

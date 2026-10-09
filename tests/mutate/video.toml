@@ -22,6 +22,22 @@ libs = ["-lm"]
 timeout = 1800
 env_default = { YVID_TEST_MEDIA = "{repo}/build-vid/media" }
 
+# v0.2.2: the MSVC load path, which gcc does not compile.
+[test.video_msvc]
+source = "tests/adapt/video_test.c"
+compiler = "msvc"
+flags = ["/O1", "/W3", "/D_CRT_SECURE_NO_WARNINGS"]
+timeout = 1800
+unset = ["YVID_TEST_MEDIA"]
+
+[[mutant]]
+id = "x-01"
+name = "MSVC load reads seven bytes"
+test = "video_msvc"
+why = "v0.2.2's memcpy load on MSVC must give the bytes the byte-by-byte load gives; the published XXH64 vectors check it."
+find = 'static uint64_t yvid__rd64(const unsigned char* p) { uint64_t v; memcpy(&v, p, 8); return v; }'
+replace = 'static uint64_t yvid__rd64(const unsigned char* p) { uint64_t v = 0; memcpy(&v, p, 7); return v; }'
+
 [[mutant]]
 id = "mf-00"
 name = "pts to index rounds down"

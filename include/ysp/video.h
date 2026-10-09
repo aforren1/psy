@@ -1,4 +1,4 @@
-/* ysp/video.h - v0.2.1 - public domain single-header video playback library
+/* ysp/video.h - v0.2.2 - public domain single-header video playback library
  *
  *   A movie as a stimulus. On each display frame the header takes the
  *   frame's PREDICTED ONSET, asks the movie clock for the movie time at
@@ -26,6 +26,11 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.2 - XXH64 on MSVC: little-endian loads through memcpy instead of
+ *          byte by byte, which MSVC did not fuse; yvid_xxh64() on 1 GiB
+ *          went from 5.9 to 6.3 GB/s to 11.9 to 14.1 GB/s (MinGW gcc
+ *          unchanged at 13.0 to 13.6), the same hashes. A 1080p I420
+ *          frame's hash is half as long on the decode thread.
  *   v0.2.1 - Fixed: after a decoder's YVID_PENDING the decode thread
  *          slept until the next seek or control, so a custom decoder that
  *          stalled once showed no new frame again (the frame on screen
@@ -491,8 +496,8 @@
 
 #define YVID_VERSION_MAJOR 0
 #define YVID_VERSION_MINOR 2
-#define YVID_VERSION_PATCH 1
-#define YVID_VERSION_STRING "0.2.1"
+#define YVID_VERSION_PATCH 2
+#define YVID_VERSION_STRING "0.2.2"
 
 #include "ysp/gfx.h"
 #include "ysp/timeline.h"
@@ -1329,6 +1334,13 @@ typedef struct yvid__xxh {
 } yvid__xxh;
 
 static uint64_t yvid__rotl(uint64_t x, int r) { return (x << r) | (x >> (64 - r)); }
+/* MSVC does not fuse the byte loads into one load, which halved XXH64's
+ * rate there (measured, docs/video.md "Frame sequence and the index");
+ * every MSVC target is little-endian. */
+#if defined(_MSC_VER)
+static uint64_t yvid__rd64(const unsigned char* p) { uint64_t v; memcpy(&v, p, 8); return v; }
+static uint32_t yvid__rd32(const unsigned char* p) { uint32_t v; memcpy(&v, p, 4); return v; }
+#else
 static uint64_t yvid__rd64(const unsigned char* p) {
     return (uint64_t)p[0] | ((uint64_t)p[1] << 8) | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24) |
            ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40) | ((uint64_t)p[6] << 48) | ((uint64_t)p[7] << 56);
@@ -1336,6 +1348,7 @@ static uint64_t yvid__rd64(const unsigned char* p) {
 static uint32_t yvid__rd32(const unsigned char* p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
+#endif
 static uint64_t yvid__xround(uint64_t acc, uint64_t in) {
     acc += in * YVID__P2;
     acc = yvid__rotl(acc, 31);

@@ -22,6 +22,15 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.4.1 - yscr_event_input() drops SDL 3.4's second key reports (INPUT,
+ *          "Second key reports"): a key-down of the same key within 50 ms
+ *          of the last one kept, from the same keyboard or with either
+ *          device 0, and that report's key-up. It was ysp/response.h's
+ *          rule R3, which only its collector got. Counted in
+ *          yscr_input_stats (key_doubles, key_double_ups) and logged as a
+ *          YSCR_EV_KEY_DOUBLE ring record each; desc.key_dedup_ns sets
+ *          the window or turns the filter off; yscr_key_filter() applies
+ *          it to events from elsewhere.
  *   v0.4.0 - The input bridge (INPUT, "The input bridge"): any thread hands
  *          ysp/input.h events to yscr_push_input(); each one is stored
  *          and announced by an SDL event (a doorbell) in SDL's queue, so
@@ -131,7 +140,7 @@
  *          groups, input restamping, mode lists and the parameter table.
  *          The other swap paths are stubs that refuse to open.
  *
- *   STATUS: v0.4.0. Two swap paths run, DXGI_FLIP and COMPOSITION, on one
+ *   STATUS: v0.4.1 (the key filter; INPUT has its checks). Two swap paths run, DXGI_FLIP and COMPOSITION, on one
  *   machine: a Windows 11 25H2 laptop whose Intel Iris Xe drives a 1920 x
  *   1200 panel at 60.0008 Hz (60 Hz is its only rate), with the ANGLE that
  *   ships in Docker Desktop's Electron front end (2.1.23876, git
@@ -904,8 +913,8 @@
  *   press and a repeat; scan-code injection gave one report, tapped or
  *   held. Keys from a keyboard carry scan codes, so they most likely
  *   report once; screen_input --hand checks keys pressed by hand.
- *   ysp/response.h removes second reports; to count presses yourself,
- *   count a key-down only after a key-up of the same key.
+ *   yscr_event_input() drops the second reports (v0.4.1, "Second key
+ *   reports" below); SDL's own event stream keeps them.
  *   caps.raw_keyboard says whether keys come on the raw path now: on
  *   Windows, with a window, the hint on and text input off.
  *   Devices (v0.3.4). Keyboards on the raw path are per device: a key
@@ -1031,6 +1040,42 @@
  *   frames, and 65,535 doorbells of overwritten records counted lost. Raw
  *   mice through the bridge: 30 of 30 injected moves, with SDL's keys in
  *   the same loop.
+ *   Second key reports (v0.4.1). yscr_event_input() returns false for a
+ *   second report of a key press, so every consumer of the loop above
+ *   gets one press per key, not only ysp/response.h's collector. The rule,
+ *   on keyboard events from SDL (either path) and from doorbells alike:
+ *     - a key-down that is not an OS repeat, of the same key (scancode)
+ *       as a key-down kept less than desc.key_dedup_ns (0 = 50 ms) before
+ *       or after it, from the same keyboard or with either device 0 (the
+ *       message path and injected input have device 0), is dropped;
+ *     - after such a drop, the first key-up of that key that finds no
+ *       kept key-down still down is dropped too, so the consumer sees one
+ *       down and one up; the kept press's own key-up passes, whichever
+ *       comes first;
+ *     - an OS repeat (YIN_REPEAT) passes: SDL's key state marks the second
+ *       report of a held key so, and a consumer's held-key rule reads it;
+ *     - a key-down with the same time, device and key as the one kept is
+ *       that report decoded again and passes, so two calls on one SDL
+ *       event give the event twice.
+ *   Why 50 ms: the largest measured gap was 34.2 ms (518 virtual-key
+ *   taps), and one finger does not press one key twice within 50 ms
+ *   (stated, not measured here). The first report to arrive is kept, not
+ *   the earliest stamp: SDL queues the raw report first, and the message
+ *   report's stamp is tick-quantized (-0.1 ms is in the table). Each drop
+ *   counts in yscr_get_input_stats() (key_doubles, key_double_ups) and,
+ *   on a screen with desc.ring, writes a YSCR_EV_KEY_DOUBLE record for a
+ *   dropped key-down: t_ns the dropped report's time, aux
+ *   desc.display_index, u.i64[0] its time minus the kept report's (ns),
+ *   u.u32[2] the scancode, u.u32[3] its device, u.u32[4] the kept
+ *   report's device. The table holds the 16 keys pressed last, for the
+ *   process (SDL's queue is one stream for every window); s NULL uses 50
+ *   ms. desc.key_dedup_ns < 0 turns it off for that screen's calls:
+ *   every report, as SDL gives it. yscr_key_filter() applies the same
+ *   rule, and the same table, to an event that did not come from
+ *   yscr_event_input() (your own adapter, a simulated participant); never
+ *   call it on an event yscr_event_input() returned. SDL's own events,
+ *   read by Dear ImGui or by SDL_PollEvent(), are not changed. Measured
+ *   with the core test only: no key was injected through it in a window.
  *   Gamepads (desc.gamepads): open() starts SDL_INIT_GAMEPAD and opens each
  *   gamepad; yscr_poll() opens one on SDL_EVENT_GAMEPAD_ADDED and closes
  *   it on SDL_EVENT_GAMEPAD_REMOVED (so read events with yscr_poll(), not
@@ -1273,8 +1318,8 @@
 
 #define YSCR_VERSION_MAJOR 0
 #define YSCR_VERSION_MINOR 4
-#define YSCR_VERSION_PATCH 0
-#define YSCR_VERSION_STRING "0.4.0"
+#define YSCR_VERSION_PATCH 1
+#define YSCR_VERSION_STRING "0.4.1"
 
 #include "ysp/rt.h"
 #include "ysp/input.h"
@@ -1403,6 +1448,12 @@ typedef yin_mouse_report yscr_mouse_event;
  * found no record, [3] doorbells waiting to be pushed again; all totals. */
 #define YSCR_EV_INPUT_LOST 12u
 
+/* YSCR_EV_KEY_DOUBLE: one dropped second report of a key press (INPUT,
+ * "Second key reports"). t_ns the report's time, u.i64[0] its time minus
+ * the kept report's (ns), u.u32[2] the scancode, u.u32[3] its device,
+ * u.u32[4] the kept report's device. */
+#define YSCR_EV_KEY_DOUBLE 13u
+
 /* The bridge's counters, totals since the process started. */
 typedef struct yscr_input_stats {
     uint32_t stored;        /* events stored by yscr_push_input() and raw mice */
@@ -1410,6 +1461,8 @@ typedef struct yscr_input_stats {
     uint32_t refused;       /* doorbells SDL refused (its queue full)          */
     uint32_t pending;       /* refused doorbells not pushed again yet          */
     uint32_t lost;          /* doorbells decoded after their record was gone   */
+    uint32_t key_doubles;   /* second key-downs dropped (v0.4.1)               */
+    uint32_t key_double_ups;/* their key-ups dropped                           */
 } yscr_input_stats;
 
 /* --- abort and panic (ABORT, PANIC) --------------------------------------- */
@@ -1790,6 +1843,9 @@ typedef struct yscr_desc {
                                       * every gamepad                         */
     bool           raw_mice;         /* read every mouse's Raw Input on a
                                       * thread: per device, raw-timed (Windows) */
+    int64_t        key_dedup_ns;     /* yscr_event_input() drops a key's second
+                                      * report within this time; 0 = 50 ms,
+                                      * < 0 = off, at most 1 s (INPUT)       */
 } yscr_desc;
 
 /* Private. One flip between flip_at() and its completion. */
@@ -1856,6 +1912,7 @@ typedef struct yscr_screen {
     int32_t                 raw_mice;                 /* desc.raw_mice: a reader user */
     int32_t                 rm_state;                 /* 1 while relative mode holds the mice */
     int32_t                 rm_rel, rm_frames;        /* the guard's last relative mode, frames */
+    int64_t                 key_dedup_ns;             /* desc.key_dedup_ns: 0 = 50 ms, < 0 off */
     yscr_caps             caps;
     yrt_ring*             ring;
     uint32_t                display_index;
@@ -2150,9 +2207,17 @@ YSCR_API uint32_t yscr_input_event_type(void);
  * stored event (keyed by the doorbell's sequence number, user.code); SDL's
  * keyboard, mouse, touch, pen and gamepad events go through ysp/input.h's
  * adapter, with this screen's raw-keyboard state and the ysp_rt time.
- * false for any other event, a doorbell already decoded, or a doorbell
- * whose record was overwritten (counted as lost). s may be NULL. */
+ * false for any other event, a doorbell already decoded, a doorbell
+ * whose record was overwritten (counted as lost), or a second report of a
+ * key press or its key-up (counted; INPUT, "Second key reports"). s may
+ * be NULL. */
 YSCR_API bool     yscr_event_input(yscr_screen* s, const union SDL_Event* ev, yin_event* out);
+
+/* The same key filter on an event that did not come from
+ * yscr_event_input(), which applies it already: your own SDL adapter, a
+ * simulated participant. false: drop it. Counted and logged like the
+ * bridge's drops. s may be NULL (a 50 ms window, no ring record). */
+YSCR_API bool     yscr_key_filter(yscr_screen* s, const yin_event* e);
 
 /* The bridge's counters. */
 YSCR_API void     yscr_get_input_stats(yscr_input_stats* out);
@@ -2524,12 +2589,25 @@ typedef struct yscr__in_slot {
     int32_t          origin;  /* 1: desc.raw_mice's reader                     */
     yin_event      e;
 } yscr__in_slot;
+/* One key of the second-report filter (INPUT, "Second key reports"). */
+#define YSCR__KEYS          16
+#define YSCR__KEY_DEDUP_NS  50000000
+typedef struct yscr__key {
+    int64_t  t;               /* the kept key-down's time                      */
+    uint32_t device, control;
+    uint8_t  used, down;      /* down: the kept key-down's key-up not seen yet */
+    uint8_t  dropped;         /* dropped key-downs whose key-up is to drop     */
+    uint8_t  reserved_;
+} yscr__key;
 static struct {
     volatile int32_t next;    /* the next sequence, unmasked                   */
     volatile int32_t overwritten, refused, pending, lost;
+    volatile int32_t key_doubles, key_double_ups;
     uint32_t type;            /* the doorbell's SDL type; 0 = no SDL yet       */
     uint32_t mouse_next;      /* yscr_poll_mouse()'s scan; the frame thread  */
     uint32_t logged[4];       /* the counters the last record showed           */
+    yscr__key key[YSCR__KEYS];/* the key filter's table; the frame thread      */
+    uint32_t key_next;        /* the slot the next new key takes               */
     yscr__in_slot slot[YSCR_INPUT_STORE];
 } yscr__in;
 
@@ -2654,6 +2732,78 @@ static int yscr__in_decode(yscr_screen* s, int32_t seq, yin_event* out) {
     if (r == 0) yscr__a_inc(&yscr__in.lost);
     if (r <= 0) return 0;
     if (out->kind == YIN_KIND_MOUSE && yscr__unlisted(s, out->device, out->t)) out->flags |= YIN_UNLISTED;
+    return 1;
+}
+
+/* Two reports can be of one press when their devices are equal or one is
+ * 0: SDL gives the raw path the keyboard's handle, the message path and
+ * injected input 0. Two keyboards are two presses. */
+static int yscr__key_dev(uint32_t a, uint32_t b) { return a == b || a == 0 || b == 0; }
+
+/* The second-report filter (INPUT, "Second key reports"): 1 keeps e, 0
+ * drops it (counted, and logged on s's ring). Keyboard presses and
+ * releases only. The frame thread. */
+static int yscr__key_keep(yscr_screen* s, const yin_event* e) {
+    int64_t win = s && s->key_dedup_ns ? s->key_dedup_ns : YSCR__KEY_DEDUP_NS;
+    yscr__key* k;
+    int i;
+    if (e->kind != YIN_KIND_KEYBOARD || win <= 0) return 1;
+    if (e->type == YIN_RELEASE) {
+        /* the kept press's key-up first, whichever report it came from */
+        for (i = 0; i < YSCR__KEYS; i++) {
+            k = &yscr__in.key[i];
+            if (!k->used || !k->down || k->control != e->control || !yscr__key_dev(k->device, e->device)) continue;
+            k->down = 0;
+            return 1;
+        }
+        for (i = 0; i < YSCR__KEYS; i++) {
+            k = &yscr__in.key[i];
+            if (!k->used || !k->dropped || k->control != e->control || !yscr__key_dev(k->device, e->device)) continue;
+            k->dropped--;
+            yscr__a_inc(&yscr__in.key_double_ups);
+            return 0;
+        }
+        return 1;
+    }
+    if (e->type != YIN_PRESS || (e->flags & YIN_REPEAT)) return 1;
+    for (i = 0; i < YSCR__KEYS; i++) {
+        int64_t dt;
+        k = &yscr__in.key[i];
+        if (!k->used || k->control != e->control || !yscr__key_dev(k->device, e->device)) continue;
+        dt = e->t - k->t;
+        if (dt == 0 && k->device == e->device) return 1;      /* the kept report again */
+        if (dt >= win || dt <= -win) continue;
+        if (k->dropped < 255) k->dropped++;
+        yscr__a_inc(&yscr__in.key_doubles);
+        if (s && s->ring) {
+            yrt_event ev;
+            memset(&ev, 0, sizeof ev);
+            ev.source = (uint16_t)YRT_SRC_SCREEN;
+            ev.kind = (uint16_t)YSCR_EV_KEY_DOUBLE;
+            ev.t_ns = (uint64_t)e->t;
+            ev.aux = s->display_index;
+            ev.u.i64[0] = dt;
+            ev.u.u32[2] = e->control;
+            ev.u.u32[3] = e->device;
+            ev.u.u32[4] = k->device;
+            yrt_ring_push(s->ring, &ev);
+        }
+        return 0;
+    }
+    /* kept: this keyboard's slot for the key, else the oldest */
+    k = NULL;
+    for (i = 0; i < YSCR__KEYS && !k; i++)
+        if (yscr__in.key[i].used && yscr__in.key[i].control == e->control && yscr__in.key[i].device == e->device)
+            k = &yscr__in.key[i];
+    if (!k) {
+        k = &yscr__in.key[yscr__in.key_next];
+        yscr__in.key_next = (yscr__in.key_next + 1u) % YSCR__KEYS;
+    }
+    k->t = e->t;
+    k->device = e->device;
+    k->control = e->control;
+    k->used = k->down = 1;
+    k->dropped = 0;
     return 1;
 }
 
@@ -6434,6 +6584,10 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
         yscr__copy(s->error, sizeof s->error, "ysp_screen: a negative desc.panic_presses, panic_window_ms or panic_grace_ms");
         return false;
     }
+    if (desc->key_dedup_ns > 1000000000) {
+        yscr__copy(s->error, sizeof s->error, "ysp_screen: desc.key_dedup_ns must be at most 1 s (< 0 turns the key filter off)");
+        return false;
+    }
     if (desc->panic && desc->abort_keys.off) {
         yscr__copy(s->error, sizeof s->error, "ysp_screen: desc.panic needs the abort combination (desc.abort_keys.off is set)");
         return false;
@@ -6671,6 +6825,7 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
     }
     s->lead = desc->lead == 0 ? 0.5 : desc->lead;
     s->offset = desc->onset_offset_ns;
+    s->key_dedup_ns = desc->key_dedup_ns;
     s->patch = desc->patch;
     s->nominal_f = (double)s->caps.period_ns;
     s->period_f = s->nominal_f;
@@ -7593,17 +7748,24 @@ YSCR_API void yscr_get_input_stats(yscr_input_stats* out) {
     out->refused = (uint32_t)yscr__a_load(&yscr__in.refused);
     out->pending = (uint32_t)yscr__a_load(&yscr__in.pending);
     out->lost = (uint32_t)yscr__a_load(&yscr__in.lost);
+    out->key_doubles = (uint32_t)yscr__a_load(&yscr__in.key_doubles);
+    out->key_double_ups = (uint32_t)yscr__a_load(&yscr__in.key_double_ups);
+}
+
+YSCR_API bool yscr_key_filter(yscr_screen* s, const yin_event* e) {
+    return e && yscr__key_keep(s, e) != 0;
 }
 
 YSCR_API bool yscr_event_input(yscr_screen* s, const union SDL_Event* ev, yin_event* out) {
     if (!ev || !out) return false;
 #if !defined(YSCR_NO_SDL)
-    if (yscr__in.type && ev->type == yscr__in.type) return yscr__in_decode(s, ev->user.code, out) != 0;
+    if (yscr__in.type && ev->type == yscr__in.type)
+        return yscr__in_decode(s, ev->user.code, out) != 0 && yscr__key_keep(s, out);
     {
         yin_sdl_ctx ctx;
         ctx.raw_keyboard = s ? yscr__raw_keyboard(s) : true;
         ctx.keep_synthetic = false;
-        return yin_from_sdl(ev, yscr_restamp(s, ev->common.timestamp), &ctx, out) != 0;
+        return yin_from_sdl(ev, yscr_restamp(s, ev->common.timestamp), &ctx, out) != 0 && yscr__key_keep(s, out);
     }
 #else
     (void)s;
@@ -7663,6 +7825,7 @@ YSCR_API const yscr_param* yscr_params(int* n) {
         { "d3d11_video",     "bool", 0, 1, 0, "",                 "D3D11 device with video support and multithread protection" },
         { "gamepads",        "bool", 0, 1, 0, "",                 "start SDL's gamepad subsystem and open every gamepad" },
         { "raw_mice",        "bool", 0, 1, 0, "",                 "read each mouse's Raw Input on a thread: per device, raw-timed (Windows)" },
+        { "key_dedup_ns",    "i64", -1, 1e9, 0, "ns",             "drop a key's second report within this time; 0 = 50 ms, -1 = off" },
         { "onset_offset_ns", "i64", -1e9, 1e9, 0, "ns",           "added to every onset; from the photodiode test" },
         { "min_tier",        "i32",  0, 3, 0, "",                 "flag flips whose tier is worse; 0 = off" },
         { "sim_period_ns",   "i64",  0, 1e10, 16666667, "ns",     "frame period of the simulated display" }

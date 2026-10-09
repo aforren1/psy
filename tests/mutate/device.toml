@@ -1,4 +1,5 @@
-# ysp/device.h mutants: brackets, the map, the lifecycle, identify, keys.
+# ysp/device.h mutants: brackets, the map, the lifecycle, identify, keys;
+# since v0.2.0 the outputs, the trigger channel and roles.
 # The test runs simulated devices on a virtual clock (about 2 s with the
 # thread part). docs/device.md lists the results.
 header = "ysp/device.h"
@@ -70,11 +71,11 @@ why = "A wrong device at the key must fail before the session, not give garbage.
 find = '''    return -1;
 }
 
-/* --- the step'''
+/* --- outputs'''
 replace = '''    return 1;
 }
 
-/* --- the step'''
+/* --- outputs'''
 
 [[mutant]]
 id = "dev-08"
@@ -117,3 +118,112 @@ test = "device"
 why = "The answers' spread (15 ms behind an FTDI timer) is not the map's error (about 1 ms)."
 find = '''    int64_t ns = (int64_t)ybox_ns_per_tick(dev->d.family) + (fi->width_ns > 0 ? fi->width_ns : fi->spread_ns);'''
 replace = '''    int64_t ns = (int64_t)ybox_ns_per_tick(dev->d.family) + fi->spread_ns;'''
+
+[[mutant]]
+id = "dev-13"
+name = "a set keeps a pending trailing edge"
+test = "device"
+why = "A set means \"hold this\": a stale 0 from an earlier pulse must not undo it."
+find = '''    if (dev->trail_token) {
+        /* a set means "hold this"; a pulse moves the one trailing edge */
+        dev->trail_token = 0;'''
+replace = '''    if (dev->trail_token && pulse) {
+        /* a set means "hold this"; a pulse moves the one trailing edge */
+        dev->trail_token = 0;'''
+
+[[mutant]]
+id = "dev-14"
+name = "the trailing edge writes the code again"
+test = "device"
+why = "A pulse ends at the idle code 0."
+find = '''        if (dev->out_ready) rc = ydev__put(dev, 0, 0, &t0, &t1);'''
+replace = '''        if (dev->out_ready) rc = ydev__put(dev, dev->out_code, 0, &t0, &t1);'''
+
+[[mutant]]
+id = "dev-15"
+name = "the trailing edge at the leading write"
+test = "device"
+why = "The width starts at the leading write: a deadline without it gives no pulse."
+find = '''            dev->trail_at = t1 + width_ns;'''
+replace = '''            dev->trail_at = t1;'''
+
+[[mutant]]
+id = "dev-16"
+name = "XID width never sent"
+test = "device"
+why = "An XID box keeps its last mp: a set after a pulse would pulse, a pulse after a set would hold."
+find = '''        if (ms != dev->xid_width_ms) {'''
+replace = '''        if (0) {'''
+
+[[mutant]]
+id = "dev-17"
+name = "a fixed-width box takes any width"
+test = "device"
+why = "A BioSemi interface ends every code after 8 ms; a 2 ms request must be refused, not logged as 2 ms."
+find = '''        rc = YDEV_ERR_ARG;   /* the device ends every code after its own width */'''
+replace = '''        rc = YDEV_OK;        /* the device ends every code after its own width */'''
+
+[[mutant]]
+id = "dev-18"
+name = "both modem lines written every time"
+test = "device"
+why = "Setting RTS must not touch DTR: each line can be its own output."
+find = '''        r = dev->tr.lines(dev->conn, code, code ^ dev->out_code);'''
+replace = '''        r = dev->tr.lines(dev->conn, code, 3u);'''
+
+[[mutant]]
+id = "dev-19"
+name = "modem lines left as the open set them"
+test = "device"
+why = "yser_open() raises DTR and RTS by default; an output must start idle."
+find = '''    dev->out_code = fam == YBOX_LINES ? 3u : 0u;   /* lines: write both, whatever the open left */'''
+replace = '''    dev->out_code = 0u;   /* lines: write both, whatever the open left */'''
+
+[[mutant]]
+id = "dev-20"
+name = "no 0 after the open"
+test = "device"
+why = "A box that holds a byte can hold a code from the last session."
+find = '''    if (fam == YBOX_TRIGGERBOX || fam == YBOX_PARALLEL || fam == YBOX_LINES || (fam == YBOX_MMBTS && dev->d.latched))
+        (void)ydev_out_set(dev, 0);'''
+replace = '''    (void)fam;'''
+
+[[mutant]]
+id = "dev-21"
+name = "a held code left at the stop"
+test = "device"
+why = "A latching box must not hold a trigger code after the session."
+find = '''    if (dev->out_code != 0 && ydev__fixed_ns(dev) == 0) (void)ydev_out_set(dev, 0);'''
+replace = ''
+
+[[mutant]]
+id = "dev-22"
+name = "the flip deadline not recorded"
+test = "device"
+why = "Deadline to write is the trigger's lateness; without it the log cannot show it."
+find = '''                     YDEV_OUT_FLIP, deadline_ns);'''
+replace = '''                     YDEV_OUT_FLIP, 0);'''
+
+[[mutant]]
+id = "dev-23"
+name = "a pulse at the screen's close"
+test = "device"
+why = "ysp/screen.h flushes pending triggers at close; a callback should not pulse then."
+find = '''    if (info->flags & YSCR_TRIG_FLUSHED) return;   /* the screen's close: no pulse then */'''
+replace = ''
+
+[[mutant]]
+id = "dev-24"
+name = "reports at their read time"
+test = "device"
+why = "The board's own time of the pin change is the point; the read time carries the USB path."
+find = '''            int64_t m = mapped ? yrt_fit_map(&dev->fit, o.out_ticks) : t;'''
+replace = '''            int64_t m = t;'''
+
+[[mutant]]
+id = "dev-25"
+name = "a role gets a new index after a restart"
+test = "device"
+why = "The data file joins events and records by role index; it must not change in a session."
+find = '''        int i = ydev_role_index(r, desc->role);'''
+replace = '''        int i = 0;'''

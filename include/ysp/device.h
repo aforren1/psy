@@ -1,13 +1,15 @@
-/* ysp/device.h - v0.1.0 - public domain single-header device layer
+/* ysp/device.h - v0.2.0 - public domain single-header device layer
  *
  *   A response box, a trigger box or a microcontroller board as a producer
- *   of ysp/input.h events with times on the ysp_rt clock: one instance per
- *   physical device, each with its own reader thread, a decoder from
- *   ysp/box.h, a device clock fit from ysp/rt.h, timer queries for
- *   bracketed pairs, identity (a match key and the device's own answer),
- *   and a lifecycle that survives an unplug: the device is found again by
- *   its key, the fit restarts, and the gap is in the log.
- *   docs/devices_spec.md is the plan; this is its step 2.
+ *   of ysp/input.h events with times on the ysp_rt clock, and as a target
+ *   for output codes (TTL triggers): one instance per physical device, each
+ *   with its own reader thread, a decoder and encoders from ysp/box.h, a
+ *   device clock fit from ysp/rt.h, timer queries for bracketed pairs,
+ *   identity (a match key and the device's own answer), roles, and a
+ *   lifecycle that survives an unplug: the device is found again by its
+ *   key, the fit restarts, and the gap is in the log. Every output write
+ *   is a record with the times before and after it.
+ *   docs/devices_spec.md is the plan; this is its steps 2 and 3.
  *
  *   REQUIRES ysp/rt.h, ysp/input.h, ysp/box.h and ysp/serial.h beside it;
  *   this header includes them, and its implementation implements ysp/rt.h,
@@ -18,21 +20,33 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.0 - Outputs: ydev_out_set(), ydev_out_pulse(), ydev_out_mark(),
+ *          ydev_out_trigger() and the YDEV_REC_OUT record; the output
+ *          families of ysp/box.h v0.2.0 (TriggerBox, BioSemi, MMBT-S, DTR
+ *          and RTS, the parallel port, XID and line-protocol outputs);
+ *          host-timed trailing edges on a ysp/rt.h worker; the
+ *          ysp/screen.h trigger channel (ydev_trigger_fn); roles
+ *          (ydev_roles, desc.roles); transport.lines; a transport without
+ *          read. Inputs unchanged.
  *   v0.1.0 - first version: XID, ysp line protocol and photodiode frame
  *          devices on the serial transport (or the caller's), a reader
  *          thread or manual polling, BRACKET fits with timer queries,
  *          match keys, identify, reconnect, records in a ysp/rt.h ring.
  *
- *   STATUS: v0.1.0, 2026-10-08. Built with MSVC 19.44 (/W4 /WX, C11 and
+ *   STATUS: v0.2.0, 2026-10-08. Built with MSVC 19.44 (/W4 /WX, C11 and
  *   C++17), MinGW-w64 gcc 16.1 and gcc 11.4 on WSL2 (C99, C11, C++17,
  *   -Werror). tests/adapt/device_test.c runs simulated devices through a
  *   fake transport on a virtual clock (manual mode) and on a real thread:
  *   identify, events mapped through the fit, timer queries and their
  *   widths, an unplug with a clock reset (LOST, the gap record, the fit
- *   restarted, RUNNING again), silence, a wrong device, the match keys.
- *   tests/loopback/device_loopback.c runs the serial transport against a
- *   socat pty pair on WSL2. NO REAL DEVICE has been opened: no box or
- *   board was attached. docs/device.md has the numbers.
+ *   restarted, RUNNING again), silence, a wrong device, the match keys;
+ *   and the outputs: the bytes and lines of each family, the OUT records,
+ *   trailing edges on the worker (timed on the real clock), the trigger
+ *   channel with a fake flip, roles. tests/loopback/device_loopback.c runs
+ *   the serial transport against a socat pty pair on WSL2;
+ *   examples/device/out_latency.c measures write to edge on a simulated
+ *   adapter and board. NO REAL DEVICE has been opened: no box, board or
+ *   trigger interface was attached. docs/device.md has the numbers.
  *
  *   ---------------------------------------------------------------------
  *   USAGE
@@ -55,6 +69,16 @@
  *       if (!ydev_start(&photo, &d)) die(ydev_error(&photo));
  *       ...
  *       ydev_stop(&photo);
+ *
+ *       static ydev_device trig;                        // an output
+ *       ydev_desc o = { 0 };
+ *       o.role = "trig";
+ *       o.family = YBOX_TRIGGERBOX;
+ *       o.key = "serial:0403:6001:TB0123:";
+ *       o.device = 2;
+ *       o.ring = &log_ring;
+ *       ydev_start(&trig, &o);
+ *       ydev_out_pulse(&trig, 12, 2000000);             // 12 for 2 ms, then 0
  *
  *   ---------------------------------------------------------------------
  *   MATCH KEYS (desc.key)
@@ -135,7 +159,97 @@
  *   "role ...", "port ...", "ident ..."), YDEV_REC_GARBAGE (u64[0] the
  *   decoder's total, at most one a second).
  *   Nothing allocates after ydev_start(); the instance holds its buffers
- *   and the fit (about 44 KB: make it static or allocate it once).
+ *   and the fit (about 45 KB: make it static or allocate it once).
+ *
+ *   ---------------------------------------------------------------------
+ *   OUTPUTS
+ *   ---------------------------------------------------------------------
+ *   An instance of a family with outputs (ybox_caps() & YBOX_CAP_OUT)
+ *   takes codes from any thread once it is RUNNING:
+ *     ydev_out_set(dev, code)               hold code (0 is idle)
+ *     ydev_out_pulse(dev, code, width_ns)   code, then 0 after width_ns
+ *     ydev_out_mark(dev, code, text)        the code as desc.pulse_ns says
+ *                                           (a pulse, or a set when 0) and
+ *                                           the text in the log
+ *     ydev_out_trigger(dev, code, deadline) the same for a ysp/screen.h
+ *                                           trigger channel (AT THE FLIP)
+ *   Each returns YDEV_OK or a YDEV_ERR_*: STATE when the device is not
+ *   RUNNING (nothing is written), ARG for a code above ybox_code_max() or
+ *   a width the family cannot give, IO when the write failed (the reader
+ *   then finds the device LOST). Each call, failed or not, is one
+ *   YDEV_REC_OUT record. Who times a pulse's end:
+ *     the device     XID ("mp" then "mh"; the width in whole ms, sent only
+ *                    when it changes) and LINE ("p <code> <us>"): flag
+ *                    DEVICE_TIMED; no second write
+ *     fixed          BioSemi and MMBT-S at switch P end every code after
+ *                    8 ms by themselves: width_ns must be 0 or within 1 ms
+ *                    of it; a set is that pulse too
+ *     the host       TriggerBox, MMBT-S at switch S (desc.latched), DTR and
+ *                    RTS, the parallel port: the instance's own ysp/rt.h
+ *                    worker (elevated unless desc.no_elevate) writes 0 at
+ *                    the deadline taken after the leading write. Its
+ *                    record (TRAILING) gives that write's own times
+ *   yser_pulse_async() and ypar_pulse_async() are not used: they give no
+ *   time for the trailing write and know no modem lines. The worker keeps
+ *   one trailing edge: a pulse while one is pending moves it (REPLACED); a
+ *   set cancels it, because a set means "hold this". ydev_stop() writes a
+ *   pending trailing edge at once (FLUSHED), then 0 if a code is still
+ *   held, then the family's close bytes (TriggerBox 0xFF), then closes.
+ *   With desc.now (a virtual clock) there is no worker: ydev_poll() writes
+ *   a trailing edge that is due.
+ *   Opening: DTR and RTS start low (the port is opened with
+ *   dtr_low_on_open and rts_low_on_open); the TriggerBox, MMBT-S, LINES and
+ *   parallel outputs get one 0 after they open. desc.baud 0 is the
+ *   family's rate (ybox_default_baud(): 9600 for the MMBT-S).
+ *   Writes are serialized with the reader's timer queries under the
+ *   instance's output lock; an XID query writes its 3 bytes 1 ms apart, so
+ *   an output on an XID instance with queries can wait up to 2 ms
+ *   (desc.probe_ns < 0 turns the queries off). Output commands are written
+ *   whole: Cedrus says XID 2 devices need no gap between bytes.
+ *   LINE boards report each change of their outputs ("O <t> <code>"): the
+ *   reader maps t through the fit and writes a REPORTED record, the
+ *   board's own time of the pin change.
+ *   YDEV_REC_OUT: t_ns = i64[0]; i64[0] the time just before the write
+ *   (REPORTED: the mapped board time), i64[1] just after (REPORTED: the read
+ *   time), i64[2] the width (the device's or the requested one; TRAILING:
+ *   the host width between the two writes), i64[3] the flip deadline (FLIP)
+ *   or the board ticks (REPORTED), u32[8] the code, u16[18] the YDEV_OUT_*
+ *   flags, u16[19] the output's number (a pulse and its TRAILING record
+ *   share it). MARK text follows as TEXT records "mark <text>", 34
+ *   characters each. ydev_out_last() gives the last call's times.
+ *   No output has a tier yet: write to edge is a loopback measurement
+ *   (docs/devices_spec.md 12; examples/device/out_latency.c).
+ *
+ *   ---------------------------------------------------------------------
+ *   AT THE FLIP (ysp/screen.h)
+ *   ---------------------------------------------------------------------
+ *   Include ysp/screen.h before this header (or include this header again
+ *   after it) and the device layer supplies the trigger channel callback;
+ *   its context is the output instance:
+ *       yscr_trigger_desc ch[1];
+ *       ch[0] = ydev_trigger_channel(&trig, 0);     // fn, ctx, offset, name
+ *       sd.triggers = ch; sd.n_triggers = 1;
+ *       ... yscr_trigger(screen, 0, 12);            // at this flip's vblank
+ *   ydev_trigger_fn() runs on the screen's trigger worker at the planned
+ *   vblank and calls ydev_out_trigger() with the code and the deadline: a
+ *   pulse of desc.pulse_ns (a set when 0), recorded with FLIP and the
+ *   deadline, so deadline to write is in the log. A flush at the screen's
+ *   close writes nothing (TRIGGERS: "a callback should not pulse then").
+ *   No second scheduler: the screen's worker is the clock.
+ *
+ *   ---------------------------------------------------------------------
+ *   ROLES
+ *   ---------------------------------------------------------------------
+ *   A role is the experiment's name for an instance ("resp", "trig"). With
+ *   desc.roles (a ydev_roles table the caller owns, zeroed once) and
+ *   desc.device 0, ydev_start() gives the instance the role's index, 1 to
+ *   YDEV_MAX_ROLES: the yin_event.device of its events and the aux of its
+ *   records, so the data file joins them by role. A role keeps its index
+ *   across a stop and a start; two running instances cannot share a role.
+ *   ydev_role_index(), ydev_role_device() and ydev_role_name() look roles
+ *   up, so a timeline's "trigger trig 12" finds its output by name. Start
+ *   and stop instances from one thread; the lookups are safe while no
+ *   start or stop runs.
  *
  *   ---------------------------------------------------------------------
  *   LICENSE: public domain / MIT-0, see end of file.
@@ -144,9 +258,9 @@
 #define YSP_DEVICE_H_INCLUDED
 
 #define YDEV_VERSION_MAJOR 0
-#define YDEV_VERSION_MINOR 1
+#define YDEV_VERSION_MINOR 2
 #define YDEV_VERSION_PATCH 0
-#define YDEV_VERSION_STRING "0.1.0"
+#define YDEV_VERSION_STRING "0.2.0"
 
 #include "ysp/rt.h"
 #include "ysp/input.h"
@@ -156,6 +270,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+
+#if defined(YRT_NO_THREADS)
+#error "ysp/device.h needs threads: its reader and its trailing edges run on threads (do not define YRT_NO_THREADS or YSER_NO_THREADS)"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -186,6 +304,25 @@ typedef enum ydev_lifecycle {
 #define YDEV_REC_GAP     2u
 #define YDEV_REC_TEXT    3u
 #define YDEV_REC_GARBAGE 4u
+#define YDEV_REC_OUT     5u   /* each output write (OUTPUTS)                */
+
+/* Results of the output calls. */
+#define YDEV_OK          0
+#define YDEV_ERR_ARG    -1    /* a code or width the family cannot give     */
+#define YDEV_ERR_FAMILY -2    /* the family has no outputs                  */
+#define YDEV_ERR_STATE  -3    /* not RUNNING: nothing was written           */
+#define YDEV_ERR_IO     -4    /* the write failed                           */
+
+/* YDEV_REC_OUT flags (u16[18]) and ydev_out_info.flags. */
+#define YDEV_OUT_DEVICE_TIMED 0x0001u /* the device ends the pulse           */
+#define YDEV_OUT_FLUSHED      0x0002u /* a trailing edge written early by stop */
+#define YDEV_OUT_TRAILING     0x0004u /* the host-timed end of a pulse       */
+#define YDEV_OUT_FAILED       0x0008u /* not written, or not whole           */
+#define YDEV_OUT_MARK         0x0010u /* TEXT records with the text follow   */
+#define YDEV_OUT_FLIP         0x0020u /* from a trigger channel; i64[3] its deadline */
+#define YDEV_OUT_REPORTED     0x0040u /* the board's own report of a change  */
+#define YDEV_OUT_REPLACED     0x0080u /* moved a pending trailing edge       */
+#define YDEV_OUT_PULSE        0x0100u /* a pulse (else a set)                */
 
 /* How bytes move. Every function is called on the reader thread except
  * interrupt (from ydev_stop()). */
@@ -200,23 +337,51 @@ typedef struct ydev_transport {
     void  (*interrupt)(void* conn);       /* end a blocked read; may be NULL */
     void  (*close)(void* conn);
     void* user;
+    /* YBOX_LINES: set the modem lines to code (bit 0 DTR, bit 1 RTS),
+     * touching only the bits in changed; 0, or < 0 the device is gone.
+     * NULL for a transport without lines. */
+    int   (*lines)(void* conn, uint32_t code, uint32_t changed);
 } ydev_transport;
+/* read may be NULL for an output-only transport (the parallel port): the
+ * reader then only waits. read and write may run at the same time on two
+ * threads (the reader and an output). */
 
 typedef void (*ydev_sink)(void* ctx, const yin_event* e);
+
+/* Roles (ROLES): the caller's table, zeroed once. */
+#define YDEV_MAX_ROLES 32
+struct ydev_device;
+typedef struct ydev_roles {
+    int                 n;
+    char                name[YDEV_MAX_ROLES][32];
+    struct ydev_device* dev[YDEV_MAX_ROLES];   /* the running instance, or NULL */
+} ydev_roles;
+
+/* What the last output call did (ydev_out_last()). */
+typedef struct ydev_out_info {
+    int64_t  t_before;       /* the clock just before the write             */
+    int64_t  t_after;        /* just after                                  */
+    int64_t  width_ns;       /* the pulse's width; 0 for a set              */
+    uint32_t code;
+    uint32_t seq;            /* the output's number (YDEV_REC_OUT u16[19])  */
+    uint32_t flags;          /* YDEV_OUT_*                                  */
+    int      result;         /* YDEV_OK or a YDEV_ERR_*                     */
+} ydev_out_info;
 
 /* Zero-initialize, then set role, family, key, device and sink. */
 typedef struct ydev_desc {
     const char*    role;            /* the experiment's name for it; logged     */
-    int            family;          /* YBOX_XID, YBOX_LINE, YBOX_PHOTO          */
+    int            family;          /* a YBOX_ family (ysp/box.h)               */
     const char*    key;             /* the match key (MATCH KEYS)               */
-    uint32_t       device;          /* yin_event.device of its events, > 0      */
+    uint32_t       device;          /* yin_event.device of its events, > 0;
+                                     * 0 with desc.roles (ROLES)               */
     int            kind;            /* yin_event.kind; 0 = the family's: BOX for
                                      * XID and LINE, SYNC for PHOTO            */
     ydev_sink      sink;            /* called for each event                   */
     void*          sink_ctx;
     yrt_ring*      ring;            /* records; NULL = none                    */
     ydev_transport transport;       /* all NULL = ysp/serial.h                 */
-    uint32_t       baud;            /* serial: 0 = 115200                      */
+    uint32_t       baud;            /* serial: 0 = ybox_default_baud()         */
     int64_t        probe_ns;        /* timer queries: 0 = 100 ms; < 0 = none   */
     int64_t        retry_ns;        /* reopen: 0 = 1 s                         */
     int64_t        silent_ns;       /* LOST after this long with no byte:
@@ -228,6 +393,12 @@ typedef struct ydev_desc {
     bool           no_elevate;
     int64_t      (*now)(void* ctx); /* the clock; NULL = yrt_now_ns()          */
     void*          now_ctx;
+    /* outputs (OUTPUTS) and roles (ROLES) */
+    ydev_roles*    roles;           /* with device 0: device = the role's index */
+    int64_t        pulse_ns;        /* ydev_out_mark() and trigger channels:
+                                     * > 0 a pulse this wide, 0 a set          */
+    bool           latched;         /* MMBT-S with its switch at S: a byte holds
+                                     * (default P: 8 ms pulses)                */
 } ydev_desc;
 
 typedef struct ydev_stats {
@@ -237,6 +408,9 @@ typedef struct ydev_stats {
     uint64_t      reads, bytes, events, pairs, probes, answers, refused;
     uint64_t      garbage;          /* bytes that fit no frame                 */
     uint64_t      clamped;          /* events whose map passed their read time */
+    uint64_t      outs;             /* output calls, trailing edges included   */
+    uint64_t      out_errors;       /* of them, not written                    */
+    uint64_t      reports;          /* LINE "O" reports                        */
     int64_t       last_rx_ns;       /* the last byte                           */
     yrt_fit_info  fit;
     char          found[64];        /* the port that matched                   */
@@ -263,6 +437,21 @@ typedef struct ydev_device {
     int            stop;            /* written and read under the lock         */
     int            started, have_thread;
     union { unsigned char b[64]; void* p; int64_t i; double f; } thread_mem, lock_mem;
+    /* outputs: written under the output lock */
+    union { unsigned char b[64]; void* p; int64_t i; double f; } out_lock_mem;
+    yrt_worker     worker;          /* host-timed trailing edges               */
+    ydev_out_info  last_out;
+    uint64_t       outs, out_errors;
+    int64_t        trail_at;        /* an armed trailing edge: its deadline    */
+    int64_t        trail_lead;      /* and its pulse's leading write           */
+    uint32_t       trail_token;     /* the worker's job; 0 = none armed        */
+    uint32_t       trail_seq;       /* the pulse it ends                       */
+    uint32_t       out_seq;
+    uint32_t       out_code;        /* the code the outputs hold               */
+    uint32_t       xid_width_ms;    /* the box's mp; unknown after an open     */
+    int            out_ready;       /* RUNNING with a connection               */
+    int            have_worker;
+    int            role;            /* the slot in desc.roles + 1, or 0        */
     char           err[160];
 } ydev_device;
 
@@ -298,11 +487,66 @@ YDEV_API bool ydev_key_match(const char* pattern, const char* key);
  * the instance. */
 YDEV_API ydev_transport ydev_serial_transport(ydev_device* dev);
 
+/* --- outputs (OUTPUTS) ----------------------------------------------------- */
+
+YDEV_API int  ydev_out_set(ydev_device* dev, uint32_t code);
+YDEV_API int  ydev_out_pulse(ydev_device* dev, uint32_t code, int64_t width_ns);
+YDEV_API int  ydev_out_mark(ydev_device* dev, uint32_t code, const char* text);
+/* desc.pulse_ns's pulse (or a set) for a trigger at deadline_ns, flagged
+ * FLIP: what ydev_trigger_fn() calls. */
+YDEV_API int  ydev_out_trigger(ydev_device* dev, uint32_t code, int64_t deadline_ns);
+/* The last output call of any thread on dev. */
+YDEV_API void ydev_out_last(ydev_device* dev, ydev_out_info* out);
+
+/* --- roles (ROLES) ------------------------------------------------------------ */
+
+/* The role's index (1 to YDEV_MAX_ROLES), or 0 when the table has none. */
+YDEV_API int  ydev_role_index(const ydev_roles* r, const char* name);
+/* The running instance of a role, or NULL. */
+YDEV_API ydev_device* ydev_role_device(const ydev_roles* r, int index);
+YDEV_API const char*  ydev_role_name(const ydev_roles* r, int index);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* YSP_DEVICE_H_INCLUDED */
+
+/* Outside the include guard: including this header again after
+ * ysp/screen.h (or ysp/parallel.h) adds the glue. */
+#if defined(YSP_SCREEN_H_INCLUDED) && !defined(YDEV__SCREEN_GLUE)
+#define YDEV__SCREEN_GLUE
+/* A ysp/screen.h trigger channel's callback (AT THE FLIP); ctx is the
+ * output instance. */
+static inline void ydev_trigger_fn(void* ctx, const yscr_trigger_info* info) {
+    if (info->flags & YSCR_TRIG_FLUSHED) return;   /* the screen's close: no pulse then */
+    (void)ydev_out_trigger((ydev_device*)ctx, info->code, info->deadline_ns);
+}
+/* A channel for desc.triggers: the callback, the instance, the offset and
+ * the role as its name. */
+static inline yscr_trigger_desc ydev_trigger_channel(ydev_device* dev, int64_t offset_ns) {
+    yscr_trigger_desc t;
+    t.fn = ydev_trigger_fn;
+    t.ctx = dev;
+    t.offset_ns = offset_ns;
+    t.name = dev->d.role;
+    return t;
+}
+#endif
+#if defined(YSP_PARALLEL_H_INCLUDED) && !defined(YDEV__PARALLEL_GLUE)
+#define YDEV__PARALLEL_GLUE
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* The parallel port as a transport for YBOX_PARALLEL: key "parallel:" (the
+ * default port), "parallel:0x378" (a base address) or
+ * "parallel:/dev/parport0" (Linux). The caller owns port, zeroed. Built
+ * where the implementation sees ysp/parallel.h first. */
+YDEV_API ydev_transport ydev_parallel_transport(ypar_port* port);
+#ifdef __cplusplus
+}
+#endif
+#endif
 
 /* ======================================================================= *
  *                            IMPLEMENTATION                               *
@@ -322,6 +566,7 @@ YDEV_API ydev_transport ydev_serial_transport(ydev_device* dev);
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <ctype.h>
 
 #if defined(_WIN32)
@@ -353,6 +598,10 @@ static void ydev__unlock(ydev__mutex* m)     { pthread_mutex_unlock(m); }
 typedef char ydev__lock_fits[sizeof(ydev__mutex) <= 64 ? 1 : -1];
 
 static ydev__mutex* ydev__mx(ydev_device* dev) { return (ydev__mutex*)(void*)dev->lock_mem.b; }
+/* The output lock: writes to the device (outputs, trailing edges, timer
+ * queries) and the connection's use by them. Taken before the lock above,
+ * never after it. */
+static ydev__mutex* ydev__omx(ydev_device* dev) { return (ydev__mutex*)(void*)dev->out_lock_mem.b; }
 
 static bool ydev__stopping(ydev_device* dev) {
     int s;
@@ -446,9 +695,11 @@ static void* ydev__ser_open(void* user, const char* key, char* found, size_t fou
     if (!name || !name[0]) return NULL;
     memset(&sd, 0, sizeof sd);
     sd.device = name;
-    sd.baud = dev->d.baud ? dev->d.baud : 115200u;
+    sd.baud = dev->d.baud ? dev->d.baud : ybox_default_baud(dev->d.family);
     sd.low_latency = true;
     sd.write_timeout_ms = 100;
+    /* DTR and RTS as outputs start idle; yser_open() raises both otherwise */
+    sd.dtr_low_on_open = sd.rts_low_on_open = dev->d.family == YBOX_LINES;
     if (!yser_open(&dev->port, &sd)) return NULL;
     snprintf(found, found_cap, "%s", name);
     return &dev->port;
@@ -467,6 +718,13 @@ static int ydev__ser_write(void* conn, const uint8_t* buf, int n) {
 static void ydev__ser_interrupt(void* conn) { (void)yser_interrupt((yser_port*)conn); }
 static void ydev__ser_close(void* conn) { yser_close((yser_port*)conn); }
 
+static int ydev__ser_lines(void* conn, uint32_t code, uint32_t changed) {
+    yser_port* p = (yser_port*)conn;
+    if ((changed & 1u) && yser_set_dtr(p, (code & 1u) != 0) < 0) return -1;
+    if ((changed & 2u) && yser_set_rts(p, (code & 2u) != 0) < 0) return -1;
+    return 0;
+}
+
 YDEV_API ydev_transport ydev_serial_transport(ydev_device* dev) {
     ydev_transport t;
     t.open = ydev__ser_open;
@@ -475,21 +733,62 @@ YDEV_API ydev_transport ydev_serial_transport(ydev_device* dev) {
     t.interrupt = ydev__ser_interrupt;
     t.close = ydev__ser_close;
     t.user = dev;
+    t.lines = ydev__ser_lines;
     return t;
 }
 
+/* --- the parallel transport (when ysp/parallel.h came first) ------------------ */
+
+#if defined(YSP_PARALLEL_H_INCLUDED)
+static void* ydev__par_open(void* user, const char* key, char* found, size_t found_cap) {
+    ypar_port* port = (ypar_port*)user;
+    ypar_desc pd;
+    const char* a;
+    if (strncmp(key, "parallel:", 9) != 0) return NULL;
+    a = key + 9;
+    memset(&pd, 0, sizeof pd);
+    if (a[0] == '0' && (a[1] == 'x' || a[1] == 'X')) pd.base_addr = (uint16_t)strtoul(a, NULL, 16);
+    else if (a[0]) pd.device = a;
+    if (!ypar_open(port, &pd)) return NULL;
+    snprintf(found, found_cap, "%s", a[0] ? a : "parallel (default)");
+    return port;
+}
+
+static int ydev__par_write(void* conn, const uint8_t* buf, int n) {
+    /* one byte is the whole state of the data lines: the last one counts */
+    if (n <= 0) return n;
+    return ypar_write_data((ypar_port*)conn, buf[n - 1]) ? n : -1;
+}
+
+static void ydev__par_close(void* conn) { ypar_close((ypar_port*)conn); }
+
+YDEV_API ydev_transport ydev_parallel_transport(ypar_port* port) {
+    ydev_transport t;
+    memset(&t, 0, sizeof t);
+    t.open = ydev__par_open;
+    t.write = ydev__par_write;
+    t.close = ydev__par_close;
+    t.user = port;
+    return t;
+}
+#endif
+
 /* --- records -------------------------------------------------------------------- */
 
-static void ydev__rec(ydev_device* dev, uint16_t kind, const yrt_payload* u) {
+static void ydev__rec_at(ydev_device* dev, uint16_t kind, int64_t t, const yrt_payload* u) {
     yrt_event ev;
     if (!dev->d.ring) return;
     memset(&ev, 0, sizeof ev);
-    ev.t_ns = (uint64_t)ydev__now(dev);
+    ev.t_ns = (uint64_t)t;
     ev.source = (uint16_t)YRT_SRC_DEVICE;
     ev.kind = kind;
     ev.aux = dev->d.device;
     ev.u = *u;
     (void)yrt_ring_push(dev->d.ring, &ev);
+}
+
+static void ydev__rec(ydev_device* dev, uint16_t kind, const yrt_payload* u) {
+    if (dev->d.ring) ydev__rec_at(dev, kind, ydev__now(dev), u);
 }
 
 static void ydev__text(ydev_device* dev, const char* what, const char* text) {
@@ -598,7 +897,7 @@ static int ydev__identify(ydev_device* dev) {
     char acc[512];
     uint8_t q[8];
     int tries, nq;
-    if (dev->d.no_identify || dev->d.family == YBOX_PHOTO) return 1;
+    if (dev->d.no_identify || !(ybox_caps(dev->d.family) & YBOX_CAP_IDENT)) return 1;
     nq = ybox_identify(dev->d.family, q, (int)sizeof q);
     for (tries = 0; tries < 3 && !ydev__stopping(dev); tries++) {
         size_t len = 0;
@@ -639,14 +938,275 @@ static int ydev__identify(ydev_device* dev) {
     return -1;
 }
 
+/* --- outputs --------------------------------------------------------------------- */
+
+#define YDEV__WIDTH_UNKNOWN 0xFFFFFFFFu
+
+/* The width every code gets from the device itself: BioSemi, and the MMBT-S
+ * unless its switch is at S. */
+static int64_t ydev__fixed_ns(const ydev_device* dev) {
+    if (dev->d.family == YBOX_MMBTS && dev->d.latched) return 0;
+    return ybox_fixed_pulse_ns(dev->d.family);
+}
+
+/* Whether the host times a pulse's end (the worker), or the device does. */
+static bool ydev__host_pulse(const ydev_device* dev) {
+    return !(ybox_caps(dev->d.family) & YBOX_CAP_PULSE) && ydev__fixed_ns(dev) == 0;
+}
+
+/* XID's mp is in whole ms and 0 means hold: a pulse is never 0 ms. */
+static uint32_t ydev__xid_ms(int64_t width_ns) {
+    int64_t ms = (width_ns + 500000) / 1000000;
+    /* ybox_encode() takes us in 32 bits: at most 4294967 ms */
+    return ms < 1 ? 1u : ms > 4294967 ? 4294967u : (uint32_t)ms;
+}
+
+/* Puts code on the outputs: the modem lines, or the encoder's bytes in one
+ * write. width_ns > 0 asks the device to time a pulse (PULSE families).
+ * t0 and t1 bracket the write. Under the output lock, with out_ready. */
+static int ydev__put(ydev_device* dev, uint32_t code, int64_t width_ns, int64_t* t0, int64_t* t1) {
+    uint8_t b[24];
+    int n = 0, k, r;
+    int fam = dev->d.family;
+    if (ybox_caps(fam) & YBOX_CAP_LINES) {
+        if (!dev->tr.lines) { *t0 = *t1 = ydev__now(dev); return YDEV_ERR_FAMILY; }
+        *t0 = ydev__now(dev);
+        r = dev->tr.lines(dev->conn, code, code ^ dev->out_code);
+        *t1 = ydev__now(dev);
+        return r < 0 ? YDEV_ERR_IO : YDEV_OK;
+    }
+    if (fam == YBOX_XID) {
+        /* the box keeps its pulse width: send mp only when it changes */
+        uint32_t ms = width_ns > 0 ? ydev__xid_ms(width_ns) : 0u;
+        if (ms != dev->xid_width_ms) {
+            k = ybox_encode(fam, YBOX_OP_WIDTH, 0, ms * 1000u, b, (int)sizeof b);
+            if (k < 0) return YDEV_ERR_ARG;
+            n = k;
+        }
+        k = ybox_encode(fam, YBOX_OP_SET, code, 0, b + n, (int)sizeof b - n);
+    } else {
+        k = ybox_encode(fam, width_ns > 0 ? YBOX_OP_PULSE : YBOX_OP_SET, code,
+                        width_ns > 0 ? (uint32_t)((width_ns + 500) / 1000) : 0u, b, (int)sizeof b);
+    }
+    if (k <= 0) { *t0 = *t1 = ydev__now(dev); return YDEV_ERR_ARG; }
+    n += k;
+    *t0 = ydev__now(dev);
+    r = dev->tr.write(dev->conn, b, n);
+    *t1 = ydev__now(dev);
+    if (r != n) {
+        if (fam == YBOX_XID) dev->xid_width_ms = YDEV__WIDTH_UNKNOWN;
+        return YDEV_ERR_IO;
+    }
+    if (fam == YBOX_XID) dev->xid_width_ms = width_ns > 0 ? ydev__xid_ms(width_ns) : 0u;
+    return YDEV_OK;
+}
+
+/* One YDEV_REC_OUT record and the last call's info. Under the output lock. */
+static void ydev__out_done(ydev_device* dev, int rc, uint32_t flags, uint32_t code, int64_t t0, int64_t t1,
+                           int64_t width, int64_t extra, uint32_t seq) {
+    yrt_payload u;
+    if (rc != YDEV_OK) { flags |= YDEV_OUT_FAILED; dev->out_errors++; }
+    dev->outs++;
+    dev->last_out.t_before = t0;
+    dev->last_out.t_after = t1;
+    dev->last_out.width_ns = width;
+    dev->last_out.code = code;
+    dev->last_out.seq = seq;
+    dev->last_out.flags = flags;
+    dev->last_out.result = rc;
+    memset(&u, 0, sizeof u);
+    u.i64[0] = t0;
+    u.i64[1] = t1;
+    u.i64[2] = width;
+    u.i64[3] = extra;
+    u.u32[8] = code;
+    u.u16[18] = (uint16_t)flags;
+    u.u16[19] = (uint16_t)seq;
+    ydev__rec_at(dev, (uint16_t)YDEV_REC_OUT, t0, &u);
+}
+
+/* The end of a host-timed pulse: 0, if this job is still the armed one
+ * (token 0: whatever is armed). */
+static void ydev__trail(ydev_device* dev, uint32_t token, bool flushed) {
+    ydev__lock(ydev__omx(dev));
+    if (dev->trail_token && (token == 0 || token == dev->trail_token)) {
+        int64_t t0, t1;
+        int rc;
+        dev->trail_token = 0;
+        if (dev->out_ready) rc = ydev__put(dev, 0, 0, &t0, &t1);
+        else { rc = YDEV_ERR_STATE; t0 = t1 = ydev__now(dev); }
+        if (rc == YDEV_OK) dev->out_code = 0;
+        ydev__out_done(dev, rc, YDEV_OUT_TRAILING | (flushed ? YDEV_OUT_FLUSHED : 0u), 0, t0, t1,
+                       t0 - dev->trail_lead, 0, dev->trail_seq);
+    }
+    ydev__unlock(ydev__omx(dev));
+}
+
+static void ydev__trail_job(void* ctx, const yrt_job_info* info) {
+    ydev__trail((ydev_device*)ctx, info->seq, info->flushed);
+}
+
+/* Every output call. width_ns < 0: a set; else a pulse (0 = the family's
+ * fixed width). */
+static int ydev__out(ydev_device* dev, uint32_t code, int64_t width_ns, uint32_t flags, int64_t extra) {
+    int64_t t0 = 0, t1 = 0, w = 0, fixed;
+    uint32_t seq;
+    int rc = YDEV_OK;
+    bool pulse = width_ns >= 0;
+    if (!dev || !dev->started) return YDEV_ERR_STATE;
+    if (!(ybox_caps(dev->d.family) & YBOX_CAP_OUT)) return YDEV_ERR_FAMILY;
+    fixed = ydev__fixed_ns(dev);
+    ydev__lock(ydev__omx(dev));
+    seq = ++dev->out_seq;
+    if (pulse) flags |= YDEV_OUT_PULSE;
+    if (code > ybox_code_max(dev->d.family)) rc = YDEV_ERR_ARG;
+    else if (fixed > 0 && pulse && width_ns != 0 && (width_ns < fixed - 1000000 || width_ns > fixed + 1000000))
+        rc = YDEV_ERR_ARG;   /* the device ends every code after its own width */
+    else if (!fixed && pulse && width_ns == 0) rc = YDEV_ERR_ARG;
+    else if (!dev->out_ready) rc = YDEV_ERR_STATE;
+    if (rc != YDEV_OK) {
+        t0 = t1 = ydev__now(dev);
+        ydev__out_done(dev, rc, flags, code, t0, t1, 0, extra, seq);
+        ydev__unlock(ydev__omx(dev));
+        return rc;
+    }
+    if (dev->trail_token) {
+        /* a set means "hold this"; a pulse moves the one trailing edge */
+        dev->trail_token = 0;
+        if (pulse) flags |= YDEV_OUT_REPLACED;
+        if (dev->have_worker) (void)yrt_worker_cancel(&dev->worker);
+    }
+    if (fixed > 0) {
+        rc = ydev__put(dev, code, 0, &t0, &t1);
+        w = fixed;
+        flags |= YDEV_OUT_DEVICE_TIMED;
+    } else if (pulse && !ydev__host_pulse(dev)) {
+        rc = ydev__put(dev, code, width_ns, &t0, &t1);
+        w = dev->d.family == YBOX_XID ? (int64_t)ydev__xid_ms(width_ns) * 1000000 : (width_ns + 500) / 1000 * 1000;
+        flags |= YDEV_OUT_DEVICE_TIMED;
+    } else {
+        rc = ydev__put(dev, code, 0, &t0, &t1);
+        if (rc == YDEV_OK && pulse) {
+            /* the deadline from the end of the leading write, as
+             * yser_pulse_async() takes it */
+            w = width_ns;
+            dev->trail_at = t1 + width_ns;
+            dev->trail_lead = t0;
+            dev->trail_seq = seq;
+            if (dev->have_worker) {
+                int job = yrt_worker_submit(&dev->worker, (uint64_t)dev->trail_at, ydev__trail_job, dev);
+                dev->trail_token = job > 0 ? (uint32_t)job : 0u;
+                if (job <= 0) rc = YDEV_ERR_IO;
+            } else {
+                dev->trail_token = 1u;   /* a virtual clock: ydev_poll() ends it */
+            }
+        }
+    }
+    /* what the lines hold now: a device-timed pulse ends by itself */
+    if (rc == YDEV_OK) dev->out_code = (flags & YDEV_OUT_DEVICE_TIMED) ? 0u : code;
+    ydev__out_done(dev, rc, flags, code, t0, t1, w, extra, seq);
+    ydev__unlock(ydev__omx(dev));
+    return rc;
+}
+
+YDEV_API int ydev_out_set(ydev_device* dev, uint32_t code) { return ydev__out(dev, code, -1, 0u, 0); }
+
+YDEV_API int ydev_out_pulse(ydev_device* dev, uint32_t code, int64_t width_ns) {
+    if (width_ns < 0) width_ns = 0;
+    return ydev__out(dev, code, width_ns, 0u, 0);
+}
+
+YDEV_API int ydev_out_trigger(ydev_device* dev, uint32_t code, int64_t deadline_ns) {
+    if (!dev) return YDEV_ERR_STATE;
+    return ydev__out(dev, code, dev->d.pulse_ns > 0 || ydev__fixed_ns(dev) > 0 ? dev->d.pulse_ns : -1,
+                     YDEV_OUT_FLIP, deadline_ns);
+}
+
+YDEV_API int ydev_out_mark(ydev_device* dev, uint32_t code, const char* text) {
+    int rc;
+    if (!dev) return YDEV_ERR_STATE;
+    rc = ydev__out(dev, code, dev->d.pulse_ns > 0 || ydev__fixed_ns(dev) > 0 ? dev->d.pulse_ns : -1,
+                   text && text[0] ? YDEV_OUT_MARK : 0u, 0);
+    if (text && text[0] && dev->started && dev->d.ring) {
+        /* the text after its record, 34 characters a record */
+        size_t n = strlen(text), i;
+        for (i = 0; i < n; i += 34) {
+            yrt_payload u;
+            memset(&u, 0, sizeof u);
+            snprintf(u.text, sizeof u.text, "mark %.34s", text + i);
+            ydev__rec(dev, (uint16_t)YDEV_REC_TEXT, &u);
+        }
+    }
+    return rc;
+}
+
+YDEV_API void ydev_out_last(ydev_device* dev, ydev_out_info* out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    if (!dev || !dev->started) return;
+    ydev__lock(ydev__omx(dev));
+    *out = dev->last_out;
+    ydev__unlock(ydev__omx(dev));
+}
+
+/* After an open: outputs usable, the width of an XID box unknown, and a 0
+ * for the boxes that hold a byte (and the modem lines), so they start
+ * idle. */
+static void ydev__out_open(ydev_device* dev) {
+    int fam = dev->d.family;
+    ydev__lock(ydev__omx(dev));
+    dev->out_code = fam == YBOX_LINES ? 3u : 0u;   /* lines: write both, whatever the open left */
+    dev->xid_width_ms = YDEV__WIDTH_UNKNOWN;
+    dev->trail_token = 0;
+    dev->out_ready = dev->conn != NULL;
+    ydev__unlock(ydev__omx(dev));
+    if (fam == YBOX_TRIGGERBOX || fam == YBOX_PARALLEL || fam == YBOX_LINES || (fam == YBOX_MMBTS && dev->d.latched))
+        (void)ydev_out_set(dev, 0);
+}
+
+/* At stop, after the reader: a held code back to 0, the close bytes. */
+static void ydev__out_close(ydev_device* dev) {
+    uint8_t b[8];
+    int n;
+    if (!(ybox_caps(dev->d.family) & YBOX_CAP_OUT)) return;
+    if (dev->out_code != 0 && ydev__fixed_ns(dev) == 0) (void)ydev_out_set(dev, 0);
+    n = ybox_encode(dev->d.family, YBOX_OP_CLOSE, 0, 0, b, (int)sizeof b);
+    ydev__lock(ydev__omx(dev));
+    if (n > 0 && dev->out_ready) (void)dev->tr.write(dev->conn, b, n);
+    ydev__unlock(ydev__omx(dev));
+}
+
+/* --- roles ------------------------------------------------------------------------ */
+
+YDEV_API int ydev_role_index(const ydev_roles* r, const char* name) {
+    int i;
+    if (!r || !name) return 0;
+    for (i = 0; i < r->n && i < YDEV_MAX_ROLES; i++)
+        if (strcmp(r->name[i], name) == 0) return i + 1;
+    return 0;
+}
+
+YDEV_API ydev_device* ydev_role_device(const ydev_roles* r, int index) {
+    if (!r || index < 1 || index > r->n || index > YDEV_MAX_ROLES) return NULL;
+    return r->dev[index - 1];
+}
+
+YDEV_API const char* ydev_role_name(const ydev_roles* r, int index) {
+    if (!r || index < 1 || index > r->n || index > YDEV_MAX_ROLES) return NULL;
+    return r->name[index - 1];
+}
+
 /* --- the step ----------------------------------------------------------------------- */
 
 static void ydev__close_conn(ydev_device* dev) {
     void* c;
+    ydev__lock(ydev__omx(dev));
+    dev->out_ready = 0;
     ydev__lock(ydev__mx(dev));
     c = dev->conn;
     dev->conn = NULL;
     ydev__unlock(ydev__mx(dev));
+    ydev__unlock(ydev__omx(dev));
     if (c) dev->tr.close(c);
 }
 
@@ -710,6 +1270,7 @@ static void ydev__try_open(ydev_device* dev) {
     dev->st.last_rx_ns = ydev__now(dev);
     dev->next_probe = ydev__now(dev);
     ydev__set_state(dev, YDEV_RUNNING, YDEV_WHY_IDENTIFIED);
+    ydev__out_open(dev);
 }
 
 static void ydev__probe(ydev_device* dev) {
@@ -721,7 +1282,10 @@ static void ydev__probe(ydev_device* dev) {
     if (++dev->probe_seq == 0) dev->probe_seq = 1;
     n = ybox_probe(dev->d.family, dev->probe_seq, q, (int)sizeof q);
     if (n <= 0) return;
-    if (ydev__write(dev, q, n, &t0) < 0) { ydev__lose(dev, YDEV_WHY_DISCONNECTED); return; }
+    ydev__lock(ydev__omx(dev));
+    n = ydev__write(dev, q, n, &t0);
+    ydev__unlock(ydev__omx(dev));
+    if (n < 0) { ydev__lose(dev, YDEV_WHY_DISCONNECTED); return; }
     dev->probe_pending = dev->d.family == YBOX_XID ? 1u : dev->probe_seq;
     dev->probe_t0 = t0;
     dev->st.probes++;
@@ -743,6 +1307,11 @@ static void ydev__read(ydev_device* dev, int timeout_ms) {
     size_t used = 0;
     int64_t t;
     ybox_out o;
+    if (!dev->tr.read) {
+        /* an output-only transport: nothing to read */
+        if (timeout_ms > 0 && !dev->d.now) (void)yrt_sleep_ns((uint64_t)timeout_ms * 1000000u);
+        return;
+    }
     n = dev->tr.read(dev->conn, dev->rx, (int)sizeof dev->rx, timeout_ms);
     t = ydev__now(dev);
     if (n < 0) { ydev__lose(dev, YDEV_WHY_DISCONNECTED); return; }
@@ -787,6 +1356,19 @@ static void ydev__read(ydev_device* dev, int timeout_ms) {
             dev->st.events++;
             if (dev->d.sink) dev->d.sink(dev->d.sink_ctx, e);
         }
+        if (o.has_out) {
+            /* the board's own time of its pin change */
+            yrt_payload u;
+            int64_t m = mapped ? yrt_fit_map(&dev->fit, o.out_ticks) : t;
+            memset(&u, 0, sizeof u);
+            u.i64[0] = m > t ? t : m;
+            u.i64[1] = t;
+            u.i64[3] = (int64_t)o.out_ticks;
+            u.u32[8] = o.out_code;
+            u.u16[18] = (uint16_t)(YDEV_OUT_REPORTED | YDEV_OUT_DEVICE_TIMED);
+            ydev__rec_at(dev, (uint16_t)YDEV_REC_OUT, u.i64[0], &u);
+            dev->st.reports++;
+        }
     }
     if (dev->d.ring && dev->st.garbage && t - dev->last_garbage_rec >= 1000000000) {
         yrt_payload u;
@@ -798,6 +1380,7 @@ static void ydev__read(ydev_device* dev, int timeout_ms) {
 }
 
 static void ydev__step(ydev_device* dev, int timeout_ms) {
+    if (!dev->have_worker && dev->trail_token && ydev__now(dev) >= dev->trail_at) ydev__trail(dev, 0, false);
     if (dev->state == YDEV_OPENING || dev->state == YDEV_LOST) ydev__try_open(dev);
     if (dev->state == YDEV_RUNNING && dev->conn) {
         ydev__probe(dev);
@@ -833,15 +1416,39 @@ YDEV_API bool ydev_start(ydev_device* dev, const ydev_desc* desc) {
 #define YDEV__FAIL(msg) do { snprintf(dev->err, sizeof dev->err, "ysp_device: %s", msg); return false; } while (0)
     if (!desc) YDEV__FAIL("NULL desc");
     if (!desc->role || !desc->role[0]) YDEV__FAIL("desc.role is required");
-    if (desc->family < YBOX_XID || desc->family > YBOX_PHOTO) YDEV__FAIL("desc.family is not a YBOX_ family");
+    if (desc->family < YBOX_XID || desc->family > YBOX_FAMILY_LAST) YDEV__FAIL("desc.family is not a YBOX_ family");
     if (!desc->key || !desc->key[0]) YDEV__FAIL("desc.key is required (MATCH KEYS)");
+    if (desc->family == YBOX_PARALLEL && !desc->transport.open)
+        YDEV__FAIL("YBOX_PARALLEL needs desc.transport = ydev_parallel_transport(&port)");
     if (strncmp(desc->key, "serial:", 7) != 0 && strncmp(desc->key, "port:", 5) != 0 && !desc->transport.open)
         YDEV__FAIL("desc.key must start with serial: or port:");
-    if (desc->device == 0) YDEV__FAIL("desc.device must be > 0 (0 means unknown in ysp/input.h)");
+    if (desc->device == 0 && !desc->roles) YDEV__FAIL("desc.device must be > 0 (0 means unknown in ysp/input.h), or set desc.roles");
+    if (desc->device != 0 && desc->roles) YDEV__FAIL("desc.roles gives desc.device: leave it 0");
+    if (desc->pulse_ns < 0) YDEV__FAIL("desc.pulse_ns must be >= 0");
+    if (desc->pulse_ns > 0 && ybox_fixed_pulse_ns(desc->family) > 0 && !(desc->family == YBOX_MMBTS && desc->latched) &&
+        (desc->pulse_ns < ybox_fixed_pulse_ns(desc->family) - 1000000 ||
+         desc->pulse_ns > ybox_fixed_pulse_ns(desc->family) + 1000000))
+        YDEV__FAIL("desc.pulse_ns: this family ends every code after 8 ms by itself");
     if (desc->kind < 0 || desc->kind > 15) YDEV__FAIL("desc.kind is not a yin_kind");
-    if (desc->transport.open && (!desc->transport.read || !desc->transport.write || !desc->transport.close))
-        YDEV__FAIL("desc.transport needs open, read, write and close");
+    if (desc->transport.open && (!desc->transport.write || !desc->transport.close ||
+                                 (!desc->transport.read && (ybox_caps(desc->family) & YBOX_CAP_IN))))
+        YDEV__FAIL("desc.transport needs open, read, write and close (read only for an output-only family)");
     dev->d = *desc;
+    if (desc->roles) {
+        ydev_roles* r = desc->roles;
+        int i = ydev_role_index(r, desc->role);
+        if (strlen(desc->role) >= sizeof r->name[0]) YDEV__FAIL("desc.role: at most 31 characters with desc.roles");
+        if (i && r->dev[i - 1] && r->dev[i - 1] != dev) YDEV__FAIL("desc.role is bound to another running instance");
+        if (!i) {
+            if (r->n >= YDEV_MAX_ROLES) YDEV__FAIL("desc.roles is full (YDEV_MAX_ROLES)");
+            snprintf(r->name[r->n], sizeof r->name[0], "%s", desc->role);
+            r->dev[r->n] = NULL;
+            i = ++r->n;
+        }
+        r->dev[i - 1] = dev;
+        dev->role = i;
+        dev->d.device = (uint32_t)i;
+    }
     if (dev->d.kind == 0) dev->d.kind = dev->d.family == YBOX_PHOTO ? YIN_KIND_SYNC : YIN_KIND_BOX;
     if (dev->d.probe_ns == 0) dev->d.probe_ns = 100000000;
     if (dev->d.retry_ns <= 0) dev->d.retry_ns = 1000000000;
@@ -849,8 +1456,28 @@ YDEV_API bool ydev_start(ydev_device* dev, const ydev_desc* desc) {
     if (dev->d.max_width_ns <= 0) dev->d.max_width_ns = dev->d.family == YBOX_XID ? 20000000 : 1300000;
     if (dev->d.read_timeout_ms <= 0) dev->d.read_timeout_ms = 20;
     if (dev->d.family == YBOX_PHOTO) dev->d.probe_ns = -1;   /* no queries */
+    if (!(ybox_caps(dev->d.family) & YBOX_CAP_IN)) {
+        /* an output-only device says nothing: silence is not a loss */
+        dev->d.probe_ns = -1;
+        dev->d.silent_ns = -1;
+    }
     dev->tr = desc->transport.open ? desc->transport : ydev_serial_transport(dev);
     ydev__lock_init(ydev__mx(dev));
+    ydev__lock_init(ydev__omx(dev));
+    if (ydev__host_pulse(dev) && (ybox_caps(dev->d.family) & YBOX_CAP_OUT) && !dev->d.now) {
+        yrt_worker_desc wd;
+        memset(&wd, 0, sizeof wd);
+        wd.no_elevate = dev->d.no_elevate;
+        if (!yrt_worker_start(&dev->worker, &wd)) {
+            snprintf(dev->err, sizeof dev->err, "ysp_device: the trailing-edge worker did not start: %.100s",
+                     yrt_worker_error(&dev->worker));
+            ydev__lock_free(ydev__omx(dev));
+            ydev__lock_free(ydev__mx(dev));
+            if (dev->role) desc->roles->dev[dev->role - 1] = NULL;
+            return false;
+        }
+        dev->have_worker = 1;
+    }
     dev->state = YDEV_CLOSED;
     ydev__text(dev, "role", dev->d.role);
     ydev__set_state(dev, YDEV_OPENING, YDEV_WHY_START);
@@ -875,7 +1502,10 @@ YDEV_API bool ydev_start(ydev_device* dev, const ydev_desc* desc) {
     }
 #endif
     if (!dev->have_thread) {
+        if (dev->have_worker) { yrt_worker_stop(&dev->worker); dev->have_worker = 0; }
+        ydev__lock_free(ydev__omx(dev));
         ydev__lock_free(ydev__mx(dev));
+        if (dev->role) dev->d.roles->dev[dev->role - 1] = NULL;
         dev->started = 0;
         YDEV__FAIL("the reader thread did not start");
     }
@@ -902,10 +1532,16 @@ YDEV_API void ydev_stop(ydev_device* dev) {
 #endif
         dev->have_thread = 0;
     }
+    /* outputs end idle: a pending trailing edge now, then a held code */
+    if (dev->have_worker) { yrt_worker_stop(&dev->worker); dev->have_worker = 0; }
+    else if (dev->trail_token) ydev__trail(dev, 0, true);
+    ydev__out_close(dev);
     ydev__close_conn(dev);
     ydev__set_state(dev, YDEV_CLOSED, YDEV_WHY_STOP);
     ydev__publish(dev);
+    ydev__lock_free(ydev__omx(dev));
     ydev__lock_free(ydev__mx(dev));
+    if (dev->role && dev->d.roles && dev->d.roles->dev[dev->role - 1] == dev) dev->d.roles->dev[dev->role - 1] = NULL;
     dev->started = 0;
 }
 
@@ -930,9 +1566,13 @@ YDEV_API void ydev_get_stats(ydev_device* dev, ydev_stats* out) {
         if (dev) *out = dev->snap; else memset(out, 0, sizeof *out);
         return;
     }
+    ydev__lock(ydev__omx(dev));
     ydev__lock(ydev__mx(dev));
     *out = dev->snap;
     ydev__unlock(ydev__mx(dev));
+    out->outs = dev->outs;
+    out->out_errors = dev->out_errors;
+    ydev__unlock(ydev__omx(dev));
 }
 
 YDEV_API const char* ydev_error(const ydev_device* dev) { return dev ? dev->err : "ysp_device: NULL device"; }
@@ -946,7 +1586,8 @@ YDEV_API yin_source ydev_source(const ydev_device* dev) {
     s.tier = (uint8_t)YIN_TIER_UNKNOWN;
     s.note = dev->d.family == YBOX_XID ? "ysp_device xid: box clock fitted (BRACKET), no loopback"
            : dev->d.family == YBOX_LINE ? "ysp_device line: board clock fitted (BRACKET), no loopback"
-                                        : "ysp_device photo: board clock fitted (LATE), no loopback";
+           : dev->d.family == YBOX_PHOTO ? "ysp_device photo: board clock fitted (LATE), no loopback"
+                                         : "ysp_device: output only, no loopback";
     return s;
 }
 

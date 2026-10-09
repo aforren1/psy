@@ -1,5 +1,6 @@
 # ysp/box.h mutants: the XID frame and timer answer, the line protocol's
-# rules, the photodiode frame, resynchronization and the output reserve.
+# rules, the photodiode frame, resynchronization and the output reserve;
+# since v0.2.0 the StimTracker 2 frame, the O report and the encoders.
 # docs/box.md lists the results.
 header = "ysp/box.h"
 
@@ -15,8 +16,10 @@ id = "box-01"
 name = "XID key 0 kept as 0"
 test = "box"
 why = "pyxid2 maps key 0 to 8: an RB-x40's eighth button would be lost."
-find = '''                                           key == 0 ? 8u : key);'''
-replace = '''                                           key);'''
+find = '''(info & 0x10u) ? (uint8_t)YIN_PRESS : (uint8_t)YIN_RELEASE,
+                                           key == 0 ? 8u : key);'''
+replace = '''(info & 0x10u) ? (uint8_t)YIN_PRESS : (uint8_t)YIN_RELEASE,
+                                           key);'''
 
 [[mutant]]
 id = "box-02"
@@ -95,8 +98,8 @@ id = "box-11"
 name = "one past the output"
 test = "box"
 why = "The caller's arrays have cap entries; one more is a write past them."
-find = '''        if (out->n_ev >= out->ev_cap || out->n_pair >= out->pair_cap) break;'''
-replace = '''        if (out->n_ev > out->ev_cap || out->n_pair > out->pair_cap) break;'''
+find = '''        if (out->n_ev >= out->ev_cap || out->n_pair >= out->pair_cap || out->has_out) break;'''
+replace = '''        if (out->n_ev > out->ev_cap || out->n_pair > out->pair_cap || out->has_out) break;'''
 
 [[mutant]]
 id = "box-12"
@@ -116,3 +119,100 @@ find = '''            d->n = 0;
             continue;'''
 replace = '''            d->n = 0;
             continue;'''
+
+[[mutant]]
+id = "box-14"
+name = "XID mh bytes high first"
+test = "box"
+why = "pyxid2 sends 'mh' + chr(lo) + chr(hi): swapped bytes raise the wrong lines."
+find = '''        buf[n + 2] = (uint8_t)(code & 0xFFu);
+        buf[n + 3] = (uint8_t)(code >> 8);'''
+replace = '''        buf[n + 2] = (uint8_t)(code >> 8);
+        buf[n + 3] = (uint8_t)(code & 0xFFu);'''
+
+[[mutant]]
+id = "box-15"
+name = "XID width truncated to ms"
+test = "box"
+why = "A 4.6 ms pulse is nearer 5 ms than 4 ms."
+find = '''        uint32_t ms = (uint32_t)(((uint64_t)arg + 500u) / 1000u);'''
+replace = '''        uint32_t ms = (uint32_t)((uint64_t)arg / 1000u);'''
+
+[[mutant]]
+id = "box-16"
+name = "XID pulse of 0 ms"
+test = "box"
+why = "Cedrus: mp 0 makes mh hold the lines; a short pulse would never end."
+find = '''        if (op == YBOX_OP_PULSE && ms == 0) ms = 1;'''
+replace = ''
+
+[[mutant]]
+id = "box-17"
+name = "TriggerBox closed with 0"
+test = "box"
+why = "Brain Products: write 0xFF to reset the output lines to their default levels when finished."
+find = '''        buf[0] = 0xFF;            /* the box's default levels */'''
+replace = '''        buf[0] = 0x00;            /* the box's default levels */'''
+
+[[mutant]]
+id = "box-18"
+name = "StimTracker 2 null byte not checked"
+test = "box"
+why = "The terminating 0 is how a misaligned 'o' frame shows."
+find = '''            if (b[8] != 0u) return -1;'''
+replace = ''
+
+[[mutant]]
+id = "box-19"
+name = "StimTracker 2 press inverted"
+test = "box"
+why = "'1' is pressed (pyxid2: pressed == b'1')."
+find = '''                int pressed = b[3] == '1';'''
+replace = '''                int pressed = b[3] == '0';'''
+
+[[mutant]]
+id = "box-20"
+name = "decoding goes on after an O report"
+test = "box"
+why = "ybox_out holds one report: a second O line in the same call would overwrite the first."
+find = '''        if (out->n_ev >= out->ev_cap || out->n_pair >= out->pair_cap || out->has_out) break;'''
+replace = '''        if (out->n_ev >= out->ev_cap || out->n_pair >= out->pair_cap) break;'''
+
+[[mutant]]
+id = "box-21"
+name = "output-only families decoded as photodiode frames"
+test = "box"
+why = "A TriggerBox's input byte is not a photodiode frame; it must give no event and no pair."
+find = '''        if (!(ybox_caps(d->family) & YBOX_CAP_IN)) {
+            /* an output-only family: nothing to decode */'''
+replace = '''        if (0) {
+            /* an output-only family: nothing to decode */'''
+
+[[mutant]]
+id = "box-22"
+name = "DTR and RTS take a byte"
+test = "box"
+why = "The serial-lines family has two outputs: a code above 3 names lines that do not exist."
+find = '''    if (family == YBOX_LINES) return 3u;'''
+replace = '''    if (family == YBOX_LINES) return 255u;'''
+
+[[mutant]]
+id = "box-23"
+name = "single-byte boxes claim a device-timed pulse"
+test = "box"
+why = "No TriggerBox, BioSemi, MMBT-S or parallel port times a pulse of a chosen width; the host must."
+find = '''    if (op == YBOX_OP_PULSE) return 0;
+    if (cap < 1) return -1;'''
+replace = '''    if (cap < 1) return -1;'''
+
+[[mutant]]
+id = "box-24"
+name = "O report with a code past 32 bits"
+test = "box"
+why = "A report's code is a 32-bit output state; more digits are a broken line."
+find = '''        if (!ybox__u64(&p, &a) || !ybox__u64(&p, &b) || !ybox__end(p) || b > 0xFFFFFFFFu) return false;
+        ybox__pair(out, a, 0);
+        out->has_out = 1;'''
+replace = '''        if (!ybox__u64(&p, &a) || !ybox__u64(&p, &b) || !ybox__end(p)) return false;
+        ybox__pair(out, a, 0);
+        out->has_out = 1;'''

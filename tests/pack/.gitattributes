@@ -1,0 +1,3 @@
+# The corpus sources and the pinned hashes are bytes: a CRLF checkout
+# would change the packs built from them (tool_test.c, corpus.sha256).
+* -text

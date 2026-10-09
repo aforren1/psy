@@ -1,11 +1,15 @@
 # Devices: specification draft
 
 Status: draft for review, 2026-10-08; decisions in section 16. Steps 1
-and 2 of section 14.2 are built: `ysp/rt.h` v0.6.0 and v0.7.0 (the fit,
+to 3 of section 14.2 are built: `ysp/rt.h` v0.6.0 and v0.7.0 (the fit,
 the per-user folders), `ysp/input.h` v0.3.0, `ysp/response.h` v0.1.4,
-`ysp/box.h` v0.1.0, `ysp/device.h` v0.1.0, `firmware/ysp_line/` and
-`examples/device/photodiode_check.c` (docs/rt.md, docs/box.md, docs/device.md).
-The rest is not. No device in this document was attached to the
+`ysp/box.h` v0.1.0 and v0.2.0 (outputs), `ysp/device.h` v0.1.0 and v0.2.0
+(outputs, the trigger channel, roles), `firmware/ysp_line/`,
+`examples/device/photodiode_check.c`, `out_latency.c` and
+`trigger_flip.c` (docs/rt.md, docs/box.md, docs/device.md). The rig
+profile (section 11.2) was decided on 2026-10-09 and is built:
+`ysp/rigfile.h` v0.1.0 on the strict JSON reader `ysp/json.h` v0.1.0. The
+rest is not built. No device in this document was attached to the
 development machine, and no timing number in it was measured on a device
 here. A number from another source carries its
 source. "Unverified" marks a statement that was not checked against a
@@ -343,8 +347,10 @@ crossings). Not measured: the bridge above 4 kHz in total.
 |---|---|---|---|
 | `ysp/rt.h` | v0.5.0 exists; v0.6 proposed | The device clock fit: FIT (lower envelope of late pairs) and BRACKET (minimum round trip) estimators, tick unwrapping, bounded memory; `YRT_SRC_DEVICE` (12) reserved | OS |
 | `ysp/input.h` | v0.2.0 exists; v0.3.0 proposed | `YIN_KIND_SYNC` (7); the raw device ticks in the event's tail padding; `YIN_DEVTICKS` flag; eye-event controls | nothing |
-| `ysp/box.h` | v0.1.0, built 2026-10-08 | Pure decoders and query bytes for byte-stream devices: XID, the ysp line protocol, the photodiode frame (section 10) | `ysp/input.h` |
-| `ysp/device.h` | v0.1.0, built 2026-10-08 (inputs); outputs, stream rings, roles and the analog edge detector later | Instance, match keys, identify, lifecycle with reconnect, a reader thread or manual polling, a BRACKET fit with timer queries, a sink, log records | `ysp/rt.h`, `ysp/input.h`, `ysp/box.h`, `ysp/serial.h` (required: every step-2 family is serial; `desc.transport` replaces it). The bridge is the caller's sink, not glue in the header |
+| `ysp/box.h` | v0.2.0, built 2026-10-08 | Pure decoders, query bytes and output encoders for byte-stream devices: XID, the ysp line protocol, the photodiode frame, TriggerBox, BioSemi, MMBT-S, DTR and RTS, the parallel port (section 10) | `ysp/input.h` |
+| `ysp/device.h` | v0.2.0, built 2026-10-08 (inputs, outputs, the trigger channel, roles); stream rings and the analog edge detector later | Instance, match keys, identify, lifecycle with reconnect, a reader thread or manual polling, a BRACKET fit with timer queries, a sink, log records | `ysp/rt.h`, `ysp/input.h`, `ysp/box.h`, `ysp/serial.h` (required: every step-2 family is serial; `desc.transport` replaces it). The bridge is the caller's sink, not glue in the header |
+| `ysp/json.h` | v0.1.0, built 2026-10-09 | The strict JSON reader and canonical writer of the repository: the rig profile, the pack tool, later the experiment definition if it is JSON | nothing |
+| `ysp/rigfile.h` | v0.1.0, built 2026-10-09 | The rig profile (11.2): load with errors that name the field, the SHA-256 check of each loopback file, the canonical write and the profile's hash, a role's desc and start, a binding, a stored loopback result | `ysp/device.h`, `ysp/json.h` |
 | `ysp/screen.h` | v0.4.0 exists | Device path and match key in `YSCR_EV_DEVICE`; nothing else | SDL3 |
 | `ysp/hid.h` | new, later | HID enumeration, input reports on overlapped reads, output and feature reports | OS (SetupAPI and hid.dll; hidraw; IOKit on macOS) |
 | `ysp/net.h` | planned (rig_spec 4.7) | TCP and UDP transports, cross-machine clock offsets, LSL inlets and outlets with liblsl loaded at run time | OS; liblsl at run time |
@@ -356,6 +362,14 @@ computation and is fuzzed on bytes; the device layer has threads and OS
 calls. A program that replays a capture needs only `ysp/box.h`. The
 analysis side (a Python binding that decodes a raw capture) needs only
 `ysp/box.h`.
+
+Why the rig profile is `ysp/rigfile.h` and not part of `ysp/device.h`: the
+profile is the rig's, not only its devices' (the display's onset offset
+and calibration are in it too); it is file I/O, hashing and a parser,
+which the device layer's run-time path does not need; and a change of the
+file format then does not change the device layer's version. It includes
+`ysp/device.h` (one direction) because binding fills a `ydev_desc` and
+the family names are `ysp/box.h`'s.
 
 Why the fit is in `ysp/rt.h` and not in a new header: every device header
 already needs `ysp/rt.h`, the fit is about 300 lines, and the clock
@@ -371,8 +385,9 @@ What is example glue, not a header:
 - A data writer that drains the stream rings to a file.
 
 What is the player's:
-- Reading the device table and the rig profile; binding roles; the
-  binding procedure; refusing to start.
+- Reading the device table; binding its roles through the rig profile
+  (`ysp/rigfile.h` reads, checks and writes the profile); the binding
+  procedure; refusing to start.
 - What a LOST required device does to a trial.
 - The data file's layout (section 11.4).
 - The runner protocol's device messages for the designer.
@@ -461,7 +476,7 @@ Outputs use the same instance, role and log as inputs. Three calls:
 | `DEVICE_GAP` | LOST to RUNNING | first and last time of the gap |
 | `DEVICE_FIT` | each refit, at most 1 per second | offset, ppm, spread, points, epoch |
 | `YRT_KIND_CLOCK` | thinned clock pairs | as defined in ysp/rt.h; `aux` the clock number |
-| `DEVICE_OUT` | each output write | role index, code, time before, time after, flags (device-timed, flushed) |
+| `DEVICE_OUT` | each output write | role index, code, time before, time after, flags (device-timed, flushed). Built as `YDEV_REC_OUT` (5): also the width, the flip deadline, the output's number, and flags for the trailing edge, a failure, a mark, a replaced edge and a board's own report (docs/device.md) |
 | `DEVICE_GARBAGE` | a decoder resynchronized | bytes skipped, total |
 
 Events themselves go through the sink and the stream rings, not as
@@ -568,6 +583,69 @@ The player reads both files, enumerates devices, binds each role, runs
 each family's identify step, and refuses to start when a required role
 is unbound, fails identify, or is below `min_tier`. The refusal names the
 role and what was found.
+
+#### The rig profile file (decided 2026-10-09, user; built)
+
+Proposed in step 3; the user accepted it on 2026-10-09. Built as
+`ysp/rigfile.h` v0.1.0 on `ysp/json.h` v0.1.0 (docs/device.md, "The rig
+profile"; docs/json.md). The format of the experiment definition is not
+decided (rig_spec 6); the profile should use the same syntax.
+
+- **Fields.** `format` ("ysp-rig 1"); `rig` (a name); `written` (UTC);
+  per role: `family`, `key`, `options` (baud, `latched`, the FTDI latency
+  timer as measured, a button map), `pulse_s` if the rig fixes it, and
+  `latency`: the loopback summary (`n`, `median_s`, `p5_s`, `p95_s`,
+  `max_s`, `date`) with the result file's name and `sha256`; for inputs,
+  `bounds` (`lo_s`, `hi_s`) from their loopback the same way; `display`:
+  `onset_offset_s` and the `.yspcal` file's name and `sha256`. Durations
+  in seconds.
+- **Format: JSON, written in one canonical form** (keys in a fixed
+  order, numbers with a fixed precision). Reasons: tools write most of
+  the profile (the binding by activity, the loopback runs), so comments
+  matter little; the designer and the runner protocol speak JSON already
+  (rig_spec 6, the trace export); a strict grammar needs a small parser
+  in the player and none in the browser; a canonical form gives a stable
+  hash for the data file. If the definition goes to TOML (comments, hand
+  edits), the profile should follow it rather than add a second syntax.
+  YAML is not recommended: its implicit typing changes values (`no`,
+  `1e3`) and its parser is large.
+- **Loopback results.** The tool's own file (`device_out_latency` writes
+  one now, "name value" lines in seconds) is kept beside the profile in
+  `loopback/` and named in the profile by its SHA-256. The player
+  checks each hash at load: a missing or changed file makes that role
+  tier UNKNOWN and is logged, not silently used. The data file header
+  copies each role's summary and hash and the profile's own hash.
+- **Location.** `yrt_user_dir(YRT_DIR_CONFIG, "rig", ...)`:
+  `%APPDATA%\ysp\rig\profile.json` and `...\rig\loopback\` on Windows,
+  `~/.config/ysp/rig/` on Linux. That function refuses a folder other
+  users can write, so a planted profile cannot bind a role to another
+  device or state a false latency. A machine that hosts two rigs keeps
+  `<name>.json` beside `profile.json`, and the player takes `--rig NAME`.
+
+What the build settled (2026-10-09):
+
+- **Canonical form**: the pack manifest's (keys in bytewise order, two
+  spaces, LF, one final LF), written by `ysp/json.h`; seconds as the
+  exact decimal of the nanoseconds with no trailing zeros, read back
+  exactly. A default is left out. The profile's hash is the SHA-256 of
+  these bytes, so whitespace or another spelling of a number in a hand
+  edit does not change it.
+- **Strict reading**: an unknown key at any level is refused, so a
+  misspelled field is an error, not a default. Each error names the
+  field path, the line and the column.
+- **The file's name**: a loopback result is `loopback/<sha256>.txt`; the
+  profile stores the hash only, so the name and the hash cannot disagree.
+- **A fourth check result**: DIFFERS, the file is genuine but the
+  profile's summary is not the file's (an output latency file of
+  `device_out_latency` is compared field by field).
+- **The tier**: tier 1 (ysp/input.h: a device clock mapped by a fit that
+  a loopback checked) only for an input family with a device clock whose
+  `bounds` file checks; every other role, and every role whose file is
+  missing, changed or differs, gives `YIN_TIER_UNKNOWN`. No output has a
+  tier.
+- **Options**: `baud`, `latched` (MMBT-S only), `ftdi_latency_s`,
+  `buttons` (code to name, at most 16). A new binding drops the role's
+  latency and bounds, which belonged to the device it had.
 
 ### 11.3 Binding
 
@@ -712,6 +790,23 @@ Each is small enough to finish and check before the next starts.
    the first output latencies on this laptop. USB trigger boxes rank
    before the parallel port for new rigs; `ysp/parallel.h` stays.
    Serves rank 1.
+   Built 2026-10-08 (docs/device.md, docs/box.md): `ydev_out_set`,
+   `_pulse`, `_mark` and `_trigger`, the `YDEV_REC_OUT` record with the
+   times before and after each write; pulses timed by the device (XID
+   `mp`/`mh`, the line protocol's new `p`, the fixed 8 ms of BioSemi and
+   the MMBT-S) or by the instance's own ysp/rt.h worker (TriggerBox,
+   MMBT-S at switch S, DTR and RTS, the parallel port), each trailing edge
+   with its own record; encoders in `ysp/box.h` pinned to Cedrus's page
+   and pyxid2, Brain Products' programming examples, BioSemi's page, and
+   two open-source MMBT-S drivers (not Neurospec's manual); the ysp/screen.h
+   trigger channel (`ydev_trigger_fn`, `ydev_trigger_channel()`) with
+   `examples/device/trigger_flip.c`; roles by index (`ydev_roles`); the
+   loopback tool `examples/device/out_latency.c` (a distribution and a
+   file named by its SHA-256), checked against a simulated adapter and
+   board; `firmware/ysp_line/` with outputs (compiled, not run). Not in
+   it: LSL markers (step 4), the rig profile file (built afterwards,
+   2026-10-09: `ysp/rigfile.h`, 11.2), any vendor device or board on the
+   wire.
 
 After these, in order:
 4. LSL in `ysp/net.h` (rank 5; testable locally). With it, the user's
@@ -754,7 +849,7 @@ for the others are defaults: adopt unless the user changes them.
 | 5 | Parts on hand | A USB-serial adapter and Arduino, Teensy and RP2040 boards | User |
 | 6 | Threads or processes for vendor libraries | Threads first. A helper process only if a measurement shows interference | Default |
 | 7 | Vendor glue | Headers that load the vendor library at run time (the ANGLE pattern); player modules later | Default |
-| 8 | The rig profile | A file on the rig, outside the pack, in `yrt_user_dir(YRT_DIR_CONFIG, "rig")` (`ysp/rt.h` v0.7.0, added 2026-10-08) | Default |
+| 8 | The rig profile | A file on the rig, outside the pack, in `yrt_user_dir(YRT_DIR_CONFIG, "rig")` (`ysp/rt.h` v0.7.0, added 2026-10-08). Its format (11.2): accepted by the user on 2026-10-09, built as `ysp/rigfile.h` v0.1.0 | Default; format: user |
 | 9 | Devices first in hardware | About three response devices, Cedrus among them: the XID decoder first; the user names the other two | User |
 | 10 | Names | `ysp/device.h` (`ydev_`), `ysp/box.h` (`ybox_`) | Default |
 | 11 | `ysp/screen.h` device record | Add the Raw Input path and the match key, in a later step | Default |

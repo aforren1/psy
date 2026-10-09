@@ -123,6 +123,17 @@ jobs:
           # The audio example on miniaudio's null device: no sound hardware.
           expect 0 "$bin/audio_tone" --null
           expect 2 "$bin/audio_tone" --bogus
+          # The rig profile (ysp/rigfile.h) in a folder of the runner's, never
+          # the user's: a simulated output latency stored into it, then
+          # the CLI on it; a second --new must not replace it.
+          rig="$RUNNER_TEMP/rig"
+          expect 0 "$bin/device_out_latency" --sim --n 20 --warmup 1 --file "$RUNNER_TEMP/out_latency.txt" --store --rig-dir "$rig"
+          expect 0 "$bin/rigfile_profile" --dir "$rig"
+          expect 0 "$bin/rigfile_profile" --dir "$rig" --bind resp xid serial:0403:6001:FT4ABC12:
+          expect 0 "$bin/rigfile_profile" --dir "$rig" --rig second --new "second rig"
+          expect 1 "$bin/rigfile_profile" --dir "$rig" --rig second --new again
+          expect 0 "$bin/rigfile_profile" --dir "$rig" --list
+          expect 2 "$bin/rigfile_profile" --bogus
 
   # --------------------------------------------------------------------- #
   # Extra Linux toolchains and flag sets, one matrix entry each:           #
@@ -249,7 +260,7 @@ jobs:
 
   # --------------------------------------------------------------------- #
   # WebAssembly: the computation headers (stair, quest, aep, trials,       #
-  # timeline, color)                                                       #
+  # timeline, color, pack, json)                                           #
   # claim to need nothing but libm, and ysp/rt.h claims a platform branch  #
   # is all wasm needs. Compile the compile checks with emcc, threads off,  #
   # and run them under node. Nothing here is a timing claim.               #
@@ -283,7 +294,7 @@ jobs:
           emcc $W $T -o rt_test.js tests/adapt/rt_test.c && node rt_test.js
           emcc $W $T -o rt_pump.js examples/rt/pump.c && node rt_pump.js 40
           emcc $W $T -o rt_ring_csv.js examples/rt/ring_csv.c && node rt_ring_csv.js 30 > /dev/null
-          for h in stair quest aep table trials timeline color; do
+          for h in stair quest aep table json pack trials timeline color; do
             emcc $W -o "compile_$h.js" "tests/compile/$h.c" && node "compile_$h.js"
             emcc $W -o "test_$h.js" "tests/adapt/${h}_test.c" && node "test_$h.js"
           done
@@ -315,7 +326,7 @@ jobs:
       # their warnings off, the glue and the test with ours. No fonts here:
       # the corpus check says it skipped them; the order checks run.
       - name: Layout sources cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/ysp-layout-tarballs
           key: layout-${{ hashFiles('third_party/MANIFEST.sha256', 'third_party/patches/*', 'tools/vendor_layout.py') }}
@@ -617,7 +628,7 @@ jobs:
       - name: ANGLE cache (Windows)
         if: runner.os == 'Windows'
         id: anglecache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/angle
           key: angle-electron-${{ env.ELECTRON_VERSION }}-v1
@@ -657,7 +668,7 @@ jobs:
       - name: SDL3 cache (Linux, macOS)
         if: runner.os != 'Windows'
         id: sdlcache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/sdl3
           key: sdl3-${{ env.SDL_VERSION }}-${{ runner.os }}-${{ runner.arch }}-v1
@@ -685,7 +696,7 @@ jobs:
 
       - name: Layout sources cache (Windows, Linux)
         if: runner.os != 'macOS'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/ysp-layout-tarballs
           key: layout-${{ hashFiles('third_party/MANIFEST.sha256', 'third_party/patches/*', 'tools/vendor_layout.py') }}
@@ -699,15 +710,32 @@ jobs:
           PY=$(command -v python3 || command -v python)
           "$PY" tools/vendor_layout.py --write --cache ~/ysp-layout-tarballs
 
+      # lodepng for the pack tool (docs/pack.md): three files at a commit,
+      # each checked by SHA-256 (tools/vendor_pack.py).
+      - name: lodepng cache (Windows, Linux)
+        if: runner.os != 'macOS'
+        uses: actions/cache@v6
+        with:
+          path: ~/ysp-pack-files
+          key: lodepng-${{ hashFiles('tools/vendor_pack.py') }}
+
+      - name: lodepng (Windows, Linux)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" tools/vendor_pack.py --write --cache ~/ysp-pack-files
+
+      # miniaudio for the two response examples with a sound (null device).
       - name: Configure
         shell: bash
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DYSP_BUILD_LOOPBACK=ON -DYSP_FETCH_PL_MPEG=ON ${{ runner.os != 'macOS' && '-DYSP_BUILD_LAYOUT=ON' || '' }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL3_DIR="$SDL3_DIR" -DYSP_BUILD_LOOPBACK=ON -DYSP_FETCH_MINIAUDIO=ON -DYSP_FETCH_PL_MPEG=ON ${{ runner.os != 'macOS' && '-DYSP_BUILD_LAYOUT=ON -DYSP_BUILD_PACK=ON' || '' }}
 
       # The Headers job has no SDL3, so a screen, gfx or video program left
       # out of this list is compiled nowhere on CI. ctest below runs every
       # test that matches its pattern, built or not.
       - name: Build
-        run: cmake --build build --config Release --target compile_screen_c compile_screen_cxx compile_screen_com test_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma screen_loopback compile_gfx_c compile_gfx_cxx test_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_rdk gfx_rdk_bench compile_video_c compile_video_cxx compile_video_com test_video video_play video_bench video_check test_response_sdl test_input_sdl trial_keyboard
+        run: cmake --build build --config Release --target compile_screen_c compile_screen_cxx compile_screen_com test_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma screen_loopback compile_gfx_c compile_gfx_cxx test_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_rdk gfx_rdk_bench compile_video_c compile_video_cxx compile_video_com test_video video_play video_bench video_check test_response_sdl test_input_sdl trial_keyboard trial_same_different trial_srt trial_adjustment trial_mouse_tracking trial_audio_keyboard trial_stop_signal
 
       # ysp/gfx.h's pixel checks must run where software GL exists; macOS has
       # no EGL, so its test runs the CPU checks only.
@@ -738,6 +766,15 @@ jobs:
           # ysp/response.h: the keyboard trial with a synthetic participant; 1 if a trial does not come out as scripted.
           expect 0 "$bin/trial_keyboard" --sim --out "$RUNNER_TEMP/trial_keyboard.csv"
           expect 2 "$bin/trial_keyboard" --bogus
+          # The jsPsych-style response examples, each with a synthetic participant (about 90 s in all).
+          expect 0 "$bin/trial_same_different" --sim --out "$RUNNER_TEMP/trial_same_different.csv"
+          expect 0 "$bin/trial_srt" --sim --out "$RUNNER_TEMP/trial_srt.csv"
+          expect 0 "$bin/trial_adjustment" --sim --out "$RUNNER_TEMP/trial_adjustment.csv" --traj "$RUNNER_TEMP/trial_adjustment_trajectory.csv"
+          expect 0 "$bin/trial_mouse_tracking" --sim --out "$RUNNER_TEMP/trial_mouse_tracking.csv" --traj "$RUNNER_TEMP/trial_mouse_tracking_trajectory.csv"
+          expect 0 "$bin/trial_mouse_tracking" --sim --raw-mice --out "$RUNNER_TEMP/trial_mouse_tracking_raw.csv" --traj "$RUNNER_TEMP/trial_mouse_tracking_raw_trajectory.csv"
+          expect 0 "$bin/trial_audio_keyboard" --sim --out "$RUNNER_TEMP/trial_audio_keyboard.csv"
+          expect 0 "$bin/trial_stop_signal" --sim --out "$RUNNER_TEMP/trial_stop_signal.csv"
+          expect 2 "$bin/trial_srt" --blocks SX
           expect 0 "$bin/gfx_load" --sim --gabors 10 --dots 100 --seconds 1
           expect 0 "$bin/gfx_calib"                 # no args: the synthetic display
           expect 0 "$bin/gfx_gallery" --sim         # each page once; 1 if a tile's draw is refused
@@ -775,6 +812,22 @@ jobs:
           "$bin/gfx_layout" --sim
           "$bin/gfx_layout" --sim --fonts no-such-dir
           if "$bin/gfx_layout" --page 9; then echo "::error::gfx_layout --page 9 exited 0"; exit 1; fi
+
+      # The pack tool (docs/pack.md): its test builds a pack of every kind,
+      # verifies, rebuilds and appends it, and compares every entry with
+      # tests/pack/corpus.sha256, so each OS and compiler must make the same
+      # bytes. Then the CLI on the test's pack. About half a minute a job.
+      - name: Pack tool (Windows, Linux)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          cmake --build build --config Release --target test_pack_tool ypak
+          ctest --test-dir build -C Release -R pack_tool --output-on-failure
+          if [ "$RUNNER_OS" = Windows ]; then bin=build/pack/Release; else bin=build/pack; fi
+          "$bin/ypak" verify build/pack/pack_tool_work/corpus.ysppak
+          "$bin/ypak" list build/pack/pack_tool_work/corpus.ysppak > /dev/null
+          if "$bin/ypak" bogus x; then echo "::error::ypak bogus exited 0"; exit 1; fi
 
       # The runner's MinGW-w64 gcc, warnings as errors, on the same sources.
       - name: MinGW compile checks (Windows)

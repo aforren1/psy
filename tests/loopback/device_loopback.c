@@ -16,7 +16,10 @@
  * arrives with its time mapped through the fit to within 2 ms of the time
  * the board stamped it, and that timer queries are answered. With
  * socat_pid it then kills socat, which hangs up the port, and checks that
- * the device goes LOST within 2 s.
+ * the device goes LOST within 2 s. Before that it writes 20 output codes
+ * ("o"); the board answers each with "O <t> <code>" stamped when it read
+ * the command, and the program checks that each report, mapped through the
+ * fit, lies within 5 ms after the time before its write.
  *
  * Exit code 0 if every check passed, 1 otherwise, 2 for a usage error.
  */
@@ -39,6 +42,9 @@ static int64_t     g_edges[4096];               /* host ns of each edge sent */
 static volatile int g_n_edges;
 static yin_event   g_ev[4096];
 static int         g_nev;
+static unsigned char g_ring_mem[YRT_RING_BYTES(16384)];
+static yrt_ring    g_ring;
+static yrt_event   g_rec[16384];
 
 static uint32_t board_us(void) { return (uint32_t)((int64_t)yrt_now_us() + g_offset_us); }
 
@@ -64,6 +70,7 @@ static void* board_thread(void* arg)
                 line[nline] = '\0';
                 if (line[0] == 'q') { snprintf(out, sizeof out, "Q %s %lu\n", line + 2, (unsigned long)t); board_send(out); }
                 else if (line[0] == 'i') board_send("I ysp-line 1 loopback test\n");
+                else if (line[0] == 'o') { snprintf(out, sizeof out, "O %lu %s\n", (unsigned long)t, line + 2); board_send(out); }
                 nline = 0;
             } else if (nline < 63) {
                 line[nline++] = (char)b[i];
@@ -125,8 +132,43 @@ int main(int argc, char** argv) {
     d.kind = YIN_KIND_SYNC;
     d.sink = sink;
     d.no_elevate = true;
+    {
+        yrt_ring_desc rd;
+        memset(&rd, 0, sizeof rd);
+        rd.memory = g_ring_mem;
+        rd.bytes = sizeof g_ring_mem;
+        if (!yrt_ring_open(&g_ring, &rd)) return 2;
+        d.ring = &g_ring;
+    }
     if (!ydev_start(&g_dev, &d)) { fprintf(stderr, "%s\n", ydev_error(&g_dev)); return 2; }
     (void)yrt_sleep_ns(6000000000ull);
+    {
+        /* outputs over the serial transport: 20 codes, each reported back */
+        int64_t before[20];
+        int got = 0, r, m;
+        double worst_rep = 0;
+        while (yrt_ring_drain(&g_ring, g_rec, 16384) > 0) { }
+        for (i = 0; i < 20; i++) {
+            ydev_out_info oi;
+            if (ydev_out_set(&g_dev, (uint32_t)(1 + (i & 1))) != YDEV_OK) { puts("FAIL: ydev_out_set"); fails++; break; }
+            ydev_out_last(&g_dev, &oi);
+            before[i] = oi.t_before;
+            (void)yrt_sleep_ns(20000000);
+        }
+        (void)yrt_sleep_ns(100000000);
+        m = yrt_ring_drain(&g_ring, g_rec, 16384);
+        for (r = 0; r < m && got < 20; r++) {
+            const yrt_event* e = &g_rec[r];
+            double dt;
+            if (e->source != YRT_SRC_DEVICE || e->kind != YDEV_REC_OUT || !(e->u.u16[18] & YDEV_OUT_REPORTED)) continue;
+            dt = (double)(e->u.i64[0] - before[got]);
+            if (dt < -100000.0 || dt > 5e6 || e->u.u32[8] != (uint32_t)(1 + (got & 1))) { printf("FAIL: report %d: %.1f us\n", got, dt / 1e3); fails++; }
+            if (dt > worst_rep) worst_rep = dt;
+            got++;
+        }
+        printf("outputs: 20 written, %d reported, worst report minus write %.1f us\n", got, worst_rep / 1e3);
+        if (got != 20) { puts("FAIL: reports"); fails++; }
+    }
     ydev_get_stats(&g_dev, &st);
     printf("state %s, ident \"%s\", %llu events, %llu probes, %llu answers, fit %+.2f ppm, spread %.1f us, width %.1f us\n",
            ydev_state_name(st.state), st.ident, (unsigned long long)st.events, (unsigned long long)st.probes,

@@ -1,4 +1,4 @@
-/* ysp/response.h - v0.1.4 - public domain single-header response collector
+/* ysp/response.h - v0.2.0 - public domain single-header response collector
  *
  *   Turns timestamped input events from any device into the response of a
  *   trial: which key or button, when, measured from the stimulus onset that
@@ -22,6 +22,16 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.0 - Trimmed (docs/response.md, "What the examples show"). The
+ *          second-report rule R3 moved to ysp/screen.h v0.4.1's input
+ *          bridge, so every consumer of yscr_event_input() gets it, not
+ *          only the collector: desc.dedup, YRSP_E_DUPLICATE and
+ *          result.n_duplicates are gone (REPEATS, HELD KEYS AND DOUBLE
+ *          REPORTS says what a producer that is not the bridge must do).
+ *          Also gone, used by no example: yrsp_format_header() and
+ *          yrsp_format_row() (each program writes its own columns) and
+ *          desc.settle (a press stamped before the deadline counts
+ *          whenever it is fed).
  *   v0.1.4 - YRSP_KINDS_ALL in ALL mode takes every kind but SYNC
  *          (ysp/input.h v0.3.0's YIN_KIND_SYNC: a scanner pulse, a TTL
  *          input, a photodiode edge), so a timing event never ends a trial.
@@ -51,14 +61,14 @@
  *          releases, the trace, the result and its CSV row, the SDL3
  *          adapter.
  *
- *   STATUS: v0.1.4, 2026-10-08 (v0.1.3's runs, and SYNC in ALL mode). Built and run on Windows 11 with MinGW-w64
+ *   STATUS: v0.2.0, 2026-10-09. Built and run on Windows 11 with MinGW-w64
  *   gcc 16.1 as C11, C99 and C++17 under -Wall -Wextra -Wpedantic -Wshadow
  *   -Werror and with MSVC 19.44 under /W4 /WX as C11 and C++17.
- *   tests/adapt/response_test.c (20,604 checks; 20,669 with the SDL
- *   adapter, checked against SDL 3.4.0's headers) covers every rule on
- *   synthetic streams, with 20,000 random streams against a direct reading
- *   of the entries. Mutations: 49 of 49 caught
- *   (tests/mutate/response.toml).
+ *   tests/adapt/response_test.c covers every rule on synthetic streams,
+ *   with 20,000 random streams against a direct reading of the entries,
+ *   and the SDL adapter against SDL 3.4.0's headers (docs/response.md has
+ *   the counts). Mutations: every mutant of tests/mutate/response.toml
+ *   caught.
  *   examples/response/trial_keyboard.c --sim (simulated display, synthetic
  *   participant) passes its own checks on both compilers; in a window on
  *   the Iris Xe laptop, keys sent with SendInput (scan codes and
@@ -78,8 +88,8 @@
  *
  *   in *one* C or C++ file before including this header to create the
  *   implementation. Every other file just includes the header normally.
- *   Include ysp/screen.h (or SDL3) first where you want yrsp_from_sdl()
- *   and yrsp_onset_flip().
+ *   Include ysp/screen.h first where you want yrsp_onset_flip() (or SDL3
+ *   for yrsp_from_sdl()).
  *
  *   The jsPsych html-keyboard-response trial, choices f and j, a response
  *   window of 1.5 s from the stimulus onset, responses before 0.1 s are
@@ -93,8 +103,8 @@
  *
  *       yrsp_arm(&rsp, f.onset);                      // at the fixation
  *       // every frame:
- *       while (yscr_poll(&scr, &ev, &t))              // feed every event
- *           if (yrsp_from_sdl(&ev, t, NULL, &in)) yrsp_feed(&rsp, &in);
+ *       while (yscr_poll(&scr, &ev, NULL))            // feed every event
+ *           if (yscr_event_input(&scr, &ev, &in)) yrsp_feed(&rsp, &in);
  *       // the stimulus event landed: its planned onset
  *       yrsp_onset o = yrsp_onset_landing(&fired[i]);
  *       yrsp_set_onset(&rsp, &o);
@@ -173,9 +183,9 @@
  *       desc.max_responses responses (0 = never);
  *     - with desc.wait_for_key_release, at that response's release, or
  *       desc.max_hold (0 = 2 s) after the press;
- *     - at onset + duration + desc.settle, in update(). settle lets a
- *       report stamped before the deadline but delivered after it still be
- *       fed. A press fed after ENDED with t before the end still counts.
+ *     - at onset + duration, in update(). A press fed after ENDED with t
+ *       before the end still counts: a report stamped before the deadline
+ *       and delivered after it.
  *   Presses with t at or after the press that ended the window are
  *   AFTER_END: logged, never responses (jsPsych cancels the listener).
  *   The result's response is the VALID entry with the earliest t, not the
@@ -206,38 +216,27 @@
  *   result: no final onset came, so RT is from a prediction.
  *
  *   ---------------------------------------------------------------------
- *   DOUBLE REPORTS (desc.dedup)
+ *   REPEATS, HELD KEYS AND DOUBLE REPORTS
  *   ---------------------------------------------------------------------
- *   With SDL_HINT_WINDOWS_RAW_KEYBOARD on (ysp/screen.h turns it on), SDL
- *   3.4 also sends a key from the window message when the message's scan
- *   code is 0 (read in SDL 3.4.0's source). Measured with SendInput
- *   (examples/screen/input.c --reports): a virtual-key tap (wVk, scan code
- *   0, down and up back to back) gave two press-release pairs, the second
- *   report -0.1 to 34.2 ms after the first (518 taps, 1 above 17.1 ms); a
- *   virtual-key 100 ms hold gave one press, the second report marked as a
- *   repeat; scan-code injection (KEYEVENTF_SCANCODE) gave one report,
- *   tapped or held. Keys from a keyboard carry scan codes, so they most
- *   likely report once; screen_input --hand checks keys pressed by hand.
- *   The rule guards against the rest: injected input, keys without a
- *   scan code (media keys), some on-screen keyboards and remote tools.
  *     R1  A PRESS with YRSP_IN_REPEAT is not a new press, unless only
  *         another device holds the control (DEVICES).
  *     R2  A PRESS of a control that is down (no RELEASE since) on the same
  *         device is not a new press. R1 and R2 are HELD (HELD KEYS).
- *     R3  A PRESS of the same kind and control, from the same device or
- *         with either device 0 (DEVICES), within dedup
- *         (0 = 50 ms; < 0 turns R3 off) of the last accepted press of that
- *         control, in either time order, is a second report: logged as
- *         DUPLICATE, never a response, and it does not make the control
- *         down, so its RELEASE is a stray release and is dropped. The
- *         first report to arrive is kept, not the earliest stamp: SDL
- *         queues the raw report first, and the message report's stamp is
- *         tick-quantized.
- *   Why 50 ms: the largest measured gap was 34.2 ms; a person does not
- *   press one key twice within 50 ms (keyboards debounce contact bounce,
- *   and tapping one finger runs at intervals of about 150 ms or more:
- *   stated, not measured here).
- *
+ *   A second report of one press is the producer's to drop, not the
+ *   collector's: SDL 3.4 sends a key with no scan code (virtual-key
+ *   injection, some media keys, remote tools) from its raw and its
+ *   message path, -0.1 to 34.2 ms apart (518 taps, ysp/screen.h INPUT),
+ *   and a program that steps a value per key-down needs the filter as
+ *   much as this collector. ysp/screen.h's yscr_event_input() (v0.4.1)
+ *   drops them and counts them (yscr_get_input_stats()). A producer that
+ *   is not the bridge (yin_from_sdl() in your own loop) must drop, before
+ *   yrsp_feed(): a key-down that is not a repeat, of the key of a key-down
+ *   kept less than 50 ms before or after it, of the same device or with
+ *   either device 0; and the first key-up of that key that finds no kept
+ *   key-down still down. With ysp/screen.h, yscr_key_filter() does it.
+ *   Fed to the collector, a second report is a new press: AFTER_END when
+ *   the first ended the window, a second response with persist.
+
  *   ---------------------------------------------------------------------
  *   DEVICES (input.device)
  *   ---------------------------------------------------------------------
@@ -249,7 +248,7 @@
  *   report merge, and two keyboards pressing one key never do. Mice in
  *   SDL's absolute mode all come as device 0 (one pointer);
  *   ysp/screen.h's desc.raw_mice gives each mouse its own id (MICE). This rule
- *   applies to R2, R3, releases and HELD_AT_OPEN. SDL keeps one key state
+ *   applies to R2, releases and HELD_AT_OPEN. SDL keeps one key state
  *   for all keyboards: while keyboard A holds F, keyboard B's press of F
  *   comes marked as a repeat, and B's release ends SDL's state, so SDL
  *   drops A's later release. The collector takes B's "repeat" for B's
@@ -336,15 +335,14 @@
  *   1 kHz for 2 s is 96 KB.
  *
  *   ---------------------------------------------------------------------
- *   THE RESULT (yrsp_result) AND THE DATA ROW
+ *   THE RESULT (yrsp_result)
  *   ---------------------------------------------------------------------
  *   jsPsych's names: rt, response, rt_key_duration. Then the response's
  *   kind, scancode (control), keycode, device and stamp tier and bounds;
  *   the onset's time, tier, source, residual, uncertainty and frame;
- *   counts; flags (YRSP_R_*). yrsp_format_header() and
- *   yrsp_format_row() write them as CSV: times in seconds, NaN as an
- *   empty field. The entries (yrsp_entries()) hold every press of the
- *   window, in arrival order.
+ *   counts; flags (YRSP_R_*). The program writes the columns it wants
+ *   (examples/response/ has seven programs that do). The entries
+ *   (yrsp_entries()) hold every press of the window, in arrival order.
  *
  *   ---------------------------------------------------------------------
  *   SDL3 AND RAW MICE
@@ -358,8 +356,8 @@
  *   the last YRSP_LOG_RESERVE (8) of them only for presses of a choice,
  *   so presses of other keys cannot push the response out (LOG_FULL
  *   counts what did not fit); YRSP_MAX_SOURCES 8; 64 controls tracked
- *   as down (per device); 16 recent presses for R3. The collector is
- *   about 6 KB, caller-allocated; nothing is allocated. One thread: a
+ *   as down (per device). The collector is about 6 KB, caller-allocated;
+ *   nothing is allocated. One thread: a
  *   reader thread (a serial port, an eye tracker) queues its events, and
  *   the frame thread feeds them.
  *
@@ -384,9 +382,9 @@
 #define YSP_RESPONSE_H_INCLUDED
 
 #define YRSP_VERSION_MAJOR 0
-#define YRSP_VERSION_MINOR 1
-#define YRSP_VERSION_PATCH 4
-#define YRSP_VERSION_STRING "0.1.4"
+#define YRSP_VERSION_MINOR 2
+#define YRSP_VERSION_PATCH 0
+#define YRSP_VERSION_STRING "0.2.0"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -407,7 +405,6 @@ extern "C" {
 #define YRSP_LOG_CAP      64
 #define YRSP_LOG_RESERVE  8
 #define YRSP_MAX_HELD     64
-#define YRSP_MAX_RECENT   16
 
 /* Status: what feed(), set_onset() and update() return. */
 #define YRSP_IDLE      0   /* not armed, or finished                    */
@@ -540,8 +537,6 @@ typedef struct yrsp_desc {
     bool      allow_held_key;       /* a held key's press can count        */
     bool      wait_for_key_release; /* end at the response's release       */
     double    max_hold;             /* s; 0 = 2                            */
-    double    dedup;                /* s; R3's window; 0 = 0.050, < 0 off  */
-    double    settle;               /* s after the deadline; 0 = none      */
     const yrsp_source* sources;   /* copied at init                      */
     int       n_sources;
     yrsp_input* trace;            /* the caller's array; NULL = none     */
@@ -574,7 +569,7 @@ typedef struct yrsp_onset {
 #define YRSP_E_LATE         0x0008u /* rt >= duration                    */
 #define YRSP_E_AFTER_END    0x0010u /* at or after the press that ended it */
 #define YRSP_E_NOT_CHOICE   0x0020u /* a press that is no choice         */
-#define YRSP_E_DUPLICATE    0x0040u /* a second report (R3)              */
+/*      0x0040u was YRSP_E_DUPLICATE (v0.1); unused                        */
 #define YRSP_E_HELD         0x0080u /* a held press, allow_held_key      */
 #define YRSP_E_CROSSING     0x0100u /* a threshold crossing              */
 #define YRSP_E_RECLASSIFIED 0x0200u /* its class changed after arrival   */
@@ -632,20 +627,19 @@ typedef struct yrsp_result {
     int64_t     onset_uncertainty;
     int64_t     onset_frame;
     int32_t     n_responses, n_early, n_anticipations, n_late, n_after_end,
-                n_duplicates, n_not_choice, n_held, n_entries, n_lost, n_trace;
+                n_not_choice, n_held, n_entries, n_lost, n_trace;
 } yrsp_result;
 
 /* Private state, sized for no allocation. */
 typedef struct yrsp__chan { float v, x, y, rx, ry; uint8_t has, armed, has_ref, reserved_; } yrsp__chan;
 typedef struct yrsp__held { uint32_t device, control; uint8_t kind, used, reserved_[2]; } yrsp__held;
-typedef struct yrsp__recent { int64_t t; uint32_t device, control; uint8_t kind, used, reserved_[2]; } yrsp__recent;
 
 /* The collector. Caller-allocated; every field is private. */
 typedef struct yrsp_collector {
     yrsp_desc    d;
     yrsp_choice  ch[YRSP_MAX_CHOICES];
     yrsp_source  src[YRSP_MAX_SOURCES];
-    int64_t        min_rt_ns, duration_ns, max_hold_ns, dedup_ns, settle_ns;
+    int64_t        min_rt_ns, duration_ns, max_hold_ns;
     yrsp_onset   onset;
     int64_t        t_arm, t_end;
     int32_t        ok, armed, finished, have_onset;
@@ -654,8 +648,6 @@ typedef struct yrsp_collector {
     int32_t        end_entry;       /* -1                                   */
     int32_t        closing;         /* waiting for end_entry's release      */
     yrsp__held   held[YRSP_MAX_HELD];
-    yrsp__recent recent[YRSP_MAX_RECENT];
-    int32_t        recent_next;
     yrsp__chan   chan[YRSP_MAX_CHOICES];
     yrsp_entry   log[YRSP_LOG_CAP];
     int32_t        n_log, n_trace, n_lost, n_lost_trace, n_held, n_stray;
@@ -683,7 +675,7 @@ YRSP_API int  yrsp_set_onset(yrsp_collector* c, const yrsp_onset* o);
  * type or kind out of range. */
 YRSP_API int  yrsp_feed(yrsp_collector* c, const yrsp_input* in);
 
-/* The clock without input: ENDED at onset + duration + settle, or at the
+/* The clock without input: ENDED at onset + duration, or at the
  * press + max_hold while waiting for a release. Call it once a frame with
  * f.onset or yrt_now_ns(). */
 YRSP_API int  yrsp_update(yrsp_collector* c, int64_t now);
@@ -704,15 +696,6 @@ YRSP_API const yrsp_entry* yrsp_entries(const yrsp_collector* c, int* n);
  * unknown; the name of a scancode, NULL when it has none. */
 YRSP_API int         yrsp_scancode(const char* name);
 YRSP_API const char* yrsp_key_name(uint32_t scancode);
-
-/* The CSV header and a result's row: rt, response, rt_key_duration,
- * rsp_kind, rsp_scancode, rsp_keycode, rsp_device, rsp_tier, rsp_stamp_lo,
- * rsp_stamp_hi, rsp_partial, onset_tier, onset_src, onset_residual,
- * onset_uncertainty, onset_frame, n_responses, n_anticipations, n_early,
- * n_late, n_duplicates, rsp_flags. Seconds; NaN as an empty field. No
- * newline. Return snprintf's count. */
-YRSP_API int yrsp_format_header(char* buf, size_t cap);
-YRSP_API int yrsp_format_row(const yrsp_result* r, char* buf, size_t cap);
 
 /* --- helpers for the other headers, inline, when they came first ----- */
 
@@ -972,16 +955,12 @@ YRSP_API bool yrsp_init(yrsp_collector* c, const yrsp_desc* d) {
     if (d->max_responses < 0) return yrsp__fail(c, "ysp_response: max_responses %d < 0", d->max_responses);
     if (!yrsp__dur(c, "minimum_valid_rt", d->minimum_valid_rt, &c->min_rt_ns) ||
         !yrsp__dur(c, "duration", d->duration, &c->duration_ns) ||
-        !yrsp__dur(c, "max_hold", d->max_hold, &c->max_hold_ns) ||
-        !yrsp__dur(c, "settle", d->settle, &c->settle_ns))
+        !yrsp__dur(c, "max_hold", d->max_hold, &c->max_hold_ns))
         return false;
     if (c->duration_ns > 0 && c->min_rt_ns >= c->duration_ns)
         return yrsp__fail(c, "ysp_response: minimum_valid_rt %g s leaves no time in a duration of %g s",
                             d->minimum_valid_rt, d->duration);
     if (c->max_hold_ns == 0) c->max_hold_ns = 2000000000;
-    if (d->dedup != d->dedup) return yrsp__fail(c, "ysp_response: dedup is NaN");
-    if (d->dedup < 0) c->dedup_ns = 0;
-    else if (!yrsp__dur(c, "dedup", d->dedup == 0 ? 0.050 : d->dedup, &c->dedup_ns)) return false;
     c->end_entry = -1;
     c->status = YRSP_IDLE;
     c->ok = 1;
@@ -1061,7 +1040,7 @@ static uint16_t yrsp__time_class(const yrsp_collector* c, int64_t t) {
 static uint16_t yrsp__class(const yrsp_collector* c, const yrsp_entry* e) {
     uint16_t k = yrsp__time_class(c, e->t);
     if (k) return k;
-    if (e->flags & (YRSP_E_NOT_CHOICE | YRSP_E_DUPLICATE | YRSP_E_AFTER_END)) return 0;
+    if (e->flags & (YRSP_E_NOT_CHOICE | YRSP_E_AFTER_END)) return 0;
     if ((e->flags & YRSP_E_HELD) && !c->d.allow_held_key) return 0;
     return YRSP_E_VALID;
 }
@@ -1116,7 +1095,7 @@ static void yrsp__check_end(yrsp_collector* c) {
 static int yrsp__log(yrsp_collector* c, const yrsp_input* in, int choice, uint16_t flags, float value) {
     yrsp_entry* e;
     const yrsp_source* s;
-    bool match = !(flags & (YRSP_E_NOT_CHOICE | YRSP_E_DUPLICATE));
+    bool match = !(flags & YRSP_E_NOT_CHOICE);
     int cap = match ? YRSP_LOG_CAP : YRSP_LOG_CAP - YRSP_LOG_RESERVE;
     if (c->n_log >= cap) { c->n_lost++; return -1; }
     e = &c->log[c->n_log];
@@ -1156,43 +1135,8 @@ static int yrsp__match(const yrsp_collector* c, const yrsp_input* in) {
     return -2;
 }
 
-/* R3: a press of this control within dedup of the last accepted one. */
-static bool yrsp__duplicate(yrsp_collector* c, const yrsp_input* in) {
-    int i;
-    if (c->dedup_ns <= 0) return false;
-    for (i = 0; i < YRSP_MAX_RECENT; i++) {
-        const yrsp__recent* r = &c->recent[i];
-        int64_t dt;
-        if (!r->used || r->kind != in->kind || r->control != in->control) continue;
-        if (!yrsp__same_dev(r->device, in->device)) continue;
-        dt = in->t - r->t;
-        if (dt < c->dedup_ns && dt > -c->dedup_ns) return true;
-    }
-    return false;
-}
-
-static void yrsp__remember(yrsp_collector* c, const yrsp_input* in) {
-    int i;
-    yrsp__recent* r = NULL;
-    for (i = 0; i < YRSP_MAX_RECENT; i++)
-        if (c->recent[i].used && c->recent[i].kind == in->kind && c->recent[i].control == in->control &&
-            c->recent[i].device == in->device) {
-            r = &c->recent[i];
-            break;
-        }
-    if (!r) {
-        r = &c->recent[c->recent_next];
-        c->recent_next = (c->recent_next + 1) % YRSP_MAX_RECENT;
-    }
-    r->used = 1;
-    r->kind = in->kind;
-    r->control = in->control;
-    r->device = in->device;
-    r->t = in->t;
-}
-
 /* Presses are logged from arm() to the next arm(), after finish() too, so
- * a report delivered late still counts and a second report is still seen. */
+ * a report delivered late still counts. */
 static bool yrsp__window(const yrsp_collector* c) { return c->armed != 0; }
 
 static void yrsp__press(yrsp_collector* c, const yrsp_input* in) {
@@ -1201,18 +1145,8 @@ static void yrsp__press(yrsp_collector* c, const yrsp_input* in) {
     /* a "repeat" of a key down only on another keyboard is this keyboard's
      * first press (one key state for all keyboards in SDL) */
     if (repeat && !yrsp__is_down(c, in) && yrsp__down_elsewhere(c, in)) repeat = false;
-    if (!repeat && yrsp__duplicate(c, in)) {
-        if (yrsp__window(c)) {
-            choice = yrsp__match(c, in);
-            yrsp__log(c, in, choice >= 0 ? choice : -1, YRSP_E_DUPLICATE, in->value);
-        }
-        return;
-    }
     held = repeat || yrsp__is_down(c, in);
-    if (!held) {
-        yrsp__set_down(c, in, true);
-        yrsp__remember(c, in);
-    }
+    if (!held) yrsp__set_down(c, in, true);
     if (!yrsp__window(c)) return;
     choice = yrsp__match(c, in);
     if (held) {
@@ -1240,7 +1174,7 @@ static void yrsp__release(yrsp_collector* c, const yrsp_input* in) {
         yrsp_entry* e = &c->log[i];
         if (e->kind != in->kind || e->control != in->control) continue;
         if (!yrsp__same_dev(e->device, in->device)) continue;
-        if (e->flags & (YRSP_E_CROSSING | YRSP_E_DUPLICATE | YRSP_E_RELEASED)) continue;
+        if (e->flags & (YRSP_E_CROSSING | YRSP_E_RELEASED)) continue;
         e->t_release = in->t;
         e->flags |= YRSP_E_RELEASED;
         if (c->closing && i == c->end_entry) {
@@ -1369,7 +1303,7 @@ YRSP_API int yrsp_update(yrsp_collector* c, int64_t now) {
         }
         return c->status;
     }
-    if (c->have_onset && c->duration_ns > 0 && now >= c->onset.t + c->duration_ns + c->settle_ns) {
+    if (c->have_onset && c->duration_ns > 0 && now >= c->onset.t + c->duration_ns) {
         c->status = YRSP_ENDED;
         c->ended_by = 2;
         c->t_end = c->onset.t + c->duration_ns;
@@ -1405,7 +1339,6 @@ YRSP_API int yrsp_finish(yrsp_collector* c, yrsp_result* r) {
         if (e->flags & YRSP_E_ANTICIPATION) r->n_anticipations++;
         if (e->flags & YRSP_E_LATE) r->n_late++;
         if (e->flags & YRSP_E_AFTER_END) r->n_after_end++;
-        if (e->flags & YRSP_E_DUPLICATE) r->n_duplicates++;
         if (e->flags & YRSP_E_NOT_CHOICE) r->n_not_choice++;
     }
     r->n_held = c->n_held;
@@ -1458,75 +1391,6 @@ YRSP_API int yrsp_finish(yrsp_collector* c, yrsp_result* r) {
 YRSP_API const yrsp_entry* yrsp_entries(const yrsp_collector* c, int* n) {
     if (n) *n = c ? c->n_log : 0;
     return c ? c->log : NULL;
-}
-
-/* --- CSV --------------------------------------------------------------- */
-
-YRSP_API int yrsp_format_header(char* buf, size_t cap) {
-    return snprintf(buf, cap, "rt,response,rt_key_duration,rsp_kind,rsp_scancode,rsp_keycode,rsp_device,"
-                              "rsp_tier,rsp_stamp_lo,rsp_stamp_hi,rsp_partial,onset_tier,onset_src,"
-                              "onset_residual,onset_uncertainty,onset_frame,n_responses,n_anticipations,"
-                              "n_early,n_late,n_duplicates,rsp_flags");
-}
-
-/* Seconds with 9 decimals, or nothing for NaN. */
-static void yrsp__sec(char* out, size_t cap, double s) {
-    if (s != s) out[0] = 0;
-    else snprintf(out, cap, "%.9f", s);
-}
-
-/* A CSV field: quoted when it holds a comma, a quote or a line break. */
-static void yrsp__field(char* out, size_t cap, const char* s) {
-    size_t n = 0;
-    const char* p;
-    bool q = strpbrk(s, ",\"\r\n") != NULL;
-    if (cap == 0) return;
-    if (q && n + 1 < cap) out[n++] = '"';
-    for (p = s; *p && n + 2 < cap; p++) {
-        if (*p == '"') out[n++] = '"';
-        out[n++] = *p;
-    }
-    if (q && n + 1 < cap) out[n++] = '"';
-    out[n] = 0;
-}
-
-YRSP_API int yrsp_format_row(const yrsp_result* r, char* buf, size_t cap) {
-    static const char* const kinds[16] = { "keyboard", "mouse", "touch", "pen", "gamepad", "box", "eye", "sync",
-                                           "user0", "user1", "user2", "user3", "user4", "user5", "user6", "user7" };
-    char rt[40], dur[40], res[40], unc[40], lo[40], hi[40], resp[80], tmp[48];
-    const char* name = NULL;
-    if (!r) return -1;
-    yrsp__sec(rt, sizeof rt, r->rt);
-    yrsp__sec(dur, sizeof dur, r->rt_key_duration);
-    resp[0] = 0;
-    if (r->flags & YRSP_R_RESPONDED) {
-        name = r->response_name;
-        if (!name && r->kind == YRSP_KIND_KEYBOARD) name = yrsp_key_name(r->control);
-        if (!name) {
-            snprintf(tmp, sizeof tmp, "%s:%u", kinds[r->kind & 15], (unsigned)r->control);
-            name = tmp;
-        }
-        yrsp__field(resp, sizeof resp, name);
-    }
-    if (r->flags & YRSP_R_NO_ONSET) res[0] = unc[0] = 0;
-    else {
-        yrsp__sec(res, sizeof res, (double)r->onset_residual / YRSP__NS_PER_S);
-        yrsp__sec(unc, sizeof unc, (double)r->onset_uncertainty / YRSP__NS_PER_S);
-    }
-    if (r->stamp_lo_us == 0 && r->stamp_hi_us == 0) lo[0] = hi[0] = 0;
-    else {
-        yrsp__sec(lo, sizeof lo, (double)r->stamp_lo_us / 1e6);
-        yrsp__sec(hi, sizeof hi, (double)r->stamp_hi_us / 1e6);
-    }
-    if (!(r->flags & YRSP_R_RESPONDED))
-        return snprintf(buf, cap, ",,,,,,,,,,,%u,%u,%s,%s,%lld,%d,%d,%d,%d,%d,%u", (unsigned)r->onset_tier,
-                        (unsigned)r->onset_src, res, unc, (long long)r->onset_frame, r->n_responses,
-                        r->n_anticipations, r->n_early, r->n_late, r->n_duplicates, (unsigned)r->flags);
-    return snprintf(buf, cap, "%s,%s,%s,%s,%u,%u,%u,%u,%s,%s,%u,%u,%u,%s,%s,%lld,%d,%d,%d,%d,%d,%u", rt, resp, dur,
-                    kinds[r->kind & 15], (unsigned)r->control, (unsigned)r->code, (unsigned)r->device,
-                    (unsigned)r->stamp_tier, lo, hi, (unsigned)r->stamp_partial, (unsigned)r->onset_tier,
-                    (unsigned)r->onset_src, res, unc, (long long)r->onset_frame, r->n_responses,
-                    r->n_anticipations, r->n_early, r->n_late, r->n_duplicates, (unsigned)r->flags);
 }
 
 #endif /* YSP_RESPONSE_IMPLEMENTATION_GUARD */

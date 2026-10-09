@@ -1629,6 +1629,174 @@ static void test_bridge(void) {
     bridge_reset();
 }
 
+/* v0.4.1: the second-report filter (INPUT, "Second key reports") on
+ * synthetic SDL 3.4 patterns: a raw report, then its message report. */
+#define KMS(x) ((int64_t)(x) * 1000000)
+
+static yin_event key_ev(int64_t t, uint32_t sc, uint32_t dev, int type, int repeat) {
+    yin_event e;
+    memset(&e, 0, sizeof e);
+    e.t = t;
+    e.kind = YIN_KIND_KEYBOARD;
+    e.type = (uint8_t)type;
+    e.control = sc;
+    e.device = dev;
+    e.flags = (uint8_t)(repeat ? YIN_REPEAT : 0);
+    return e;
+}
+
+/* down and up of one report; returns what passed: 1 down, 2 up */
+static int key_tap(yscr_screen* s, int64_t t, uint32_t sc, uint32_t dev) {
+    yin_event d = key_ev(t, sc, dev, YIN_PRESS, 0), u = key_ev(t + 30000, sc, dev, YIN_RELEASE, 0);
+    int k = yscr__key_keep(s, &d) ? 1 : 0;
+    return k | (yscr__key_keep(s, &u) ? 2 : 0);
+}
+
+static void test_key_double(void) {
+    static script c;
+    static const int gap_ms[] = { 10, 49, 51, 200 };
+    yscr_screen s;
+    yscr_desc d;
+    yscr_input_stats st;
+    yin_event e;
+    int i, j, n, recs = 0;
+    /* doubled taps: kept within 50 ms, two presses beyond */
+    for (i = 0; i < 4; i++) {
+        bridge_reset();
+        CHECK_I(key_tap(NULL, KMS(1000), 9, 0), 3);
+        CHECK_I(key_tap(NULL, KMS(1000 + gap_ms[i]), 9, 0), gap_ms[i] < 50 ? 0 : 3);
+        CHECK_I(yscr__in.key_doubles, gap_ms[i] < 50 ? 1 : 0);
+        CHECK_I(yscr__in.key_double_ups, gap_ms[i] < 50 ? 1 : 0);
+    }
+    /* 0 ms: the raw report with the keyboard's id, the message one with 0 */
+    bridge_reset();
+    CHECK_I(key_tap(NULL, KMS(1000), 9, 65537), 3);
+    CHECK_I(key_tap(NULL, KMS(1000), 9, 0), 0);
+    /* the bounds: 49.999999 ms dropped, 50 ms kept */
+    bridge_reset();
+    CHECK_I(key_tap(NULL, KMS(1000), 9, 0), 3);
+    CHECK_I(key_tap(NULL, KMS(1050) - 1, 9, 0), 0);
+    bridge_reset();
+    CHECK_I(key_tap(NULL, KMS(1000), 9, 0), 3);
+    CHECK_I(key_tap(NULL, KMS(1050), 9, 0), 3);
+    /* the message report stamped first (a tick-quantized time) */
+    bridge_reset();
+    CHECK_I(key_tap(NULL, KMS(1000), 9, 0), 3);
+    CHECK_I(key_tap(NULL, KMS(995), 9, 0), 0);
+    /* down, down, up, up: the kept press's own up passes, the second drops */
+    bridge_reset();
+    e = key_ev(KMS(1000), 9, 65537, YIN_PRESS, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1009), 9, 0, YIN_PRESS, 0);
+    CHECK(!yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1080), 9, 65537, YIN_RELEASE, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1089), 9, 0, YIN_RELEASE, 0);
+    CHECK(!yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1200), 9, 0, YIN_RELEASE, 0);  /* a stray up: not ours to drop */
+    CHECK(yscr__key_keep(NULL, &e));
+    /* distinct keys 2 ms apart; two keyboards on one key 5 ms apart */
+    bridge_reset();
+    CHECK_I(key_tap(NULL, KMS(1000), 9, 0), 3);
+    CHECK_I(key_tap(NULL, KMS(1002), 13, 0), 3);
+    CHECK_I(key_tap(NULL, KMS(2000), 9, 11), 3);
+    CHECK_I(key_tap(NULL, KMS(2005), 9, 22), 3);
+    CHECK_I(yscr__in.key_doubles, 0);
+    /* a held key: SDL marks the second report a repeat, and OS repeats
+     * 33 ms apart all pass; one up */
+    bridge_reset();
+    e = key_ev(KMS(1000), 9, 0, YIN_PRESS, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    for (j = 1; j <= 5; j++) {
+        e = key_ev(KMS(1000) + j * KMS(9), 9, 0, YIN_PRESS, 1);
+        CHECK(yscr__key_keep(NULL, &e));
+    }
+    e = key_ev(KMS(1100), 9, 0, YIN_RELEASE, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    CHECK_I(yscr__in.key_doubles, 0);
+    /* one report decoded twice: the event twice */
+    bridge_reset();
+    e = key_ev(KMS(1000), 9, 0, YIN_PRESS, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    CHECK(yscr__key_keep(NULL, &e));
+    CHECK_I(yscr__in.key_doubles, 0);
+    /* other kinds pass */
+    bridge_reset();
+    e = key_ev(KMS(1000), 1, 0, YIN_PRESS, 0);
+    e.kind = YIN_KIND_MOUSE;
+    CHECK(yscr__key_keep(NULL, &e));
+    e.t += KMS(5);
+    CHECK(yscr__key_keep(NULL, &e));
+    /* more keys than the table: the oldest goes, the newest still filter */
+    bridge_reset();
+    for (j = 0; j < 20; j++) CHECK_I(key_tap(NULL, KMS(1000) + j, 4u + (uint32_t)j, 0), 3);
+    for (j = 4; j < 20; j++) CHECK_I(key_tap(NULL, KMS(1010) + j, 4u + (uint32_t)j, 0), 0);
+    CHECK_I(yscr__in.key_doubles, 16);
+    /* the public call; the counters */
+    bridge_reset();
+    e = key_ev(KMS(1000), 9, 0, YIN_PRESS, 0);
+    CHECK(yscr_key_filter(NULL, &e));
+    e.t = KMS(1009);
+    CHECK(!yscr_key_filter(NULL, &e));
+    e.type = YIN_RELEASE;
+    CHECK(yscr_key_filter(NULL, &e));                  /* the kept press's up */
+    CHECK(!yscr_key_filter(NULL, &e));                 /* the second's */
+    CHECK(!yscr_key_filter(NULL, NULL));
+    yscr_get_input_stats(&st);
+    CHECK_I(st.key_doubles, 1);
+    CHECK_I(st.key_double_ups, 1);
+    /* a screen: its window, off, the ring record */
+    bridge_reset();
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = YSCR_PATH_OVERLAY;
+    ring_reset();
+    memset(&s, 0, sizeof s);
+    memset(&d, 0, sizeof d);
+    d.backend = YSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted;
+    d.presenter_ctx = &c;
+    d.ring = &g_ring;
+    d.display_index = 7;
+    d.key_dedup_ns = 1000000001;
+    CHECK(!yscr_open(&s, &d));
+    CHECK(strstr(yscr_error(&s), "key_dedup_ns") != NULL);
+    d.key_dedup_ns = KMS(10);
+    CHECK(yscr_open(&s, &d));
+    if (!yscr_is_open(&s)) return;
+    CHECK_I(key_tap(&s, KMS(1000), 9, 65537), 3);
+    CHECK_I(key_tap(&s, KMS(1009), 9, 0), 0);
+    CHECK_I(key_tap(&s, KMS(1020), 9, 0), 3);        /* 11 ms after: two presses */
+    e = key_ev(KMS(1025), 9, 0, YIN_PRESS, 0);        /* dropped, its up still to come */
+    CHECK(!yscr__key_keep(&s, &e));
+    s.key_dedup_ns = -1;                              /* off: every report */
+    e.type = YIN_RELEASE;
+    CHECK(yscr__key_keep(&s, &e));
+    CHECK_I(key_tap(&s, KMS(1026), 9, 0), 3);
+    yscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++)
+        if (g_ev[j].source == YRT_SRC_SCREEN && g_ev[j].kind == YSCR_EV_KEY_DOUBLE && recs++ == 0) {
+            CHECK_I(g_ev[j].t_ns, KMS(1009));
+            CHECK_I(g_ev[j].aux, 7);
+            CHECK_I(g_ev[j].u.i64[0], KMS(9));
+            CHECK_I(g_ev[j].u.u32[2], 9);
+            CHECK_I(g_ev[j].u.u32[3], 0);
+            CHECK_I(g_ev[j].u.u32[4], 65537);
+        }
+    CHECK_I(recs, 2);
+    /* desc 0 is 50 ms */
+    bridge_reset();
+    ring_reset();
+    d.key_dedup_ns = 0;
+    CHECK(yscr_open(&s, &d));
+    if (!yscr_is_open(&s)) return;
+    CHECK_I(key_tap(&s, KMS(1000), 9, 0), 3);
+    CHECK_I(key_tap(&s, KMS(1049), 9, 0), 0);
+    yscr_close(&s);
+    bridge_reset();
+}
+
 /* v0.3.5: the raw mouse reader's pure parts on synthetic RAWMOUSE data:
  * the decoder, the queue, the unlisted-device log, the guard, the refusal. */
 static void test_raw_mice(void) {
@@ -2449,6 +2617,7 @@ int main(void) {
     test_text_input();
     test_devices();
     test_bridge();
+    test_key_double();
     test_raw_mice();
     test_snap_and_hold(1, 0);
     test_snap_and_hold(0, 0);

@@ -18,14 +18,16 @@
  * The data file has one row per trial. Columns with jsPsych's names where
  * they match: trial_index, stimulus, key_answer, response, rt, correct,
  * rt_key_duration; then ysp's: onset_tier, onset_src, landing_residual,
- * onset_frame, rsp_tier, rsp_flags, n_anticipations, n_duplicates, iti.
- * Times in seconds. A '#' line before the header has the session's
+ * onset_frame, rsp_tier, rsp_flags, n_anticipations, n_duplicates (second
+ * key reports that ysp/screen.h's input bridge dropped during the trial),
+ * iti. Times in seconds. A '#' line before the header has the session's
  * settings. Shift+Esc stops the session; the rows so far are kept.
  *
  * --sim runs on the simulated display with a synthetic participant (no
  * keyboard): a correct response, an anticipation then a response, a wrong
  * key reported twice 9 ms apart (the pattern SDL 3.4 gives for a
- * virtual-key tap, docs/response.md), a timeout, and two more correct
+ * virtual-key tap, docs/response.md; the bridge's filter drops the
+ * second), a timeout, and two more correct
  * responses. It checks its own results and exits 1 on a mismatch. CI runs
  * it. The simulated display runs on the real clock: about 15 s.
  *
@@ -104,6 +106,13 @@ static const ygfx_bind binds[] = {
     { .stim = &fb_none,  .param = YGFX_P_VISIBLE, .channel = FB_NONE   },
 };
 
+/* The bridge's count of dropped second key reports (a process total). */
+static uint32_t key_doubles(void) {
+    yscr_input_stats st;
+    yscr_get_input_stats(&st);
+    return st.key_doubles;
+}
+
 static ygfx_stim shape(ygfx_shape_kind kind, float w, float p0, float r, float g, float b) {
     ygfx_shape_desc d;
     memset(&d, 0, sizeof d);
@@ -135,6 +144,8 @@ int main(int argc, char** argv) {
     ytl_event fired[16];
     ytr_trial_info ti = { 0 };
     yrsp_result res, sim_res[SIM_TRIALS];
+    int sim_doubles[SIM_TRIALS];
+    uint32_t doubles_at_arm = 0;
     yrsp_input sim_ev[16];
     FILE* out;
     char line[1024], meta[2048];
@@ -231,7 +242,7 @@ int main(int argc, char** argv) {
 
     for (;;) {
         SDL_Event ev;
-        int64_t t_ev, bt = 0;
+        int64_t bt = 0;
         yrsp_input in;
         int rc = yscr_begin(&scr, &f);
         if (rc == YSCR_QUIT) { aborted = 1; break; }
@@ -262,19 +273,20 @@ int main(int argc, char** argv) {
             ytl_on(&q, stim_ch);
             if (q.err) { fprintf(stderr, "trial_keyboard: timeline error %d\n", q.err); failed = 1; break; }
             yrsp_arm(&rsp, f.onset);
+            doubles_at_arm = key_doubles();
             stim_frame = -1;
             in_trial = responding = 1;
             n_sim_ev = sim_next = 0;
         }
 
         /* input: every event, so held keys are known between trials too.
-         * Another library can turn SDL text input on, which moves keys to
-         * the message path: read the path each frame (about 0.2 us). */
-        yscr_get_caps(&scr, &caps);
-        sdl.raw_keyboard = caps.raw_keyboard;
-        while (yscr_poll(&scr, &ev, &t_ev))
-            if (yrsp_from_sdl(&ev, t_ev, &sdl, &in)) yrsp_feed(&rsp, &in);
-        while (sim && sim_next < n_sim_ev && sim_ev[sim_next].t <= f.onset) yrsp_feed(&rsp, &sim_ev[sim_next++]);
+         * yscr_event_input() reads the key path per event (another library
+         * can turn SDL text input on) and drops second key reports; the
+         * synthetic participant's go through the same filter. */
+        while (yscr_poll(&scr, &ev, NULL))
+            if (yscr_event_input(&scr, &ev, &in)) yrsp_feed(&rsp, &in);
+        for (; sim && sim_next < n_sim_ev && sim_ev[sim_next].t <= f.onset; sim_next++)
+            if (yscr_key_filter(&scr, &sim_ev[sim_next])) yrsp_feed(&rsp, &sim_ev[sim_next]);
 
         /* the end of the response window: hide the stimulus on this frame */
         if (responding && yrsp_update(&rsp, f.onset) == YRSP_ENDED) {
@@ -344,13 +356,17 @@ int main(int argc, char** argv) {
                         ytb_text(&tab, ti.condition, stim_col), key_answer,
                         res.response_name ? res.response_name : "", rt, correct, dur, (unsigned)res.onset_tier,
                         (unsigned)res.onset_src, lres, (long long)res.onset_frame, (unsigned)res.stamp_tier,
-                        (unsigned)res.flags, res.n_anticipations, res.n_duplicates, (double)iti_ns / 1e9);
+                        (unsigned)res.flags, res.n_anticipations, (int)(key_doubles() - doubles_at_arm),
+                        (double)iti_ns / 1e9);
                 fflush(out);
                 printf("trial %2d %-6s rt %s response %s %s\n", ti.index, ytb_text(&tab, ti.condition, stim_col),
                        rt[0] ? rt : "-", res.response_name ? res.response_name : "-",
                        !(res.flags & YRSP_R_RESPONDED) ? "(too slow)" : correct ? "correct" : "wrong");
                 ytr_update(&trials, (res.flags & YRSP_R_RESPONDED) ? correct : YTR_INVALID, NULL);
-                if (ti.index < SIM_TRIALS) sim_res[ti.index] = res;
+                if (ti.index < SIM_TRIALS) {
+                    sim_res[ti.index] = res;
+                    sim_doubles[ti.index] = (int)(key_doubles() - doubles_at_arm);
+                }
                 rows++;
                 in_trial = 0;
             }
@@ -385,13 +401,13 @@ int main(int argc, char** argv) {
             else ok = (r->flags & YRSP_R_RESPONDED) && fabs(r->rt - want_rt) < 1e-6;
             if (i == 0) ok = ok && fabs(r->rt_key_duration - 0.1) < 1e-6;
             if (i == 1) ok = ok && r->n_anticipations == 1;
-            if (i == 2) ok = ok && r->n_duplicates == 1 && r->n_responses == 1;
+            if (i == 2) ok = ok && sim_doubles[i] == 1 && r->n_responses == 1;
             if (i != 3) ok = ok && r->onset_tier == YSCR_TIER_SIM && r->onset_src == YRSP_ONSET_FLIP &&
                              r->stamp_tier == YRSP_TIER_SIM;
             if (!ok) {
                 fprintf(stderr, "trial_keyboard: --sim: trial %d: rt %.9f flags 0x%x n_anticipations %d "
                                 "n_duplicates %d onset tier %d src %d\n", i, r->rt, (unsigned)r->flags,
-                        r->n_anticipations, r->n_duplicates, r->onset_tier, r->onset_src);
+                        r->n_anticipations, sim_doubles[i], r->onset_tier, r->onset_src);
                 bad = 1;
             }
         }

@@ -1,6 +1,6 @@
-# ysp/response.h mutants: the window and its bounds, onset refinement, the
-# double-report rule, held keys, releases, crossings, the trace, the log
-# reserve, sources and the data row. docs/response.md lists the results.
+# ysp/response.h mutants: the window and its bounds, onset refinement, held
+# keys, releases, crossings, the trace, the log reserve and sources. The
+# double-report rule's mutants moved to screen.toml (kd-, v0.2.0). docs/response.md lists the results.
 header = "ysp/response.h"
 
 [test.response]
@@ -43,16 +43,8 @@ id = "w-04"
 name = "deadline from arm"
 test = "response"
 why = "duration runs from the onset; from arm() the window would close a fixation early."
-find = 'if (c->have_onset && c->duration_ns > 0 && now >= c->onset.t + c->duration_ns + c->settle_ns) {'
-replace = 'if (c->have_onset && c->duration_ns > 0 && now >= c->t_arm + c->duration_ns + c->settle_ns) {'
-
-[[mutant]]
-id = "w-05"
-name = "settle ignored"
-test = "response"
-why = "settle delays ENDED so late-delivered presses still count before the trial moves on."
-find = 'now >= c->onset.t + c->duration_ns + c->settle_ns'
-replace = 'now >= c->onset.t + c->duration_ns'
+find = 'if (c->have_onset && c->duration_ns > 0 && now >= c->onset.t + c->duration_ns) {'
+replace = 'if (c->have_onset && c->duration_ns > 0 && now >= c->t_arm + c->duration_ns) {'
 
 [[mutant]]
 id = "w-06"
@@ -201,44 +193,7 @@ why = "An RT measured from a prediction must say so."
 find = '        if (!c->onset.final) r->flags |= YRSP_R_ONSET_PLAN;'
 replace = ''
 
-# --- double reports and held keys -------------------------------------------
-
-[[mutant]]
-id = "d-01"
-name = "dedup inclusive"
-test = "response"
-why = "Two presses exactly dedup apart are two presses."
-find = 'if (dt < c->dedup_ns && dt > -c->dedup_ns) return true;'
-replace = 'if (dt <= c->dedup_ns && dt >= -c->dedup_ns) return true;'
-
-[[mutant]]
-id = "d-02"
-name = "dedup one direction"
-test = "response"
-why = "The message report can be stamped before the raw one (a tick-quantized time)."
-find = 'if (dt < c->dedup_ns && dt > -c->dedup_ns) return true;'
-replace = 'if (dt >= 0 && dt < c->dedup_ns) return true;'
-
-[[mutant]]
-id = "d-03"
-name = "duplicate marks the key down"
-test = "response"
-why = "A second report must not make the key down: its release would pair and shorten rt_key_duration."
-find = '''        return;
-    }
-    held = repeat || yrsp__is_down(c, in);'''
-replace = '''        yrsp__set_down(c, in, true);
-        return;
-    }
-    held = repeat || yrsp__is_down(c, in);'''
-
-[[mutant]]
-id = "d-04"
-name = "default dedup 30 ms"
-test = "response"
-why = "A second report came 34.2 ms after the first in the measurement; 30 ms would take it for a press."
-find = 'd->dedup == 0 ? 0.050 : d->dedup'
-replace = 'd->dedup == 0 ? 0.030 : d->dedup'
+# --- held keys -------------------------------------------------------------
 
 [[mutant]]
 id = "d-05"
@@ -399,24 +354,6 @@ test = "response"
 why = "Bounds belong to the tier they were measured for."
 find = '        if (s && s->tier == e->stamp) {'
 replace = '        if (s) {'
-
-[[mutant]]
-id = "f-01"
-name = "NaN written as 0"
-test = "response"
-why = "No response is an empty rt, not 0 s."
-find = '''    if (s != s) out[0] = 0;
-    else snprintf(out, cap, "%.9f", s);'''
-replace = '''    if (s != s) s = 0;
-    snprintf(out, cap, "%.9f", s);'''
-
-[[mutant]]
-id = "f-02"
-name = "names not quoted"
-test = "response"
-why = "A choice name with a comma must not shift the columns."
-find = '    bool q = strpbrk(s, ",\"\r\n") != NULL;'
-replace = '    bool q = false;'
 
 [[mutant]]
 id = "n-01"

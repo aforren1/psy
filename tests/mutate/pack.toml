@@ -1,0 +1,312 @@
+# ysp/pack.h mutants: the container checks, the hashes, the names, the
+# cursors and the views. docs/pack.md lists the results.
+header = "ysp/pack.h"
+
+[test.pack]
+source = "tests/adapt/pack_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = []
+timeout = 300
+
+# --- the comment and the end records ---------------------------------------------
+
+[[mutant]]
+id = "c-01"
+name = "format 2 read as 1"
+test = "pack"
+why = "An unknown format version must be refused, not parsed as the known one."
+find = 'if (v != YPAK_FORMAT)'
+replace = 'if (v != YPAK_FORMAT && v != 2)'
+
+[[mutant]]
+id = "c-02"
+name = "directory hash not checked"
+test = "pack"
+why = "A central directory changed by another zip tool keeps the comment; its hash is what finds it."
+find = 'if (ypak_xxh64(cd, (size_t)p->cd_size_, 0) != p->cd_hash_)'
+replace = 'if (0)'
+
+[[mutant]]
+id = "c-03"
+name = "manifest SHA-256 not checked"
+test = "pack"
+why = "The pack ID names the manifest; a manifest that differs from it must be refused."
+find = 'if (memcmp(sha, p->id, 32) != 0)'
+replace = 'if (0)'
+
+[[mutant]]
+id = "c-04"
+name = "relative offsets read as absolute"
+test = "pack"
+why = "A pack appended with offsets from its own start needs the zip start added."
+find = 'if (!z64) p->b_ = cd_end - (int64_t)off64 - (int64_t)size64;'
+replace = 'if (!z64) p->b_ = 0;'
+
+# --- the central directory ----------------------------------------------------------
+
+[[mutant]]
+id = "d-01"
+name = "duplicate names accepted"
+test = "pack"
+why = "Strict order is also the duplicate check."
+find = 'if (prev_name && ypak__cmp(prev_name, prev_len, nm, nl) >= 0)'
+replace = 'if (prev_name && ypak__cmp(prev_name, prev_len, nm, nl) > 0)'
+
+[[mutant]]
+id = "d-02"
+name = "gaps accepted"
+test = "pack"
+why = "Bytes between entries are bytes no hash covers."
+find = 'if (hrel != prev_end)'
+replace = 'if (hrel < prev_end)'
+
+[[mutant]]
+id = "d-03"
+name = "data offset not canonical"
+test = "pack"
+why = "The record's data offset must be the one the header and the alignment give."
+find = 'if (data_off != (uint64_t)data_rel)'
+replace = 'if (data_off < (uint64_t)data_rel)'
+
+[[mutant]]
+id = "d-04"
+name = "fixed fields not checked"
+test = "pack"
+why = "Time, date, attributes and comment are part of the canonical container."
+find = 'if (flags != 0x0800u || tm != 0 || dt != 0x21 || cl != 0 || dsk != 0 || ia != 0 || ea != (0100644u << 16))'
+replace = 'if (0)'
+
+[[mutant]]
+id = "d-05"
+name = "version needed 10 accepted"
+test = "pack"
+why = "Version fields are canonical."
+find = 'if (need != (z64 ? 45u : 20u) || made != (z64 ? 0x032Du : 0x0314u))'
+replace = 'if ((need != (z64 ? 45u : 20u) && need != 10u) || made != (z64 ? 0x032Du : 0x0314u))'
+
+[[mutant]]
+id = "d-06"
+name = "two experiments"
+test = "pack"
+why = "At most one EXPERIMENT entry, so the player finds it without the manifest."
+find = 'if (n_exp > 1)'
+replace = 'if (n_exp > 2)'
+
+[[mutant]]
+id = "d-07"
+name = "reserved names accepted"
+test = "pack"
+why = "Names under ysp/ belong to the format."
+find = 'if (nl >= 4 && memcmp(nm, "ysp/", 4) == 0) {'
+replace = 'if (0) {'
+
+[[mutant]]
+id = "d-08"
+name = "zip start off the grid"
+test = "pack"
+why = "Entry data is 4096-aligned in the file only when the zip start is."
+find = 'if (z % YPAK_ALIGN) return'
+replace = 'if (0) return'
+
+[[mutant]]
+id = "d-09"
+name = "zip64 size truncated"
+test = "pack"
+why = "A 4.3 GB entry's size is in the zip64 field."
+find = 'size = (int64_t)a;'
+replace = 'size = (int64_t)(uint32_t)a;'
+
+[[mutant]]
+id = "d-10"
+name = "zip64 offset truncated"
+test = "pack"
+why = "An entry past 4 GiB has its offset in the zip64 field."
+find = 'hrec = (int64_t)a;'
+replace = 'hrec = (int64_t)(uint32_t)a;'
+
+[[mutant]]
+id = "d-11"
+name = "chunk index not checked"
+test = "pack"
+why = "Chunk lists are consecutive in pack order."
+find = 'if (chunk != chunks || kc > (int64_t)(YPAK__M32 - 1) - chunks)'
+replace = 'if (kc > (int64_t)(YPAK__M32 - 1) - chunks)'
+
+# --- local headers ---------------------------------------------------------------------
+
+[[mutant]]
+id = "l-01"
+name = "padding not checked"
+test = "pack"
+why = "The padding is the only part of an entry no hash covers; it must be zeros."
+find = 'if (h[6 + k]) return'
+replace = 'if (0) return'
+
+[[mutant]]
+id = "l-02"
+name = "local name not compared"
+test = "pack"
+why = "A zip tool reads the local header's name; it must be the record's."
+find = 'if (nl != t->name_len || 30 + (int64_t)nl + el != hl || memcmp(h + 30, nm, nl) != 0)'
+replace = 'if (nl != t->name_len || 30 + (int64_t)nl + el != hl)'
+
+[[mutant]]
+id = "l-03"
+name = "local CRC not compared"
+test = "pack"
+why = "Zip tools check the local header's CRC; it must be the record's."
+find = 'ypak__rd16(h + 8) != 0 || ypak__rd16(h + 10) != 0 || ypak__rd16(h + 12) != 0x21 || ypak__rd32(h + 14) != t->crc)'
+replace = 'ypak__rd16(h + 8) != 0 || ypak__rd16(h + 10) != 0 || ypak__rd16(h + 12) != 0x21)'
+
+# --- hashes ------------------------------------------------------------------------------
+
+[[mutant]]
+id = "h-01"
+name = "XXH64 round prime"
+test = "pack"
+why = "The reference vectors pin XXH64."
+find = '    acc += in * YPAK__P2;'
+replace = '    acc += in * YPAK__P1;'
+
+[[mutant]]
+id = "h-02"
+name = "XXH64 four-byte tail"
+test = "pack"
+why = "Lengths 4 to 7 mod 8 take this step."
+find = 'h = ypak__rotl(h, 23) * YPAK__P2 + YPAK__P3;'
+replace = 'h = ypak__rotl(h, 22) * YPAK__P2 + YPAK__P3;'
+
+[[mutant]]
+id = "h-03"
+name = "entry hash seed"
+test = "pack"
+why = "The entry hash is seeded with the size; the reader's own path must agree with ypak_entry_hash."
+find = '    ypak_xxh64_init(&lst, (uint64_t)t->size);'
+replace = '    ypak_xxh64_init(&lst, 0);'
+
+[[mutant]]
+id = "h-04"
+name = "chunk hash not compared"
+test = "pack"
+why = "A cursor that reads one chunk relies on the chunk's own hash."
+find = 'if (ypak__rd64(p->chunks_ + 8 * ((int64_t)t->chunk + j)) != c)'
+replace = 'if (0)'
+
+[[mutant]]
+id = "h-05"
+name = "SHA-256 constant"
+test = "pack"
+why = "The FIPS 180-4 vectors pin SHA-256."
+find = '0x428a2f98u'
+replace = '0x428a2f99u'
+
+[[mutant]]
+id = "h-06"
+name = "SHA-256 padding at 56 bytes"
+test = "pack"
+why = "A 56-byte message needs a second block."
+find = 'size_t padn = (s->n < 56) ? 56 - s->n : 120 - s->n;'
+replace = 'size_t padn = (s->n <= 56) ? 56 - s->n : 120 - s->n;'
+
+[[mutant]]
+id = "h-07"
+name = "CRC-32 polynomial"
+test = "pack"
+why = "The check value of '123456789' pins CRC-32."
+find = '(0xEDB88320u & (0u - (v & 1u)))'
+replace = '(0xEDB88321u & (0u - (v & 1u)))'
+
+# --- names ------------------------------------------------------------------------------------
+
+[[mutant]]
+id = "n-01"
+name = "DEL accepted"
+test = "pack"
+why = "Control characters are refused in names."
+find = '''if (c < 0x20 || c == 0x7F || c == '\\') return 0;'''
+replace = '''if (c < 0x20 || c == '\\') return 0;'''
+
+[[mutant]]
+id = "n-02"
+name = "'..' inside a path accepted"
+test = "pack"
+why = "A '..' component would climb out of an extract folder."
+find = '''if ((comp == 1 && s[i - 1] == '.') || (comp == 2 && s[i - 1] == '.' && s[i - 2] == '.')) return 0;'''
+replace = '''if (comp == 1 && s[i - 1] == '.') return 0;'''
+
+[[mutant]]
+id = "n-03"
+name = "surrogates accepted"
+test = "pack"
+why = "UTF-8 never encodes surrogates."
+find = '(cp >= 0xD800 && cp <= 0xDFFF) || (cp >= 0x80 && cp < 0xA0))'
+replace = '(cp >= 0x80 && cp < 0xA0))'
+
+# --- cursors, checks, the arena ------------------------------------------------------------
+
+[[mutant]]
+id = "k-01"
+name = "cursor skips chunk verification"
+test = "pack"
+why = "A streamed entry is verified chunk by chunk as it is read."
+find = 'else need_hash = p->verify_ != YPAK_VERIFY_NONE && !YPAK__LOAD(&p->cok_[t->chunk + (uint32_t)j]);'
+replace = 'else need_hash = 0;'
+
+[[mutant]]
+id = "k-02"
+name = "ypak_check length not checked"
+test = "pack"
+why = "Fetched bytes must be exactly the entry's range."
+find = 'if ((int64_t)n != t->data + t->size - t->hdr)'
+replace = 'if ((int64_t)n < 30)'
+
+[[mutant]]
+id = "k-03"
+name = "arena bound"
+test = "pack"
+why = "desc.arena is the caller's; it must not be overrun."
+find = 'if (p->arena_used_ + n > p->arena_size_) {'
+replace = 'if (0) {'
+
+# --- views -------------------------------------------------------------------------------------
+
+[[mutant]]
+id = "v-01"
+name = "curve set words offset"
+test = "pack"
+why = "The offsets must describe the entry exactly."
+find = 'to != 64 || wo != 64 + 16 * nt ||'
+replace = 'to != 64 ||'
+
+[[mutant]]
+id = "v-02"
+name = "glyph run keys unsorted"
+test = "pack"
+why = "ypak_runs_find is a binary search; duplicate or unsorted keys break it."
+find = '(const uint8_t*)out->pool + k->key_off, k->key_len) >= 0)'
+replace = '(const uint8_t*)out->pool + k->key_off, k->key_len) > 0)'
+
+[[mutant]]
+id = "v-03"
+name = "QOI on R8"
+test = "pack"
+why = "QOI codes four channels; it is for RGBA8 only."
+find = '(out->compression == YPAK_TEX_QOI && out->format != YPAK_TEX_RGBA8) ||'
+replace = ''
+
+[[mutant]]
+id = "v-04"
+name = "QOI raw hash not checked"
+test = "pack"
+why = "Decoded texels are checked against the hash of the raw rows."
+find = 'if (ypak_xxh64(dst, (size_t)t->raw_bytes, 0) != t->raw_hash)'
+replace = 'if (0)'
+
+[[mutant]]
+id = "v-05"
+name = "shader body without its NUL"
+test = "pack"
+why = "The body is given to GL as a C string."
+find = '    if (b[s + len] != 0) return 0;'
+replace = ''

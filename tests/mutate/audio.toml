@@ -1,0 +1,53 @@
+# ysp/audio.h mutants: the v0.2.1 list, yau_wav_probe() and the parse split
+# it made (docs/audio.md, "The WAV probe"). Earlier lists were not kept.
+header = "ysp/audio.h"
+
+[test.audio]
+source = "tests/adapt/audio_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 300
+
+[[mutant]]
+id = "p-01"
+name = "the probe checks the device rate"
+test = "audio"
+why = "The probe has no device; the caller compares the rate with the project's. A 44100 Hz file must give its info, not a refusal."
+find = '''    rc = yau__wav_scan(&src, info, err, cap);
+    yau__wsrc_close(&src);'''
+replace = '''    rc = yau__wav_scan(&src, info, err, cap);
+    if (rc == 0 && info->rate != 48000) rc = YAU_ERR_FORMAT;
+    yau__wsrc_close(&src);'''
+
+[[mutant]]
+id = "p-02"
+name = "the scan leaves the info empty"
+test = "audio"
+why = "The probe reports rate, channels and frames from the scan."
+find = '''    out->frames = data_size / block;
+    out->channel_mask = mask;'''
+replace = '''    out->frames = 0;
+    out->channel_mask = mask;'''
+
+[[mutant]]
+id = "p-03"
+name = "the open skips the device checks"
+test = "audio"
+why = "After the split, yau_wav_open() must still refuse a rate that is not the device's."
+find = '''    if (rc < 0) return rc;
+    rate = out->rate;'''
+replace = '''    if (rc < 0) return rc;
+    return 0;
+    rate = out->rate;'''
+
+[[mutant]]
+id = "p-04"
+name = "the probe leaves a path open"
+test = "audio"
+why = "The probe opens and closes a path; a file left open cannot be removed on Windows."
+find = '''    rc = yau__wav_scan(&src, info, err, cap);
+    yau__wsrc_close(&src);
+    return rc;'''
+replace = '''    rc = yau__wav_scan(&src, info, err, cap);
+    return rc;'''

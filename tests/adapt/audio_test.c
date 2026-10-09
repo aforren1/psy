@@ -2064,9 +2064,23 @@ static void test_wav(void) {
         CHECK_I(yau_wav_open(&g_au, &g_wav2, &(yau_wav_desc){ .data = g_wavmem, .size = n, .ring = 4000, .memory = ring_d }), 0);
         CHECK_I(yau_wav_feed(&g_wav2, 0), 3000);
         CHECK(memcmp(ring_a, ring_d, sizeof(float) * 6000) == 0);
+        /* v0.2.1: the probe gives the open's info from a path, a reader
+         * and memory, with no device */
+        {
+            yau_wav_info pi;
+            char pe[256];
+            CHECK_I(yau_wav_probe(&(yau_wav_desc){ .path = path }, &pi, pe, sizeof pe), 0);
+            CHECK(memcmp(&pi, &g_wav.info, sizeof pi) == 0);
+            CHECK_I(yau_wav_probe(&(yau_wav_desc){ .reader = &rd }, &pi, pe, sizeof pe), 0);
+            CHECK(memcmp(&pi, &g_wav.info, sizeof pi) == 0);
+            CHECK_I(yau_wav_probe(&(yau_wav_desc){ .data = g_wavmem, .size = n }, &pi, NULL, 0), 0);
+            CHECK(pi.rate == 48000 && pi.channels == 2 && pi.frames == 3000 && pi.format == YAU_WAV_S24_32);
+            CHECK_I(yau_wav_probe(&(yau_wav_desc){ .path = "no_such_file.wav" }, &pi, pe, sizeof pe), YAU_ERR_IO);
+            CHECK_I(yau_wav_probe(NULL, &pi, pe, sizeof pe), YAU_ERR_ARG);
+        }
         CHECK_I(yau_wav_close(&g_au, &g_wav), 0);
         CHECK_I(yau_wav_close(&g_au, &g_wav2), 0);
-        remove(path);
+        CHECK(remove(path) == 0);   /* every reader closed the file (on Windows an open file cannot be removed) */
         CHECK_I(yau_wav_open(&g_au, &g_wav, &(yau_wav_desc){ .path = "no_such_file.wav" }), YAU_ERR_IO);
     }
 
@@ -2105,6 +2119,19 @@ static void test_wav(void) {
             if (!strstr(yau_wav_error(&g_wav), cases[i].says)) {
                 printf("wav refusal %d says: %s\n", (int)i, yau_wav_error(&g_wav));
                 fail(__LINE__, "a WAV refusal without its reason");
+            }
+            /* v0.2.1: the probe refuses the form, and reports the rate and
+             * channels for the caller to compare */
+            {
+                yau_wav_info pi;
+                char pe[256];
+                int prc = yau_wav_probe(&(yau_wav_desc){ .data = g_wavmem, .size = len }, &pi, pe, sizeof pe);
+                if (i == 0) CHECK(prc == 0 && pi.rate == 44100);
+                else if (i == 1) CHECK(prc == 0 && pi.channels == 3);
+                else {
+                    CHECK_I(prc, YAU_ERR_FORMAT);
+                    if (!strstr(pe, cases[i].says)) fail(__LINE__, "a probe refusal without its reason");
+                }
             }
         }
         memcpy(g_wavmem, "RIFX", 4);

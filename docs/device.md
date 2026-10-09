@@ -1,8 +1,11 @@
 # ysp/device.h
 
-Status: v0.1.0, 2026-10-08. The header's manual is the reference. This
-page records the decisions the plan (`docs/devices_spec.md`, step 2 of
-section 14.2) left open, the results, and what needs the user's hardware.
+Status: v0.2.0, 2026-10-08; the rig profile, `ysp/rigfile.h` v0.1.0,
+2026-10-09. The headers' manuals are the reference (OUTPUTS, AT THE FLIP
+and ROLES of `ysp/device.h`; THE FILE, CHECKS AT LOAD and BINDING of
+`ysp/rigfile.h`). This page records the decisions the plan
+(`docs/devices_spec.md`, steps 2 and 3 of section 14.2, and 11.2) left
+open, the results, and what needs the user's hardware.
 
 ## How-to: run the photodiode board
 
@@ -25,6 +28,128 @@ section 14.2) left open, the results, and what needs the user's hardware.
    edge minus flip onset; that mean is `desc.onset_offset_ns` of
    `ysp/screen.h`.
 
+## How-to: send a trigger code
+
+1. Find the output's key: `device_out_latency --list`.
+2. Start an instance of its family. The device need not be there yet:
+
+   ```c
+   static ydev_device trig;
+   ydev_desc d = { 0 };
+   d.role = "trig";
+   d.family = YBOX_TRIGGERBOX;          /* or BIOSEMI, MMBTS, LINES, LINE, XID */
+   d.key = "serial:0403:6001:TB0123:";
+   d.device = 2;                        /* or d.roles = &roles */
+   d.ring = &log_ring;
+   ydev_start(&trig, &d);
+   ```
+3. When `ydev_state(&trig)` is `YDEV_RUNNING`, call
+   `ydev_out_pulse(&trig, 12, 2000000)` (12 for 2 ms, then 0) or
+   `ydev_out_set(&trig, 12)` (hold 12). Each call returns `YDEV_OK` or a
+   `YDEV_ERR_*` and puts one `YDEV_REC_OUT` record in the ring.
+4. `ydev_stop(&trig)` ends a pending pulse, writes 0 if a code is held,
+   writes the family's close bytes (0xFF for the TriggerBox) and closes.
+
+For the parallel port, include `ysp/parallel.h` before `ysp/device.h` and
+set `d.transport = ydev_parallel_transport(&port)` with a zeroed
+`ypar_port` and the key `"parallel:"` (or `"parallel:0x378"`,
+`"parallel:/dev/parport0"`).
+
+## How-to: send the code at the flip
+
+1. Include `ysp/screen.h` before `ysp/device.h`.
+2. Set `d.pulse_ns` of the output (0 = hold the code).
+3. Give the screen the output as a trigger channel:
+
+   ```c
+   yscr_trigger_desc ch = ydev_trigger_channel(&trig, 0);
+   sd.triggers = &ch;
+   sd.n_triggers = 1;
+   ```
+4. Between `yscr_begin()` and the flip, call `yscr_trigger(&scr, 0, code)`.
+   The screen's deadline worker calls `ydev_trigger_fn()` at the planned
+   vblank. Its OUT record has the FLIP flag and the deadline in `i64[3]`.
+
+`examples/device/trigger_flip.c` does this on the simulated display.
+
+## How-to: measure an output's write-to-edge latency
+
+The loopback of devices_spec section 12. The input is a board with
+`firmware/ysp_line/` (pin 2 is its input, pin 3 its first output).
+
+| Output | Wiring | Command |
+|---|---|---|
+| A USB-serial adapter's DTR | the adapter's DTR pin to the board's pin 2, grounds joined. A TTL-level adapter (3.3 V) only: an RS-232-level DTR (up to 12 V) needs a level shifter | `device_out_latency --out lines:serial:<vid>:<pid>:<serial>: --in serial:16C0:0483::` |
+| A board's own output | the board's pin 3 to its pin 2 | `device_out_latency --out line:serial:16C0:0483::` |
+| A trigger box's bit 0 | its bit 0 line to the board's pin 2, grounds joined (check the box's output voltage against the board's input range first) | `device_out_latency --out triggerbox:<key> --in <board key>` |
+
+The program waits 6 s (`--warmup`) for the board's clock fit, sends 200
+pulses (`--n`) of 5 ms (`--width`) 50 to 150 ms apart, and takes the first
+edge of either polarity after each write. It prints n, missed, min, p5,
+median, p95, max and mean in seconds, writes them with the samples to
+`out_latency.txt` (`--file`), and prints the file's SHA-256: the rig
+profile names the file by that hash (devices_spec 11.2). With `--store`
+it also keeps the file in the rig profile's `loopback/` and writes the
+role's binding and summary into the profile (next how-to). With a line
+board as the output, it also prints the board's own time of each pin
+change ("O" reports) minus the write.
+
+`device_out_latency --sim` and `--sim --self` run the same procedure
+against an in-process model and print the model's true latencies beside
+the measured ones.
+
+## How-to: keep a rig's devices and latencies in its rig profile
+
+The rig profile (`ysp/rigfile.h`, devices_spec 11.2) is a JSON file in the
+user's config folder: `%APPDATA%\ysp\rig\profile.json` on Windows,
+`~/.config/ysp/rig/profile.json` on Linux. Tools write it; read it with
+`rigfile_profile`.
+
+1. Make the profile for the rig: `rigfile_profile --new booth-2`.
+2. Find the devices' match keys: `device_out_latency --list`.
+3. Bind each role to its device:
+   `rigfile_profile --bind resp xid serial:0403:6001:FT4ABC12:` and
+   `rigfile_profile --bind trig triggerbox serial:0403:6001:TB0123:`.
+   A new binding drops the role's old loopback numbers.
+4. Measure each output's write-to-edge latency into the profile (the
+   wiring of the previous how-to):
+   `device_out_latency --out triggerbox:serial:0403:6001:TB0123: --in <board key> --store --role trig`.
+   The result file goes to `loopback\<sha256>.txt` beside the profile,
+   and the profile gets the role's family, key and summary.
+5. Check the profile: `rigfile_profile`. It prints each role, the check of
+   each loopback file (`ok`, `missing`, `changed`, `differs`), the notes,
+   and the profile's SHA-256. Exit code 3 means that a file failed its
+   check: that role runs with tier UNKNOWN.
+
+A machine with two rigs keeps `<NAME>.json` beside `profile.json`: give
+`--rig NAME` to both programs. `--dir DIR` (`rigfile_profile`) and
+`--rig-dir DIR` (`device_out_latency`) use another folder, for a test.
+
+## How-to: start a role's device from the profile
+
+```c
+#define YSP_RIGFILE_IMPLEMENTATION
+#include "ysp/rigfile.h"
+
+static yrig_profile prof;            /* about 50 KB */
+static ydev_device trig;
+static ydev_roles roles;
+char err[256], hash[65];
+if (yrig_load(&prof, NULL, err, sizeof err) != YRIG_OK) die(err);
+for (int i = 0; i < prof.n_notes; i++) log_line(prof.notes[i]);
+yrig_hash(&prof, hash);              /* into the data file header */
+ydev_desc base = { 0 };
+base.roles = &roles;
+base.ring = &log_ring;
+if (!yrig_start(&trig, &prof, "trig", &base, err, sizeof err)) die(err);
+```
+
+`yrig_start()` takes family, key, baud, latched and the rig's pulse width
+from the profile and everything else from `base`. The profile must live
+as long as the instance. `yrig_source(&prof, &dev)` gives an input's
+source entry with tier 1 and its bounds only when its loopback file
+checked.
+
 ## Decisions
 
 | Question | Decision | Why |
@@ -43,6 +168,42 @@ section 14.2) left open, the results, and what needs the user's hardware.
 | Kind | 0 = the family's: BOX for XID and LINE, SYNC for the photodiode frame | `desc.kind` 0 would otherwise be KEYBOARD, which no box is |
 | The bridge | The caller's sink; the example uses `yscr_push_input()` | `ysp/screen.h` stays out of this header; a logger or a test is another sink |
 | Source tier | UNKNOWN | No loopback has checked any device on this layer (devices_spec 12) |
+
+### Outputs (v0.2.0)
+
+| Question | Decision | Why |
+|---|---|---|
+| Who ends a pulse | The device when it can: XID (`mp` then `mh`), line boards (`p <code> <us>`); BioSemi and the MMBT-S at switch P end every code after 8 ms by themselves. Otherwise the instance's own ysp/rt.h worker writes 0 at the deadline | A device-timed pulse is one write and has no host jitter on its end. The fixed-width boxes cannot give another width, so a request for one is refused (`YDEV_ERR_ARG`), and so is a `desc.pulse_ns` other than 8 ms at start: the binding fails before the session, not in the data |
+| `yser_pulse_async()`, `ypar_pulse_async()` | Not used | They give no time for the trailing write, so the TRAILING record could not have its times, and they know no modem lines and no custom transport. The worker here is the same ysp/rt.h worker with the same rules: one pending edge, a set cancels it, a stop flushes it |
+| The deadline | The end of the leading write plus the width | As `yser_pulse_async()`: the width does not include the leading write's own cost |
+| XID writes | Output commands in one write; queries still 1 ms per byte | Cedrus's command page: "XID 2 devices ... eliminates the need for an inter-byte delay". Per byte, `mp` and `mh` would delay the edge by 9 ms. Queries keep pyxid2's gap, as in v0.1.0, until a box shows it is not needed |
+| XID width | `mp` is sent only when the width changes; unknown after each open | The box keeps its width, so a set after a pulse must send `mp 0` first (Cedrus: with 0, `mh` holds) |
+| Writes and queries | One output lock serializes them | Two writers on one byte stream: an `_e5` between `mh` and its bytes would corrupt both. The cost: an output on an XID instance with queries can wait up to 2 ms (`desc.probe_ns < 0` turns queries off) |
+| At the open | DTR and RTS opened low; a 0 to the TriggerBox, the MMBT-S at switch S, the parallel port and the lines | `yser_open()` raises DTR and RTS by default; a box that holds a byte can hold the last session's code |
+| At the stop | The pending edge at once (FLUSHED), then 0 if a code is held, then the close bytes, then close | A latching box must never be left holding a trigger code (as serial.h's close) |
+| Output-only families | No identify, no queries, no silence timeout; a transport may have no `read` | A TriggerBox, BioSemi or MMBT-S says nothing; silence is not a loss. The TriggerBox's input byte (its input lines changed) is counted as garbage, not decoded |
+| `ydev_out_mark()` | The code as `desc.pulse_ns` says, then the text in TEXT records ("mark ...", 34 characters each) | No family of this step takes text; EyeLink and LSL markers come with their headers. The text is in the log either way |
+| Failed calls | A record too, with FAILED | The log must show a trigger that was not sent |
+| The trigger channel | `ydev_trigger_fn` and `ydev_trigger_channel()` are static inline functions defined when `ysp/screen.h` came first; a FLUSHED call (the screen's close) writes nothing | `ysp/screen.h` stays out of this header's dependencies. The screen's manual says a callback should not pulse at the close |
+| Roles | `ydev_roles`, a table of 32 names the caller owns; `desc.roles` with `desc.device` 0 gives the index | The index is `yin_event.device` and the records' `aux`, so the data file joins by role. A role keeps its index across a restart. No global state |
+| MMBT-S switch | `desc.latched` says S; the default is P | The switch cannot be read (the open-source driver's notes) |
+
+### The rig profile (`ysp/rigfile.h` v0.1.0, 2026-10-09)
+
+| Question | Decision | Why |
+|---|---|---|
+| Where the code lives | `ysp/rigfile.h`, prefix `yrig_`, on `ysp/device.h` and `ysp/json.h` | The profile is the rig's, not only its devices' (the display's onset offset and calibration are in it); it is files, hashes and a parser, which the device layer's run-time path does not need; a format change does not change `ysp/device.h`'s version. Binding fills a `ydev_desc` and families are `ysp/box.h`'s names, so it includes the device layer (one direction) |
+| The parser | `ysp/json.h`, the repository's one strict reader (docs/json.md) | The pack tool had a strict reader; one reader for both means one set of edge cases |
+| Canonical form | `ysp/json.h`'s YJS_WRITE_PRETTY and a final LF; seconds as the exact decimal of the nanoseconds; defaults left out | The hash then depends on the values only. The pack manifest has the same form |
+| Unknown keys | Refused at every level, with the field path, line and column | A misspelled `ftdi_latency_s` would otherwise be a silent default |
+| A loopback file's name | `loopback/<sha256>.txt`; the profile keeps the hash only | A name and a hash that could disagree are one more check that can fail |
+| The checks | MISSING, CHANGED, and DIFFERS (an output latency file whose summary is not the profile's) | A hand-edited median with a genuine file is as wrong as a changed file |
+| A failed check | Not a load error: a note, and tier UNKNOWN for the role | The rig can still run, with the tier it can prove, and the log says why |
+| The tier | `yrig_source()`: tier 1 only for an input family with a device clock whose `bounds` file checks | ysp/input.h's tier 1 is a device clock mapped by a fit that a loopback checked. No output has a tier |
+| A new binding | Drops the role's latency and bounds | They were measured on the device the role had before |
+| Writing | `yrig_save()` reads its own bytes back before it writes, sets `written`, makes the folder (0700 on POSIX), writes a temporary file and renames it | A profile that would not load is never written; a reader never sees half a file |
+| The folder | `yrt_user_dir(YRT_DIR_CONFIG, "rig")` only; refused means `YRIG_ERR_FOLDER`, no other folder | A folder another user can write may hold a planted profile (POSIX; on Windows `yrt_user_dir` reads no ACL) |
+| Limits | 1 MiB of text, 32 roles (`ydev_roles`), 16 buttons, nesting 8 | A profile is a few KB; bounds keep a hostile file cheap |
 
 ## Results
 
@@ -64,18 +225,78 @@ of the simulated edge.
 | `photodiode_check --list` (`examples/device/photodiode_check.c`) on the development laptop | "no serial ports" (none attached) |
 | Mutants (`tests/mutate/device.toml`) | 11 of 12 caught; `dev-11` (an answer matched to any query) is equivalent here, because the simulated boards answer each query before the next. The first run missed `dev-10` (no clamp; `test_clamp` added) and `dev-12` (the uncertainty bound was too loose) |
 
+### Outputs (v0.2.0)
+
+On 2026-10-08, MSVC 19.44 (Release) on Windows 11 for the numbers, under
+`psy-guard.sh time` (load 18 %, on AC); MinGW-w64 gcc 16.1 and gcc 11.4
+on WSL2 for the checks.
+
+| Check | Result |
+|---|---|
+| `tests/adapt/device_test.c`, 853 checks | Pass on MSVC, MinGW and WSL2 (C99, C11), also under ThreadSanitizer, ASan and UBSan on WSL2 |
+| Bytes per family, virtual clock | TriggerBox `00 05 07 00 09 03 00 FF` for open, set 5, pulse 7, its 0, pulse 9, set 3 (cancels the 0), stop; BioSemi and MMBT-S at P one byte per code, a 2 ms request refused; MMBT-S at S and the parallel port host-timed; DTR and RTS: low at the open, only the changed line; XID `mp` once per width, `mh` low byte first; line `o 5`, `p 1 2000` |
+| Records | A pulse and its TRAILING record share a number; TRAILING times its own write and gives the host width; REPLACED, a set's cancel, FAILED (bad code, write error, not running), MARK text, FLIP with the deadline, FLUSHED at the stop |
+| Line board reports | 20 of 20 "O" reports, mapped within 100 us of the board's true change |
+| Trailing edge on the worker, fake transport, 2 ms pulses 3 to 7 ms apart, 3 runs of 300 | Width minus 2 ms: p50 +0.7 to +1.3 us, p95 +1.1 to +2.7, p99 +3.3 to +13.4, max +15.6 to +454 us. Trailing write minus its deadline: p50 0.4 to 0.7 us, p99 1.7 to 4.5 us. No pulse short. Worker TIME_CRITICAL |
+| The same test 20 times on a loaded machine (other workers' builds, not under the guard) | In 2 runs one trailing edge was still pending when the next pulse came (3 to 7 ms after the last, so the worker was at least 1 ms late), and the next pulse moved it (REPLACED). The test checks the contract (each pulse ends, or the next one moves its end; none is short), not that the worker is never late |
+| Cost of `ydev_out_pulse()` on the caller | p50 5.3 to 8.7 us, p99 28 to 60 us, max 5.5 ms once (the caller's thread, not elevated); the bracket of the fake write 0.3 to 0.6 us. Most of the call is the worker's wake-up (`yrt_worker_submit`) |
+| `examples/device/trigger_flip.c`, simulated display, 600 triggers | 600 written; write start minus the planned vblank p50 4.3 us, p99 9.5 us, max 594 us (the screen's worker, its lock and the output lock) |
+| `tests/loopback/device_loopback.c` on a socat pty pair (WSL2) | The serial transport's outputs: 20 `o` codes written, 20 reports back, the worst 718 us after its write |
+| `device_out_latency --sim`, 100 pulses: DTR into a board | measured median 577 us, p95 983 us; the model's truth median 556 us, p95 949 us; the input's own `unc_us` median 142 us |
+| `device_out_latency --sim --self`, 100 pulses | measured median 122 us, p95 187 us; truth 87 and 141 us; the board's "O" reports median 121 us |
+| Mutants (`tests/mutate/device.toml`) | 24 of 25 caught; `dev-11` equivalent as before. All 13 output mutants (`dev-13` to `dev-25`) caught on the first run |
+| Firmware (`firmware/ysp_line/` with `o`, `p`, `O`) | Compiles with arduino-cli 1.5.1 for `teensy41`, `teensy40` and `rpipico`, and in analog mode with three outputs for `teensy41` and `rpipico`. Not run on a board |
+
+The simulated latencies check the procedure, not a device: measured minus
+truth is +21 to +46 us, inside the input's stated uncertainty (142 to 202 us).
+
+### The rig profile (v0.1.0)
+
+On 2026-10-09, MSVC 19.44 and MinGW-w64 gcc 16.1 on Windows 11, gcc 11.4
+on WSL2.
+
+| Check | Result |
+|---|---|
+| `tests/adapt/rigfile_test.c` | 373 checks pass on MSVC (Release) and MinGW (Release, -O1); 381 on WSL2 gcc 11.4 (-O2, ASan with UBSan, and as C++17; 380 when the working folder is not under /tmp), where the planted-folder checks run too |
+| Canonical bytes | A profile of every field written to a pinned text; read back and written again: the same bytes; a hand edit in another key order, whitespace and number spelling (`983e-6`, `0.0005770`, `2.000`, a BOM): the same bytes and hash |
+| Refusals | 66 edits of the pinned text, each refused with the field it names: bad JSON (line and column), a duplicate role, the format, each required field missing, wrong types, ranges, an unknown key at each level, role names, families, `latched` on another family, percentile order, hashes, dates, calibration paths; 33 roles; 17 buttons; more than 1 MiB; nesting |
+| Checks at load | A stored output latency file checks OK; its summary edited in the profile: DIFFERS; the file changed: CHANGED; removed: MISSING; the calibration changed: CHANGED; each with a note; more than 16 failures stop at 16 notes; without a folder: NOT_RUN |
+| The user folder | `APPDATA` (Windows) or `XDG_CONFIG_HOME` (POSIX) pointed at the test's folder: save makes `ysp/rig/`, load reads it back, `<NAME>.json`, bad names refused; a relative variable is no folder (Windows). On WSL2: a base folder that all users can write, and a planted `ysp/rig` with mode 0777 under a good base, refused with `YRIG_ERR_FOLDER`; 0700 again, loaded |
+| Binding | Through a fake transport on a virtual clock: the key reaches the transport, the role gets its index, the TriggerBox gets 00 05 07 00 for open, set 5, a mark at the profile's 2 ms pulse; `latched` and `baud` reach the desc; an unknown or unbound role is refused by name |
+| Tier | Tier 1 with the bounds (-300 and 1100 us) for a checked xid role; UNKNOWN when not checked, changed, or for a trigger box with checked bounds |
+| Damage | 20,000 random edits of the pinned text: no crash; the 2169 still valid write canonical text that reads back to the same bytes (the same count on every compiler) |
+| `device_out_latency --sim --store` | The file stored as `loopback/<sha256>.txt`, the role written, `rigfile_profile` reads it back with the check `ok` (Windows and WSL2) |
+| Fuzzing (`tests/fuzz/json_fuzz.c`, target 2) | MSVC libFuzzer with ASan, all four targets (JSON in a fixed arena, in a heap arena with a depth from the input, the rig profile, the latency file and the number parsers): 14,150,487 inputs in 1501 s, no crash and no broken round trip; the 2166 corpus files replayed on WSL2 gcc under ASan and UBSan with no report |
+| Mutants (`tests/mutate/rigfile.toml`) | 24 of 24 caught on the first run |
+
+Costs (`examples/rigfile/bench.c`, Iris Xe laptop on AC, under the measurement lock (load 9 %), 21 rounds, MSVC 19.44 /O2 and MinGW-w64 gcc 16.1 -O2; a 3453-byte profile with 4 roles and every field): `yrig_parse()` of a 3453-byte profile with 4 roles, every field checked: 23.3 us (MSVC) and 17.7 us (MinGW), medians; the JSON parse alone 4.9 and 4.4 us; `yrig_write()` 7.0 and 6.6 us; `yrig_hash()` 43 us. docs/json.md has the table.
+
 ## What needs the user's hardware
 
 | Hardware | Checks | How |
 |---|---|---|
 | Teensy 4.x or Pico with the photodiode module | The firmware runs; identify; query widths on native USB; the fit on real USB delivery; edge minus flip onset; the bridge under a window | Steps 1 to 5 above |
 | Unplugging that board during `--monitor` | LOST, reconnect by key, the gap | Pull the cable, put it back |
-| The USB-serial adapter | Nothing yet: outputs are step 3 | |
+| The USB-serial adapter and a Teensy or Pico with `firmware/ysp_line/` | DTR as an output; write to edge for the adapter on this laptop | Wire the adapter's DTR to the board's pin 2 and the grounds together (3.3 V TTL adapter only). `device_out_latency --list`, then `device_out_latency --out lines:<adapter key> --in <board key>` |
+| A Teensy, Pico or Arduino board alone | The board's outputs (`o`, `p`, `O`) and its own write-to-edge | Upload the new `firmware/ysp_line/`, wire pin 3 to pin 2, run `device_out_latency --out line:<board key>`. A classic Arduino (ATmega, USB-serial chip) works too, but its USB bridge adds its own latency |
+| A trigger box at a flip | The trigger channel with a real output | `device_trigger_flip --out lines:<adapter key>` (simulated display; a windowed program sets only `sd.backend`) |
 | A Cedrus box (XID) | The decoder on real bytes, `_c1` and `_d` answers, the 1 ms byte gap, brackets behind the FTDI latency timer | `photodiode_check --family xid --key serial:0403:6001:<serial>: --monitor 30`, pressing buttons |
 | The LabStreamer | An independent reference for the same flips | After LSL exists (step 4) |
 
 ## Not done
 
-- Outputs (step 3), the `ysp/screen.h` match key for keyboard-mode boxes,
-  other transports.
-- A device on this layer under a real load; any timing claim.
+- The `ysp/screen.h` match key for keyboard-mode boxes; HID, network and
+  vendor transports; LSL and EyeLink markers (`ydev_out_mark()` text goes
+  to the log only).
+- The parallel transport (`ydev_parallel_transport()`): compiled with
+  MSVC, MinGW and gcc, never run (no LPT port here; devices_spec 16,
+  decision 12).
+- The rig profile: no tool measures an input's `bounds` yet (the field
+  is read, written and checked); the display's onset offset is written
+  by hand or a later tool (`photodiode_check` prints it); the player
+  that refuses a session below `min_tier` does not exist yet.
+- Every vendor output: no TriggerBox, BioSemi, MMBT-S, c-pod or
+  StimTracker was attached; their bytes come from documentation and
+  open-source code (docs/box.md).
+- A device on this layer under a real load; any timing claim about a
+  device.

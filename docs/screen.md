@@ -1314,6 +1314,9 @@ Two presses by hand cannot fall within 50 ms, so no press is lost. The
 core test sends two presses reported twice, 34.2 ms apart, to an armed
 watchdog: no panic (mutant `input-02`, with 30 ms, is caught).
 
+v0.4.1 drops the second reports in `yscr_event_input()` for every
+consumer ("Second key reports").
+
 ### caps.raw_keyboard
 
 `yscr_get_caps()` reads it at each call: true on Windows with a window,
@@ -1442,6 +1445,46 @@ the store. Mutants `br-00` to `br-05`, caught; the whole list, 33 of
 33. Two needed a second look: removing the first sequence check left a
 second one that catches the same fault (the mutant now removes both),
 and the loss record had a redundant early return (removed).
+
+### Second key reports (v0.4.1)
+
+SDL 3.4 reports a key with no scan code two times ("The double key report
+has one cause"). Up to v0.4.0, only `ysp/response.h`'s collector dropped
+the second report (its rule R3). A program that read keys for any other
+purpose got both: `examples/response/trial_adjustment.c` stepped its bar
+two times for one virtual-key tap. From v0.4.1, `yscr_event_input()`
+drops them, so every consumer of the input bridge gets one press per key.
+The user approved the move on 2026-10-09.
+
+| Question | Decision | Why |
+|---|---|---|
+| Where | In `yscr_event_input()`, on keyboard events from SDL (raw and message paths) and from doorbells | The one call that every consumer of the bridge makes. SDL's own event stream is not changed: Dear ImGui and the abort watch read it. |
+| The rule | A key-down of the same scancode within 50 ms of the last key-down kept, before or after it, from the same keyboard or with either device 0 | The rule of `ysp/response.h` v0.1 (R3): the largest measured gap was 34.2 ms in 518 taps, and the message path's stamp can come first (-0.1 ms). |
+| The key-up | After a drop, the first key-up that finds no kept key-down still down is dropped too | A consumer sees one key-down and one key-up per press. The kept press's key-up passes, whichever report comes first. |
+| OS repeats | Pass | SDL marks the second report of a held key (100 ms) as a repeat; a consumer's held-key rule reads the flag. |
+| One event decoded twice | Passes (same time, device and key) | Two calls on one SDL event must not drop the event as its own second report. |
+| State | One table of the 16 keys pressed last, for the process | SDL's queue is one stream for every window, like the bridge's store. |
+| Measurable | `yscr_input_stats.key_doubles` and `key_double_ups`; a `YSCR_EV_KEY_DOUBLE` ring record per dropped key-down, with the gap and both devices | The data shows how often the filter acted, and the gaps show whether 50 ms still covers them. |
+| Opt-out | `desc.key_dedup_ns`: 0 is 50 ms, < 0 is off for that screen's calls, at most 1 s | A program that studies the reports themselves through the bridge needs them all (`screen_input --reports` reads SDL's events, so it needs no opt-out). |
+| Events from elsewhere | `yscr_key_filter()` applies the same rule and table | A simulated participant, or a program's own SDL adapter. |
+
+Measured (MinGW-w64 gcc 16.1 `-O2`, AC, under the timing guard): 9.6 ns
+per keyboard event at p50 (9.1 to 11.0 ns, 15 runs of 1,000,000 events,
+each key-down scanning a full table). Other events pay one compare.
+
+The core test (no SDL) feeds `yscr__key_keep()` synthetic reports: doubled
+taps at 0 (the raw report with a keyboard id, the message report with
+0), 10, 49 and 49.999999 ms are one press, at 50, 51 and 200 ms two; the
+message report stamped 5 ms first; down, down, up, up; distinct keys 2 ms
+apart; two keyboards on one key 5 ms apart; a held key with OS repeats 9
+ms apart; one report decoded twice; a mouse click twice in 5 ms; more keys
+than the table; the counters; the ring record; `desc.key_dedup_ns` of 10
+ms, 0 (50 ms), off, and over 1 s (refused). Mutants `kd-01` to `kd-15`,
+caught; the whole list, 48 of 48 (MinGW gcc 16.1). Not measured: keys
+injected through the filter in a window, and keys pressed by hand.
+`examples/response/trial_adjustment.c --sim` and `trial_keyboard.c
+--sim` send a doubled tap through `yscr_key_filter()` and check that it
+counts once.
 
 ### Raw mice (v0.3.5)
 

@@ -2,12 +2,12 @@
 
 One program per file. CMake builds `examples/<lib>/<name>.c` as the
 program `<lib>_<name>` (for example `examples/gfx/gallery.c` is
-`gfx_gallery`). Six examples sit in the folder of the header they mainly
+`gfx_gallery`). Some examples sit in the folder of the header they mainly
 show but use another header's build; they keep their own file name as
 their program name (`YSP_EXAMPLES_ACROSS` in `CMakeLists.txt`):
 `rdk/gfx_rdk.c`, `rdk/gfx_rdk_bench.c`, `timeline/gfx_trial.c`,
-`layout/gfx_layout.c`, `response/trial_keyboard.c` and
-`device/photodiode_check.c`.
+`layout/gfx_layout.c`, `device/photodiode_check.c` and the seven
+`response/trial_*.c`.
 
 Run a program from the build folder (`build/<preset>/Release/` with MSVC,
 `build/<preset>/` otherwise). "Needs" says what a run needs beyond the
@@ -45,6 +45,8 @@ needs nothing; CI runs the commands marked "CI".
 | Program | Shows | Headers | Run | Needs |
 |---|---|---|---|---|
 | `photodiode_check` | The MCU photodiode on the device layer: ports and keys, a console monitor, or edge minus flip onset in a window | device, screen | `photodiode_check --list`; `photodiode_check --key serial:16C0:0483:: --monitor 10`; `photodiode_check --key <key>` | SDL3; the board of `firmware/ysp_line/` (none for `--list`) |
+| `device_out_latency` | An output's write-to-edge latency by loopback: pulses on an output role, edges on an input board, the distribution in seconds and a file named by its SHA-256; `--store` keeps the file in the rig profile's `loopback/` and writes the role's binding and summary into the profile | device, rig (parallel) | `device_out_latency --sim` and `--sim --self` (no hardware); `device_out_latency --sim --n 20 --warmup 1 --store --rig-dir <folder>` (CI); `device_out_latency --out lines:<adapter key> --in <board key> --store` | nothing for `--sim`; else an output and a board of `firmware/ysp_line/` wired to it |
+| `device_trigger_flip` | An output role as a ysp/screen.h trigger channel: codes at planned vblanks, written by the device layer, deadline to write in the log | device, screen (no SDL) | `device_trigger_flip` (an in-process box); `device_trigger_flip --out lines:<adapter key>` | nothing; a trigger output with `--out` |
 
 ## gfx
 
@@ -69,6 +71,13 @@ needs nothing; CI runs the commands marked "CI".
 |---|---|---|---|---|
 | `outline_font` | A label from a font file: exact alpha (a PGM) and a curve set | outline | `outline_font <font.ttf> "label" 48 out.pgm` | a font file (CI checks the usage exit) |
 | `outline_bench` | The cost of the builds against their bars | rt, outline | `outline_bench 1 <font folder>` | fonts (CI checks the "no fonts" exit) |
+
+## pack
+
+| Program | Shows | Headers | Run | Needs |
+|---|---|---|---|---|
+| `pack_bench` | The reader's costs (docs/pack.md 8): open, lookup, verification, a chunk through a cursor, allocations after open | rt, pack | `pack_bench <pack> [rounds]` | a pack; `ypak build` makes one |
+| `ypak` (`pack/ypak.c`) | The pack tool: build a pack from a source description, verify, list, info, extract, cat, rebuild from the manifest, append to a player | pack, the tool library | `ypak build study.json -o study.ysppak` (the description: docs/pack.md 5.2); `ypak verify study.ysppak` (CI verifies the tool test's pack) | `YSP_BUILD_LAYOUT=ON`, `YSP_BUILD_PACK=ON`, lodepng (`tools/vendor_pack.py --write`) |
 
 ## parallel
 
@@ -98,6 +107,19 @@ needs nothing; CI runs the commands marked "CI".
 | Program | Shows | Headers | Run | Needs |
 |---|---|---|---|---|
 | `trial_keyboard` | jsPsych's html-keyboard-response as a small experiment: RT from the flip onset | gfx, timeline, trials, response | `trial_keyboard --sim --out trials.csv` (CI); `trial_keyboard` | SDL3, ANGLE |
+| `trial_same_different` | jsPsych's same-different-html: two bars, a gap, Q or P; the SOA from flip records | gfx, timeline, trials, response | `trial_same_different --sim` (CI); `trial_same_different` | SDL3, ANGLE |
+| `trial_srt` | jsPsych's serial-reaction-time: four positions, sequence and random blocks, an RSI | gfx, timeline, trials, response | `trial_srt --sim` (CI); `trial_srt` | SDL3, ANGLE |
+| `trial_adjustment` | jsPsych's reconstruction (method of adjustment): G and H change a bar, space confirms; the steps in a second file | gfx, timeline, trials, response | `trial_adjustment --sim` (CI); `trial_adjustment` | SDL3, ANGLE |
+| `trial_mouse_tracking` | A mouse-tracking trial with extension-mouse-tracking's data: samples per event, movement onset, raw mice on request | gfx, timeline, trials, response | `trial_mouse_tracking --sim` and `--sim --raw-mice` (CI); `trial_mouse_tracking`; `trial_mouse_tracking --raw-mice` | SDL3, ANGLE; Windows for `--raw-mice` in a window |
+| `trial_audio_keyboard` | jsPsych's audio-keyboard-response: RT from the tone's onset record, with its tier | gfx, audio, trials, response | `trial_audio_keyboard --sim` (CI); `trial_audio_keyboard` | SDL3, ANGLE, miniaudio; a sound device without `--sim` |
+| `trial_stop_signal` | The stop-signal task (jspsych-contrib plugin-stop-signal): a tone at a staircase SSD, display and sound on one clock | gfx, audio, timeline, trials, stair, response | `trial_stop_signal --sim` (CI); `trial_stop_signal` | SDL3, ANGLE, miniaudio; a sound device without `--sim` |
+
+## rigfile
+
+| Program | Shows | Headers | Run | Needs |
+|---|---|---|---|---|
+| `rigfile_profile` | The rig profile: load and check it (each loopback file by SHA-256), its roles, notes and hash; list profiles; a new profile; a binding by hand | rigfile | `rigfile_profile`; `rigfile_profile --rig booth2`; `rigfile_profile --list`; `rigfile_profile --new booth-2`; `rigfile_profile --bind resp xid serial:0403:6001:FT4ABC12:` (CI, in a folder of the runner's with `--dir`) | nothing |
+| `rigfile_bench` | The costs of reading, checking, writing and hashing a profile, and ysp/json.h on a 1 MB document | rt, json, rigfile | `rigfile_bench` (under the measurement lock) | nothing |
 
 ## rt
 
@@ -117,6 +139,8 @@ needs nothing; CI runs the commands marked "CI".
 | `screen_input` | How good the input timestamps are; devices; raw mice | screen | `screen_input`; `screen_input --devices`; `screen_input --mice` | SDL3; Windows for the injected keys |
 | `screen_abort` | The abort combination and the panic watchdog | screen | `screen_abort` | SDL3; Windows |
 | `screen_gamma` | The OS gamma ramp, checked without changing what is shown | screen | `screen_gamma` | SDL3; Windows |
+
+The X11 display-timing probe for the GLX backend is in `tests/probe/screen_x11/` (Linux only, not built by CMake): `sh tests/probe/screen_x11/run.sh`. See [screen_x11_probe.md](../docs/screen_x11_probe.md).
 
 ## serial
 

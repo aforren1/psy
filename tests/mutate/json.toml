@@ -1,0 +1,251 @@
+# ysp/json.h mutants: the grammar, UTF-8, duplicates, limits, numbers,
+# sorted objects, the builder, the writer and the arena. docs/json.md lists
+# the results.
+header = "ysp/json.h"
+
+[test.json]
+source = "tests/adapt/json_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 300
+env = { YJS_TEST_NUMBERS = "50000" }
+
+# --- the grammar ------------------------------------------------------------------
+
+[[mutant]]
+id = "j-01"
+name = "duplicate keys accepted"
+test = "json"
+why = "Two values for one key: a reader that keeps either one decides silently."
+find = '''            if (yjs__member_cmp(&ms[k - 1], &ms[k]) == 0) {'''
+replace = '''            if (0) {'''
+
+[[mutant]]
+id = "j-02"
+name = "depth limit one too deep"
+test = "json"
+why = "max_depth bounds the parser's recursion; the limit is the stated one."
+find = '''if (++p->depth > p->max_depth)'''
+replace = '''if (++p->depth > p->max_depth + 1)'''
+
+[[mutant]]
+id = "j-03"
+name = "leading zero accepted"
+test = "json"
+why = "01 is not JSON; another reader may read it as octal."
+find = '''        if (i < n && s[i] >= '0' && s[i] <= '9') { *why = "a leading zero"; return 0; }'''
+replace = '''        if (0) { *why = "a leading zero"; return 0; }'''
+
+[[mutant]]
+id = "j-04"
+name = "a raw control character in a string"
+test = "json"
+why = "RFC 8259 requires control characters escaped; a raw tab or newline is a broken string."
+find = '''        if (c < 0x20) return yjs__fail(p, YJS_ERR_SYNTAX, i, "a control character in a string (escape it)");'''
+replace = '''        if (c < 0x09) return yjs__fail(p, YJS_ERR_SYNTAX, i, "a control character in a string (escape it)");'''
+
+[[mutant]]
+id = "j-05"
+name = "a lone low surrogate escape"
+test = "json"
+why = "\\udc00 alone is no code point; decoded, it is invalid UTF-8."
+find = '''                if (cp >= 0xDC00 && cp <= 0xDFFF) return yjs__fail(p, YJS_ERR_UTF8, i, "a lone surrogate");'''
+replace = '''                if (0) return yjs__fail(p, YJS_ERR_UTF8, i, "a lone surrogate");'''
+
+[[mutant]]
+id = "j-06"
+name = "a high surrogate followed by anything"
+test = "json"
+why = "The second half of a pair must be a low surrogate."
+find = '''|| lo < 0xDC00 || lo > 0xDFFF)'''
+replace = '''|| lo > 0xDFFF)'''
+
+[[mutant]]
+id = "j-07"
+name = "\\u0000 accepted"
+test = "json"
+why = "Every string is also a C string; a NUL inside cuts it short for the caller."
+find = '''                if (cp == 0) return yjs__fail(p, YJS_ERR_UTF8, i, "\\u0000 in a string");'''
+replace = '''                if (0) return yjs__fail(p, YJS_ERR_UTF8, i, "\\u0000 in a string");'''
+
+[[mutant]]
+id = "j-08"
+name = "overlong three-byte forms"
+test = "json"
+why = "An overlong form spells '/' or '.' past a byte-wise check."
+find = '''    if (c == 0xE0) lo = 0xA0;            /* overlong */'''
+replace = '''    if (0) lo = 0xA0;'''
+
+[[mutant]]
+id = "j-09"
+name = "UTF-8 encoded surrogates"
+test = "json"
+why = "U+D800 to U+DFFF are not characters; strict UTF-8 refuses their encodings."
+find = '''    else if (c == 0xED) hi = 0x9F;       /* surrogates */'''
+replace = '''    else if (0) hi = 0x9F;'''
+
+[[mutant]]
+id = "j-10"
+name = "above U+10FFFF"
+test = "json"
+why = "F4 90 and up encode no Unicode code point."
+find = '''    else if (c == 0xF4) hi = 0x8F;       /* above U+10FFFF */'''
+replace = '''    else if (0) hi = 0x8F;'''
+
+[[mutant]]
+id = "j-11"
+name = "text after the value"
+test = "json"
+why = "Two documents in one file: one of them is ignored."
+find = '''        if (p.i != n) rc = yjs__fail(&p, YJS_ERR_SYNTAX, p.i, "text after the value");'''
+replace = '''        if (0) rc = yjs__fail(&p, YJS_ERR_SYNTAX, p.i, "text after the value");'''
+
+[[mutant]]
+id = "j-12"
+name = "a value runs into text"
+test = "json"
+why = "truex and 0x10 are not values; the message must say where."
+find = '''        if (e != ',' && e != ']' && e != '}' && e != ' ' && e != '\t' && e != '\n' && e != '\r')'''
+replace = '''        if (0)'''
+
+# --- numbers ----------------------------------------------------------------------
+
+[[mutant]]
+id = "j-13"
+name = "int64 overflow kept"
+test = "json"
+why = "9223372036854775808 does not fit; it must not wrap to a negative."
+find = '''        if (m > (lim - d) / 10u) return false;'''
+replace = '''        if (m > (lim - d) / 10u + 1u) return false;'''
+
+[[mutant]]
+id = "j-14"
+name = "the negative limit for positives"
+test = "json"
+why = "INT64_MIN's magnitude is one more than INT64_MAX."
+find = '''    lim = neg ? (uint64_t)INT64_MAX + 1u : (uint64_t)INT64_MAX;'''
+replace = '''    lim = (uint64_t)INT64_MAX + 1u;'''
+
+[[mutant]]
+id = "j-15"
+name = "fixed: ties away from zero"
+test = "json"
+why = "Ties to even, as the double conversion; 0.0000000025 s is 2 ns."
+find = '''    if (rd > 5 || (rd == 5 && (sticky || (acc & 1u)))) {'''
+replace = '''    if (rd >= 5) {'''
+
+[[mutant]]
+id = "j-16"
+name = "fixed: digits past the half ignored"
+test = "json"
+why = "0.00000000250001 is above the tie and rounds up."
+find = '''        } else if (d) {
+            sticky = true;'''
+replace = '''        } else if (0) {
+            sticky = true;'''
+
+[[mutant]]
+id = "j-17"
+name = "fixed: the scale overflows"
+test = "json"
+why = "1e10 seconds in nanoseconds does not fit int64."
+find = '''            if (acc > UINT64_MAX / 10u) return YJS_ERR_RANGE;
+            acc *= 10u;'''
+replace = '''            acc *= 10u;'''
+
+[[mutant]]
+id = "j-18"
+name = "fixed: one past INT64_MAX"
+test = "json"
+why = "A positive value of 2^63 would come back negative."
+find = '''        if (acc > (uint64_t)INT64_MAX) return YJS_ERR_RANGE;'''
+replace = '''        if (acc > (uint64_t)INT64_MAX + 1u) return YJS_ERR_RANGE;'''
+
+[[mutant]]
+id = "j-19"
+name = "double: fast path up to 2^54"
+test = "json"
+why = "A mantissa above 2^53 is not exact as a double: one multiply rounds twice."
+find = '''    if (m <= ((uint64_t)1 << 53) && e >= -22 && e <= 22) {'''
+replace = '''    if (m <= ((uint64_t)1 << 54) && e >= -22 && e <= 22) {'''
+
+# --- objects, the builder, the writer, the arena -------------------------------------
+
+[[mutant]]
+id = "j-20"
+name = "a prefix equals its extension"
+test = "json"
+why = "\"a\" and \"ab\" are two keys; equal by the shorter length, one hides the other."
+find = '''    return an < bn ? -1 : an > bn;'''
+replace = '''    return 0;'''
+
+[[mutant]]
+id = "j-21"
+name = "the lookup misses the last member"
+test = "json"
+why = "The binary search covers every member."
+find = '''    if (!obj || obj->type != YJS_OBJECT || !key) return NULL;
+    hi = obj->n;'''
+replace = '''    if (!obj || obj->type != YJS_OBJECT || !key) return NULL;
+    hi = obj->n > 1 ? obj->n - 1 : obj->n;'''
+
+[[mutant]]
+id = "j-22"
+name = "the builder inserts in reverse order"
+test = "json"
+why = "Objects stay sorted, or the lookup and the canonical order break."
+find = '''        int c = yjs__key_cmp(obj->u.members[mid].key, obj->u.members[mid].key_len, key, n);
+        if (c == 0) { obj->u.members[mid].value = v; return YJS_OK; }'''
+replace = '''        int c = -yjs__key_cmp(obj->u.members[mid].key, obj->u.members[mid].key_len, key, n);
+        if (c == 0) { obj->u.members[mid].value = v; return YJS_OK; }'''
+
+[[mutant]]
+id = "j-23"
+name = "control characters written raw"
+test = "json"
+why = "The canonical text must parse back: a raw newline in a string does not."
+find = '''        if (c == '"' || c == '\\' || c < 0x20) {'''
+replace = '''        if (c == '"' || c == '\\') {'''
+
+[[mutant]]
+id = "j-24"
+name = "integers written as their text"
+test = "json"
+why = "-0 and 0 are one value; the canonical form writes it one way."
+find = '''        if (v->flags & YJS_NUM_I64) {
+            char buf[24];'''
+replace = '''        if (0) {
+            char buf[24];'''
+
+[[mutant]]
+id = "j-25"
+name = "nested arrays on one line"
+test = "json"
+why = "Only an array of scalars is one line in the canonical form."
+find = '''        for (k = 0; k < v->n; k++) if (!v->u.items[k] || !yjs__scalar(v->u.items[k])) flat = false;'''
+replace = '''        for (k = 0; k < v->n; k++) if (!v->u.items[k]) flat = false;'''
+
+[[mutant]]
+id = "j-26"
+name = "values over the scratch stack"
+test = "json"
+why = "A fixed arena holds values from the bottom and the parser's slots from the top; they must not meet."
+find = '''    if (!a->p || at > a->cap - a->top || n > a->cap - a->top - at) {'''
+replace = '''    if (!a->p || at > a->cap || n > a->cap - at) {'''
+
+[[mutant]]
+id = "j-27"
+name = "the heap limit's last block unchecked"
+test = "json"
+why = "limit bounds what a hostile document can make the reader allocate."
+find = '''        if (YJS__BLOCK_HDR + want > a->heap_limit - a->heap_bytes) return false;'''
+replace = '''        if (0) return false;'''
+
+[[mutant]]
+id = "j-28"
+name = "the size limit ignored"
+test = "json"
+why = "max_bytes refuses input before any work."
+find = '''    if (n > max_bytes || n > 0xFFFFFFFEu) return yjs__fail(&p, YJS_ERR_LIMIT, 0, "longer than the size limit");'''
+replace = '''    if (n > 0xFFFFFFFEu) return yjs__fail(&p, YJS_ERR_LIMIT, 0, "longer than the size limit");'''

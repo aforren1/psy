@@ -393,6 +393,27 @@ which still caches the file. The header does not use
 need sector-aligned offsets, sizes and buffers. `yau_wav_load()` reads a
 whole file into the arena and widens it in place.
 
+### The WAV probe (v0.2.1)
+
+The pack tool checks every AUDIO entry with the player's own parser, so
+the two cannot disagree on what a valid WAV file is (docs/pack.md, AUDIO).
+The tool has no device. v0.2.1 splits the parse in two: a scan of the
+file's form (the chunks, the format tag, the bits, the block align, the
+data size), and the device's checks (the rate, the channel count, the
+speaker map). `yau_wav_probe()` runs the scan alone and gives the rate,
+the channels and the speaker mask in `yau_wav_info` for the caller to
+compare with the project's. `yau_wav_open()` and `yau_wav_load()` run
+both, with the same messages as v0.2.0.
+
+Tests: the probe gives `yau_wav_open()`'s info byte for byte from a path,
+a reader and memory; it refuses each of the eight form refusals with its
+reason and passes the rate and channel cases with their values; a missing
+path is `YAU_ERR_IO`; and the test file can be removed after the probe
+(on Windows an open file cannot be). Mutations: `tests/mutate/audio.toml`,
+4 mutants (the probe checks the rate, the scan leaves the info empty, the
+open skips the device checks, the probe leaves a path open), 4 killed.
+The test passes on MinGW gcc 16.1, MSVC 19.44 and emcc 6.0.10 (node).
+
 ### Tests
 
 `tests/adapt/audio_test.c` uses the scripted device and the virtual

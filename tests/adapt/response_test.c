@@ -259,9 +259,6 @@ static void check_validation(void) {
     d = fj_desc(1, 0);
     d.max_responses = -1;
     CHECK(!yrsp_init(&g_c, &d));
-    d = fj_desc(1, 0);
-    d.dedup = (double)NAN;
-    CHECK(!yrsp_init(&g_c, &d));
     CHECK(!yrsp_init(&g_c, NULL));
     CHECK(!yrsp_init(NULL, &d));
     /* a collector that failed init refuses calls */
@@ -387,13 +384,12 @@ static void check_bounds(void) {
 static void check_deadline(void) {
     yrsp_desc d = fj_desc(1.0, 0);
     yrsp_result r;
-    d.settle = 0.020;
     CHECK(yrsp_init(&g_c, &d));
     yrsp_arm(&g_c, 0);
     CHECK_I(yrsp_update(&g_c, MS(3000)), YRSP_OPEN);   /* no onset yet */
     onset(MS(500), 1);
-    CHECK_I(yrsp_update(&g_c, MS(1519)), YRSP_OPEN);
-    CHECK_I(yrsp_update(&g_c, MS(1520)), YRSP_ENDED);
+    CHECK_I(yrsp_update(&g_c, MS(1500) - 1), YRSP_OPEN);
+    CHECK_I(yrsp_update(&g_c, MS(1500)), YRSP_ENDED);
     /* a press stamped before the deadline, delivered after ENDED: valid */
     CHECK_I(key(MS(1499), SC_F, 1), YRSP_ENDED);
     key(MS(1550), SC_J, 1);                                 /* late */
@@ -720,17 +716,17 @@ static void check_held(void) {
     }
 }
 
-/* R3 and the measured patterns of SDL 3.4's double report. */
+/* v0.2.0: second reports are the producer's to drop (ysp/screen.h's
+ * bridge); fed to the collector, the measured patterns of SDL 3.4's double
+ * report are what R1 and R2 make of them. */
 static void check_double(void) {
     yrsp_desc d = fj_desc(2.0, 0);
     yrsp_result r;
     const yrsp_entry* e;
-    yrsp_input in;
     int n;
-    d.persist = true;
+    /* a virtual-key tap, down up (raw), down up (message) 9 ms later: two
+     * presses; the second is AFTER_END, as the first ended the window */
     CHECK(yrsp_init(&g_c, &d));
-    CHECK_I(g_c.dedup_ns, MS(50));
-    /* a virtual-key tap: down up (raw), down up (message) 9 ms later */
     yrsp_arm(&g_c, 0);
     onset(MS(100), 1);
     key(MS(500), SC_F, 1);
@@ -741,22 +737,35 @@ static void check_double(void) {
     e = yrsp_entries(&g_c, &n);
     CHECK_I(n, 2);
     CHECK_I(r.n_responses, 1);
-    CHECK_I(r.n_duplicates, 1);
-    CHECK(e[1].flags & YRSP_E_DUPLICATE);
-    CHECK(!(e[1].flags & YRSP_E_RELEASED));
+    CHECK_I(r.n_after_end, 1);
+    CHECK_D(r.rt, 0.4);
     CHECK_D(r.rt_key_duration, 0.00003);
-    CHECK_I(g_c.n_stray, 1);
-    /* the second report stamped earlier (message tick): the first is kept */
+    CHECK(e[1].flags & YRSP_E_RELEASED);
+    /* with persist, two responses: the filter belongs before yrsp_feed() */
+    d.persist = true;
+    CHECK(yrsp_init(&g_c, &d));
+    yrsp_arm(&g_c, 0);
+    onset(MS(100), 1);
+    key(MS(500), SC_F, 1);
+    key(MS(500) + 30000, SC_F, 0);
+    key(MS(509), SC_F, 1);
+    key(MS(509) + 30000, SC_F, 0);
+    r = finish();
+    CHECK_I(r.n_responses, 2);
+    /* down, down, up, up: the second down is held (R2), one up closes */
     CHECK(yrsp_init(&g_c, &d));
     yrsp_arm(&g_c, 0);
     onset(MS(100), 1);
     key(MS(500), SC_F, 1);
     key(MS(495), SC_F, 1);
     key(MS(600), SC_F, 0);
+    key(MS(601), SC_F, 0);
     r = finish();
+    CHECK_I(r.n_responses, 1);
+    CHECK_I(r.n_held, 1);
     CHECK_D(r.rt, 0.4);
-    CHECK_I(r.n_duplicates, 1);
     CHECK_D(r.rt_key_duration, 0.1);
+    CHECK_I(g_c.n_stray, 1);
     /* a 100 ms hold: SDL marks the second report a repeat */
     CHECK(yrsp_init(&g_c, &d));
     yrsp_arm(&g_c, 0);
@@ -767,67 +776,12 @@ static void check_double(void) {
     r = finish();
     CHECK_I(r.n_responses, 1);
     CHECK_I(r.n_held, 1);
-    CHECK_I(r.n_duplicates, 0);
-    /* the bounds: 49.999999 ms merged, 50 ms two presses */
-    CHECK(yrsp_init(&g_c, &d));
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    tap(MS(1000), SC_F);
-    key(MS(1050) - 1, SC_F, 1);
-    key(MS(1050) - 1 + MS(80), SC_F, 0);
-    tap(MS(1500), SC_J);
-    tap(MS(1550), SC_J);
-    r = finish();
-    CHECK_I(r.n_duplicates, 1);
-    CHECK_I(r.n_responses, 3);
     /* two different keys 2 ms apart both count */
     CHECK(yrsp_init(&g_c, &d));
     yrsp_arm(&g_c, 0);
     onset(MS(100), 1);
     key(MS(500), SC_F, 1);
     key(MS(502), SC_J, 1);
-    r = finish();
-    CHECK_I(r.n_responses, 2);
-    /* any device: the raw report has the keyboard's id, the message one 0 */
-    CHECK(yrsp_init(&g_c, &d));
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    in = ev(YRSP_KIND_KEYBOARD, YRSP_PRESS, MS(500), SC_F);
-    in.device = 65537;
-    yrsp_feed(&g_c, &in);
-    in.type = YRSP_RELEASE;
-    in.t = MS(501);
-    yrsp_feed(&g_c, &in);
-    in.device = 0;
-    in.type = YRSP_PRESS;
-    in.t = MS(508);
-    yrsp_feed(&g_c, &in);
-    in.type = YRSP_RELEASE;
-    in.t = MS(509);
-    yrsp_feed(&g_c, &in);
-    r = finish();
-    CHECK_I(r.n_responses, 1);
-    CHECK_I(r.n_duplicates, 1);
-    CHECK_I(r.device, 65537);
-    CHECK_D(r.rt_key_duration, 0.001);
-    /* dedup < 0: off */
-    d.dedup = -1;
-    CHECK(yrsp_init(&g_c, &d));
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    key(MS(500), SC_F, 1);
-    key(MS(500) + 30000, SC_F, 0);
-    key(MS(509), SC_F, 1);
-    key(MS(509) + 30000, SC_F, 0);
-    r = finish();
-    CHECK_I(r.n_responses, 2);
-    /* dedup set: 10 ms */
-    d.dedup = 0.010;
-    CHECK(yrsp_init(&g_c, &d));
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    tap(MS(500), SC_F);
-    tap(MS(511), SC_F);
     r = finish();
     CHECK_I(r.n_responses, 2);
 }
@@ -856,7 +810,6 @@ static void check_devices(void) {
     dkey(MS(505), SC_F, 22, YRSP_PRESS, 0);
     r = finish();
     CHECK_I(r.n_responses, 2);
-    CHECK_I(r.n_duplicates, 0);
     /* as SDL gives it: B's press comes as a repeat while A holds F */
     CHECK(yrsp_init(&g_c, &d));
     yrsp_arm(&g_c, 0);
@@ -880,18 +833,19 @@ static void check_devices(void) {
     r = finish();
     CHECK_I(r.n_responses, 1);
     CHECK_I(r.n_held, 1);
-    /* a raw report (the keyboard's id) and its message report (0): one */
+    /* a raw report (the keyboard's id) and its message report (0) while
+     * the first is down: device 0 matches it, so held (R2) */
     CHECK(yrsp_init(&g_c, &d));
     yrsp_arm(&g_c, 0);
     onset(MS(100), 1);
     dkey(MS(2000), SC_F, 11, YRSP_PRESS, 0);
-    dkey(MS(2000) + 30000, SC_F, 11, YRSP_RELEASE, 0);
     dkey(MS(2009), SC_F, 0, YRSP_PRESS, 0);
-    dkey(MS(2009) + 30000, SC_F, 0, YRSP_RELEASE, 0);
+    dkey(MS(2050), SC_F, 11, YRSP_RELEASE, 0);
     r = finish();
     CHECK_I(r.n_responses, 1);
-    CHECK_I(r.n_duplicates, 1);
+    CHECK_I(r.n_held, 1);
     CHECK_I(r.device, 11);
+    CHECK_D(r.rt_key_duration, 0.05);
     /* releases per device */
     CHECK(yrsp_init(&g_c, &d));
     yrsp_arm(&g_c, 0);
@@ -1443,86 +1397,7 @@ static void check_quality(void) {
     CHECK_I(r.stamp_hi_us, 0);
 }
 
-static int count_fields(const char* s) {
-    int n = 1, q = 0;
-    for (; *s; s++) {
-        if (*s == '"') q = !q;
-        else if (*s == ',' && !q) n++;
-    }
-    return n;
-}
-
-static void check_format(void) {
-    char head[512], row[512];
-    yrsp_desc d = fj_desc(1.0, 0);
-    static const yrsp_choice odd[] = { { "f", "a,\"b\"", 0, 0, 0, 0, 0, 0, 0, 0, 0 } };
-    yrsp_result r;
-    yrsp_input in;
-    int hn = yrsp_format_header(head, sizeof head);
-    CHECK(hn > 0 && hn < (int)sizeof head);
-    CHECK_I(count_fields(head), 22);
-    CHECK(strncmp(head, "rt,response,rt_key_duration,", 28) == 0);
-    CHECK(yrsp_init(&g_c, &d));
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    key(MS(523), SC_F, 1);
-    key(MS(600), SC_F, 0);
-    r = finish();
-    yrsp_format_row(&r, row, sizeof row);
-    CHECK_I(count_fields(row), 22);
-    CHECK(strncmp(row, "0.423000000,f,0.077000000,keyboard,9,102,0,", 43) == 0);
-    CHECK_HAS(row, ",1,1,0.000001234,0.000000000,42,1,0,0,0,0,1");
-    /* a response with no release: an empty duration */
-    yrsp_arm(&g_c, MS(5000));
-    onset(MS(5100), 1);
-    key(MS(5600), SC_J, 1);
-    r = finish();
-    yrsp_format_row(&r, row, sizeof row);
-    CHECK(strncmp(row, "0.500000000,right,,keyboard,", 28) == 0);
-    key(MS(5700), SC_J, 0);
-    /* no response: empty rt, response and duration */
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    yrsp_update(&g_c, MS(2000));
-    r = finish();
-    yrsp_format_row(&r, row, sizeof row);
-    CHECK_I(count_fields(row), 22);
-    CHECK(strncmp(row, ",,,", 3) == 0);
-    /* a name with a comma and a quote is quoted */
-    d.choices = odd;
-    d.n_choices = 1;
-    CHECK(yrsp_init(&g_c, &d));
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    key(MS(523), SC_F, 1);
-    r = finish();
-    yrsp_format_row(&r, row, sizeof row);
-    CHECK_HAS(row, ",\"a,\"\"b\"\"\",");
-    CHECK_I(count_fields(row), 22);
-    /* an unnamed box button and an ALL-mode key */
-    memset(&d, 0, sizeof d);
-    d.kinds = YRSP_KINDS_ALL;
-    CHECK(yrsp_init(&g_c, &d));
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    in = ev(YRSP_KIND_BOX, YRSP_PRESS, MS(200), 4);
-    yrsp_feed(&g_c, &in);
-    r = finish();
-    yrsp_format_row(&r, row, sizeof row);
-    CHECK_HAS(row, ",box:4,");
-    yrsp_arm(&g_c, 0);
-    onset(MS(100), 1);
-    key(MS(200), 44, 1);
-    r = finish();
-    yrsp_format_row(&r, row, sizeof row);
-    CHECK_HAS(row, ",space,");
-    /* no onset: empty residual */
-    yrsp_arm(&g_c, 0);
-    r = finish();
-    yrsp_format_row(&r, row, sizeof row);
-    CHECK_I(count_fields(row), 22);
-    CHECK_HAS(row, ",0,0,,,-1,");
-    CHECK_I(yrsp_format_row(NULL, row, sizeof row), -1);
+static void check_strerror(void) {
     CHECK_S(yrsp_strerror(YRSP_ENDED), "ended");
     CHECK_S(yrsp_strerror(YRSP_ERR_ARG), "bad argument");
 }
@@ -1790,7 +1665,7 @@ static void check_property(void) {
             if (k == YRSP_E_VALID) {
                 n_valid++;
                 if (!g_c.have_onset || rt < g_c.min_rt_ns || (g_c.duration_ns && rt >= g_c.duration_ns)) n_cls++;
-                if (e[i].flags & (YRSP_E_DUPLICATE | YRSP_E_NOT_CHOICE | YRSP_E_AFTER_END)) n_cls++;
+                if (e[i].flags & (YRSP_E_NOT_CHOICE | YRSP_E_AFTER_END)) n_cls++;
                 if (best < 0 || e[i].t < e[best].t) best = i;
             }
         }
@@ -1826,7 +1701,7 @@ int main(void) {
     check_trace();
     check_capacity();
     check_quality();
-    check_format();
+    check_strerror();
     check_helpers();
 #if defined(YRSP_TEST_SDL)
     check_sdl();

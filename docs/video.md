@@ -240,8 +240,19 @@ does that with `ytl_window()` ("Base rates").
 The frame sequence is as in the design (section 3.3), with XXH64 in place
 of CRC-32 for the header, the frames and the index. One hash function
 serves the container, the .yspvi index and the run-time check. XXH64
-runs at 4.3 to 5.3 GB/s here (table below), so a 1080p I420 frame costs
-0.6 to 0.7 ms on the decode thread. The writer reserves the index at
+ran at 4.3 to 5.3 GB/s here (table below), so a 1080p I420 frame cost
+0.6 to 0.7 ms on the decode thread. v0.2.2 changed the loads on MSVC (next
+paragraph); the table is v0.2.1's.
+
+v0.2.2: MSVC compiled the byte-by-byte 64-bit load as eight loads, which
+the pack reader found first (docs/pack.md 9.1). With `memcpy` loads under
+`_MSC_VER`, `yvid_xxh64()` on 1 GiB in memory went from 5.93 and 6.32 GB/s
+to 11.87 and 14.11 GB/s (medians of 9, two interleaved rounds, the
+measurement lock, MSVC 19.44 `/O2`); MinGW gcc 16.1 `-O2` stayed at 13.04
+to 13.64 GB/s, its code unchanged. The hashes are the same (the test's
+published vectors). Mutant x-01 (`tests/mutate/video.toml`, test
+`video_msvc`) checks that the vectors catch a wrong load on the MSVC
+path. The writer reserves the index at
 create when `max_frames` is set, so writing allocates nothing per frame.
 
 The .yspvi index: a 128-byte header (magic `YSPVIDX1`, version 1, codec,

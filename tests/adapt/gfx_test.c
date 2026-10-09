@@ -42,6 +42,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+/* FNV-1a 64 of ygfx_shader_wrap()'s text for the three test bodies (v0.10.3). */
+#define WRAP_PIN0 0xb50a66cbc59d9fbdULL
+#define WRAP_PIN1 0xb4617a390cfca6b2ULL
+#define WRAP_PIN2 0x56a3b341e7ed296cULL
 #if defined(_WIN32)
     #include <direct.h>
     #if defined(_MSC_VER)
@@ -472,6 +477,27 @@ static void test_tables(void) {
         CHECK(strstr(t, "#line 1\nfloat ysp_main") != NULL && strncmp(t, "#version 300 es", 15) == 0);
         free(t);
         CHECK(ygfx_shader_wrap("x", YGFX_COLOR, buf, sizeof buf) < 0);
+    }
+    /* v0.10.3: the contract's version, and the wrapper's text pinned per
+     * mode. A different text fails here: if what the wrapper does to a
+     * body changed, raise YGFX_SHADER_CONTRACT; then update the pins. */
+    {
+        static const uint64_t pin[3] = { WRAP_PIN0, WRAP_PIN1, WRAP_PIN2 };
+        static const char* const bodies[3] = { "float ysp_main(vec2 p) { return 0.0; }",
+                                               "vec4 ysp_main(vec2 p) { return vec4(1.0); }",
+                                               "vec3 ysp_main(vec2 p) { return vec3(0.0); }" };
+        static char wt[65536];
+        int md;
+        volatile int contract = YGFX_SHADER_CONTRACT;   /* volatile: MSVC C4127 on a constant condition */
+        CHECK(contract == 1);
+        for (md = 0; md < 3; md++) {
+            int wn = ygfx_shader_wrap(bodies[md], (ygfx_shader_mode)md, wt, sizeof wt);
+            uint64_t h = 0xCBF29CE484222325ULL;
+            int k;
+            for (k = 0; k < wn; k++) { h ^= (uint8_t)wt[k]; h *= 0x100000001B3ULL; }
+            if (wn <= 0 || h != pin[md]) printf("wrapper text, mode %d: FNV-1a 64 0x%016llxULL\n", md, (unsigned long long)h);
+            CHECK(wn > 0 && h == pin[md]);
+        }
     }
 }
 

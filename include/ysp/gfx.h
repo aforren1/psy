@@ -1,4 +1,4 @@
-/* ysp/gfx.h - v0.10.2 - public domain single-header stimulus graphics library
+/* ysp/gfx.h - v0.10.3 - public domain single-header stimulus graphics library
  *   (with MIT-licensed parts: see below)
  *
  *   Stimuli on GL ES 3.0, on top of ysp/screen.h: signed-distance shapes
@@ -37,6 +37,11 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.10.3 - YGFX_SHADER_CONTRACT, the shader contract's version (1). A
+ *          pack records it with each shader (docs/pack.md, SHADER) and the
+ *          player refuses a shader built for another contract. It changes
+ *          only when the wrapper's meaning changes; the test pins the
+ *          wrapper's text, so a change to the text forces that decision.
  *   v0.10.2 - ygfx_default_cache_dir() is a wrapper of ysp/rt.h v0.7.0's
  *          yrt_user_dir(YRT_DIR_CACHE, "progcache"), which took over its
  *          rules unchanged. Needs ysp/rt.h v0.7.0.
@@ -1361,6 +1366,10 @@
  *   The wrapper puts "#line 1" before the body, so the compiler's log
  *   names the body's lines. ygfx_shader_wrap() gives the fragment
  *   shader text without GL: the pack tool validates exactly that.
+ *   YGFX_SHADER_CONTRACT (v0.10.3) is the contract's version: it changes
+ *   when what the wrapper does to a body changes (the names above, their
+ *   meaning, the blend), not when its text changes otherwise. A pack
+ *   stores it with each shader; a player refuses another version.
  *   A time-dependent pattern takes its phase in ysp_param() from the CPU,
  *   not from ysp_time. A slow shader is its writer's timing problem, and
  *   the flip record's phases are where it shows.
@@ -1468,8 +1477,8 @@
 
 #define YGFX_VERSION_MAJOR 0
 #define YGFX_VERSION_MINOR 10
-#define YGFX_VERSION_PATCH 2
-#define YGFX_VERSION_STRING "0.10.2"
+#define YGFX_VERSION_PATCH 3
+#define YGFX_VERSION_STRING "0.10.3"
 
 #include "ysp/screen.h"
 #include "ysp/color.h"
@@ -2753,6 +2762,8 @@ YGFX_API void        ygfx_pipeline_free(ygfx_gfx* g, ygfx_pipe p);
  * pack tool validates the same text. Returns the length, or a negative code
  * when cap is too small (the length needed is then -return - 1000). */
 YGFX_API int ygfx_shader_wrap(const char* body, ygfx_shader_mode mode, char* out, size_t cap);
+/* The SHADER CONTRACT's version (v0.10.3). */
+#define YGFX_SHADER_CONTRACT 1
 
 /* The output stage's table: lut holds n values per channel, red first, linear
  * to device value 0..1, 2 <= n <= 4096. Between frames. */
