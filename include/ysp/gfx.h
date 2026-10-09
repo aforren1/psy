@@ -1,4 +1,4 @@
-/* ysp/gfx.h - v0.10.1 - public domain single-header stimulus graphics library
+/* ysp/gfx.h - v0.10.2 - public domain single-header stimulus graphics library
  *   (with MIT-licensed parts: see below)
  *
  *   Stimuli on GL ES 3.0, on top of ysp/screen.h: signed-distance shapes
@@ -37,6 +37,9 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.10.2 - ygfx_default_cache_dir() is a wrapper of ysp/rt.h v0.7.0's
+ *          yrt_user_dir(YRT_DIR_CACHE, "progcache"), which took over its
+ *          rules unchanged. Needs ysp/rt.h v0.7.0.
  *   v0.10.1 - PROGRAM CACHE: ygfx_default_cache_dir() gives the per-user
  *          cache folder (it makes no file or folder). The describe line names
  *          the cache folder and gives hits and misses.
@@ -324,7 +327,7 @@
  *   linss2_10e_1; RGB to LMS, the DKL matrix and its unit axes within 7e-8
  *   (relative) of Psychtoolbox's ComputeDKL_M run in MATLAB R2023a on its
  *   own B_monitor spectra.
- *   Cost on the Iris Xe at 1920 x 1200 (examples/gfx_bench.c, GPU time from
+ *   Cost on the Iris Xe at 1920 x 1200 (examples/gfx/bench.c, GPU time from
  *   frames between two glFinish calls, AC and battery runs): an empty frame
  *   (scene clear and the output stage) 0.42 to 1.34 ms of GPU; 1000 gabors
  *   of 256 x 256 about 9.3 to 11 ms of GPU and 0.2 to 0.5 ms of CPU
@@ -421,7 +424,7 @@
  *   in *one* C or C++ file before including this header. ysp/screen.h's and
  *   ysp/rt.h's implementations come with it, once.
  *
- *   A gabor in the middle of a mid-gray window (examples/gfx_hello.c):
+ *   A gabor in the middle of a mid-gray window (examples/gfx/hello.c):
  *
  *       #define YSP_GFX_IMPLEMENTATION
  *       #include "ysp/gfx.h"
@@ -473,7 +476,7 @@
  *   draw for "the next flip"; here a frame is drawn for f.onset, the
  *   predicted onset of its own flip.
  *
- *   A trial with timeline bindings (examples/gfx_trial.c runs it):
+ *   A trial with timeline bindings (examples/timeline/gfx_trial.c runs it):
  *
  *       static ygfx_stim grating;
  *       static const ygfx_bind binds[] = {
@@ -1161,8 +1164,9 @@
  *       char dir[512];
  *       if (ygfx_default_cache_dir(dir, sizeof dir) == YGFX_OK)
  *           desc.cache = ygfx_file_cache_init(&pc, dir);
- *   ygfx_default_cache_dir() gives the per-user cache folder (v0.10.1).
- *   It makes no folder; on POSIX it reads the owner and mode of the parts
+ *   ygfx_default_cache_dir() gives the per-user cache folder (v0.10.1;
+ *   from v0.10.2 it is yrt_user_dir(YRT_DIR_CACHE, "progcache"), ysp/rt.h
+ *   PER-USER FOLDERS, with the same rules). It makes no folder; on POSIX it reads the owner and mode of the parts
  *   of the path that exist.
  *     Windows  %LOCALAPPDATA%\ysp\progcache (read with the wide API, given
  *              as UTF-8)
@@ -1464,8 +1468,8 @@
 
 #define YGFX_VERSION_MAJOR 0
 #define YGFX_VERSION_MINOR 10
-#define YGFX_VERSION_PATCH 1
-#define YGFX_VERSION_STRING "0.10.1"
+#define YGFX_VERSION_PATCH 2
+#define YGFX_VERSION_STRING "0.10.2"
 
 #include "ysp/screen.h"
 #include "ysp/color.h"
@@ -2847,8 +2851,7 @@ YGFX_API int ygfx_cset_winding(const ygfx_cset_desc* d, uint32_t glyph, double x
 #include <stdarg.h>
 #include <math.h>
 #if !defined(_WIN32)
-    #include <sys/stat.h>   /* mkdir, stat: the file cache and its default folder */
-    #include <unistd.h>     /* geteuid: the default folder */
+    #include <sys/stat.h>   /* mkdir: the file cache */
 #endif
 
 #ifdef __cplusplus
@@ -5936,89 +5939,11 @@ YGFX_API const ygfx_cache* ygfx_file_cache_init(ygfx_file_cache* fc, const char*
     return &fc->cache;
 }
 
-/* Only a folder that this user alone can write: the entry hash finds
- * damage, but anyone who can write the folder can plant an entry with a
- * correct hash, and the driver parses the binary (PROGRAM CACHE). */
+/* yrt_user_dir()'s rules (ysp/rt.h, PER-USER FOLDERS): only a folder that
+ * this user alone can write, because anyone who can write it can plant an
+ * entry with a correct hash, and the driver parses the binary. */
 YGFX_API int ygfx_default_cache_dir(char* out, size_t cap) {
-    static const char tail[] =
-#if defined(_WIN32)
-        "\\ysp\\progcache";
-#elif defined(__APPLE__)
-        "/Library/Caches/ysp/progcache";
-#else
-        "/ysp/progcache";
-#endif
-    size_t n = 0;
-    if (!out || cap == 0) return YGFX_ERR_ARG;
-    out[0] = '\0';
-#if defined(__EMSCRIPTEN__)
-    (void)n; (void)tail;
-    return YGFX_ERR_ARG;                  /* WebGL has no program binaries */
-#elif defined(_WIN32)
-    {
-        wchar_t w[512];
-        DWORD k = GetEnvironmentVariableW(L"LOCALAPPDATA", w, 512);
-        int m;
-        /* Absolute only: a drive and a root, or a UNC path. */
-        if (k == 0 || k >= 512 || !((k >= 3 && w[1] == L':' && (w[2] == L'\\' || w[2] == L'/')) || (w[0] == L'\\' && w[1] == L'\\')))
-            return YGFX_ERR_ARG;
-        while (k > 3 && (w[k - 1] == L'\\' || w[k - 1] == L'/')) w[--k] = L'\0';
-        m = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)(cap < 0x7FFFFFFF ? cap : 0x7FFFFFFF), NULL, NULL);
-        if (m <= 1) { out[0] = '\0'; return YGFX_ERR_ARG; }
-        n = (size_t)m - 1;
-    }
-#else
-    {
-        const char* base = NULL;
-        size_t i, end;
-        uid_t me = geteuid();
-#if !defined(__APPLE__)
-        base = getenv("XDG_CACHE_HOME");
-        if (!base || base[0] != '/') base = NULL;
-#endif
-        if (!base) {
-            const char* home = getenv("HOME");
-            if (!home || home[0] != '/') return YGFX_ERR_ARG;
-            n = strlen(home);
-            if (n + 1 > cap) return YGFX_ERR_ARG;
-            memcpy(out, home, n + 1);
-#if !defined(__APPLE__)
-            if (n + 7 >= cap) { out[0] = '\0'; return YGFX_ERR_ARG; }
-            while (n > 1 && out[n - 1] == '/') out[--n] = '\0';
-            memcpy(out + n, "/.cache", 8);
-            n += 7;
-#endif
-        } else {
-            n = strlen(base);
-            if (n + 1 > cap) return YGFX_ERR_ARG;
-            memcpy(out, base, n + 1);
-        }
-        while (n > 1 && out[n - 1] == '/') out[--n] = '\0';
-        if (n + sizeof tail > cap) { out[0] = '\0'; return YGFX_ERR_ARG; }
-        memcpy(out + n, tail, sizeof tail);
-        /* Each part of the path that exists, from the root: refused when all
-         * users can write it (/tmp is 1777) or another user owns it (a
-         * folder planted under /tmp before the first run). */
-        end = n + sizeof tail - 1;
-        for (i = 1; i <= end; i++) {
-            if (out[i] == '/' || i == end) {
-                struct stat st;
-                char c = out[i];
-                int bad;
-                out[i] = '\0';
-                bad = stat(out, &st) == 0 && ((st.st_mode & S_IWOTH) != 0 || (st.st_uid != me && st.st_uid != 0));
-                out[i] = c;
-                if (bad) { out[0] = '\0'; return YGFX_ERR_ARG; }
-            }
-        }
-        return YGFX_OK;
-    }
-#endif
-#if defined(_WIN32)
-    if (n + sizeof tail > cap) { out[0] = '\0'; return YGFX_ERR_ARG; }
-    memcpy(out + n, tail, sizeof tail);
-    return YGFX_OK;
-#endif
+    return yrt_user_dir(YRT_DIR_CACHE, "progcache", out, cap) == YRT_OK ? YGFX_OK : YGFX_ERR_ARG;
 }
 
 YGFX_API void ygfx_reset_state(ygfx_gfx* g) {

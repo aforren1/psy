@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ysp.aep beside AEPsych on the audiometric benchmark of Owen et al. 2021.
 
-The protocol of examples/aep_audiometric.c, run through the Python binding and
+The protocol of examples/aep/audiometric.c, run through the Python binding and
 through AEPsych's server-free API in the same process tree, on one response
 stream:
 
@@ -67,7 +67,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.special import ndtr
 
-# --- the test field (examples/aep_audiometric.c) -----------------------------
+# --- the test field (examples/aep/audiometric.c) -----------------------------
 
 AUDIO_F = np.array([0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0])
 PHENO = {

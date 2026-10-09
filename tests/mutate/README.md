@@ -70,6 +70,8 @@ values change from run to run.
 | `screen.toml` | gcc | `gcc -std=c11 -O1 -w -I<copy> tests/adapt/screen_test.c -lm` |
 | `timeline.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/timeline_test.c -lm` |
 | `rt.toml` | gcc | `gcc -std=c11 -O2 -w -DYRT_TEST_FIT_ONLY -I<copy> tests/adapt/rt_test.c -lm` (the device clock fit only) |
+| `box.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/box_test.c -lm` |
+| `device.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/device_test.c -lsetupapi -lm` (Windows) |
 | `video.toml` | gcc | `gcc -std=c11 -O2 -w -I<copy> tests/adapt/video_test.c -lm` |
 
 These are the compilers of the original runs. The runner finds gcc in
@@ -170,4 +172,6 @@ measurement lock.
 | `timeline.toml` | 43 | 4 | 9 min |
 | `video.toml` | 21 | 3 | 19 min (one test run with the clips takes about 70 s) |
 | `gfx.toml` | 35 | 1 | 25 min (about 42 s for each mutant) |
-| `rt.toml` | 17 | 4 | 18 s (2026-10-08) |
+| `rt.toml` | 27 | 4 | 27 s (2026-10-08) |
+| `box.toml` | 13 | 4 | 4 s (2026-10-08) |
+| `device.toml` | 12 | 4 | 17 s (2026-10-08) |

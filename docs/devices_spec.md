@@ -1,10 +1,13 @@
 # Devices: specification draft
 
-Status: draft for review, 2026-10-08; decisions in section 16. Step 1 of
-section 14.2 is built (`ysp/rt.h` v0.6.0, `ysp/input.h` v0.3.0,
-`ysp/response.h` v0.1.4); nothing else here is. No device in this document
-was attached to the development machine, and no timing number in it was
-measured on a device here. A number from another source carries its
+Status: draft for review, 2026-10-08; decisions in section 16. Steps 1
+and 2 of section 14.2 are built: `ysp/rt.h` v0.6.0 and v0.7.0 (the fit,
+the per-user folders), `ysp/input.h` v0.3.0, `ysp/response.h` v0.1.4,
+`ysp/box.h` v0.1.0, `ysp/device.h` v0.1.0, `firmware/ysp_line/` and
+`examples/device/photodiode_check.c` (docs/rt.md, docs/box.md, docs/device.md).
+The rest is not. No device in this document was attached to the
+development machine, and no timing number in it was measured on a device
+here. A number from another source carries its
 source. "Unverified" marks a statement that was not checked against a
 primary source (a manual, a specification or source code). Research
 notes: `C:\tmp\psy-work\devices\`.
@@ -340,8 +343,8 @@ crossings). Not measured: the bridge above 4 kHz in total.
 |---|---|---|---|
 | `ysp/rt.h` | v0.5.0 exists; v0.6 proposed | The device clock fit: FIT (lower envelope of late pairs) and BRACKET (minimum round trip) estimators, tick unwrapping, bounded memory; `YRT_SRC_DEVICE` (12) reserved | OS |
 | `ysp/input.h` | v0.2.0 exists; v0.3.0 proposed | `YIN_KIND_SYNC` (7); the raw device ticks in the event's tail padding; `YIN_DEVTICKS` flag; eye-event controls | nothing |
-| `ysp/box.h` | new | Pure decoders and encoders for byte-stream devices (section 10) | `ysp/input.h` |
-| `ysp/device.h` | new | Instance, family vtable, roles, match keys, lifecycle, reader threads, sinks, stream rings, outputs, log records, the analog edge detector | `ysp/rt.h`, `ysp/input.h`; glue for `ysp/serial.h`, `ysp/parallel.h`, `ysp/screen.h` and `ysp/box.h` when included first |
+| `ysp/box.h` | v0.1.0, built 2026-10-08 | Pure decoders and query bytes for byte-stream devices: XID, the ysp line protocol, the photodiode frame (section 10) | `ysp/input.h` |
+| `ysp/device.h` | v0.1.0, built 2026-10-08 (inputs); outputs, stream rings, roles and the analog edge detector later | Instance, match keys, identify, lifecycle with reconnect, a reader thread or manual polling, a BRACKET fit with timer queries, a sink, log records | `ysp/rt.h`, `ysp/input.h`, `ysp/box.h`, `ysp/serial.h` (required: every step-2 family is serial; `desc.transport` replaces it). The bridge is the caller's sink, not glue in the header |
 | `ysp/screen.h` | v0.4.0 exists | Device path and match key in `YSCR_EV_DEVICE`; nothing else | SDL3 |
 | `ysp/hid.h` | new, later | HID enumeration, input reports on overlapped reads, output and feature reports | OS (SetupAPI and hid.dll; hidraw; IOKit on macOS) |
 | `ysp/net.h` | planned (rig_spec 4.7) | TCP and UDP transports, cross-machine clock offsets, LSL inlets and outlets with liblsl loaded at run time | OS; liblsl at run time |
@@ -364,7 +367,7 @@ What is example glue, not a header:
 - The sink that pushes to the bridge is one line (`yscr_push_input`),
   and `ysp/device.h` defines it inline when `ysp/screen.h` came first.
 - Firmware for a DIY box and for the photodiode (an Arduino or Teensy
-  sketch) is an example in `examples/firmware/`, not a header.
+  sketch) is in `firmware/` (`firmware/ysp_line/`), not a header.
 - A data writer that drains the stream rings to a file.
 
 What is the player's:
@@ -479,7 +482,7 @@ hardware can check now.
 | Cedrus XID | RB-x40, Lumina, c-pod, m-pod, StimTracker | USB-serial (FTDI) | XID frames (6 bytes; StimTracker 2: 9 bytes) | FIT from frames, BRACKET from `_e5` queries (the box's ms timer) | `ysp/box.h` decoder, `ysp/device.h` | No box: decoder on published or captured bytes only |
 | Bit-state boxes | PST Serial Response Box, other byte-per-sample boxes | serial | one byte per sample, one bit per button | HOST; FIT by sample count when the box streams at a fixed rate | `ysp/box.h` | No |
 | Byte-per-press boxes | BITSI, simple DIY boxes | serial | a byte per press or release | HOST | `ysp/box.h` | Through a DIY board |
-| ysp line protocol | DIY Arduino, Teensy, RP2040 boards with ysp's firmware | USB-CDC | `t,<us>,<ch>,<0or1>\n` | FIT (the board's crystal) | `ysp/box.h`, firmware in `examples/firmware/` | With any such board |
+| ysp line protocol | DIY Arduino, Teensy, RP2040 boards with ysp's firmware | USB-CDC | lines `S <t>`, `E <t> <ch> <0|1>`, `A <t> <ch> <v>`, `Q <seq> <t>`, `I <text>` (docs/box.md says why not the comma form first drafted here) | BRACKET (syncs, edges and query answers) | `ysp/box.h`, firmware in `firmware/ysp_line/` | With any such board |
 | Photodiode frame | the photodiode board of `screen_loopback.c` | USB-CDC | 6-byte frames, `0xA5` edge, `0x5A` sync | FIT | `ysp/box.h` | Yes, when the photodiode comes, if it is on a microcontroller (section 16) |
 | Analog edges | photodiode or microphone on line-in; force sensor or photodiode on a DAQ or a board's ADC | audio capture; DAQ; serial | sample blocks | the capture fit, the DAQ's clock | `ysp/device.h` edge detector (pure) on `ysp/audio.h` capture or a DAQ glue | Line-in, when capture exists |
 | HID vendor devices | Teensy raw HID, response pads in generic HID mode | HID | per device | HOST, or FIT if the report carries a time | `ysp/hid.h`, decoder in `ysp/box.h` | With a Teensy |
@@ -548,7 +551,11 @@ panel and the script binding have one source.
 ### 11.2 The rig profile
 
 A file on the rig, not in the pack, like the display calibration
-(`.yspcal`):
+(`.yspcal`). It lives in the per-user config folder,
+`yrt_user_dir(YRT_DIR_CONFIG, "rig", ...)` (`ysp/rt.h` v0.7.0): for
+example `%APPDATA%\ysp\rig` on Windows and `~/.config/ysp/rig` on Linux.
+That function refuses a folder other users can write, so a planted profile
+cannot bind a role to another device or state a false latency.
 
 | Field | Example |
 |---|---|
@@ -689,6 +696,13 @@ Each is small enough to finish and check before the next starts.
    keyboards check binding and replug. The `ysp/screen.h` match key
    (decision 11) can follow in a later step.
    Serves ranks 2, 3 and 6.
+   Built 2026-10-08 (docs/device.md): the instance, match keys, identify,
+   the lifecycle with reconnect and the gap record, the reader thread and
+   manual mode, BRACKET fits with timer queries, the three decoders
+   (`ysp/box.h`), the firmware (compiled for the Teensy 4.x and the Pico,
+   not run) and `examples/device/photodiode_check.c`. Left for later steps: roles
+   and the family vtable (a family is a `ybox_family` and code in
+   `ysp/device.h` for now), stream rings, the `ysp/screen.h` match key.
 3. **Outputs on the model.** `ydev_out_set`, `_pulse`, `_mark`;
    trigger roles over `ysp/parallel.h` and `ysp/serial.h` (TriggerBox,
    BioSemi, MMBT-S, XID, DTR), bound to `ysp/screen.h` trigger channels;
@@ -740,7 +754,7 @@ for the others are defaults: adopt unless the user changes them.
 | 5 | Parts on hand | A USB-serial adapter and Arduino, Teensy and RP2040 boards | User |
 | 6 | Threads or processes for vendor libraries | Threads first. A helper process only if a measurement shows interference | Default |
 | 7 | Vendor glue | Headers that load the vendor library at run time (the ANGLE pattern); player modules later | Default |
-| 8 | The rig profile | A file on the rig, outside the pack | Default |
+| 8 | The rig profile | A file on the rig, outside the pack, in `yrt_user_dir(YRT_DIR_CONFIG, "rig")` (`ysp/rt.h` v0.7.0, added 2026-10-08) | Default |
 | 9 | Devices first in hardware | About three response devices, Cedrus among them: the XID decoder first; the user names the other two | User |
 | 10 | Names | `ysp/device.h` (`ydev_`), `ysp/box.h` (`ybox_`) | Default |
 | 11 | `ysp/screen.h` device record | Add the Raw Input path and the match key, in a later step | Default |

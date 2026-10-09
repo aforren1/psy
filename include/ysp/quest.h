@@ -65,7 +65,7 @@
  *          synchronous replay of the same responses agree bit for bit, which
  *          the test asserts. Without YQST_ASYNC the header is unchanged, still
  *          includes nothing but the C standard library, and produces the same
- *          numbers bit for bit; examples/quest_async.c is a 16 ms frame loop
+ *          numbers bit for bit; examples/quest/async.c is a 16 ms frame loop
  *          driving it. See ASYNC and docs/adapt.md, "Inference on a
  *          thread".
  *   v0.3.1 - no code in the header changed, and the default build is bit for
@@ -73,7 +73,7 @@
  *          answer whether they are worth having: a float posterior and
  *          accumulators, and a 16-bit likelihood table. Neither earned its
  *          place, both were removed, and PRECISION records the numbers so the
- *          question does not have to be reopened. examples/quest_bench.c lost
+ *          question does not have to be reopened. examples/quest/bench.c lost
  *          a measurement bug in the process: its memory-floor pass did the
  *          same arithmetic every trial, so at -O3 the compiler hoisted it out
  *          of the timing loop and the floor came out 30 times too fast. The
@@ -83,7 +83,7 @@
  *          desc.pf_fn. It fills a whole stimulus's worth of cells in one
  *          call, which is what a binding needs: a vectorized Python callable
  *          is entered once per stimulus instead of S*P times (140 times
- *          instead of 156,800 for examples/quest_qcsf.c, which now uses it
+ *          instead of 156,800 for examples/quest/qcsf.c, which now uses it
  *          and keeps the per-cell version beside it to check against).
  *          YQST_PF_CUSTOM takes exactly one of the two; open() rejects both
  *          or neither. The two paths produce tables that are equal bit for
@@ -110,7 +110,7 @@
  *          Measured on one laptop, a Psi-marginal selection went from 6.3 ms
  *          to 0.95 ms and an update from 30 us to 19 us; the numbers and the
  *          memory floor they are measured against are under MEMORY, COST AND
- *          THREADS, and examples/quest_bench.c prints them for your machine.
+ *          THREADS, and examples/quest/bench.c prints them for your machine.
  *          No SIMD intrinsics: at the measured rate the sweep is bound by
  *          memory, not by arithmetic, and -mavx2 changes nothing.
  *   v0.1 - the implementation. The API and the declarations are v0.0's, and
@@ -196,7 +196,7 @@
  *   same simulation numbers as gcc, and the four examples build and exit 0.
  *
  *   The cost numbers under MEMORY, COST AND THREADS come from
- *   examples/quest_bench.c on one x86-64 laptop (an i7-1360P under WSL2),
+ *   examples/quest/bench.c on one x86-64 laptop (an i7-1360P under WSL2),
  *   measured on v0.5.2; the two lower-precision variants under PRECISION were
  *   measured on the same laptop at v0.3.1 and then removed. They are the only
  *   measurement of cost there is.
@@ -559,7 +559,7 @@
  *   Watson's quick CSF (Lesmes 2010): stim = (log spatial frequency, log
  *   contrast), params = (peak gain, peak frequency, bandwidth,
  *   low-frequency truncation), a log-parabola for the sensitivity and a
- *   Weibull on the distance to it. examples/quest_qcsf.c writes it both ways
+ *   Weibull on the distance to it. examples/quest/qcsf.c writes it both ways
  *   and checks them against each other.
  *
  *   ---------------------------------------------------------------------
@@ -671,7 +671,7 @@
  *   in the inter-trial interval or on a thread of the caller's.
  *
  *   Every count above is an operation count. For times, run
- *   examples/quest_bench.c: it prints the counts next to measured nanoseconds
+ *   examples/quest/bench.c: it prints the counts next to measured nanoseconds
  *   for four configurations of the Psi-marginal grid, and next to a MEMORY
  *   FLOOR, which is the same dot product over the same bytes with nothing
  *   else in it. What it prints on your machine is what to log. On one x86-64
@@ -715,7 +715,7 @@
  *   The two qCSF rows are estimates, not measurements: the Psi-marginal rate
  *   per cell times the qCSF cell count. So every configuration that keeps a
  *   table and is not of qCSF size is a fraction of a frame, and
- *   examples/quest_qcsf.c, whose grid is ninety times smaller than the qCSF
+ *   examples/quest/qcsf.c, whose grid is ninety times smaller than the qCSF
  *   row, is one too (0.3 ms there). When a configuration does not fit, do
  *   this, in this order: set desc.subset_size, which divides the sweep by
  *   S / subset_size and is what Watson 2017 sec. 4.2 recommends anyway (8 of
@@ -725,7 +725,7 @@
  *   header allows because it does no I/O and touches nothing but its own
  *   handle, and which ASYNC does for you. Do not split one selection across
  *   frames: the posterior must not change underneath it.
- *   examples/quest_bench.c prints this line for every configuration it
+ *   examples/quest/bench.c prints this line for every configuration it
  *   times, so a desc of your own can be checked against the budget before it
  *   is trusted with an experiment.
  *
@@ -793,9 +793,9 @@
  *   parameter values (not only grid points); yqst_simulate(q, stim_index,
  *   params, u) draws an outcome from it with the uniform variate u in
  *   [0, 1) that the caller supplies. The header has no random generator.
- *   examples/quest_sim.c runs Psi and QUEST configurations against a
+ *   examples/quest/sim.c runs Psi and QUEST configurations against a
  *   simulated observer and prints the posterior sd per trial next to the
- *   truth. examples/quest_qcsf.c does the same for a four-parameter quick CSF
+ *   truth. examples/quest/qcsf.c does the same for a four-parameter quick CSF
  *   through desc.pf_fn, and tests/adapt/quest_test.c replays a fixed
  *   response sequence against a reference posterior computed from the
  *   definitions. The comparison with mQUESTPlus's
@@ -1023,8 +1023,8 @@
  *   session of 300 trials should say so. Define YQST_MALLOC and YQST_FREE
  *   (both, or neither) to replace malloc for the one allocation at open.
  *
- *       cc -O2 -Iinclude -o quest_sim examples/quest_sim.c -lm
- *       cl /O2 /Iinclude examples\quest_sim.c
+ *       cc -O2 -Iinclude -o quest_sim examples/quest/sim.c -lm
+ *       cl /O2 /Iinclude examples\quest\sim.c
  *
  *   ---------------------------------------------------------------------
  *   LICENSE: public domain / MIT-0, see end of file.

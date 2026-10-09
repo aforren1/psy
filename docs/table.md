@@ -143,7 +143,7 @@ number of an error after CRLF records.
 
 All on the Iris Xe laptop, AC, the measurement lock held (`guard.sh time
 trials`), CPU load 16 % (gcc) and 0 % (MSVC) when the lock was taken,
-2026-10-07. `examples/trials_bench.c`, 21 rounds, MinGW gcc 16.1 -O2 and
+2026-10-07. `examples/trials/bench.c`, 21 rounds, MinGW gcc 16.1 -O2 and
 MSVC 19.44 /O2. The inputs are 10,000 rows x 8 columns made from a fixed
 seed: words of 3 to 12 letters (strings), `%.17g` doubles as pandas
 writes them (numbers), and 30 % quoted fields with commas and line breaks

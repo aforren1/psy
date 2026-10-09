@@ -1464,7 +1464,7 @@ extern "C" {
 #ifndef YAU__SLEEP_UNTIL
 #define YAU__SLEEP_UNTIL(t) yrt_sleep_until((uint64_t)(t), 0u)
 #endif
-/* Measurement seam, not API: examples/audio_clockstats.c records every
+/* Measurement seam, not API: examples/audio/clockstats.c records every
  * tick and the cost of every render through these. */
 #ifndef YAU__ON_TICK
 #define YAU__ON_TICK(au, tk) ((void)0)

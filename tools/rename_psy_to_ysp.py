@@ -66,7 +66,7 @@ TEST_DIRS = ["adapt", "compile", "fuzz", "loopback", "layout", "compare"]
 PROTECT = [
     ("C:/tmp/psy-quiet", None), ("/tmp/psy-quiet", None), ("C:\\tmp\\psy-quiet", None),
     ("psy-measure.lock", None), ("C:\\tmp\\psy-work\\", None),
-    ('"PSY"', "examples/gfx_gallery.c"),
+    ('"PSY"', "examples/gfx/gallery.c"),
 ]
 
 

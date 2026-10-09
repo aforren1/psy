@@ -59,7 +59,7 @@
  *   synthetic streams, with 20,000 random streams against a direct reading
  *   of the entries. Mutations: 49 of 49 caught
  *   (tests/mutate/response.toml).
- *   examples/trial_keyboard.c --sim (simulated display, synthetic
+ *   examples/response/trial_keyboard.c --sim (simulated display, synthetic
  *   participant) passes its own checks on both compilers; in a window on
  *   the Iris Xe laptop, keys sent with SendInput (scan codes and
  *   virtual-key taps) went through yscr_poll(), yrsp_from_sdl() and
@@ -83,7 +83,7 @@
  *
  *   The jsPsych html-keyboard-response trial, choices f and j, a response
  *   window of 1.5 s from the stimulus onset, responses before 0.1 s are
- *   anticipations (examples/trial_keyboard.c is the whole program):
+ *   anticipations (examples/response/trial_keyboard.c is the whole program):
  *
  *       static const yrsp_choice keys[] = { { .key = "f" }, { .key = "j" } };
  *       yrsp_collector rsp;
@@ -211,7 +211,7 @@
  *   With SDL_HINT_WINDOWS_RAW_KEYBOARD on (ysp/screen.h turns it on), SDL
  *   3.4 also sends a key from the window message when the message's scan
  *   code is 0 (read in SDL 3.4.0's source). Measured with SendInput
- *   (examples/screen_input.c --reports): a virtual-key tap (wVk, scan code
+ *   (examples/screen/input.c --reports): a virtual-key tap (wVk, scan code
  *   0, down and up back to back) gave two press-release pairs, the second
  *   report -0.1 to 34.2 ms after the first (518 taps, 1 above 17.1 ms); a
  *   virtual-key 100 ms hold gave one press, the second report marked as a

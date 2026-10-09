@@ -1,8 +1,9 @@
 /* rt_test.c - self-checking test for yrt_pump, the event ring, the
- * trace macros, the clock correlation and the device clock fit
- * (rt_test_fit.h) in ysp/rt.h. No framework: it returns 0 when every
- * check passed and 1 after printing each failure. With YRT_TEST_FIT_ONLY
- * it runs the fit's part only, as tests/mutate/rt.toml does.
+ * trace macros, the clock correlation, the device clock fit
+ * (rt_test_fit.h) and the per-user folders (rt_test_userdir.h) in
+ * ysp/rt.h. No framework: it returns 0 when every check passed and 1 after
+ * printing each failure. With YRT_TEST_FIT_ONLY it runs the fit and the
+ * folders only, as tests/mutate/rt.toml does.
  *
  * The ring's stress test runs 2, 4 and 8 producers on deadline workers into
  * a 256-slot ring against one draining thread, and checks every record and
@@ -1458,6 +1459,7 @@ static void test_version(void) {
 }
 
 #include "rt_test_fit.h"
+#include "rt_test_userdir.h"
 
 /* -------------------------------------------------------------------- main */
 
@@ -1466,9 +1468,11 @@ int main(void) {
     uint64_t t0 = yrt_now_ns();
 
     test_fit();
+    test_user_dir();
 #ifdef YRT_TEST_FIT_ONLY
-    /* the mutation runs of tests/mutate/rt.toml: the fit alone, in seconds */
-    printf("ysp_rt_pump_test: %s (%d failures, fit only)\n",
+    /* the mutation runs of tests/mutate/rt.toml: the fit and the per-user
+     * folders alone, in seconds */
+    printf("ysp_rt_pump_test: %s (%d failures, fit and folders only)\n",
            g_failures ? "FAILED" : "all checks passed", g_failures);
     (void)caller_ring;
     return g_failures ? 1 : 0;

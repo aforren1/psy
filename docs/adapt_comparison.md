@@ -63,7 +63,7 @@ threshold lies between -0.97 and -0.58, near the bottom of the box.
 |---|---|---|
 | 1-up-2-down, 1-up-3-down | 1-D | steps 8, 4, 2 dB (4, 2, 1 deg for w4), start at the top of the range, reversal mean after the schedule |
 | weighted 1-up-1-down | 1-D | the same steps, down step scaled to converge on the target p |
-| interleaved staircases | 2-D | weighted 1-up-1-down at fixed contexts, round robin: 8 audiometric frequencies (as `aep_audiometric.c`), 6 contexts for the others |
+| interleaved staircases | 2-D | weighted 1-up-1-down at fixed contexts, round robin: 8 audiometric frequencies (as `examples/aep/audiometric.c`), 6 contexts for the others |
 | QUEST | 1-D | QUEST+ with the threshold axis free and every other parameter fixed at the truth |
 | Psi | 1-D | threshold and slope free (slope grid 2 to 5), guess and lapse fixed |
 | QUEST+ joint | w3, w4 | Watson's grid for the example, every parameter joint |

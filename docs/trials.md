@@ -603,7 +603,7 @@ warnings and the clang 11.1 builds that v0.1.1 ran.
 ## Cost (v0.2)
 
 All on the Iris Xe laptop, AC, the measurement lock held (`guard.sh time
-trials`), 2026-10-07, `examples/trials_bench.c`, 21 rounds, MinGW gcc 16.1
+trials`), 2026-10-07, `examples/trials/bench.c`, 21 rounds, MinGW gcc 16.1
 -O2 and MSVC 19.44 /O2, built with `YTR_MAX_TRIALS` and
 `YTR_MAX_CONDITIONS` at 16384 so one handle holds 10,000 trials (the
 handle is then 608192 bytes). The table has 10,000 rows; open() builds
@@ -700,7 +700,7 @@ UndefinedBehaviorSanitizer, and at `YTR_MAX_TRIALS` 256 and
   MATLAB R2023a and Octave 10.1, the jitter part included.
 
 Cost, measured on the Iris Xe laptop, AC, the measurement lock held,
-2026-10-07, `examples/trials_bench.c`, 21 rounds:
+2026-10-07, `examples/trials/bench.c`, 21 rounds:
 
 | Measure | gcc 16.1 -O2 | MSVC 19.44 /O2 |
 |---|---|---|
@@ -748,8 +748,8 @@ The header's STATUS block has the numbers. In summary:
   handle, identical to the uninterrupted run, snapshot bytes included;
   every load refusal and every rejected desc; the format functions against
   fixed strings.
-- `examples/trials_mocs.c` (constant stimuli with a constraint, printing
-  the proportions and a CSV) and `examples/trials_interleave.c` (three
+- `examples/trials/mocs.c` (constant stimuli with a constraint, printing
+  the proportions and a CSV) and `examples/trials/interleave.c` (three
   ysp/stair.h staircases and a catch condition, the second USAGE example
   run for real, printing which track each trial went to). Both exit 0
   with no hardware, and print the same bytes under gcc and MSVC.

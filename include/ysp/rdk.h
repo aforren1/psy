@@ -48,14 +48,14 @@
  *   independent Python model written from REPRODUCIBILITY, reproduces.
  *   26 of 26 non-equivalent mutations of the header caught (one by the
  *   digests only), 2 equivalent (tests/mutate/rdk.toml).
- *   Cost on the Iris Xe laptop (AC, the lock held; examples/rdk_bench.c,
+ *   Cost on the Iris Xe laptop (AC, the lock held; examples/rdk/bench.c,
  *   MSVC 19.44 and gcc 16.1; docs/rdk.md has the tables):
  *   yrdk_update() for 1000 dots 8.9 to 16 us (SAME with DIRECTION
  *   noise, which draws nothing) and 18 to 43 us (the rules that draw for
  *   every dot), for 10,000 dots 102 to 172 us and 183 to 443 us. The bars
  *   set in the design, 10 and 100 us, are missed by every rule that draws
  *   and, at 10,000 dots, by every rule. With ysp/gfx.h
- *   (examples/gfx_rdk_bench.c, 1920 x 1200): 10,000 dots updated and
+ *   (examples/rdk/gfx_rdk_bench.c, 1920 x 1200): 10,000 dots updated and
  *   drawn in 0.30 ms of CPU and 0.32 to 0.38 ms of GPU over the empty
  *   frame; 10,000 gabors riding the dots 0.41 ms of CPU and 1.36 to 1.48
  *   ms of GPU. No number is a measurement of light.
@@ -70,7 +70,7 @@
  *   in *one* C or C++ file before including this header. Every other file
  *   just includes it.
  *
- *   A classic RDK drawn with ysp/gfx.h (examples/gfx_rdk.c runs it):
+ *   A classic RDK drawn with ysp/gfx.h (examples/rdk/gfx_rdk.c runs it):
  *
  *       static yrdk_field rdk;
  *       if (yrdk_open(&rdk, &(yrdk_desc){ .w = 400, .count = 200,

@@ -1,0 +1,119 @@
+# ysp/device.h mutants: brackets, the map, the lifecycle, identify, keys.
+# The test runs simulated devices on a virtual clock (about 2 s with the
+# thread part). docs/device.md lists the results.
+header = "ysp/device.h"
+
+[test.device]
+source = "tests/adapt/device_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lsetupapi", "-lm"]
+timeout = 120
+
+[[mutant]]
+id = "dev-01"
+name = "answers without their bracket"
+test = "device"
+why = "An answer's width is the bracket; width 0 claims a pair as good as a frame's."
+find = '''                w = t - dev->probe_t0;'''
+replace = '''                w = 0;'''
+
+[[mutant]]
+id = "dev-02"
+name = "events at their read time"
+test = "device"
+why = "The device's clock is the point: a read time carries the USB path's delay."
+find = '''                e->t = m;
+                e->unc_us = ydev__unc(dev, &fi);'''
+replace = '''                (void)m;
+                e->unc_us = ydev__unc(dev, &fi);'''
+
+[[mutant]]
+id = "dev-03"
+name = "events mapped before their pairs"
+test = "device"
+why = "The pairs of a read go into the fit first, so its events map through them."
+find = '''        yrt_fit_get(&dev->fit, &fi);
+        mapped = fi.ready;'''
+replace = '''        yrt_fit_get(&dev->fit, &fi);
+        mapped = fi.ready && dev->st.pairs > (uint64_t)o.n_pair + 100000u;'''
+
+[[mutant]]
+id = "dev-04"
+name = "no silence check"
+test = "device"
+why = "Some USB-serial drivers never fail a read after an unplug; silence is the only sign."
+find = '''        if (dev->d.silent_ns > 0 && t - dev->st.last_rx_ns > dev->d.silent_ns) ydev__lose(dev, YDEV_WHY_SILENT);'''
+replace = ''
+
+[[mutant]]
+id = "dev-05"
+name = "no gap record"
+test = "device"
+why = "The log must say when events could not arrive."
+find = '''        ydev__rec(dev, (uint16_t)YDEV_REC_GAP, &u);'''
+replace = '''        (void)u;'''
+
+[[mutant]]
+id = "dev-06"
+name = "the fit kept across a reconnect"
+test = "device"
+why = "A device's clock can reset on power-up; the old map would put every later event far off."
+find = '''    (void)yrt_fit_init(&dev->fit, &fd);'''
+replace = '''    if (dev->st.opens <= 1) (void)yrt_fit_init(&dev->fit, &fd);'''
+
+[[mutant]]
+id = "dev-07"
+name = "any device identifies"
+test = "device"
+why = "A wrong device at the key must fail before the session, not give garbage."
+find = '''    return -1;
+}
+
+/* --- the step'''
+replace = '''    return 1;
+}
+
+/* --- the step'''
+
+[[mutant]]
+id = "dev-08"
+name = "keys case-sensitive"
+test = "device"
+why = "Windows upper-cases instance ids; a key typed in lower case must still match."
+find = '''        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;'''
+replace = '''        if (*a != *b) return false;'''
+
+[[mutant]]
+id = "dev-09"
+name = "an empty field is not a wildcard"
+test = "device"
+why = "\"serial:16C0:0483::\" must match any Teensy whatever its serial number."
+find = '''        if (fp[0] && !ydev__ieq(fp, fk)) return false;'''
+replace = '''        if (!ydev__ieq(fp, fk)) return false;'''
+
+[[mutant]]
+id = "dev-10"
+name = "no clamp"
+test = "device"
+why = "An event cannot happen after it was read; a map past the read time is fit error."
+find = '''                if (m > t) { m = t; dev->st.clamped++; }'''
+replace = '''                if (m > t) dev->st.clamped++;'''
+
+[[mutant]]
+id = "dev-11"
+name = "a stale answer matched"
+test = "device"
+why = "An answer must match the pending query, or its width is from another query's write."
+find = '''            if (o.pair[i].probe && o.pair[i].probe == dev->probe_pending) {'''
+replace = '''            if (o.pair[i].probe) {'''
+expect = "survived"
+note = "The simulated boards answer every query before the next one, so no answer is stale; equivalent in this test. Kept as a control."
+
+[[mutant]]
+id = "dev-12"
+name = "the uncertainty from the spread"
+test = "device"
+why = "The answers' spread (15 ms behind an FTDI timer) is not the map's error (about 1 ms)."
+find = '''    int64_t ns = (int64_t)ybox_ns_per_tick(dev->d.family) + (fi->width_ns > 0 ? fi->width_ns : fi->spread_ns);'''
+replace = '''    int64_t ns = (int64_t)ybox_ns_per_tick(dev->d.family) + fi->spread_ns;'''

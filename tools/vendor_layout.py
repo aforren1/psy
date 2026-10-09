@@ -150,7 +150,11 @@ def apply_patches(work, patch):
         print("patch %s sha256:%s" % (name, sha256(open(pfile, "rb").read())), file=sys.stderr)
         if patch:
             comp = name.split("-", 1)[0]
-            subprocess.run(["git", "apply", "--whitespace=nowarn", pfile], cwd=os.path.join(work, comp), check=True)
+            # core.autocrlf off for this call: Windows runners set it true
+            # globally, and git apply then writes the patched files with CRLF,
+            # which the manifest's hashes refuse.
+            subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "apply",
+                            "--whitespace=nowarn", pfile], cwd=os.path.join(work, comp), check=True)
 
 
 def write_files(base, files):

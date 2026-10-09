@@ -1,0 +1,118 @@
+# ysp/box.h mutants: the XID frame and timer answer, the line protocol's
+# rules, the photodiode frame, resynchronization and the output reserve.
+# docs/box.md lists the results.
+header = "ysp/box.h"
+
+[test.box]
+source = "tests/adapt/box_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lm"]
+timeout = 120
+
+[[mutant]]
+id = "box-01"
+name = "XID key 0 kept as 0"
+test = "box"
+why = "pyxid2 maps key 0 to 8: an RB-x40's eighth button would be lost."
+find = '''                                           key == 0 ? 8u : key);'''
+replace = '''                                           key);'''
+
+[[mutant]]
+id = "box-02"
+name = "XID port bits not checked"
+test = "box"
+why = "pyxid2 rejects a frame with port bits 2 or 3 set; without the check a shifted stream gives false presses."
+find = '''            if (d->n < 6) return (d->n >= 2 && (b[1] & 0x0Cu) != 0) ? -1 : 0;'''
+replace = '''            if (d->n < 6) return 0;'''
+
+[[mutant]]
+id = "box-03"
+name = "XID press bit inverted"
+test = "box"
+why = "Bit 4 set is a press; inverted, every RT is from the release."
+find = '''                yin_event* e = ybox__event(d, out, t, ms, (info & 0x10u) ? (uint8_t)YIN_PRESS : (uint8_t)YIN_RELEASE,'''
+replace = '''                yin_event* e = ybox__event(d, out, t, ms, (info & 0x10u) ? (uint8_t)YIN_RELEASE : (uint8_t)YIN_PRESS,'''
+
+[[mutant]]
+id = "box-04"
+name = "big-endian time"
+test = "box"
+why = "XID and the photodiode frame send the time little-endian ('<I')."
+find = '''    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);'''
+replace = '''    return (uint32_t)b[3] | ((uint32_t)b[2] << 8) | ((uint32_t)b[1] << 16) | ((uint32_t)b[0] << 24);'''
+
+[[mutant]]
+id = "box-05"
+name = "timer answer not checked for '5'"
+test = "box"
+why = "Only '_e5' carries the timer; another '_' answer read as one gives a false pair."
+find = '''        if (d->n >= 3 && b[2] != '5') return -1;'''
+replace = ''
+
+[[mutant]]
+id = "box-06"
+name = "no resync inside a broken frame"
+test = "box"
+why = "A frame that starts inside a broken one must be found; dropping the whole broken frame loses it."
+find = '''            for (k = 0; k < m; k++) rest[k] = d->buf[1 + k];'''
+replace = '''            m = 0;'''
+
+[[mutant]]
+id = "box-07"
+name = "line seq 0 accepted"
+test = "box"
+why = "Query numbers start at 1: 0 means a frame the device sent on its own."
+find = '''        if (!ybox__u64(&p, &a) || !ybox__u64(&p, &b) || !ybox__end(p) || a == 0 || a > 0xFFFFFFFFu) return false;'''
+replace = '''        if (!ybox__u64(&p, &a) || !ybox__u64(&p, &b) || !ybox__end(p) || a > 0xFFFFFFFFu) return false;'''
+
+[[mutant]]
+id = "box-08"
+name = "line channel 0 accepted"
+test = "box"
+why = "Channels are 1 to 255, as XID keys are 1-based."
+find = '''        if (b < 1 || b > 255 || c > 1) return false;'''
+replace = '''        if (b > 255 || c > 1) return false;'''
+
+[[mutant]]
+id = "box-09"
+name = "line u64 overflow wraps"
+test = "box"
+why = "A time past 64 bits is garbage, not a small time."
+find = '''        if (v > (UINT64_MAX - dgt) / 10u) return false;'''
+replace = ''
+
+[[mutant]]
+id = "box-10"
+name = "trailing fields accepted"
+test = "box"
+why = "A line with an extra field is not the protocol: a future version or noise."
+find = '''        if (!ybox__u64(&p, &a) || !ybox__u64(&p, &b) || !ybox__u64(&p, &c) || !ybox__end(p)) return false;'''
+replace = '''        if (!ybox__u64(&p, &a) || !ybox__u64(&p, &b) || !ybox__u64(&p, &c)) return false;'''
+
+[[mutant]]
+id = "box-11"
+name = "one past the output"
+test = "box"
+why = "The caller's arrays have cap entries; one more is a write past them."
+find = '''        if (out->n_ev >= out->ev_cap || out->n_pair >= out->pair_cap) break;'''
+replace = '''        if (out->n_ev > out->ev_cap || out->n_pair > out->pair_cap) break;'''
+
+[[mutant]]
+id = "box-12"
+name = "photo level 2 accepted"
+test = "box"
+why = "Level is 0 or 1; anything else is a misaligned stream."
+find = '''    if (d->n >= 2 && b[1] > 1u) return -1;'''
+replace = ''
+
+[[mutant]]
+id = "box-13"
+name = "an overlong line not dropped"
+test = "box"
+why = "The rest of an overlong line would be read as a new line."
+find = '''            d->n = 0;
+            d->skip = 1;
+            continue;'''
+replace = '''            d->n = 0;
+            continue;'''

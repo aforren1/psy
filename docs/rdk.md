@@ -21,8 +21,8 @@ coordinator on 2026-10-06; "Decisions" records the answers.
 | `tests/compare/rdk_ref.py` | Done: an independent Python model; the 8 golden digests are its output. |
 | Mutations (`tests/mutate/rdk.toml`) | Done: 29 mutants, 26 caught, 2 equivalent, 1 control; 29 of 29 as expected on the final header. See "Mutations". |
 | CI | Not run yet: the Linux and macOS arm64 runs of the golden digests are the first on those platforms. |
-| `examples/gfx_rdk.c` | Done: 4 pages; `--sim` in CI replays two trials from their logs. |
-| `examples/rdk_bench.c`, `examples/gfx_rdk_bench.c` | Done: see "Cost". |
+| `examples/rdk/gfx_rdk.c` | Done: 4 pages; `--sim` in CI replays two trials from their logs. |
+| `examples/rdk/bench.c`, `examples/rdk/gfx_rdk_bench.c` | Done: see "Cost". |
 | Python binding (`bindings/python/ysp_rdk`, `ysp.rdk`) | Done 2026-10-07: see "Bindings". 25 tests pass on Windows (CPython 3.14 and 3.9, MSVC) and on Linux (WSL2, CPython 3.10, gcc 11.4, an isolated build with the header staged as CI does). CI builds and tests it on Linux, macOS arm64 and Windows. |
 
 ## Decisions
@@ -193,7 +193,7 @@ of dropped frames under the frame clock found it.
 
 ## Reproducibility
 
-What to log is in the manual (REPRODUCIBILITY). `examples/gfx_rdk.c`
+What to log is in the manual (REPRODUCIBILITY). `examples/rdk/gfx_rdk.c`
 logs `rdk.last` on each update of page 4 and replays each trial into a
 second field with `yrdk_replay()`; CI runs it on the simulated display,
 so the recipe is checked end to end on every platform.

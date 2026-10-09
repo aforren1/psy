@@ -44,7 +44,7 @@
  *   the 958 corpus files replayed on Linux under ASan and UBSan with no
  *   report. Mutations: 25 in tests/mutate/table.toml, 24 killed, 1
  *   equivalent. Costs measured (Iris Xe laptop, AC, measurement lock,
- *   examples/trials_bench.c, 21 rounds, medians, gcc 16.1 -O2 / MSVC 19.44
+ *   examples/trials/bench.c, 21 rounds, medians, gcc 16.1 -O2 / MSVC 19.44
  *   /O2) on 10,000 rows x 8 columns: parse 181 / 188 MB/s for words,
  *   170 / 97 MB/s for %.17g numbers, 200 / 218 MB/s with 30 % quoted
  *   fields; ytb_view() of the 2 to 3 MB blocks 0.26 to 0.38 / 0.21 to

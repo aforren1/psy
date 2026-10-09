@@ -227,7 +227,7 @@
  *     says which rung it got; log it with your numbers, because they mean
  *     different things under different policies.
  *     What the wait itself is worth on your machine is ysp/rt.h's WAITS
- *     section, and examples/rt_jitter.c measures it there: it sweeps spin
+ *     section, and examples/rt/jitter.c measures it there: it sweeps spin
  *     windows and prints the wake-latency distribution of each, which is the
  *     only honest number available for the trailing edge before the transport
  *     gets involved.
@@ -398,8 +398,8 @@
  *   unit does not call), and a decl-spec such as __declspec(dllexport)
  *   reaches both.
  *
- *       cc -O2 -Iinclude -o serial_trigger examples/serial_trigger.c
- *       cl /O2 /Iinclude examples\serial_trigger.c
+ *       cc -O2 -Iinclude -o serial_trigger examples/serial/trigger.c
+ *       cl /O2 /Iinclude examples\serial\trigger.c
  *
  *   ---------------------------------------------------------------------
  *   LICENSE: public domain / MIT-0, see end of file.
@@ -2766,7 +2766,7 @@ YSER_API int yser_pulse(yser_port* p, uint8_t on, uint8_t off, uint32_t usec) {
     if (r != 1) return r;
     /* The deadline is taken after the onset write, so the width does not
      * include that write's own cost. The spin window is ysp/rt.h's platform
-     * default; a caller who has measured its rig with examples/rt_jitter.c and
+     * default; a caller who has measured its rig with examples/rt/jitter.c and
      * wants a different one can call yrt_sleep_until() around two
      * yser_write_byte() calls, which is all this function is. */
     if (usec) (void)yrt_sleep_until(yrt_now_ns() + (uint64_t)usec * 1000ull,

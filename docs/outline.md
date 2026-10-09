@@ -41,7 +41,7 @@ The probe of 2026-10-06 left four jobs open, and this header does them:
 | Exact alpha | Resolve once, then closed-form signed-area accumulation per pixel cell | Measured in phase 1: equal to a direct exact sweep to 3.8e-13 of full scale on 25,000 glyphs, and 3 to 4 times cheaper per size. |
 | Stroke fold | Nehab (2020): evolute elements where the curvature radius is below the half width | Measured: 0 wrong pixel centers on 400 random curves, against 186 on 30 curves for half bands alone (phase 1). |
 | Cubics | Uniform split with a proven bound | A fitted conversion cut Source Han Sans JP's curves by 16 percent at best, under the 20 percent the coordinator set, and built sets 1.4 to 11 times slower (Cost). Deleted. |
-| No-pack layout | cmap and hmtx lookups only; examples/outline_font.c lays out a Latin label by advances | Coordinator, 2026-10-06. Real text needs shaping, kerning and bidi: Skribidi. |
+| No-pack layout | cmap and hmtx lookups only; examples/outline/font.c lays out a Latin label by advances | Coordinator, 2026-10-06. Real text needs shaping, kerning and bidi: Skribidi. |
 | Variable fonts | The default instance; an instance is refused by name | Coordinator, 2026-10-06. gvar is about 300 lines, when an experiment needs it. |
 | New code | `YOL_ERR_NUMERIC` = -12 | -11 is ysp/video.h's NOT_IMPLEMENTED. |
 | SVG subset | Built in v0.2.0 (SVG below) | After the font path, the tests, the bars and the stroke knobs, as planned. |
@@ -254,7 +254,7 @@ run's control point.
 Measured on the Iris Xe laptop (the probe's machine), on AC power for
 the whole run, under the shared measurement lock taken by the shared
 guard (no compiler or test process, CPU load at most 20 percent), rows
-interleaved, the median of 3 rounds; `examples/outline_bench.c`. Two
+interleaved, the median of 3 rounds; `examples/outline/bench.c`. Two
 numbers are gcc 16.1 -O2 and MSVC 19.44 /O2, in that order, run one after
 the other. v0.2.0 tables; v0.1.0's are kept where they changed.
 

@@ -76,7 +76,7 @@ Answers from the review of 2026-10-06. The user can still override them.
 | 9 | Display P3 and Rec. 2020 | Source spaces like sRGB, through the same code path (primaries, white, transfer). |
 | 10 | Space names in strings | "cielab", "cielch", "cieluv", "cielchuv", to keep them apart from CSS `lab()`, which has a D50 white. |
 | 11 | Python color type | A namedtuple. |
-| 12 | Color tweens | `examples/color_bench.c` is written and built; it runs under the measurement lock later. |
+| 12 | Color tweens | `examples/color/bench.c` is written and built; it runs under the measurement lock later. |
 
 ## The model
 
@@ -300,7 +300,7 @@ Stage C's checks:
   `ygfx_color()` is NULL.
 
 What ysp/video.h and its worker must change: nothing. ysp/video.h,
-examples/video_*.c and tests/adapt/video_test.c use none of the
+examples/video/*.c and tests/adapt/video_test.c use none of the
 renamed names (only `ygfx_calibrated()`, `YGFX_PRIM_*` and
 `YGFX_TRC_*`, which stay); ysp_video's test and compile checks pass
 against stage C on MSVC and MinGW. A user who copies ysp/video.h and
@@ -482,7 +482,7 @@ Warnings as errors (MSVC `/W4 /WX`; gcc `-Wall -Wextra -Wpedantic
 
 ## Cost
 
-`examples/color_bench.c`, under the measurement lock (owner "color", no
+`examples/color/bench.c`, under the measurement lock (owner "color", no
 compiler or test running), on the Iris Xe laptop,
 2026-10-06 14:41; power source not recorded. A nominal calibration with
 Gaussian spectra; the median of 9 rounds of 100000 calls (10000 for the

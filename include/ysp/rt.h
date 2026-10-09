@@ -1,10 +1,9 @@
-/* ysp/rt.h - v0.6.0 - public domain single-header real-time timing library
+/* ysp/rt.h - v0.7.0 - public domain single-header real-time timing library
  *
  *   The clock, the waits, the scheduling ladder, the one-shot deadline
  *   worker, the background-compute pump, the event ring, the clock
- *   correlation, the device clock fit and the instrumentation macros that a
- *   psychophysics rig
- *   needs, factored out of the transport headers so experiment code and
+ *   correlation, the device clock fit, the per-user folders and the
+ *   instrumentation macros that a psychophysics rig needs, factored out of the transport headers so experiment code and
  *   future transports share one clock base and one set of timing claims.
  *
  *   Written in the single-header style of the stb / sokol libraries. It is
@@ -19,6 +18,12 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.7.0 - Per-user folders: yrt_user_dir(YRT_DIR_CACHE or
+ *          YRT_DIR_CONFIG, subdir, out, cap) gives <base>/ysp/<subdir>,
+ *          the base from the platform's per-user cache or config location,
+ *          checked as ysp/gfx.h's ygfx_default_cache_dir() checked its
+ *          folder (that function is now a wrapper of this one). See
+ *          PER-USER FOLDERS. Nothing else changed.
  *   v0.6.0 - The device clock fit: yrt_fit maps a device's own counter
  *          (a response box's ms timer, a board's micros(), a tracker's
  *          clock) to the ysp_rt clock from (ticks, host time) pairs. Three
@@ -134,7 +139,15 @@
  *          now builds this header without /std:c11.
  *   v0.1 - first release.
  *
- *   STATUS: v0.6.0. The device clock fit (v0.6.0) is built with warnings
+ *   STATUS: v0.7.0. yrt_user_dir() (v0.7.0) is built with warnings as errors
+ *   by MSVC, MinGW gcc and gcc on WSL2, and by emcc in CI's wasm job;
+ *   tests/adapt/rt_test.c checks both kinds against environments it sets
+ *   (Windows: non-ASCII, UNC, relative, missing, a trailing slash, the exact
+ *   fit; POSIX: XDG absolute and relative, HOME, /tmp refused; the web:
+ *   always refused) and the subfolder rules, and ysp/gfx.h's test of
+ *   ygfx_default_cache_dir() passes unchanged. Its mutants are in
+ *   tests/mutate/rt.toml.
+ *   The device clock fit (v0.6.0) is built with warnings
  *   as errors by MSVC 19.44 (/W4 /WX, C11 and C++17), MinGW-w64 gcc 16.1
  *   (C99, C11, C++17) and gcc 11.4 on WSL2 (C99, C++17), and its tests in
  *   tests/adapt/rt_test_fit.h pass on all three, also under ASan and
@@ -181,7 +194,7 @@
  *   a known offset, a 1 ms clock's edge within half the width, the
  *   timeout, and on Windows that interrupt time runs at the QPC rate and
  *   that yrt_ticks_to_ns() brackets yrt_now_ns() and matches a 128-bit
- *   reference. examples/rt_ring_bench.c measured, on a 16-thread Windows 11
+ *   reference. examples/rt/ring_bench.c measured, on a 16-thread Windows 11
  *   machine (MSVC and MinGW) and in WSL2 on the same machine (8 vCPUs),
  *   per push: 11 to 16 ns from one thread with the stamps set (14 to 37 ns
  *   in WSL2) and 37 to 43 ns with t_ns and tid stamped by the ring; 0.4 to
@@ -234,7 +247,7 @@
  *   Covering the window throttled the timer in 1 of 19 runs
  *   only, and battery power was not available to test.
  *   The Windows path is built and measured on Windows 11 by
- *   examples/rt_jitter.c, and also builds in MSVC's default (pre-C11) C mode,
+ *   examples/rt/jitter.c, and also builds in MSVC's default (pre-C11) C mode,
  *   which is what the Python and MEX bindings compile with. The Linux path is
  *   built as C11, as C++17 and with YRT_NO_THREADS (warnings as errors) and
  *   run under a WSL2 kernel, including a ThreadSanitizer run of the worker's
@@ -247,7 +260,7 @@
  *   on_idle, drain, drop, the publish lock over a few thousand messages, the
  *   inline and the caller-supplied ring, on_start refusal, a stop releasing a
  *   blocked wait, a zeroed handle, a double stop, a submit after stop) and by
- *   examples/rt_pump.c. The v0.3.1 wait-versus-stop guarantee is checked by a
+ *   examples/rt/pump.c. The v0.3.1 wait-versus-stop guarantee is checked by a
  *   hammer in the same test (two threads in a loop of 0.3 ms waits while the
  *   main thread stops and restarts the pump 300 times, idle, draining and
  *   dropping), clean under ThreadSanitizer on Linux and run on Windows; a
@@ -260,7 +273,7 @@
  *   warnings as errors, with -pthread, without it and with YRT_NO_THREADS,
  *   and run under node 24 with -pthread -sPROXY_TO_PTHREAD=1: the whole of
  *   tests/adapt/rt_test.c passes there, wait-versus-stop hammer
- *   included, as do examples/rt_jitter.c, examples/rt_pump.c, and the
+ *   included, as do examples/rt/jitter.c, examples/rt/pump.c, and the
  *   QUEST+ and GP test suites with their async layers on. Under node the
  *   clock claims 1 ns and shows a smallest step of 0.26 us on a pthread and
  *   0.48 us on the main thread, where one read costs 0.6 us and 3.4 us. Over
@@ -372,7 +385,7 @@
  *   high-resolution timer may fire up to about a millisecond late; on Linux
  *   the floor is the thread's timer slack. A spin window buys accuracy with a
  *   busy core: the thread burns CPU for spin_ns of every wait. Pick it from
- *   measurement, not from this comment, and run examples/rt_jitter.c on the
+ *   measurement, not from this comment, and run examples/rt/jitter.c on the
  *   rig to see what each window is worth there.
  *
  *   yrt_spin_until() is the pure-spin floor: no syscall, a pause
@@ -396,7 +409,7 @@
  *
  *   Both are starting points, not measurements, and a rig with a different
  *   power plan, chipset or background load will want a different number.
- *   examples/rt_jitter.c sweeps several windows, marks this platform's
+ *   examples/rt/jitter.c sweeps several windows, marks this platform's
  *   default, and prints the wake latency distribution of each: pick yours
  *   from that output and pass it to yrt_sleep_until() or to
  *   yrt_worker_desc.spin_ns.
@@ -812,7 +825,7 @@
  *       for (int n; (n = yrt_ring_drain(&ring, ev, 64)) > 0; )
  *           for (int i = 0; i < n; i++) write_csv_row(&ev[i]);
  *
- *   examples/rt_ring_csv.c is the whole program. In C++17, zero a desc and
+ *   examples/rt/ring_csv.c is the whole program. In C++17, zero a desc and
  *   an event and set their fields one by one.
  *
  *   THE RECORD. seq (written by the ring), tid, t_ns, source, kind, aux and
@@ -1028,6 +1041,46 @@
  *   no lock and allocates nothing. Exists in a YRT_NO_THREADS build.
  *
  *   ---------------------------------------------------------------------
+ *   PER-USER FOLDERS (yrt_user_dir)
+ *   ---------------------------------------------------------------------
+ *   Where a rig keeps files that belong to the user of the machine and not
+ *   to an experiment: a program cache, a rig profile, a calibration.
+ *
+ *       char dir[512];
+ *       if (yrt_user_dir(YRT_DIR_CONFIG, "rig", dir, sizeof dir) == YRT_OK)
+ *           ... open dir/profile.json, after making dir if it is missing
+ *
+ *   KINDS. YRT_DIR_CACHE: disposable files that a program can make again
+ *   (compiled programs); the OS or the user may delete them. YRT_DIR_CONFIG:
+ *   files to keep (a rig profile, device bindings). The base folder:
+ *                 CACHE                         CONFIG
+ *     Windows     %LOCALAPPDATA%                %APPDATA%
+ *     Linux       $XDG_CACHE_HOME, if absolute,  $XDG_CONFIG_HOME, if
+ *                 else $HOME/.cache             absolute, else $HOME/.config
+ *     macOS       $HOME/Library/Caches          $HOME/Library/Application Support
+ *     the web     none                          none
+ *   then ysp, then subdir: "%LOCALAPPDATA%\ysp\progcache",
+ *   "$HOME/.config/ysp/rig". subdir is NULL or "" for the ysp folder itself,
+ *   or names separated by '/' (Windows gets '\'); an empty name, "." or
+ *   "..", a backslash, a colon or a control character is refused.
+ *   RULES. Absolute paths only: a variable that is missing or relative is
+ *   no folder, and no other folder is tried. On Windows the variable is
+ *   read with the wide API and given as UTF-8 (a user name with accents
+ *   works); a drive and a root, or a UNC path. On POSIX each part of the
+ *   path that exists, from the root, is refused when all users can write
+ *   it (/tmp is 1777) or when another user than this one or root owns it
+ *   (a folder planted under /tmp before the first run): a program cache
+ *   that someone else can write can be given an entry with a correct
+ *   hash, and the driver parses it. On the web there is no folder. The
+ *   function makes no folder and writes no file; it reads the environment
+ *   and, on POSIX, the owner and mode of the parts that exist.
+ *   RESULT. YRT_OK and the path in out (no trailing separator), or
+ *   YRT_ERR_ARG with out empty: NULL out or cap 0 (out untouched then), an
+ *   unknown kind, a refused subdir, a missing or refused base, a path that
+ *   does not fit in cap bytes with its NUL. Then use no folder: never fall
+ *   back to a shared one.
+ *
+ *   ---------------------------------------------------------------------
  *   INSTRUMENTATION
  *   ---------------------------------------------------------------------
  *   Macros that mark what the code is doing, for a profiler or for the log:
@@ -1151,7 +1204,7 @@
  *              reaches node. This is the configuration the tests run in:
  *
  *       emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -Iinclude \
- *            -o rt_pump.js examples/rt_pump.c && node rt_pump.js
+ *            -o rt_pump.js examples/rt/pump.c && node rt_pump.js
  *
  *              Node 24 runs threaded modules with no extra flag. The
  *              adaptive headers' tests also want -sSTACK_SIZE=16MB,
@@ -1164,7 +1217,7 @@
  *   requestAnimationFrame on the main thread, a QUEST+ or GP update runs on
  *   a pump thread, and the frame callback polls yrt_pump_done_seq() exactly
  *   as a native loop does. No timing claim in this header survives the trip
- *   to a browser unchanged; run examples/rt_jitter.c under the runtime you
+ *   to a browser unchanged; run examples/rt/jitter.c under the runtime you
  *   will use and log its ysp_rt: line.
  *
  *     Ring     With -pthread the ring's atomics are wasm's, and a push from
@@ -1212,10 +1265,10 @@
  *
  *   Define YRT_API to override the default `extern` linkage.
  *
- *       cc -O2 -pthread -Iinclude -o rt_jitter examples/rt_jitter.c
- *       cl /O2 /Iinclude examples\rt_jitter.c
+ *       cc -O2 -pthread -Iinclude -o rt_jitter examples/rt/jitter.c
+ *       cl /O2 /Iinclude examples\rt\jitter.c
  *       emcc -O2 -pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1 -Iinclude \
- *            -o rt_jitter.js examples/rt_jitter.c     # then: node rt_jitter.js
+ *            -o rt_jitter.js examples/rt/jitter.c     # then: node rt_jitter.js
  *
  *   ---------------------------------------------------------------------
  *   LICENSE: public domain / MIT-0, see end of file.
@@ -1226,9 +1279,9 @@
 /* The version of this header, for a binding's __version__ and for a log line.
  * The string always matches the three numbers. */
 #define YRT_VERSION_MAJOR  0
-#define YRT_VERSION_MINOR  6
+#define YRT_VERSION_MINOR  7
 #define YRT_VERSION_PATCH  0
-#define YRT_VERSION_STRING "0.6.0"
+#define YRT_VERSION_STRING "0.7.0"
 
 /* Feature-test macro for clock_nanosleep() and mlockall() in the Linux
  * implementation. Defined here, before the first system header, so it takes
@@ -1352,7 +1405,7 @@ YRT_API void yrt_get_clock_info(yrt_clock_info* out);
 /* Spin window yrt_sleep_ns() and a zeroed yrt_worker_desc use: that much
  * of the tail of a wait is spun on the clock rather than left to the OS. The
  * value differs by platform because the OS wait it has to cover differs; WAITS
- * says why. Measure it on the rig with examples/rt_jitter.c before you trust
+ * says why. Measure it on the rig with examples/rt/jitter.c before you trust
  * it, and pass your own window rather than editing this one. */
 #if defined(_WIN32)
     #define YRT_DEFAULT_SPIN_NS 1200000u
@@ -1952,6 +2005,18 @@ YRT_API int64_t  yrt_fit_map(const yrt_fit* f, uint64_t ticks);
 YRT_API uint64_t yrt_fit_unwrap(const yrt_fit* f, uint64_t ticks);
 
 YRT_API void     yrt_fit_get(const yrt_fit* f, yrt_fit_info* out);
+
+/* --- per-user folders ---------------------------------------------------- */
+
+/* Which per-user folder; see PER-USER FOLDERS. */
+typedef enum yrt_dir_kind {
+    YRT_DIR_CACHE  = 0,   /* disposable: %LOCALAPPDATA%, ~/.cache, ~/Library/Caches */
+    YRT_DIR_CONFIG = 1    /* kept: %APPDATA%, ~/.config, ~/Library/Application Support */
+} yrt_dir_kind;
+
+/* <base>/ysp/<subdir> for this user, into out (cap bytes with the NUL).
+ * YRT_OK, or YRT_ERR_ARG with out empty. Makes no folder. */
+YRT_API int yrt_user_dir(int kind, const char* subdir, char* out, size_t cap);
 
 /* --- instrumentation ---------------------------------------------------- */
 
@@ -4198,6 +4263,125 @@ void yrt_fit_get(const yrt_fit* f, yrt_fit_info* out) {
     out->spread_ns   = f->spread_ns;
     out->width_ns    = f->width_ns;
     out->span_ns     = f->py[(f->head + f->n - 1) % YRT_FIT_POINTS] - f->py[f->head];
+}
+
+/* ======================================================================= *
+ *  PER-USER FOLDERS
+ * ======================================================================= */
+#if defined(YRT__POSIX) && !defined(YRT__EMSCRIPTEN)
+#include <stdlib.h>
+#include <sys/stat.h>
+#endif
+
+/* Names separated by '/': no empty name (so no leading, trailing or double
+ * slash), no "." or "..", no backslash or colon (a second root on
+ * Windows), no control character. */
+static bool yrt__subdir_ok(const char* s) {
+    size_t i, start = 0, n, len;
+    if (!s) return true;
+    n = strlen(s);
+    for (i = 0; i <= n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (i < n && (c < 0x20u || c == '\\' || c == ':')) return false;
+        if (i == n || c == '/') {
+            len = i - start;
+            if (n > 0 && len == 0) return false;
+            if (len == 1 && s[start] == '.') return false;
+            if (len == 2 && s[start] == '.' && s[start + 1] == '.') return false;
+            start = i + 1;
+        }
+    }
+    return true;
+}
+
+#if !defined(YRT__EMSCRIPTEN)
+/* Appends sep "ysp" [sep subdir] to the n bytes in out; 0 when it does not
+ * fit, else the new length. */
+static size_t yrt__dir_tail(char* out, size_t n, size_t cap, const char* subdir, char sep) {
+    size_t m = subdir ? strlen(subdir) : 0, i;
+    size_t need = n + 4u + (m ? 1u + m : 0u);
+    if (need + 1u > cap) return 0;
+    out[n] = sep;
+    memcpy(out + n + 1, "ysp", 3);
+    n += 4;
+    if (m) {
+        out[n++] = sep;
+        for (i = 0; i < m; i++) out[n++] = subdir[i] == '/' ? sep : subdir[i];
+    }
+    out[n] = '\0';
+    return n;
+}
+#endif
+
+int yrt_user_dir(int kind, const char* subdir, char* out, size_t cap) {
+    if (!out || cap == 0) return YRT_ERR_ARG;
+    out[0] = '\0';
+    if ((kind != YRT_DIR_CACHE && kind != YRT_DIR_CONFIG) || !yrt__subdir_ok(subdir)) return YRT_ERR_ARG;
+#if defined(YRT__EMSCRIPTEN)
+    return YRT_ERR_ARG;                   /* no per-user folder on the web */
+#elif defined(YRT__WINDOWS)
+    {
+        wchar_t w[512];
+        DWORD k = GetEnvironmentVariableW(kind == YRT_DIR_CACHE ? L"LOCALAPPDATA" : L"APPDATA", w, 512);
+        int m;
+        /* Absolute only: a drive and a root, or a UNC path. */
+        if (k == 0 || k >= 512 || !((k >= 3 && w[1] == L':' && (w[2] == L'\\' || w[2] == L'/')) || (w[0] == L'\\' && w[1] == L'\\')))
+            return YRT_ERR_ARG;
+        while (k > 3 && (w[k - 1] == L'\\' || w[k - 1] == L'/')) w[--k] = L'\0';
+        m = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)(cap < 0x7FFFFFFF ? cap : 0x7FFFFFFF), NULL, NULL);
+        if (m <= 1 || yrt__dir_tail(out, (size_t)m - 1u, cap, subdir, '\\') == 0) { out[0] = '\0'; return YRT_ERR_ARG; }
+        return YRT_OK;
+    }
+#else
+    {
+        const char* base = NULL;
+        size_t i, n, end;
+        uid_t me = geteuid();
+#if !defined(YRT__DARWIN)
+        base = getenv(kind == YRT_DIR_CACHE ? "XDG_CACHE_HOME" : "XDG_CONFIG_HOME");
+        if (!base || base[0] != '/') base = NULL;     /* the XDG spec: a relative one is ignored */
+#endif
+        if (!base) {
+#if defined(YRT__DARWIN)
+            const char* sub = kind == YRT_DIR_CACHE ? "/Library/Caches" : "/Library/Application Support";
+#else
+            const char* sub = kind == YRT_DIR_CACHE ? "/.cache" : "/.config";
+#endif
+            const char* home = getenv("HOME");
+            size_t ns;
+            if (!home || home[0] != '/') return YRT_ERR_ARG;
+            n = strlen(home);
+            ns = strlen(sub);
+            if (n + ns + 1u > cap) return YRT_ERR_ARG;
+            memcpy(out, home, n + 1);
+            while (n > 1 && out[n - 1] == '/') out[--n] = '\0';
+            memcpy(out + n, sub, ns + 1);
+            n += ns;
+        } else {
+            n = strlen(base);
+            if (n + 1u > cap) return YRT_ERR_ARG;
+            memcpy(out, base, n + 1);
+        }
+        while (n > 1 && out[n - 1] == '/') out[--n] = '\0';
+        end = yrt__dir_tail(out, n, cap, subdir, '/');
+        if (end == 0) { out[0] = '\0'; return YRT_ERR_ARG; }
+        /* Each part of the path that exists, from the root: refused when all
+         * users can write it (/tmp is 1777) or another user owns it (a
+         * folder planted under /tmp before the first run). Root may own. */
+        for (i = 1; i <= end; i++) {
+            if (out[i] == '/' || i == end) {
+                struct stat st;
+                char c = out[i];
+                bool bad;
+                out[i] = '\0';
+                bad = stat(out, &st) == 0 && ((st.st_mode & S_IWOTH) != 0 || (st.st_uid != me && st.st_uid != 0));
+                out[i] = c;
+                if (bad) { out[0] = '\0'; return YRT_ERR_ARG; }
+            }
+        }
+        return YRT_OK;
+    }
+#endif
 }
 
 /* ======================================================================= *

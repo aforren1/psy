@@ -222,7 +222,7 @@
  *   clang (emcc, run in node); 43 deliberate mutations of the header
  *   each make it fail (v0.3.1's 12 and v0.3.2's 2 checked with MinGW
  *   only). v0.3.2's text input: its records and flag on the scripted path
- *   (MSVC, MinGW); its SDL calls by hand in examples/gfx_layout.c.
+ *   (MSVC, MinGW); its SDL calls by hand in examples/layout/gfx_layout.c.
  *   CODES and TRIGGERS (v0.3.0, measured on battery, Balanced plan; the
  *   tables are in docs/screen.md): the open-time self test passed on
  *   DXGI_FLIP and COMPOSITION, and 1800 code read-backs in fullscreen
@@ -244,7 +244,7 @@
  *   tail is the OS's and stays: 1 to 15 triggers a minute fired over 200
  *   us late (1 to 22 before), the largest 0.35 to 43 ms (0.37 to 12.6 ms
  *   before), so the 200 us bar for the largest is missed. Without a
- *   display, examples/rt_jitter.c on the same cores woke up to 2.6 and
+ *   display, examples/rt/jitter.c on the same cores woke up to 2.6 and
  *   32.6 ms late with the same 1.2 ms spin window (on the P-cores, 3.0
  *   ms and 20 us). With 3 frames of 25 ms GPU work every
  *   300 frames: without the GPU check 72 of 72 triggers fired a frame
@@ -304,7 +304,7 @@
  *   ysp/rt.h's implementation comes with it, once, as with the other ysp
  *   headers. Link SDL3.
  *
- *   A trial of ysp/timeline.h on the display (examples/screen_hello.c runs
+ *   A trial of ysp/timeline.h on the display (examples/screen/hello.c runs
  *   it):
  *
  *       #define YSP_SCREEN_IMPLEMENTATION
@@ -805,7 +805,7 @@
  *   machine's answer, not a rule: on a CPU of one core type there are no
  *   E-cores and the default is ysp/rt.h's placement, and on another GPU or
  *   interrupt policy the E-cores may be the busy ones. Check it: run
- *   examples/screen_flipstats.c --trigger, which prints the late triggers
+ *   examples/screen/flipstats.c --trigger, which prints the late triggers
  *   per CPU, and read "% DPC Time" per processor (typeperf) during a run.
  *   k > 0 pins the worker to logical CPU k - 1 (a pinned worker cannot
  *   leave a busy CPU: measured up to 48 ms late); -1 leaves it where
@@ -898,7 +898,7 @@
  *   when the message carries no scan code (read in SDL 3.4.0's source):
  *   keys injected by virtual-key code (SendInput with wVk only), keys with
  *   no scan code (some media keys), some on-screen keyboards and remote
- *   tools. Measured with SendInput (examples/screen_input.c --reports, 518
+ *   tools. Measured with SendInput (examples/screen/input.c --reports, 518
  *   taps): a virtual-key tap gave two press-release pairs, the second
  *   -0.1 to 34.2 ms after the first; a 100 ms virtual-key hold gave one
  *   press and a repeat; scan-code injection gave one report, tapped or
@@ -980,7 +980,7 @@
  *   reader registers again and the record says REGISTERED. Each screen with
  *   raw_mice shares the one reader; the last to close stops it. On other
  *   platforms, and with no window, open() refuses raw_mice. Measured with
- *   injected input only (examples/screen_input.c --mice is the hand test
+ *   injected input only (examples/screen/input.c --mice is the hand test
  *   for two physical mice): reports stamped 0.15 to 0.40 ms after
  *   SendInput (means of three runs), no report lost or doubled with SDL's
  *   raw keyboard running.
@@ -1160,7 +1160,7 @@
  *   test hook that stalled for 1.5 s once was still called afterwards, so
  *   the header does not install it again. Keys on SDL's raw path were not
  *   stamped later with the hook armed (STATUS).
- *   Measured (examples/screen_abort.c; a window armed through a test
+ *   Measured (examples/screen/abort.c; a window armed through a test
  *   seam, and fullscreen in a switched mode): see STATUS.
  *   Later, X11: the watchdog opens its own display connection and selects
  *   XI_RawKeyPress and XI_RawKeyRelease on the root window (XInput 2.1),
@@ -2310,7 +2310,7 @@ static void yscr__text_input_set(yscr_screen* s, int on, int external, int x, in
  * ADDED events for devices already there) one record; a full table still
  * logs. Pure: tests/adapt/screen_test.c calls it without SDL. */
 static void yscr__device_log(yscr_screen* s, uint32_t kind, uint32_t change, uint64_t id, const char* name);
-/* examples/screen_abort.c sets it to 1 to arm the panic watchdog in a
+/* examples/screen/abort.c sets it to 1 to arm the panic watchdog in a
  * window, so its test needs no fullscreen. */
 #ifndef YSCR__PANIC_WINDOWED
 #define YSCR__PANIC_WINDOWED 0

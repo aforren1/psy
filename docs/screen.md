@@ -143,7 +143,7 @@ counts in QPC on Windows, so the restamp is exact to 0.1 us.
 The event's own timestamp is not exact. SendInput reaches only the
 foreground window, and Windows does not give the foreground to a program
 started from the background. It does after the program sends one input
-event, so `examples/screen_input.c` first sends a zero-size mouse move
+event, so `examples/screen/input.c` first sends a zero-size mouse move
 (the pointer does not move) and calls `SetForegroundWindow()`. Then it
 sends F24 with SendInput at known ysp_rt times, first through SDL's
 message loop and then on SDL's raw keyboard path:
@@ -190,13 +190,13 @@ Checked: the scripted-path test (records, the flag on exactly the flips
 planned while on, no record for a moved rectangle or a repeated off, the
 argument and closed-screen errors) on MSVC and MinGW gcc 16.1, and two
 mutants (`text-00`, `text-01` in `tests/mutate/screen.toml`), both caught.
-The SDL calls ran in `examples/gfx_layout.c`'s editor page. Not measured:
+The SDL calls ran in `examples/layout/gfx_layout.c`'s editor page. Not measured:
 how much later keys are stamped with text input on than on the raw path
 beyond the message-loop rows above.
 
 ## Measurements
 
-`examples/screen_flipstats.c` made every table here, built with MSVC
+`examples/screen/flipstats.c` made every table here, built with MSVC
 19.4 /O2 in Release. It defines `YRT_TRACE_RING`, so the header's zones
 give the cost breakdown. The runs before the last three changes to the
 header (DXGI times through `yrt_ticks_to_ns()` instead of a correlation
@@ -290,7 +290,7 @@ section come from two programs:
 
 - a scratch probe in C++ with the SDK headers, which logs every present
   and every statistic;
-- `examples/screen_flipstats.c` on the header's own C implementation.
+- `examples/screen/flipstats.c` on the header's own C implementation.
 
 All runs used the machine described at the top of this note. Most of
 them ran in a 640 x 480 or 800 x 600 window kept on top, because a
@@ -888,7 +888,7 @@ An earlier window batch (19:37 to 19:43, possibly under the other agent's
 load) agreed: p99 32 to 94 us before, 1.3 to 3.0 us after; maxima 0.88
 to 1.9 ms before, 0.55 to 43 ms after.
 
-The OS tail. examples/rt_jitter.c, 1800 waits of 16.667 ms per spin
+The OS tail. examples/rt/jitter.c, 1800 waits of 16.667 ms per spin
 window, no display involved, AC, under the lock:
 
 | Placement | Spin 1.2 ms (default): p50 / p99 / max us | Spin 0: p50 / p99 / max us |
@@ -988,7 +988,7 @@ not measured.
 
 ### The OS gamma ramp
 
-`examples/screen_gamma.c`, without changing what is shown: the laptop's
+`examples/screen/gamma.c`, without changing what is shown: the laptop's
 ramp is the 8-bit identity; setting the same ramp again and reading it
 back was exact; GetDeviceGammaRamp took 0.8 to 20 ms (the first call is
 slow), SetDeviceGammaRamp 4.6 to 18 ms. Because the ramp was already the
@@ -1113,14 +1113,14 @@ reports each key twice. One report comes from its raw-input thread and
 one from the message loop, 0.1 to 11 ms apart. A probe with 8 F24 keys
 gave 8 key-downs from each thread and 16 from `SDL_PollEvent`. With the
 hint off, the probe gave 8. The tree's v0.3.0 header behaves the same,
-so `examples/screen_input.c`'s raw-path table matched the first report
+so `examples/screen/input.c`'s raw-path table matched the first report
 of each key. The header counts a press only after a key-up of the same
 key, and treats reports within 30 ms (50 ms from v0.3.3) as one press.
 v0.3.3 found the cause: the probe sent keys by virtual-key code, and only
 such keys (no scan code) come twice. See "Input for ysp/response.h
 (v0.3.3)".
 
-`examples/screen_abort.c` (a child process with a 320 x 200 window that
+`examples/screen/abort.c` (a child process with a 320 x 200 window that
 reads its events with `yscr_poll()` before begin()):
 
 | Case | Result |
@@ -1273,7 +1273,7 @@ pass under node; its own test was not run under emcc.
 
 ## Input for ysp/response.h (v0.3.3)
 
-Measured on 2026-10-07, on AC, with `examples/screen_input.c --reports`:
+Measured on 2026-10-07, on AC, with `examples/screen/input.c --reports`:
 F24 sent with SendInput while the test's window had the keyboard focus,
 on SDL's raw keyboard path. Five runs (20, 50, 50, 199 and 199 presses
 per row, 518 taps in all).

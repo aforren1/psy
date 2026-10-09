@@ -615,8 +615,8 @@ between them.
 
 The handle sizes are `sizeof` on x86-64 at the default ceilings, and the
 heap sizes are what `yqst_memory_size` and `yaep_memory_size` return. The
-operation counts are counts, not times. `examples/quest_bench.c` and
-`examples/aep_bench.c` time a desc and print the numbers to log.
+operation counts are counts, not times. `examples/quest/bench.c` and
+`examples/aep/bench.c` time a desc and print the numbers to log.
 
 ## Verification
 
@@ -681,7 +681,7 @@ MATLAB needs a license, but they are the acceptance tests.
   Sobol plus 145 adaptive trials, and two metrics: mean absolute error of
   the probability field over a 30 x 30 grid, and of the 0.75 threshold by
   local linear interpolation along the intensity axis.
-  `examples/aep_audiometric.c` runs that protocol on `ysp/aep.h` (every
+  `examples/aep/audiometric.c` runs that protocol on `ysp/aep.h` (every
   acquisition, both kernels, and the psychometric model) and on
   interleaved `ysp/stair.h` staircases as the classical baseline the paper
   left out, at 20 replications, and writes the per-trial curves to a CSV.

@@ -324,7 +324,7 @@
  *   yst_simulate_response(p_correct, u) returns 1 when u < p_correct and
  *   0 otherwise; u is a uniform variate in [0, 1) that the caller draws.
  *   The header has no random generator, so an example's seed policy is the
- *   example's. examples/stair_sim.c runs a 3-down-1-up against a Weibull
+ *   example's. examples/stair/sim.c runs a 3-down-1-up against a Weibull
  *   observer and prints the track and the estimate against the truth.
  *
  *   ---------------------------------------------------------------------
@@ -335,8 +335,8 @@
  *   definitions too, so -DYST_API=static gives one translation unit a
  *   private copy.
  *
- *       cc -O2 -Iinclude -o stair_sim examples/stair_sim.c -lm
- *       cl /O2 /Iinclude examples\stair_sim.c
+ *       cc -O2 -Iinclude -o stair_sim examples/stair/sim.c -lm
+ *       cl /O2 /Iinclude examples\stair\sim.c
  *
  *   ---------------------------------------------------------------------
  *   LICENSE: public domain / MIT-0, see end of file.

@@ -90,7 +90,7 @@ option(YSP_BUILD_LOOPBACK "Build the loopback tests in tests/loopback/ (needs ha
 # against Tracy itself and not against a copy of it.
 option(YSP_TRACY_CHECK "Fetch Tracy and build the YRT_TRACY compile check" OFF)
 # Off by default: text layout for the pack tool and the player (pack/, the
-# vendored Skribidi and HarfBuzz in third_party/, examples/gfx_layout.c and
+# vendored Skribidi and HarfBuzz in third_party/, examples/layout/gfx_layout.c and
 # tests/layout/). About 8 MB of sources that no header needs.
 option(YSP_BUILD_LAYOUT "Build the layout library (pack/, third_party/), its test and gfx_layout" OFF)
 
@@ -154,8 +154,8 @@ endif()
 # append <name>, set its macro prefix, its ysp:: group (the consumer block at
 # the top, which its programs link), the platforms it supports, and whether
 # it has a Y<X>_NO_THREADS build. Compile checks come from
-# tests/compile/<name>.{c,cpp} and examples from examples/<name>_*.c, both
-# found by name and gated by platform. The transport headers include ysp/rt.h,
+# tests/compile/<name>.{c,cpp} and examples from examples/<name>/*.c (built
+# as <name>_<file>), both found by name and gated by platform. The transport headers include ysp/rt.h,
 # which the include path above resolves from include/, so the
 # compiler's own header dependencies rebuild every target after a ysp/rt.h
 # edit. rt comes first so its compile checks run before its dependents'.
@@ -167,7 +167,20 @@ endif()
 # program registered with ctest too, and one with YSP_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
 # Y<X>_ASYNC defined, which is the opt-in layer that pulls in ysp/rt.h.
-set(YSP_LIBS rt parallel serial stair quest aep table trials timeline input response color rdk outline screen audio gfx video)
+set(YSP_LIBS rt parallel serial stair quest aep table trials timeline input response box device color rdk outline screen audio gfx video)
+
+# Examples that sit in the folder of the header they mainly show but need
+# another header's build: path, program name (the file's own name, kept from
+# the flat layout), and the library whose loop builds it with its group and
+# dependencies ("-": built by its own block below). Every other example is
+# examples/<lib>/<file>.c, built as <lib>_<file>.
+set(YSP_EXAMPLES_ACROSS
+    rdk/gfx_rdk.c              gfx
+    rdk/gfx_rdk_bench.c        gfx
+    timeline/gfx_trial.c       gfx
+    layout/gfx_layout.c        -
+    response/trial_keyboard.c  -
+    device/photodiode_check.c  -)
 
 set(YSP_PREFIX_rt          YRT)
 set(YSP_GROUP_rt           core)
@@ -233,6 +246,19 @@ set(YSP_GROUP_response     devices)
 set(YSP_PLATFORMS_response Windows Linux Darwin)
 set(YSP_THREADS_response   OFF)
 
+# Box protocols are pure (decoders and query bytes, no I/O). The device
+# layer runs them on reader threads over ysp/serial.h; it has no
+# NO_THREADS variant, because manual mode (ydev_poll) is its threadless form.
+set(YSP_PREFIX_box         YBOX)
+set(YSP_GROUP_box          devices)
+set(YSP_PLATFORMS_box      Windows Linux Darwin)
+set(YSP_THREADS_box        OFF)
+
+set(YSP_PREFIX_device      YDEV)
+set(YSP_GROUP_device       devices)
+set(YSP_PLATFORMS_device   Windows Linux Darwin)
+set(YSP_THREADS_device     OFF)
+
 # The timeline includes nothing either; it takes times as arguments.
 set(YSP_PREFIX_timeline    YTL)
 set(YSP_GROUP_timeline     core)
@@ -246,7 +272,8 @@ set(YSP_PLATFORMS_color    Windows Linux Darwin)
 set(YSP_THREADS_color      OFF)
 
 # Random dot kinematograms: pure computation on integers, nothing included.
-# Its examples/rdk_*.c run on the CPU; examples/gfx_rdk*.c draw through gfx.
+# Its examples/rdk/bench.c runs on the CPU; examples/rdk/gfx_rdk*.c draw
+# through gfx (YSP_EXAMPLES_ACROSS).
 set(YSP_PREFIX_rdk         YRDK)
 set(YSP_GROUP_rdk          rig)
 set(YSP_PLATFORMS_rdk      Windows Linux Darwin)
@@ -254,7 +281,7 @@ set(YSP_THREADS_rdk        OFF)
 
 # The outline builder is pure computation: fonts, paths, strokes, exact
 # alpha and curve sets. Its test includes ysp/gfx.h (no SDL) for the curve
-# set check only; examples/outline_bench.c uses ysp/rt.h's clock.
+# set check only; examples/outline/bench.c uses ysp/rt.h's clock.
 set(YSP_PREFIX_outline     YOL)
 set(YSP_GROUP_outline      rig)
 set(YSP_PLATFORMS_outline  Windows Linux Darwin)
@@ -422,15 +449,24 @@ foreach(lib IN LISTS YSP_LIBS)
         ysp_add_program(${lib}_loopback tests/loopback/${lib}_loopback.c ${group})
     endif()
 
-    # --- examples: examples/<lib>_*.c, one program each, named after the file.
+    # --- examples: examples/<lib>/<file>.c, one program each, <lib>_<file>;
+    #     and the YSP_EXAMPLES_ACROSS this library builds, under their own name.
     if(YSP_BUILD_EXAMPLES AND deps_ok)
-        file(GLOB lib_examples CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${lib}_*.c)
-        # gfx_layout.c needs the layout library: pack/CMakeLists.txt builds it.
-        list(FILTER lib_examples EXCLUDE REGEX "/gfx_layout\\.c$")
+        file(GLOB lib_examples CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/examples/${lib}/*.c)
         foreach(src IN LISTS lib_examples)
             get_filename_component(name ${src} NAME_WE)
-            ysp_add_program(${name} ${src} ${group})
+            if(NOT "${lib}/${name}.c" IN_LIST YSP_EXAMPLES_ACROSS)
+                ysp_add_program(${lib}_${name} ${src} ${group})
+            endif()
         endforeach()
+        set(across ${YSP_EXAMPLES_ACROSS})
+        while(across)
+            list(POP_FRONT across path owner)
+            if(owner STREQUAL lib)
+                get_filename_component(name ${path} NAME_WE)
+                ysp_add_program(${name} examples/${path} ${group})
+            endif()
+        endwhile()
     endif()
 endforeach()
 
@@ -440,9 +476,10 @@ if(TARGET audio_loopback AND WIN32)
 endif()
 
 # ysp/input.h and ysp/response.h with SDL3: their tests again with the SDL
-# adapter (SDL's headers only, nothing linked), and the keyboard trial
-# example, which sits on ysp/gfx.h and so matches no examples/<lib>_*.c
-# pattern.
+# adapter (SDL's headers only, nothing linked), and the two examples of
+# YSP_EXAMPLES_ACROSS whose groups are their own: the keyboard trial (on
+# ysp/gfx.h and the methods) and the photodiode check (a device and a
+# screen).
 if(TARGET SDL3::Headers AND YSP_BUILD_TESTS)
     ysp_add_program(test_response_sdl tests/adapt/response_test.c devices)
     target_compile_definitions(test_response_sdl PRIVATE YRSP_TEST_SDL)
@@ -454,7 +491,10 @@ if(TARGET SDL3::Headers AND YSP_BUILD_TESTS)
     add_test(NAME test_input_sdl COMMAND test_input_sdl)
 endif()
 if(TARGET SDL3::SDL3 AND YSP_BUILD_EXAMPLES)
-    ysp_add_program(trial_keyboard examples/trial_keyboard.c rig methods)
+    ysp_add_program(trial_keyboard examples/response/trial_keyboard.c rig methods)
+    # The MCU photodiode on ysp/device.h, its events over ysp/screen.h's
+    # input bridge: the first real device's hand test.
+    ysp_add_program(photodiode_check examples/device/photodiode_check.c rig devices)
 endif()
 
 # ysp/video.h: ysp::rig carries pl_mpeg when it was found, else these build

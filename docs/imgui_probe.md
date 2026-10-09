@@ -104,7 +104,7 @@ numbers below are the record.
 and four drifting gabors at contrast 0.3 (the console's sliders drive
 them). Each frame: `yscr_begin()`, `ygfx_begin/draw/end`,
 `yscr_flip_at(f.onset)`. The flip records come from `f.done`; the
-header's cost from its trace zones, as in `examples/screen_flipstats.c`.
+header's cost from its trace zones, as in `examples/screen/flipstats.c`.
 GPU time is a pair of D3D11 timestamp queries on the screen's own device
 (`yscr_native()`): one after `yscr_begin()`, one in the present
 callback, read 8 frames later without a flush. These are D3D11 calls

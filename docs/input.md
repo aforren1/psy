@@ -85,4 +85,4 @@ On 2026-10-08, with MinGW-w64 gcc 16.1 (C11, C99, C++17; `-Wall -Wextra
 | `tests/adapt/input_test.c` | 58 checks pass; 67 with `YIN_TEST_SDL` (v0.1.0 and v0.2.0) (SDL 3.4.0 headers, nothing linked): the event's size and every field offset, every constant's value, the raw mouse adapter, the SDL adapter |
 | `tests/compile/input.c`, `.cpp` | Build and run on both compilers |
 | `ysp/response.h` through the aliases | Its test unchanged: 20,604 checks, 20,669 with the SDL adapter; 49 of 49 mutations caught (`ms-01` and `ms-04` now edit `ysp/input.h`) |
-| `examples/trial_keyboard.c --sim` | As scripted |
+| `examples/response/trial_keyboard.c --sim` | As scripted |

@@ -4,12 +4,12 @@ Status: v0.1.4, 2026-10-08. The input event lives in `ysp/input.h` from v0.1.3
 (`docs/input.md`); this header keeps its names as aliases. v0.1.4:
 `YRSP_KINDS_ALL` takes every kind but SYNC. The header's manual (its comment block) is
 the reference for each rule. This page has a tutorial built on
-`examples/trial_keyboard.c`, how-to guides for other devices, the data
+`examples/response/trial_keyboard.c`, how-to guides for other devices, the data
 columns, and the decisions with their evidence.
 
 ## Tutorial: a keyboard trial with RT from the flip onset
 
-This tutorial runs `examples/trial_keyboard.c`, the ysp version of
+This tutorial runs `examples/response/trial_keyboard.c`, the ysp version of
 jsPsych's `html-keyboard-response`, and explains each part of it.
 
 ### 1. Run the example on the simulated display
@@ -130,7 +130,7 @@ yrsp_feed(&rsp, &in);
 Another library can turn SDL text input on for the stimulus window (Dear
 ImGui's SDL3 backend does, on the window with the focus). Keys then come
 on the message path, about 11 ms late (`docs/imgui_probe.md`). Read the
-path each frame and give it to the adapter, as `examples/trial_keyboard.c`
+path each frame and give it to the adapter, as `examples/response/trial_keyboard.c`
 does:
 
 ```c

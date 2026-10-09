@@ -169,7 +169,7 @@
  *   report. Mutations: tests/mutate/trials.toml, 47 of 47 killed (18 for
  *   jitter). Python binding 156 tests; MEX test_mex.m in MATLAB R2023a and
  *   Octave 10.1. Costs measured (Iris Xe laptop, AC, measurement lock,
- *   examples/trials_bench.c, medians, gcc 16.1 -O2 / MSVC 19.44 /O2): one
+ *   examples/trials/bench.c, medians, gcc 16.1 -O2 / MSVC 19.44 /O2): one
  *   ytr_jitter_draw() 66 / 54 ns uniform snapped, 82 / 109 ns
  *   exponential snapped, 32 / 62 ns exponential, 12 / 16 ns choice;
  *   next() + update() with 4 jitters mean 0.16 / 0.20 us, worst 5.2 / 4.8
@@ -218,7 +218,7 @@
  *   including the parser against Python's csv module and float(). MEX:
  *   test_mex.m passes in MATLAB R2023a and Octave 10.1.
  *   Costs measured (Iris Xe laptop, AC, measurement lock, 2026-10-07,
- *   examples/trials_bench.c, 21 rounds, medians, gcc 16.1 -O2 / MSVC
+ *   examples/trials/bench.c, 21 rounds, medians, gcc 16.1 -O2 / MSVC
  *   19.44 /O2) for open() of a 10,000-row table: file order 0.02 / 0.02
  *   ms, FULL_RANDOM 0.04 / 0.04, CONSTRAINED max_run 3 1.82 / 1.54, units
  *   with max_run 3 5.02 / 7.03, 10,000 draws with replacement 0.73 / 1.33,
@@ -297,7 +297,7 @@
  *
  *   Method of constant stimuli, 2 orientations x 5 contrasts, 20
  *   repetitions, random order, never the same orientation four times
- *   running (examples/trials_mocs.c runs this):
+ *   running (examples/trials/mocs.c runs this):
  *
  *       #define YSP_TRIALS_IMPLEMENTATION
  *       #include "ysp/trials.h"
@@ -328,7 +328,7 @@
  *           printf("%d %.2f\n", c, ytr_proportion(&t, c, 1));
  *
  *   Three interleaved staircases with a catch condition on about one trial
- *   in ten, never two catch trials in a row (examples/trials_interleave.c
+ *   in ten, never two catch trials in a row (examples/trials/interleave.c
  *   runs this):
  *
  *       static double levels[YTR_MAX_TRIALS];     // one record per trial
@@ -1163,8 +1163,8 @@
  *   needs a translation unit that calls every function, or
  *   -Wno-unused-function).
  *
- *       cc -O2 -Iinclude -o trials_mocs examples/trials_mocs.c
- *       cl /O2 /Iinclude examples\trials_mocs.c
+ *       cc -O2 -Iinclude -o trials_mocs examples/trials/mocs.c
+ *       cl /O2 /Iinclude examples\trials\mocs.c
  *
  *   ---------------------------------------------------------------------
  *   LICENSE: public domain / MIT-0, see end of file.

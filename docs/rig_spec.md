@@ -1212,7 +1212,7 @@ the one development machine, and Windows 10 became best effort
    curve-run items over on-demand curve sets and stamps each block with
    the versions and font hashes; it gives Chromium's glyph ids on all 15
    corpus lines (`tests/layout/`), on MSVC, MinGW and emcc.
-   `examples/gfx_layout.c` shows paragraphs in seven scripts, the bidi bug
+   `examples/layout/gfx_layout.c` shows paragraphs in seven scripts, the bidi bug
    strings, BudouX breaking and Skribidi's editor (on `ysp/screen.h`
    v0.3.2's `yscr_text_input()`). Not started: the pack format, the
    CLI, serialized glyph runs.
@@ -1334,12 +1334,12 @@ Sources, read on 2026-10-07:
 | Need | ysp today | Limit |
 |---|---|---|
 | Show a stimulus at a time, hide it after a duration | `ysp/timeline.h` onset and offset events (`ytl_seq`, op tables), bound to `ysp/gfx.h` stimuli (`ygfx_bind`); each event has a landing record (frame, residual) | None for shapes, gratings, gabors, dots, noise, images, video |
-| Key response | `yscr_poll()`: SDL events restamped on the `ysp/rt.h` clock; raw keyboard path on Windows. `ysp/response.h` v0.1.0 (2026-10-07): choices, a window bound to the flip onset, minimum RT, release, held keys, double-report removal, RT with the onset's tier (`examples/trial_keyboard.c`) | Keyboards are ms-grade at best |
+| Key response | `yscr_poll()`: SDL events restamped on the `ysp/rt.h` clock; raw keyboard path on Windows. `ysp/response.h` v0.1.0 (2026-10-07): choices, a window bound to the flip onset, minimum RT, release, held keys, double-report removal, RT with the onset's tier (`examples/response/trial_keyboard.c`) | Keyboards are ms-grade at best |
 | RT-grade response | `ysp/serial.h` response boxes | None |
 | Mouse click on a stimulus | SDL mouse events through `yscr_poll()`; `ygfx_hit()`, `ygfx_hit_index()` (instances, curve runs, artwork layers) | No drag helper, no pointer trace recorder |
 | Sound at a time | `yau_play_at()`, tones, noise, clicks, WAV load and stream; onset record (fit time, tier 2 at best) | No microphone capture |
 | Movie | `ysp/video.h`: frame sequence, MPEG-1, Media Foundation; seek, loop, pause; rate on the movie base | No camera capture (planned, 4.6) |
-| Text | `ysp/gfx.h` v0.7 curve runs and cached static text; `ysp/outline.h` glyph outlines, `yol_font_glyph_index()`, `yol_font_hmetrics()` | Layout (Skribidi: wrap, shaping, kerning, bidi) is the pack tool's and the player's, not built. A one-line Latin label placed by advances works now (`examples/outline_font.c`) |
+| Text | `ysp/gfx.h` v0.7 curve runs and cached static text; `ysp/outline.h` glyph outlines, `yol_font_glyph_index()`, `yol_font_hmetrics()` | Layout (Skribidi: wrap, shaping, kerning, bidi) is the pack tool's and the player's, not built. A one-line Latin label placed by advances works now (`examples/outline/font.c`) |
 | Image file | `ygfx_image()` from planes; QOI decode in `ysp/video.h` (`yvid_qoi_decode()`) | No PNG or JPEG decoder in a header. The pack tool converts (5.2), not built |
 | Degrees of visual angle | `ygfx_view {distance_mm, width_mm}`, `YGFX_DEG` | The participant procedure that measures them (card, blind spot) does not exist |
 | Conditions, order, repetitions | `ysp/trials.h`: factorial, flat or table rows (CSV conditions files via `ysp/table.h`), SEQUENTIAL, RANDOM, FULL_RANDOM, CONSTRAINED, LIST, WITH_REPLACEMENT, subsets, blocked and alternating groups, units, transition balance, Latin squares, rules text, weighted reps, blocks, practice, warmup, re-queue, tracks (v0.2.0) | One level of nesting (groups); deeper trees belong to the player. See 14.5 |
@@ -1369,11 +1369,11 @@ Widget 11, Helper 4 (`sketchpad` counted here), Device 8, Out 8.
 
 | Plugin | What it does | ysp parts | Missing | Class | C ex. |
 |---|---|---|---|---|---|
-| `html-keyboard-response` | Shows HTML, records a key | gfx shapes, curve runs; timeline on and off; `yscr_poll()` | Layout for general HTML text | Text (Now for shapes and one-line Latin labels) | Done: `examples/trial_keyboard.c` (fixation, stimulus, response window, RT from the flip onset) |
+| `html-keyboard-response` | Shows HTML, records a key | gfx shapes, curve runs; timeline on and off; `yscr_poll()` | Layout for general HTML text | Text (Now for shapes and one-line Latin labels) | Done: `examples/response/trial_keyboard.c` (fixation, stimulus, response window, RT from the flip onset) |
 | `image-keyboard-response` | Shows an image, records a key | `ygfx_image()`; timeline | Image file decode for C users | Now | Yes, with QOI or procedural images |
 | `canvas-keyboard-response` | Draws through a user function, records a key | Any `ysp/gfx.h` drawing, user shader contract | None (`ysp/response.h` v0.1.0) | Now | Covered by the base trial |
 | `audio-keyboard-response` | Plays a sound, records a key; `trial_ends_after_audio`, `response_allowed_while_playing` | `yau_play_at()`, onset record, buffer length | None: `ysp/response.h` v0.1.0 measures RT from the audio onset fit (`yrsp_onset_audio()`, tier 2) | Now | Yes: RT from a sound onset with its tier |
-| `video-keyboard-response` | Plays a video, records a key; `start`, `stop`, `rate`, `trial_ends_after_video` | `ysp/video.h` play, seek, end; rate on the movie base (`ytl_rate`) | None (`ysp/response.h` v0.1.0) | Now | Yes: extend `video_play.c` |
+| `video-keyboard-response` | Plays a video, records a key; `start`, `stop`, `rate`, `trial_ends_after_video` | `ysp/video.h` play, seek, end; rate on the movie base (`ytl_rate`) | None (`ysp/response.h` v0.1.0) | Now | Yes: extend `examples/video/play.c` |
 | `animation` | Image sequence at `frame_time`, `frame_isi`, `sequence_reps`; keys during it | Images as timeline onsets; one landing record per frame | Image decode for C users; prompt text | Now | Yes: shows per-frame landing records that jsPsych cannot give |
 | `categorize-image` | Image, key, feedback text by `key_answer` | Images, timeline | Feedback text (`correct_text`, `incorrect_text`) | Text (Now with symbol feedback) | After text |
 | `categorize-html` | HTML, key, feedback text | Shapes | Layout | Text | No |
@@ -1604,7 +1604,7 @@ means a C user writes the code each time.
 | Rank | Gap | Where it goes | Blocks or burdens | Count (official + contrib) | Size |
 |---|---|---|---|---|---|
 | 1 | Experiment flow: nested nodes, timeline variables bound to a pack table, conditional and loop, named data rows | The player (11, item 7) | Blocks every paradigm for users who do not write C | All | Large; planned |
-| 2 | Response helper: key set, double-report removal, RT from the onset record, window, `response_ends_trial`, key release, minimum RT | Done for C: `ysp/response.h` v0.1.0 and `examples/trial_keyboard.c` (2026-10-07). Left: `input.key` in the player | Burdened every key response trial | 17 + about 10 | Small |
+| 2 | Response helper: key set, double-report removal, RT from the onset record, window, `response_ends_trial`, key release, minimum RT | Done for C: `ysp/response.h` v0.1.0 and `examples/response/trial_keyboard.c` (2026-10-07). Left: `input.key` in the player | Burdened every key response trial | 17 + about 10 | Small |
 | 3 | Text layout (Skribidi): prompts, instructions, word stimuli, feedback text | Pack tool and player (11, items 6 and 7) | Blocks text-heavy paradigms; `prompt` appears on most plugins | 8 + 3, and every `prompt` | Large; planned |
 | 4 | Widget layer: button, slider, text entry, control layout | Player, above `ysp/gfx.h` | Blocks button and slider responses | 11 + 9 | Medium |
 | 5 | Image file decode for C users | Pack tool; meanwhile QOI or an outside decoder in examples | Burdens image trials | 10 + 3 | Small (in the pack tool) |

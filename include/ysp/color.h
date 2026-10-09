@@ -72,7 +72,7 @@
  *   (its fitted luminance weights against the published ones);
  *   SensorToPrimary within 1.5e-8 and SensorToSettings's out-of-gamut
  *   flags equal on 500 colors; MaximizeGamutContrast within 7.3e-16.
- *   Cost (examples/color_bench.c, MSVC 19.44 /O2, the Iris Xe laptop,
+ *   Cost (examples/color/bench.c, MSVC 19.44 /O2, the Iris Xe laptop,
  *   power source not recorded): a
  *   DKL direction 22 to 27 ns a call, CIELAB and Oklab from RGB 40 to 44
  *   ns, an OkLCh gamut ring of 360 hues 0.8 to 1.0 ms, a context 0.6 to
@@ -352,7 +352,7 @@
  *   ycol_ctx_init() checks the calibration's CRC (62 KB) and, for SS10,
  *   integrates 441 nm of spectra: a setup call. A conversion is a few
  *   3 x 3 products and, for the uniform spaces, cube roots or
- *   trigonometry: 5 to 75 ns a call (STATUS; examples/color_bench.c
+ *   trigonometry: 5 to 75 ns a call (STATUS; examples/color/bench.c
  *   measures them on your machine).
  *
  *   ---------------------------------------------------------------------

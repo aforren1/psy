@@ -170,7 +170,7 @@
  *
  *     What IS exercised on Windows is the timing underneath: since v0.3 the
  *     waits and the trailing-edge worker are ysp/rt.h's, and
- *     examples/rt_jitter.c measures those on Windows 11. The register writes
+ *     examples/rt/jitter.c measures those on Windows 11. The register writes
  *     on top of them are the part that has never reached hardware.
  *
  *   Trigger use needs a real PCIe/PCI parallel-port card or an onboard LPT.
@@ -206,7 +206,7 @@
  *   ---------------------------------------------------------------------
  *   Every wait, every clock read and every scheduling decision here belongs
  *   to ysp/rt.h. Its WAITS and SCHEDULING sections are the reference for
- *   what each one costs and what it is worth, and examples/rt_jitter.c
+ *   what each one costs and what it is worth, and examples/rt/jitter.c
  *   measures the waits on YOUR rig rather than asserting a number. Pulse
  *   deadlines are yrt_now_ns() times, so a pulse timestamp and a
  *   yrt_now_us() or yser_now_us() timestamp taken in the same process
@@ -297,8 +297,8 @@
  *   Define YPAR_API to override the default `extern` linkage. YRT_API is
  *   separate and belongs to ysp/rt.h.
  *
- *       cc -O2 -pthread -Iinclude -o parallel_trigger examples/parallel_trigger.c
- *       cl /O2 /Iinclude examples\parallel_trigger.c
+ *       cc -O2 -pthread -Iinclude -o parallel_trigger examples/parallel/trigger.c
+ *       cl /O2 /Iinclude examples\parallel\trigger.c
  *
  *   ---------------------------------------------------------------------
  *   BINDINGS
@@ -580,7 +580,7 @@ YPAR_API bool ypar_set_data_dir(ypar_port* p, bool input);
  * CALLER's thread at the caller's priority, so its trailing edge is less
  * precise than ypar_pulse_async's. Timing is best-effort and bounded by OS
  * scheduling; expect microsecond-to-millisecond jitter on a non-RT kernel,
- * and measure with examples/rt_jitter.c. */
+ * and measure with examples/rt/jitter.c. */
 YPAR_API bool ypar_pulse(ypar_port* p, uint8_t value, uint32_t usec);
 
 /* Non-blocking pulse. Writes `value` to the data lines immediately on the

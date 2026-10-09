@@ -281,8 +281,8 @@ jobs:
           emcc $W    -o rt_nothr.js tests/compile/rt.c && node rt_nothr.js
           emcc $W -DYRT_NO_THREADS -o rt_off.js tests/compile/rt.c && node rt_off.js
           emcc $W $T -o rt_test.js tests/adapt/rt_test.c && node rt_test.js
-          emcc $W $T -o rt_pump.js examples/rt_pump.c && node rt_pump.js 40
-          emcc $W $T -o rt_ring_csv.js examples/rt_ring_csv.c && node rt_ring_csv.js 30 > /dev/null
+          emcc $W $T -o rt_pump.js examples/rt/pump.c && node rt_pump.js 40
+          emcc $W $T -o rt_ring_csv.js examples/rt/ring_csv.c && node rt_ring_csv.js 30 > /dev/null
           for h in stair quest aep table trials timeline color; do
             emcc $W -o "compile_$h.js" "tests/compile/$h.c" && node "compile_$h.js"
             emcc $W -o "test_$h.js" "tests/adapt/${h}_test.c" && node "test_$h.js"

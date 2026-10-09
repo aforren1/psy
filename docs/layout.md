@@ -27,7 +27,7 @@ header. The `ysp/*.h` headers stay free of Skribidi and HarfBuzz.
   `ylay_stamp()` writes them as one line for a log or the pack manifest
   (rig_spec 5.1).
 - The glue makes no GL call, so the pack tool runs without a GPU. Uploading
-  curve sets is the caller's; `examples/gfx_layout.c` shows the 30 lines.
+  curve sets is the caller's; `examples/layout/gfx_layout.c` shows the 30 lines.
 
 ## Build
 
@@ -393,7 +393,7 @@ One-time costs:
 What this means for the player (rig_spec 6):
 
 - Static text: laid out once, at setup or between trials; the frame loop
-  draws the block's items and allocates nothing (`examples/gfx_layout.c`
+  draws the block's items and allocates nothing (`examples/layout/gfx_layout.c`
   does this). The glue's own arrays grow only when a block needs more
   room; the test checks that a second layout of the same text grows
   nothing and builds no glyph.
@@ -415,7 +415,7 @@ What this means for the player (rig_spec 6):
   patch makes more layout runs in RTL text; this table puts RTL text at
   1.8 times Latin, as the probe's did (1.6).
 
-In `examples/gfx_layout.c` (MSVC, `--sim`, two runs, not under the lock):
+In `examples/layout/gfx_layout.c` (MSVC, `--sim`, two runs, not under the lock):
 setting up all four pages (seven paragraphs, three bidi lines, four
 phrase-breaking blocks, the editor, every label) lays everything out and
 builds 286 glyphs of the main font list in 14 to 27 ms; a scripted undo in
@@ -433,7 +433,7 @@ the editor costs 64 to 74 us, the rebuild of its runs included.
 - Serializing blocks into the pack: the pack tool's job, next.
 - The designer's path (Skribidi in a browser page with composition events
   and a hidden text input) and the editor's IME with a real input method:
-  `examples/gfx_layout.c` drives the editor's composition calls with a
+  `examples/layout/gfx_layout.c` drives the editor's composition calls with a
   script in `--sim`; a person with an IME has not run it.
 - Untrusted-font robustness of HarfBuzz and Skribidi (no fuzzing here;
   `ysp/outline.h`'s reader is fuzzed).

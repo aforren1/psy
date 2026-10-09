@@ -1,5 +1,5 @@
 # The pack tool's text layout (docs/layout.md): the glue library, its
-# test, and examples/gfx_layout.c. Added by the top-level CMakeLists.txt when
+# test, and examples/layout/gfx_layout.c. Added by the top-level CMakeLists.txt when
 # YSP_BUILD_LAYOUT is ON, after third_party/.
 
 add_library(ysp_layout STATIC layout.c ysp/layout.h)
@@ -28,6 +28,6 @@ if(YSP_BUILD_TESTS)
 endif()
 
 if(YSP_BUILD_EXAMPLES AND TARGET SDL3::SDL3)
-    ysp_add_program(gfx_layout ${PROJECT_SOURCE_DIR}/examples/gfx_layout.c rig)
+    ysp_add_program(gfx_layout ${PROJECT_SOURCE_DIR}/examples/layout/gfx_layout.c rig)
     target_link_libraries(gfx_layout PRIVATE ysp_layout)
 endif()

@@ -462,7 +462,7 @@ mode on the default endpoint with no format request. The endpoint stayed
 muted at volume 0 and no endpoint setting was touched. All streams and
 voices played silence or a -60 dBFS tone, and the mix cost does not
 depend on the values. Rows were interleaved, one round after the other.
-The tool is `examples/audio_clockstats.c` (`--streams`, `--wav`, `--ring`).
+The tool is `examples/audio/clockstats.c` (`--streams`, `--wav`, `--ring`).
 The baseline is v0.1.0 from `git show HEAD:psy_audio.h` (the header's
 path before the rename to ysp), built from the
 same tool source.

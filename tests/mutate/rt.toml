@@ -1,7 +1,9 @@
-# ysp/rt.h mutants: the device clock fit (DEVICE CLOCK FIT, v0.6.0). The
-# test runs the fit's part of tests/adapt/rt_test.c only
-# (YRT_TEST_FIT_ONLY), which takes under a second. docs/rt.md lists
-# the results.
+# ysp/rt.h mutants: the device clock fit (DEVICE CLOCK FIT, v0.6.0) and the
+# per-user folders (PER-USER FOLDERS, v0.7.0). The test runs the fit's and
+# the folders' part of tests/adapt/rt_test.c only (YRT_TEST_FIT_ONLY),
+# which takes about a second. docs/rt.md lists the results. The dir-
+# mutants run on Windows, where the runner runs; dir-10 is POSIX code
+# (see its note).
 header = "ysp/rt.h"
 
 [test.fit]
@@ -150,3 +152,92 @@ why = "Held pairs that a normal pair contradicts were outliers; kept, they could
 find = '''        f->rejected += (uint32_t)f->pend_n;
         f->pend_n = 0;'''
 replace = '''        f->rejected += (uint32_t)f->pend_n;'''
+
+# --- per-user folders (v0.7.0) ---------------------------------------------------
+
+[[mutant]]
+id = "dir-01"
+name = "CONFIG from LOCALAPPDATA"
+test = "fit"
+why = "A rig profile is kept, so it belongs in the roaming config folder, not in the cache that the OS may clear."
+find = '''        DWORD k = GetEnvironmentVariableW(kind == YRT_DIR_CACHE ? L"LOCALAPPDATA" : L"APPDATA", w, 512);'''
+replace = '''        DWORD k = GetEnvironmentVariableW(L"LOCALAPPDATA", w, 512);'''
+
+[[mutant]]
+id = "dir-02"
+name = ".. accepted"
+test = "fit"
+why = "A subdir with .. leaves the ysp folder, perhaps for one other users can write."
+find = '''            if (len == 2 && s[start] == '.' && s[start + 1] == '.') return false;'''
+replace = ''
+
+[[mutant]]
+id = "dir-03"
+name = "a relative APPDATA accepted"
+test = "fit"
+why = "A relative base depends on the working directory: absolute or none."
+find = '''        if (k == 0 || k >= 512 || !((k >= 3 && w[1] == L':' && (w[2] == L'\\' || w[2] == L'/')) || (w[0] == L'\\' && w[1] == L'\\')))'''
+replace = '''        if (k == 0 || k >= 512)'''
+
+[[mutant]]
+id = "dir-04"
+name = "subdir slashes kept on Windows"
+test = "fit"
+why = "One separator in a Windows path, so the path compares and prints as Windows gives it."
+find = '''        for (i = 0; i < m; i++) out[n++] = subdir[i] == '/' ? sep : subdir[i];'''
+replace = '''        for (i = 0; i < m; i++) out[n++] = subdir[i];'''
+
+[[mutant]]
+id = "dir-05"
+name = "trailing separators kept"
+test = "fit"
+why = "A variable that ends in a slash must not give a doubled separator."
+find = '''        while (k > 3 && (w[k - 1] == L'\\' || w[k - 1] == L'/')) w[--k] = L'\0';
+        m = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)(cap < 0x7FFFFFFF ? cap : 0x7FFFFFFF), NULL, NULL);
+        if (m <= 1 || yrt__dir_tail('''
+replace = '''        m = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)(cap < 0x7FFFFFFF ? cap : 0x7FFFFFFF), NULL, NULL);
+        if (m <= 1 || yrt__dir_tail('''
+
+[[mutant]]
+id = "dir-06"
+name = "no room for the NUL"
+test = "fit"
+why = "cap counts the NUL: a path of exactly cap bytes does not fit."
+find = '''    if (need + 1u > cap) return 0;'''
+replace = '''    if (need > cap) return 0;'''
+
+[[mutant]]
+id = "dir-07"
+name = "the ANSI code page"
+test = "fit"
+why = "A user name with accents must come out as UTF-8, the encoding every ysp path takes."
+find = '''        m = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)(cap < 0x7FFFFFFF ? cap : 0x7FFFFFFF), NULL, NULL);
+        if (m <= 1 || yrt__dir_tail('''
+replace = '''        m = WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)(cap < 0x7FFFFFFF ? cap : 0x7FFFFFFF), NULL, NULL);
+        if (m <= 1 || yrt__dir_tail('''
+
+[[mutant]]
+id = "dir-08"
+name = "empty names accepted"
+test = "fit"
+why = "A leading slash makes subdir absolute on POSIX; a doubled one hides a mistake."
+find = '''            if (n > 0 && len == 0) return false;'''
+replace = ''
+
+[[mutant]]
+id = "dir-09"
+name = "backslash and colon accepted"
+test = "fit"
+why = "On Windows a backslash or a colon in subdir can name another root (c:x)."
+find = '''        if (i < n && (c < 0x20u || c == '\\' || c == ':')) return false;'''
+replace = '''        if (i < n && c < 0x20u) return false;'''
+
+[[mutant]]
+id = "dir-10"
+name = "a folder all users can write accepted"
+test = "fit"
+why = "Anyone who can write the folder can plant a cache entry with a correct hash; /tmp must be refused."
+find = '''                bad = stat(out, &st) == 0 && ((st.st_mode & S_IWOTH) != 0 || (st.st_uid != me && st.st_uid != 0));'''
+replace = '''                bad = stat(out, &st) == 0 && st.st_uid != me && st.st_uid != 0;'''
+expect = "survived"
+note = "POSIX code, so the Windows runner cannot reach it. Killed by hand on WSL2 (gcc 11.4) on 2026-10-08: the /tmp cases of rt_test_userdir.h fail."

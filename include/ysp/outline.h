@@ -308,7 +308,7 @@
  *   ---------------------------------------------------------------------
  *   Measured on the Iris Xe laptop on AC power, under the shared
  *   measurement lock, medians of 3 interleaved rounds, gcc 16.1 -O2 to
- *   MSVC 19.44 /O2 (examples/outline_bench.c measures your machine):
+ *   MSVC 19.44 /O2 (examples/outline/bench.c measures your machine):
  *       a whole font into a set, resolved   Segoe UI 25 to 30 us a glyph;
  *                                           Microsoft YaHei (30209 glyphs)
  *                                           1.7 to 1.9 s; Source Han Sans

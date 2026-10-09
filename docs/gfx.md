@@ -169,7 +169,7 @@ the open stays under 1.5 s.
 
 ## Frame cost
 
-`examples/gfx_bench.c` on the Iris Xe at 1920 x 1200, RGBA16F scene,
+`examples/gfx/bench.c` on the Iris Xe at 1920 x 1200, RGBA16F scene,
 batch 16. "GPU" is the time per frame of 120 to 300 frames run back to back
 between two `glFinish()` calls; it includes the empty frame's cost. Five
 runs, Balanced plan: the batch study's (power state not recorded), the two
@@ -207,7 +207,7 @@ varied as much.
 
 ### In a real frame loop
 
-`examples/gfx_load.c`, an 800 x 600 window on the panel, the composition
+`examples/gfx/load.c`, an 800 x 600 window on the panel, the composition
 swapchain, the window kept on top, 1 minute each, on battery. Phases from
 ysp/screen.h's flip records.
 
@@ -514,7 +514,7 @@ or for a sharp rect the exact separable blur (v0.3, section v0.3 below).
 
 ### v0.2 cost
 
-`examples/gfx_bench.c --only v0.2`, Iris Xe at 1920 x 1200, RGBA16F
+`examples/gfx/bench.c --only v0.2`, Iris Xe at 1920 x 1200, RGBA16F
 scene, on AC (Balanced plan), measurement lock held. The rows of one table
 take turns in blocks of 12 frames, 25 rounds; the GPU time is per frame
 between two `glFinish()` calls, as the median over the rounds; "over
@@ -735,7 +735,7 @@ XOR, POLYLINE MITER and BEVEL inside a turn (each a bound, about 0.083 at
 
 ### v0.3 cost
 
-`examples/gfx_bench.c --only v0.3`, Iris Xe, 1920 x 1200, RGBA16F scene,
+`examples/gfx/bench.c --only v0.3`, Iris Xe, 1920 x 1200, RGBA16F scene,
 AC, the measurement lock held, rows interleaved (25 rounds of 12 frames).
 GPU over an empty frame, ms.
 
@@ -1173,7 +1173,7 @@ batch's union bounds grow and stop later draws). Kept.
 
 ## v0.4: the gallery's findings, and an audit
 
-Found by the gallery worker (examples/gfx_gallery.c), fixed, each with a
+Found by the gallery worker (examples/gfx/gallery.c), fixed, each with a
 test and a mutation:
 
 | Finding | Fix |
@@ -1786,7 +1786,7 @@ running (checked before the lock was taken). GPU over an empty frame, the
 median of 25 interleaved rounds; each configuration in its own process,
 A/B/A/B. The fonts: Segoe UI (94 printable ASCII glyphs) and Microsoft
 YaHei (7000 glyphs from U+4E00), read from C:/Windows/Fonts by a stopgap
-`glyf` reader in gfx_bench.c (no outline is committed), built by the test
+`glyf` reader in examples/gfx/bench.c (no outline is committed), built by the test
 builder with its default bands and backward lists. The pages are larger
 than the probe's: 26205 against 21763 glyphs, and 7140 against 6783.
 
@@ -1923,7 +1923,7 @@ emcc; CI runs the Linux and wasm jobs.
   the design did not have.
 - The text program compiles in 430 to 450 ms, not under 60 ms: the exact
   area doubles the program. The program cache covers warm opens.
-- gfx_bench.c reads TrueType `glyf` tables itself, a stopgap until the
+- examples/gfx/bench.c reads TrueType `glyf` tables itself, a stopgap until the
   outline builder's header is in the tree; it then moves to that header
   and the reader is deleted.
 
@@ -2988,6 +2988,11 @@ with GL on, everything passed under ASan and UBSan apart from that leak.
 
 ## v0.10.1: the default cache folder
 
+From v0.10.2 the function is a one-line wrapper of `ysp/rt.h` v0.7.0's
+`yrt_user_dir(YRT_DIR_CACHE, "progcache", ...)`, which took over the
+rules below unchanged, so a rig profile (`YRT_DIR_CONFIG`) and the program
+cache follow one set of rules. The test of this section passes unchanged.
+
 Before v0.10.1 the program cache was used only when a caller passed
 `--cache DIR`, so most runs compiled every program (2.3 to 5.3 s on the
 Iris Xe, "v0.4: the program cache"). The header still reads and writes no
@@ -3071,11 +3076,39 @@ checked for `(caller)` and `off` with the fake backend.
 | v10-06 | the describe line's hits and misses swapped | caught |
 
 Builds: MSVC 19.44 C11 and C++17, MinGW gcc C11 and C++17 (warnings as
-errors); `gfx_layout.c` is checked by MinGW gcc only, because this build
+errors); `examples/layout/gfx_layout.c` is checked by MinGW gcc only, because this build
 leaves `YSP_BUILD_LAYOUT` off. The default test passes on Windows and on
 WSL (CPU half and llvmpipe).
 
-## Not measured
+## Gallery page 8: v0.7 to v0.10
+
+`gfx_gallery` page 8 (2026-10-08) shows the features of v0.7 to v0.10 in
+five tiles. The rounding tile spans two grid cells; the simplex and
+additive-layer tiles span two by two (`gallery_page.cells`):
+
+| Tile | What it shows |
+|---|---|
+| Uniform and Gaussian noise | `UNIFORM` and `GAUSSIAN` at one seed and one SD (0.15), 2 px checks, each with the histogram of the 44 x 44 checks drawn, in half-SD bins, from `ygfx_noise_fill()` (the same values, bit for bit). The bars are drawn once into a target in a setup pass. |
+| Simplex fBm | 1, 2, 4 and 8 octaves in 190 px squares on a 24 px lattice, `noise_z` on a track (0.1 cells a second). contrast is 0.15 / SD with this manual's SD per octave count (0.425, 0.317, 0.261, 0.246), so the four have one SD. |
+| Turning text | One word by quarter turns that stop for 2.5 s, drawn by default (left) and with `.rays` (right). The label under the left word says which program draws it by the rule in RUNS: EXACT within 0.01 degrees of a quarter turn, else RAYS. The `.rays` run is made first, because a run made before the rays program exists stays on the exact-area program. |
+| Rounding | A ramp from code 40 to code 44 rounded three ways: no dither, the Bayer 8 x 8 threshold, and one frame of the noise dither (left). The same codes 8 times as far from code 42, the mean (codes 26 to 58), for viewing (right). |
+| Additive layer | A gabor drawn once into an RGBA16F target in a setup pass, added (`YGFX_STIM_ADD`) over a grating, next to the grating alone. |
+
+The dither is one per gfx (`desc.dither`), so the rounding tile cannot
+show three live output stages side by side. It computes the three
+roundings on the CPU with the output shader's formulas (`floor(d * 255 +
+t)`; the Bayer bit interleave; `ygfx_hash2()` with frame 0's key). Each
+strip is then an RGBA32F image of the scene values that the output stage,
+with no dither, rounds to those codes. The value for a code is the middle
+of its interval, by bisection on `ycol_output_code()`. A check of the
+screenshot read back from the back buffer (`--shots`) against a separate
+model of the three roundings, written in Python, found 0 different pixels
+of 8640 in each of the six strips. The tile's label says that it shows codes, not
+light. The codes are dark (40 to 44), because there a code step is about
+5 % of the light. At mid-gray a step is about 1.7 %. At normal contrast the
+real strips still look the same; the x8 copies, labeled "X8 CONTRAST, TO
+SEE", show the bands and the two dither patterns.
+
 
 - Light. A CLUT, a dither, a calibration: all checked as arithmetic, none
   against a photometer.

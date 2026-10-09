@@ -92,7 +92,7 @@ Three arguments, none of them tidiness.
 - **The real-time rungs are untested everywhere.** No machine in this project
   grants `CAP_SYS_NICE`, so `SCHED_DEADLINE` and `SCHED_FIFO` have never been
   obtained by any of the copies. Three unexercised ladders are three times the
-  risk for none of the coverage; `ysp/rt.h` at least has `examples/rt_jitter.c`
+  risk for none of the coverage; `ysp/rt.h` at least has `examples/rt/jitter.c`
   pointed at it, and `yser_port.async_policy` now reports the same rung, by the
   same name, as everything else in the collection.
 
@@ -667,6 +667,159 @@ that includes other system headers first defines `_DEFAULT_SOURCE` itself.
   sampling the trigger line, and record the distribution (median, 99th
   percentile), with and without `low_latency`. Add Tracy zones around the
   driver calls if the numbers need explaining.
+  `tests/compare/serial_bench/` is the bench for the MATLAB binding; see
+  [Compared with MATLAB serialport and IOPort](#compared-with-matlab-serialport-and-ioport).
+
+## Compared with MATLAB serialport and IOPort
+
+`tests/compare/serial_bench/serial_bench.m` runs the same measurements on
+three MATLAB APIs: MATLAB's `serialport`, Psychtoolbox's `IOPort` and the
+`ysp_serial` MEX binding. Its README tells how to run each part and how to
+read the output. This section records what ran and what did not.
+
+### What the bench measures
+
+1. Call cost: open and close; write of 1, 8, 64 and 512 bytes; read with
+   nothing waiting and with bytes waiting; the bytes-available query; the
+   cheapest call into each API; port enumeration; open of a port that does
+   not exist. Each API is timed with its own clock (`tic`/`toc`, `GetSecs`,
+   `ysp_serial('now_us')`), and the cost of each clock is measured too.
+2. Round trip: a 13-byte command `e <seq>\n` and its answer, with a blocking
+   read and with a poll loop. With the echo board
+   (`firmware/ysp_echo/ysp_echo.ino`), a clock fit splits the round trip into
+   host to board and board to host. The fit keeps the exchange with the
+   smallest path time in each 200 ms, as ysp/rt.h's BRACKET mode does, and
+   assumes equal one-way delays for those exchanges. The variation of each
+   one-way delay is measured; its constant part is known to plus or minus half
+   the best path time, which the bench reports as `fit_unc`.
+3. Receive stamps: IOPort gives one (`when`, from `Read`). serialport gives
+   none from a read, and `evt.AbsTime` (a `datetime`) in a callback. ysp gives
+   none; the stamp is `now_us` after the read returns. Against the echo
+   board's send stamp, mapped with the fit, each API's stamp gets a latency
+   distribution.
+4. Stream: the board sends 1000 lines per second for 10 s. The bench counts
+   missed lines and lines that arrive in one read with another line, measures
+   the latency of each line against its board stamp and the MATLAB process
+   CPU use, for a blocking read per line, a poll loop, and the asynchronous
+   mode of each API (`configureCallback`, IOPort's background reader; the
+   ysp MEX binding has none).
+5. The FTDI latency timer: the loopback round trip at 16 ms and at 1 ms.
+
+### Echo board firmware
+
+`firmware/ysp_echo/ysp_echo.ino` is a separate sketch, not a command in
+`firmware/ysp_line/`. ysp_line sends a sync line every 100 ms, and an
+unsolicited line in the middle of a timed echo breaks the fixed answer
+lengths that the bench reads. The sketch answers `e <seq>` with
+`R <seq> <t_rx> <t_tx>`, `q <seq>` with the ysp line v1 answer
+`Q <seq> <t_rx>`, and `s <hz> <n>` with n ysp line v1 sample lines
+`A <t> 1 <k>`. Every number is zero-padded to 10 digits, so each kind of
+line has one length. It compiles without warnings with arduino-cli 1.5.1
+for `teensy:avr:teensy40` (Teensy core 1.62.0), `teensy:avr:teensy41` and
+`rp2040:rp2040:rpipico` (arduino-pico 6.3.0). It has not run on a board.
+
+### Results without hardware
+
+Conditions: 2026-10-08, Windows 11 Enterprise 10.0.26200, Intel Core
+i7-1360P, AC power, quiet machine (the shared guard waited for a CPU load of
+20 % or less and no compiler). MATLAB R2023a Update 6 in `-batch` mode.
+`ysp_serial.mexw64` built from this tree with `bindings/mex/build.m` and
+Microsoft Visual C++ 2022. `IOPort.mexw64` and `GetSecs.mexw64` from
+Psychtoolbox 3.0.19.16 (see below). No serial port exists on this machine,
+so only the `clock` and `noport` parts ran. Two runs; each cell gives run 1,
+then run 2. Times in microseconds. With n = 50, p99 is the maximum.
+
+| API | Metric | n | Median | p99 | Max | Mean |
+|---|---|---|---|---|---|---|
+| serialport | `tic`/`toc` pair | 100000 | 0.3, 0.3 | 0.5, 0.5 | 128, 84 | 0.31, 0.28 |
+| IOPort | `GetSecs` pair | 100000 | 4.5, 4.3 | 6.2, 5.7 | 96, 168 | 4.55, 4.42 |
+| ysp | `now_us` pair (1 us steps) | 100000 | 1, 0 | 1, 1 | 33, 68 | 0.55, 0.50 |
+| IOPort | `IOPort('Verbosity')`, cheapest call | 100000 | | | | 0.83, 0.80 |
+| ysp | `ysp_serial('now_us')`, cheapest call | 100000 | | | | 0.57, 0.49 |
+| serialport | `serialportlist("all")`, 0 ports | 200 | 1744, 1691 | 19400, 13130 | 181700, 146300 | 2920, 2931 |
+| ysp | `ysp_serial('list')`, 0 ports | 200 | 48, 42 | 221, 90 | 293, 193 | 53, 45 |
+| serialport | open of an absent port (error) | 50 | 26530, 26800 | 502300, 507800 | | 38530, 39440 |
+| IOPort | open of an absent port (returns -1) | 50 | 8.3, 8.2 | 374, 348 | | 22.0, 20.3 |
+| ysp | open of an absent port (error) | 50 | 118, 114 | 473, 471 | | 139, 134 |
+| MATLAB | `try; error(...); catch; end` alone | 50 | 97, 93 | 306, 295 | | 109, 105 |
+
+The cheapest-call rows are the mean of one batch of 100000 calls, so they
+have no distribution. IOPort has no port enumeration. serialport has no call
+without a port object.
+
+What the table shows:
+
+- `tic`/`toc` is the cheapest clock. `GetSecs` costs about 4.4 us per call,
+  about 15 times a `toc`. The IOPort dispatch costs 0.8 us, so the rest is
+  in `GetSecs` itself, not in the MEX call. `ysp_serial('now_us')` costs
+  about 0.5 us but counts whole microseconds, so a call shorter than 1 us
+  shows as 0 or 1; use the mean for those.
+- The MEX dispatch of IOPort and of ysp_serial costs less than 1 us.
+- serialport's port enumeration and its failing open cost milliseconds: the
+  cost is in MATLAB's object layer, because no port exists.
+- A failing open costs ysp_serial about 115 us, and MATLAB's error mechanism
+  alone costs about 95 us of that. IOPort, asked for two outputs, returns -1
+  and a message instead of raising an error, so its failing open is cheaper.
+  Neither number is the cost of a successful open.
+
+Not run, because each part needs a serial port or a board:
+
+| Part | Needs |
+|---|---|
+| Open, close, write, read, bytes-available call costs | Any serial port (an adapter with nothing attached is enough) |
+| Read with bytes waiting, round trip, FTDI latency timer | (a) a USB-serial adapter with TX connected to RX |
+| One-way split, receive-stamp quality, stream, CPU use, async modes | (b) a Teensy 4.0 or 4.1, or a Pico, with `ysp_echo` |
+
+Option (b) gives every result of option (a) except the FTDI latency timer,
+so (b) is the better choice. Option (a) is only for the latency timer.
+
+### Psychtoolbox on this machine
+
+The Psychtoolbox on the MATLAB path is a git checkout from January 2026
+(`Contents.m`: 3.0.22). Its `IOPort.mexw64` does not load: it links
+`LexActivator.dll`, the license manager of Psychtoolbox 3.0.20 and later on
+Windows, which is not installed. `GetSecs.mexw64` of that checkout loads.
+The bench used `IOPort.mexw64` and `GetSecs.mexw64` of Psychtoolbox
+3.0.19.16, the last release without a license check, downloaded from the
+Psychtoolbox-3 GitHub repository into `C:\tmp\psy-work\serialbench\ptb-3.0.19.16\`.
+No installation and no administrator rights were necessary. To use the
+installed Psychtoolbox instead, set up its license (`PsychLicenseHandling`)
+and omit `ioport_dir`.
+
+### Hand procedure for the hardware parts
+
+Use AC power and close other programs. Start MATLAB, then run
+`cd <repo>/tests/compare/serial_bench`.
+
+Option (a), the FTDI loopback, about 10 minutes in total (estimated):
+
+1. Take an FTDI FT232R adapter. On the TTL-232R cable, connect TXD (orange)
+   to RXD (yellow). On a DB9 RS-232 adapter, connect pin 2 to pin 3.
+2. Connect it. In Device Manager, under **Ports (COM & LPT)**, find
+   **USB Serial Port (COMn)**.
+3. Run
+   `serial_bench('port', 'COMn', 'device', 'loopback', 'ioport_dir', 'C:\tmp\psy-work\serialbench\ptb-3.0.19.16', 'label', 'FT232R 16 ms')`.
+4. In Device Manager, open the port, select **Port Settings > Advanced**,
+   set **Latency Timer (msec)** to 1 and select **OK**. Disconnect the
+   adapter and connect it again.
+5. Run step 3 again with the label `'FT232R 1 ms'`.
+
+Option (b), the echo board, about 10 minutes in total (estimated):
+
+1. Flash the board. Teensy 4.0: open `teensy.exe` from
+   `C:\tmp\psy-work\devices\arduino\data\packages\teensy\tools\teensy-tools\1.62.0\`,
+   open the HEX file
+   `C:\tmp\psy-work\serialbench\fw-teensy_avr_teensy40\ysp_echo.ino.hex`
+   (`fw-teensy_avr_teensy41` for a 4.1), connect the board and push its
+   button. Pico: hold BOOTSEL, connect the board, and copy
+   `C:\tmp\psy-work\serialbench\fw-rp2040_rp2040_rpipico\ysp_echo.ino.uf2`
+   to the `RPI-RP2` drive.
+2. Find its COM port in Device Manager (**USB Serial Device (COMn)**).
+3. Run
+   `serial_bench('port', 'COMn', 'device', 'echo', 'ioport_dir', 'C:\tmp\psy-work\serialbench\ptb-3.0.19.16', 'label', 'Teensy 4.0 echo')`.
+
+Each run prints its result folder. Send the whole folder: `summary.txt` has
+the numbers, the other CSV files have every sample.
 
 ## Deferred
 

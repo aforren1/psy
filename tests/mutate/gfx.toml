@@ -866,6 +866,7 @@ name = "a relative LOCALAPPDATA accepted as the cache folder"
 test = "gfx"
 env = { YGFX_TEST_PARTS = "none", YGFX_TEST_DEVICES = "none" }
 why = "A relative folder depends on the working directory, which may be one other users can write; the default folder must be absolute or none."
+file = "ysp/rt.h"   # since gfx v0.10.2 the rule is in yrt_user_dir(); gfx's test still kills it
 find = '''        if (k == 0 || k >= 512 || !((k >= 3 && w[1] == L':' && (w[2] == L'\\' || w[2] == L'/')) || (w[0] == L'\\' && w[1] == L'\\')))'''
 replace = '''        if (k == 0 || k >= 512)'''
 

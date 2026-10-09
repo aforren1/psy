@@ -84,11 +84,11 @@
  *          yaep_next_pair(), yaep_update_pair() and yaep_predict_pair().
  *          yaep_trial gains x2 at its end and the handle a second stimulus
  *          array; a binding that mirrors yaep_trial must add the field.
- *          Nothing else changes. See MODEL and examples/aep_pairwise.c.
+ *          Nothing else changes. See MODEL and examples/aep/pairwise.c.
  *   v0.7.0 - optimization: YAEP_ACQ_UCB, YAEP_ACQ_EI and YAEP_ACQ_THOMPSON
  *          for finding the stimulus the observer prefers most, desc.minimize
  *          (a new field at the end of yaep_desc), and yaep_argmax(). See
- *          ACQUISITION and examples/aep_optimize.c. Nothing else changes.
+ *          ACQUISITION and examples/aep/optimize.c. Nothing else changes.
  *   v0.6.0 - desc.priors: every weak-prior parameter at run time, a
  *          {center, sd, ceiling} per hyperparameter with zero meaning the
  *          measured default, and yaep_get_priors() to read what is in force.
@@ -239,7 +239,7 @@
  *   objective the finite differences see, and desc.no_hyper_prior is how the
  *   comparison was run.
  *
- *   examples/aep_audiometric.c is the harder test, and the numbers that justify
+ *   examples/aep/audiometric.c is the harder test, and the numbers that justify
  *   the priors and the acquisition guard come from it: the audiometric observer
  *   of Owen et al. 2021, four phenotypes by 20 replications of 150 trials, same
  *   seeds throughout. Pooled over the phenotypes at trial 150, threshold error
@@ -302,7 +302,7 @@
  *   run clean; and on a 2-D observer with a curved threshold and a 7 dB rise
  *   the model's EAVC and LOCALMI find the threshold to 0.7 and 1.0 dB in 80
  *   trials.
- *   On examples/aep_audiometric.c, 20 replications, trial 150: field MAE(p) /
+ *   On examples/aep/audiometric.c, 20 replications, trial 150: field MAE(p) /
  *   band MAE(p) / threshold error in dB, the worst replication's threshold
  *   error, and ms per trial with fits every 20 trials. semip2 is this model,
  *   YAEP_MODEL_PSYCHOMETRIC, under the example's name for it:
@@ -357,7 +357,7 @@
  *   (8 accepted, 3 refused, 8 still pending at a stop that drained them). That
  *   test is clean under -fsanitize=thread with no warnings, and the rest of the
  *   test's output is byte-identical between the YAEP_ASYNC build and the plain
- *   one. examples/aep_async.c runs 200 EAVC trials through a 16 ms frame loop in
+ *   one. examples/aep/async.c runs 200 EAVC trials through a 16 ms frame loop in
  *   11.2 s: with fit_in_idle on and a 225-candidate grid the proposal was ready
  *   by the next frame on 28 trials and late on 172, 2.4 frames of waiting on
  *   average and 5 at worst, the queue never filled, and the threshold at three
@@ -427,7 +427,7 @@
  *
  *   COMPARED with AEPsych 0.8.0 through the Python binding, in one process
  *   on one response stream (tests/compare/compare_gp_aepsych.py): the
- *   metabolic phenotype of examples/aep_audiometric.c at beta 2, 10
+ *   metabolic phenotype of examples/aep/audiometric.c at beta 2, 10
  *   replications, both libraries given the same Sobol init points. AEPsych
  *   runs its variational GP and its own LSE, EAVC and BALV, optimized over
  *   the box. Threshold error at trial 150, this header's GP model against
@@ -454,7 +454,7 @@
  *   categorical one-against-the-rest acquisitions have no Monte Carlo check.
  *   The timings vary by tens of percent between runs of the same binary, so
  *   the frame-budget trial counts are an order of magnitude and not a
- *   specification (examples/aep_bench.c prints its own numbers; MEMORY, COST
+ *   specification (examples/aep/bench.c prints its own numbers; MEMORY, COST
  *   AND THREADS quotes them), and the async layer's late counts are a
  *   property of that machine and that grid, not of the header. No
  *   platform other than x86-64 has been built or run. The async layer has run
@@ -573,7 +573,7 @@
  *                           each candidate, on d; THOMPSON takes the favorites
  *                           of two posterior draws of the utility; RANDOM and
  *                           the init phase take two Halton points. Measured
- *                           with examples/aep_pairwise.c (a utility peaked at
+ *                           with examples/aep/pairwise.c (a utility peaked at
  *                           (0.3, 0.7), preference Phi(2 (u1 - u2)), 80
  *                           comparisons, 12 streams): BALD and Thompson put
  *                           yaep_argmax() within 0.036 of the peak, in 12 of
@@ -790,7 +790,7 @@
  *                         psychometric rise in latent units, so an observer
  *                         whose rise is narrow against the box needs a huge
  *                         intercept: on the audiometric observer of
- *                         examples/aep_audiometric.c, 140 dB of intensity and a
+ *                         examples/aep/audiometric.c, 140 dB of intensity and a
  *                         probit width of 0.5 dB put a(c) over tens of latent
  *                         units and its output scale over a thousand, where
  *                         the default ceiling is 10 and the weak prior of
@@ -898,7 +898,7 @@
  *     one kernel row and a dot product, at every line point below x, at most
  *     65 of them per masked dimension; on a product grid the acquisition
  *     projects all M candidates by a running maximum, in O(M).
- *     Measured with examples/aep_audiometric.c (intensity masked, every
+ *     Measured with examples/aep/audiometric.c (intensity masked, every
  *     phenotype at beta = 2, 20 replications, the same seeds; pooled
  *     threshold error in dB and MAE(p), trials 25 / 50 / 100 / 150):
  *
@@ -1084,7 +1084,7 @@
  *     out that the threshold GP does not: where the threshold climbs fast,
  *     it can flatten the rise instead of following the climb, and the 75%
  *     point then lands tens of dB off. That was the 7 to 12 dB tail on the
- *     audiometric sensory phenotype. Measured with examples/aep_audiometric.c,
+ *     audiometric sensory phenotype. Measured with examples/aep/audiometric.c,
  *     20 replications, trial 150, threshold error in dB (worst replication)
  *     and band MAE(p), for the center at 1, 0.5 and 0.3:
  *
@@ -1179,7 +1179,7 @@
  *     edges of the box instead of the threshold. The likelihood is flat near
  *     that bound, so a prior this weak moves the answer a long way there and
  *     hardly at all once the data have something to say.
- *     What it bought, measured by examples/aep_audiometric.c on the metabolic
+ *     What it bought, measured by examples/aep/audiometric.c on the metabolic
  *     phenotype at beta = 2 over 20 replications of 150 trials with the
  *     level-set acquisition (the same seeds, priors off then on): the
  *     threshold error at trial 150 fell from 3.14 +- 0.30 dB to
@@ -1201,7 +1201,7 @@
  *     a smoothed box on [1, 4] on the output scale. Three priors were run on
  *     the same seeds: the log-normal centered at 1 (this header's), the same
  *     centered at 3, and a smoothed box on [1, 4] (flat inside, Gaussian tails
- *     of sd 0.05 in the logarithm). First examples/aep_audiometric.c, metabolic
+ *     of sd 0.05 in the logarithm). First examples/aep/audiometric.c, metabolic
  *     phenotype, beta = 2, 20 replications; each cell is field MAE(p) /
  *     threshold error in dB / mean fitted output scale:
  *
@@ -1351,7 +1351,7 @@
  *     yaep_argmax() then reports the stimulus with the best posterior mean
  *     of q. The repeat guard below does not apply to these three (returning
  *     to the optimum is the point); the flat test does. Measured with
- *     examples/aep_optimize.c on a 2-D bump, 80 trials, 12 streams: under
+ *     examples/aep/optimize.c on a 2-D bump, 80 trials, 12 streams: under
  *     GAUSSIAN all three put the argmax within 0.02 of the maximum by trial
  *     20 and within 0.01 by trial 50 (Thompson best, 0.006 at trial 80), in
  *     12 of 12 streams; under BERNOULLI, with the bump covering a tenth of
@@ -1415,7 +1415,7 @@
  *     lengthscale stops that: the mean prior above holds the damage to 3.2 dB
  *     on the same trials, and a floor of one candidate spacing to 4.6, but
  *     the jump itself happens either way. The thresholds come from 1440
- *     scheduled fits of examples/aep_audiometric.c (20 replications, LSE,
+ *     scheduled fits of examples/aep/audiometric.c (20 replications, LSE,
  *     EAVC and BALV, metabolic and sensory at beta 2 and 0.5): after the
  *     first two fits the median fit reclassifies under 2% of the candidates;
  *     9 fits worsened the threshold by more than 3 dB, reclassifying 3 to
@@ -1528,7 +1528,7 @@
  *     dimensions, each a kernel row and a triangular solve, which at M = 231
  *     is a fifth of the candidate sweep and inside the run-to-run noise of a
  *     whole trial.
- *     Measured with examples/aep_audiometric.c's protocol (metabolic phenotype,
+ *     Measured with examples/aep/audiometric.c's protocol (metabolic phenotype,
  *     beta = 2, 20 replications, same seeds, trial 150):
  *
  *       refine_steps               0              2              4
@@ -1871,7 +1871,7 @@
  *   FRAME BUDGET
  *   A trial's yaep_next() plus yaep_update() should fit in one display
  *   frame, 16 ms, so an experiment can call them between trials with no
- *   thread and no pacing. examples/aep_bench.c measures exactly that and
+ *   thread and no pacing. examples/aep/bench.c measures exactly that and
  *   prints the largest trial count that stays inside it. Measured on v0.14.0
  *   on one x86-64 laptop core (an i7-1360P under WSL2, load average under 1),
  *   gcc 11.4 -O2, Bernoulli probit RBF over a 2-D box with M = 256
@@ -2001,14 +2001,14 @@
  *   with the uniform variate u in [0, 1) that the caller supplies; K = 2
  *   with p = {1 - p1, p1} is the Bernoulli case. The header draws nothing
  *   itself; desc.rng is the caller's generator lent to the header for the
- *   two places randomness helps (ties, random acquisition). examples/aep_sim.c
+ *   two places randomness helps (ties, random acquisition). examples/aep/sim.c
  *   runs the LSE, EAVC and BALV configurations against a 2-D observer with
  *   a known threshold curve and prints the error of yaep_threshold() per
  *   trial. tests/compare/compare_gp_aepsych.py runs the comparison with
  *   AEPsych on the same kind of observer, through the Python binding, in one
  *   process, on one response stream; STATUS has its result.
  *   tests/adapt/aep_test.c is the self-checking test the STATUS block
- *   quotes; examples/aep_bench.c is where the cost numbers come from.
+ *   quotes; examples/aep/bench.c is where the cost numbers come from.
  *
  *   ---------------------------------------------------------------------
  *   PRECISION (YAEP_REAL)
@@ -2061,7 +2061,7 @@
  *   scalar at -O2, so a float multiply costs exactly what a double multiply
  *   costs, and the matrices still reach the same cache level. Float would pay
  *   where the loops vectorize or where the working set crosses a cache
- *   boundary; measure it with examples/aep_bench.c before believing in it.
+ *   boundary; measure it with examples/aep/bench.c before believing in it.
  *
  *   YAEP_LIK_GAUSSIAN is not available in a float build and yaep_open()
  *   says so: its exact posterior factors the raw kernel matrix rather than
@@ -2154,7 +2154,7 @@
  *   there is no "nothing published yet" state to handle.
  *
  *   A FULL QUEUE is YAEP_ERR_BUSY, nothing was copied, and the caller still
- *   owns the response: retry it on the next frame, which examples/aep_async.c
+ *   owns the response: retry it on the next frame, which examples/aep/async.c
  *   does. A queue that grew instead would trade a visible error for an
  *   invisible unbounded latency. With the default queue of 8 it takes eight
  *   trials submitted faster than the thread drains to get there.
@@ -2163,7 +2163,7 @@
  *   it: a proposal that takes four frames still takes four frames, and what the
  *   loop gains is that it is drawing during them instead of blocked. The cost
  *   of being late is one more frame of the same stimulus, which an experiment
- *   has to be written for; examples/aep_async.c counts how often it happened.
+ *   has to be written for; examples/aep/async.c counts how often it happened.
  *   It does not touch determinism either: the thread runs the same functions in
  *   submit order, so the same responses give the same posterior bit for bit
  *   whether they went through the queue or not, and
@@ -2204,9 +2204,9 @@
  *   thread, so -O2 and a compiler that vectorizes a dot product are the
  *   whole performance story.
  *
- *       cc -O2 -Iinclude -o aep_sim examples/aep_sim.c -lm
- *       cl /O2 /Iinclude examples\aep_sim.c
- *       cc -O2 -pthread -Iinclude -o aep_async examples/aep_async.c -lm
+ *       cc -O2 -Iinclude -o aep_sim examples/aep/sim.c -lm
+ *       cl /O2 /Iinclude examples\aep\sim.c
+ *       cc -O2 -pthread -Iinclude -o aep_async examples/aep/async.c -lm
  *
  *   ---------------------------------------------------------------------
  *   LICENSE: public domain / MIT-0, see end of file.

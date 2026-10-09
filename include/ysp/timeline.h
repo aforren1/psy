@@ -131,7 +131,7 @@
  *   -O3, and under -fsanitize=address,undefined -fno-sanitize-recover=all
  *   with no diagnostic; the compile checks also as C++17. On Windows 11
  *   with MSVC 19.44 under /W4 /WX, in its default C dialect and as
- *   /std:c++17. examples/timeline_trial.c and timeline_tracking.c print
+ *   /std:c++17. examples/timeline/trial.c and timeline_tracking.c print
  *   the same bytes on both compilers.
  *   tests/adapt/timeline_test.c was written from this manual by
  *   writers who did not read the implementation, with its own model, and
@@ -165,9 +165,9 @@
  *   Bezier parameter used as x, STEP tracks read at the onset, a tween's
  *   from read at the call, keep_velocity's slope ignored, the yoyo
  *   return leg missing) are each caught, and so is the first version's
- *   rule for "now". examples/timeline_tracking.c runs a 10-minute 5 Hz
+ *   rule for "now". examples/timeline/tracking.c runs a 10-minute 5 Hz
  *   sum-of-sines target at 500 Hz within 1.73e-5 of its peak and a 7.5 Hz
- *   flicker with no wrong frame in 300500. examples/timeline_bench.c
+ *   flicker with no wrong frame in 300500. examples/timeline/bench.c
  *   measures a frame's evaluate at 46-527 ns mean and under 1.6 us p99 on
  *   the workloads docs/timeline.md lists, the same at 60, 500 and
  *   1000 Hz; at 500 Hz the worst p99 is 0.04% of the 2 ms budget. Rare
@@ -191,7 +191,7 @@
  *   One trial: a fixation point from 0 to 0.5 s, then a grating whose
  *   contrast ramps up over 100 ms with a raised cosine, holds, and ramps
  *   down to end at 1.2 s, and a trigger at the grating's onset
- *   (examples/timeline_trial.c runs this against a simulated 60 Hz
+ *   (examples/timeline/trial.c runs this against a simulated 60 Hz
  *   display):
  *
  *       #define YSP_TIMELINE_IMPLEMENTATION
@@ -261,7 +261,7 @@
  *   A 10-minute sum-of-sines tracking target on the x channel, from a
  *   table of samples at 120 per second, and a 7.5 Hz square-wave flicker
  *   on the luminance channel for the same 10 minutes
- *   (examples/timeline_tracking.c runs both at 500 Hz):
+ *   (examples/timeline/tracking.c runs both at 500 Hz):
  *
  *       static float xs[600 * 120 + 1];        // from the pack, or computed
  *       ytl_track path = { 0 };
@@ -925,7 +925,7 @@
  *   display only moves the key cache less per frame. The per-frame cost
  *   measured the same at 60, 500 and 1000 Hz (docs/timeline.md), so
  *   the share of the budget grows with the rate and nothing else does.
- *   examples/timeline_bench.c [refresh_hz] measures it.
+ *   examples/timeline/bench.c [refresh_hz] measures it.
  *   No function is safe to call on one handle from two threads at once.
  *   The intended use is the frame thread only.
  *

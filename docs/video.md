@@ -32,7 +32,7 @@ that a restart loses nothing.
 | Round 2: base rates (item R) | Done, tested (rates 1/2, 1001/1000, 2/1, a change mid-play, loop, pause, strict_cadence); 9 of 9 mutations caught; rate 1 byte-identical to v0.1.0. See "Base rates" |
 | Round 2: soundtrack | Done on ysp/audio.h v0.2.0 (`yau_wav` on a stream); tested on ysp_audio's scripted device; 10 of 10 mutations caught; on the real device the flips stay within -0.42 to +0.08 ms (p1 to p99) of the audio clock, after a fix the run found (the shared start put on a display onset). See "Soundtrack" |
 | Round 2: planar upload | Done, measured (M1, M2): kept; the RGBA8 conversion left the play path. See "Upload and conversion" and M2 |
-| Round 2: GPU path | `YVID_PATH_GPU` done; on ysp/screen.h's `desc.d3d11_video` (in the tree since its v0.3.1 checkpoint). `examples/video_check.c` (against UPLOAD on hardware: the same value at every pixel) and `video_play --gpu` landed; measured (M7). An option: UPLOAD stays the default. See "GPU path" |
+| Round 2: GPU path | `YVID_PATH_GPU` done; on ysp/screen.h's `desc.d3d11_video` (in the tree since its v0.3.1 checkpoint). `examples/video/check.c` (against UPLOAD on hardware: the same value at every pixel) and `video_play --gpu` landed; measured (M7). An option: UPLOAD stays the default. See "GPU path" |
 | Round 2: fixes | A data race on the free queue after a PENDING decode, found with a new threaded case under ThreadSanitizer; fixed ("Builds and mutations") |
 | Round 2: missed bars | DXVA's cold open at 1080p60 (259 to 308 ms, bar 300 ms; M3); the software decoder's seek (M4); 2 Media Foundation mutations not caught (why, in "Builds and mutations") |
 | Round 2: not built | `YVID_PATH_SHARED`; HEVC's VUI |
@@ -528,7 +528,7 @@ surfaces imported and drawn. Findings that changed it:
 | The copy and the draw are on one immediate context (the screen's, with multithread protection on) | design | The context orders them; no fence and no keyed mutex. The slot on screen is not a copy target until another slot replaces it |
 | The frame never reaches the CPU | design | The timestamps are checked; the frame hashes are not, and describe() says so |
 
-Checked on hardware with `examples/video_check.c`: each movie drawn through UPLOAD and through
+Checked on hardware with `examples/video/check.c`: each movie drawn through UPLOAD and through
 the GPU path, frame by frame in manual mode, each read back with
 `ygfx_read_scene()`. At 1280 x 720, 1920 x 1080 (coded 1088) at 30 and
 60 fps, 40 frames each with jumps across GOPs: every frame shows its own
@@ -549,7 +549,7 @@ tail; dropped frames did not separate the two. UPLOAD stays the default;
 
 Under the lock, 2026-10-05, MSVC 19.44 Release.
 
-Decode thread, per frame (`examples/video_bench.c`, 200 repetitions or
+Decode thread, per frame (`examples/video/bench.c`, 200 repetitions or
 600 frames):
 
 | Work | 1280 x 720 mean / p99 | 1920 x 1080 mean / p99 |
@@ -567,7 +567,7 @@ not enough for 1080p at 60 fps. The conversion costs more than the
 decode; the planar shader removes it.
 
 Frame thread, `yvid_update()` including the upload, in a 640 x 360
-window, display frames after the 120th (`examples/video_play.c`, 20 s
+window, display frames after the 120th (`examples/video/play.c`, 20 s
 each). Bar: the 16.7 ms frame. gfx.md measured a full 1920 x 1200
 RGBA8 upload at 1.1 to 2.6 ms mean and 4.4 to 5.8 ms p99.
 
@@ -610,7 +610,7 @@ thread under load, any GPU but the Iris Xe.
 ### Round 2: Media Foundation (M1, M3, M4)
 
 Under the lock, 2026-10-06 10:17 to 10:36, AC, MSVC 19.44 Release,
-`examples/video_bench.c --mp4` on the clips of
+`examples/video/bench.c --mp4` on the clips of
 `tests/media/make_video_clips.sh --long` (testsrc2 with temporal noise,
 libx264 CRF 20; 1080p30 at 64 Mb/s, 1080p60 at 36 Mb/s: harder than
 most camera footage at these sizes). Three rounds, rows interleaved; the
@@ -668,7 +668,7 @@ pipelined, so a seek costs about 5 ms per frame decoded (155 ms for up to
 ### Round 2: the frame thread (M2) and the decisions
 
 Under the lock, 2026-10-06 10:41, AC, MSVC 19.44 Release,
-`examples/video_play.c --hw ...` in the 640 x 360 composed window, 30 s a
+`examples/video/play.c --hw ...` in the 640 x 360 composed window, 30 s a
 run, two rounds, rows interleaved. "RGBA8" is v0.1's path (the decode
 thread converts, the frame thread uploads 4 bytes a pixel), built for this
 A/B only. `yvid_update()` on display frames with an upload, after the
@@ -794,7 +794,7 @@ decode thread for real from an STA frame thread. The threaded case now
 also stalls the decoder (PENDING) for 300 ms at frame 40 on the real
 decode thread ("Builds and mutations": it found a data race). The GPU
 path needs a screen, so the core test checks only its refusals;
-`examples/video_check.c` compares it with UPLOAD on hardware.
+`examples/video/check.c` compares it with UPLOAD on hardware.
 
 v0.2.1 makes the threaded case's stall an outage (every frame from 40 on
 is PENDING until the time, so a seek cannot pass it), checks that a frame
@@ -897,12 +897,12 @@ ThreadSanitizer (no report). The core test passes on all of them.
 - HEVC's VUI (its color), read from the SPS as H.264's is.
 - DXVA's cold open at 1080p60 (259 to 308 ms against the 300 ms bar):
   `yvid_probe()` or an open during the inter-trial interval hides it.
-- `examples/video_clips.c`: the test clips from Media Foundation's own
+- `examples/video/clips.c` (proposed): the test clips from Media Foundation's own
   encoder, so CI on Windows needs no ffmpeg (skipped where the encoder is
   missing).
-- `examples/movie_play.c` was asked for; the example is
-  `examples/video_play.c`, because CMake builds `examples/<lib>_*.c` for
-  each header.
+- A `movie_play` example was asked for; the example is
+  `examples/video/play.c` (program `video_play`), because CMake builds
+  `examples/<lib>/*.c` for each header as `<lib>_<name>`.
 - Recovery after a decoder stall: fixed in v0.2.1 (a lost wake-up after
   `YVID_PENDING`, not the drop rule; "Recovery after a decoder
   outage"). Not measured: the recovery after a hiccup of a built-in

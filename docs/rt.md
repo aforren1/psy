@@ -5,7 +5,7 @@ current form, and records the measurements that decided them. The manual
 in the header tells you how to use them. The plan that asked for them is
 section 4.1 of [rig_spec.md](rig_spec.md).
 
-All numbers come from `examples/rt_ring_bench.c` on one machine: Windows 11
+All numbers come from `examples/rt/ring_bench.c` on one machine: Windows 11
 with 16 logical CPUs, built with MSVC 19.44 and MinGW-w64 gcc 16.1, and
 WSL2 Ubuntu 22.04 with gcc 11.4 on the same machine (8 vCPUs), and emcc
 6.0.10 under node in the `emscripten/emsdk` Docker image. Run the bench on
@@ -263,6 +263,35 @@ Not done: any real device. The first is the MCU photodiode of
 2026-10-08 (LATE, `micros()`, 32 bits) instead of its line through the
 least-late pair of the first and last quarters. It prints the old line's
 distance from the fit over the edges, for the first hardware runs.
+
+## Per-user folders (v0.7.0)
+
+`yrt_user_dir(kind, subdir, out, cap)` gives `<base>/ysp/<subdir>`:
+`YRT_DIR_CACHE` for files a program can make again (the GL program
+cache), `YRT_DIR_CONFIG` for files to keep (the rig profile of
+`docs/devices_spec.md` section 11.2). The coordinator asked for it on
+2026-10-08, with the user's approval, so that the rig profile and the
+program cache follow one set of rules.
+
+| Question | Decision | Why |
+|---|---|---|
+| Home | `ysp/rt.h`, moved from `ysp/gfx.h` | The rig profile is read by the device layer and the player, which do not include `ysp/gfx.h`; every header has `ysp/rt.h` |
+| `ygfx_default_cache_dir()` | A one-line wrapper: `yrt_user_dir(YRT_DIR_CACHE, "progcache", ...)`; gfx v0.10.2 | Same behavior: its test passes unchanged on Windows, WSL2 and under emcc, and its mutant `v10-05` now edits `ysp/rt.h` and is still caught by gfx's test |
+| Bases | CACHE: `%LOCALAPPDATA%`, `$XDG_CACHE_HOME` or `~/.cache`, `~/Library/Caches`. CONFIG: `%APPDATA%`, `$XDG_CONFIG_HOME` or `~/.config`, `~/Library/Application Support` | The platforms' documented per-user locations. `%APPDATA%` roams with a domain profile, which a kept profile wants; a cache does not |
+| Rules | gfx v0.10.1's, unchanged: absolute only, no fallback, the wide API and UTF-8 on Windows, on POSIX each existing part refused when all users can write it or another user (not root) owns it, nothing on the web, no folder made | A program cache that someone else can write can be given an entry with a correct hash. A rig profile names devices and latencies; a planted one would bind a role to the wrong device or state a false latency |
+| `subdir` | NULL or "" for the ysp folder; names separated by `/`, converted to `\` on Windows; an empty name, `.`, `..`, a backslash, a colon or a control character refused | The result must stay under `ysp`; `c:x` and `\\` name other roots on Windows |
+| Version | 0.7.0 | A new public function: a minor version under 1.0 |
+
+Checked on 2026-10-08:
+
+| Check | Result |
+|---|---|
+| `tests/adapt/rt_test_userdir.h` (in `rt_test.c`, also under `YRT_TEST_FIT_ONLY`) | Both kinds on Windows (MSVC, MinGW gcc 16.1: a non-ASCII user name as UTF-8, a trailing slash, UNC, relative, missing, the exact fit and one byte short, NULL and empty subdir), on WSL2 gcc 11.4 (C99, and C11 with ASan and UBSan: XDG absolute and relative, `HOME/.cache` and `HOME/.config`, `/tmp` refused as a base and as `HOME`, relative and missing `HOME`) and under emcc in Docker (both kinds refused); the argument and subdir rules everywhere |
+| `ygfx_default_cache_dir()`'s test | Unchanged, passes on Windows, WSL2 and emcc |
+| Mutants (`tests/mutate/rt.toml`, `dir-01` to `dir-10`) | 9 of 9 Windows mutants caught by the Windows runner. `dir-10` (a folder all users can write accepted) is POSIX code: the runner reports it as survived, as its entry expects; built by hand on WSL2 against the mutated header, the test failed its three `/tmp` checks |
+
+Not checked: macOS (CI compiles and runs the test there; its two bases are
+in the test's macOS branch).
 
 ## Windows 11 power throttling
 

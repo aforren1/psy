@@ -795,7 +795,7 @@ An adapter would only copy the same data.
 
 ## Measured costs
 
-`examples/timeline_bench.c` gives these values. The machine is the
+`examples/timeline/bench.c` gives these values. The machine is the
 development machine. The compilers are gcc 11.4 at -O2 under WSL2 and
 MSVC 19.44 at /O2 on Windows 11. The time for one frame includes one
 clock read. The display is 60 Hz. Each cell is the range over three
