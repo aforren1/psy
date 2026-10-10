@@ -29,11 +29,12 @@ add_library(ysp::methods ALIAS ysp_methods)
 target_include_directories(ysp_methods INTERFACE ${YSP_INCLUDE_DIR})
 target_link_libraries(ysp_methods INTERFACE ysp::core)
 
-# The transports include ysp/rt.h; setupapi is serial-port enumeration.
+# The transports include ysp/rt.h; setupapi is serial-port enumeration; dl
+# is ysp/net.h loading liblsl at run time.
 add_library(ysp_devices INTERFACE)
 add_library(ysp::devices ALIAS ysp_devices)
 target_include_directories(ysp_devices INTERFACE ${YSP_INCLUDE_DIR})
-target_link_libraries(ysp_devices INTERFACE ysp::core $<$<PLATFORM_ID:Windows>:setupapi>)
+target_link_libraries(ysp_devices INTERFACE ysp::core $<$<PLATFORM_ID:Windows>:setupapi> ${CMAKE_DL_LIBS})
 
 # ysp/screen.h includes ysp/input.h. dl because ysp/gfx.h's headless
 # presenter loads libEGL with dlopen on POSIX, as miniaudio loads its
@@ -172,7 +173,7 @@ endif()
 # program registered with ctest too, and one with YSP_ASYNC_<name> ON gets
 # the compile check and that test built a second time with
 # Y<X>_ASYNC defined, which is the opt-in layer that pulls in ysp/rt.h.
-set(YSP_LIBS rt parallel serial stair quest aep table json pack trials timeline input response box device rigfile color rdk outline screen audio gfx video)
+set(YSP_LIBS rt parallel serial stair quest aep table json pack trials timeline input response box device rigfile net color rdk outline screen audio gfx video)
 
 # Examples that sit in the folder of the header they mainly show but need
 # another header's build: path, program name (the file's own name, kept from
@@ -191,7 +192,16 @@ set(YSP_EXAMPLES_ACROSS
     response/trial_mouse_tracking.c -
     response/trial_audio_keyboard.c -
     response/trial_stop_signal.c -
-    device/photodiode_check.c  -)
+    response/trial_2afc_adaptive.c -
+    rdk/trial_rdk.c            -
+    response/trial_stroop.c    -
+    timeline/trial_sternberg.c -
+    pack/trial_images.c        -
+    pack/trial_images_assets.c -
+    device/photodiode_check.c  -
+    net/labstreamer_flip.c     -
+    audio/av_sync.c            -
+    response/trial_two_keyboards.c -)
 
 set(YSP_PREFIX_rt          YRT)
 set(YSP_GROUP_rt           core)
@@ -290,6 +300,13 @@ set(YSP_PREFIX_rigfile     YRIG)
 set(YSP_GROUP_rigfile      devices)
 set(YSP_PLATFORMS_rigfile  Windows Linux Darwin)
 set(YSP_THREADS_rigfile    OFF)
+
+# LSL loads liblsl at run time, so it builds and its test runs without it.
+# Manual mode (ynet_inlet_poll) is its threadless form.
+set(YSP_PREFIX_net         YNET)
+set(YSP_GROUP_net          devices)
+set(YSP_PLATFORMS_net      Windows Linux Darwin)
+set(YSP_THREADS_net        OFF)
 
 # The timeline includes nothing either; it takes times as arguments.
 set(YSP_PREFIX_timeline    YTL)
@@ -506,6 +523,50 @@ endforeach()
 if(TARGET audio_loopback AND WIN32)
     target_link_libraries(audio_loopback PRIVATE ole32)
 endif()
+# The WASAPI period probe calls IAudioClient3 itself, not through miniaudio.
+if(TARGET audio_wasapi_periods AND WIN32)
+    target_link_libraries(audio_wasapi_periods PRIVATE ole32)
+endif()
+
+# ysp/net.h loads liblsl at run time and never links it. tools/vendor_lsl.py
+# fetches a pinned release for the tests into third_party/liblsl/<platform>/.
+# With it: the loopback test loads that copy by default, and
+# tests/compile/lsl_abi.cpp checks the header's declarations against its
+# lsl_c.h. Without it only the fake-liblsl unit test runs.
+set(YSP_LSL_DIR "" CACHE PATH "liblsl for ysp/net.h's tests: the folder with lsl.dll or liblsl.so and lsl_c.h")
+if(NOT YSP_LSL_DIR)
+    if(WIN32)
+        set(_lsl_plat win_amd64)
+    else()
+        set(_lsl_plat noble_amd64)
+        if(EXISTS /etc/os-release)
+            file(READ /etc/os-release _lsl_rel)
+            if(_lsl_rel MATCHES "VERSION_CODENAME=jammy")
+                set(_lsl_plat jammy_amd64)
+            endif()
+        endif()
+    endif()
+    set(YSP_LSL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/liblsl/${_lsl_plat})
+endif()
+if(WIN32)
+    set(_lsl_lib ${YSP_LSL_DIR}/lsl.dll)
+else()
+    set(_lsl_lib ${YSP_LSL_DIR}/liblsl.so)
+endif()
+if(EXISTS ${_lsl_lib} AND EXISTS ${YSP_LSL_DIR}/lsl_c.h)
+    if(TARGET net_loopback)
+        target_compile_definitions(net_loopback PRIVATE YNET_LOOPBACK_LIB="${_lsl_lib}")
+    endif()
+    if(YSP_BUILD_TESTS)
+        ysp_add_program(compile_lsl_abi tests/compile/lsl_abi.cpp devices)
+        target_include_directories(compile_lsl_abi SYSTEM PRIVATE ${YSP_LSL_DIR})
+        add_test(NAME compile_lsl_abi COMMAND compile_lsl_abi)
+    endif()
+    message(STATUS "ysp/net.h: tests use liblsl at ${_lsl_lib}")
+elseif(CMAKE_SYSTEM_NAME IN_LIST YSP_PLATFORMS_net)
+    message(STATUS "ysp/net.h: no liblsl in ${YSP_LSL_DIR}, so only the fake-liblsl unit test runs; "
+                   "fetch it with: uv run --no-project python tools/vendor_lsl.py --write")
+endif()
 
 # ysp/input.h and ysp/response.h with SDL3: their tests again with the SDL
 # adapter (SDL's headers only, nothing linked), and the examples of
@@ -525,17 +586,30 @@ endif()
 if(TARGET SDL3::SDL3 AND YSP_BUILD_EXAMPLES)
     # The jsPsych-style trials of examples/response/ (docs/response.md,
     # "What the examples show"); the two with a sound need miniaudio.
-    foreach(_t keyboard same_different srt adjustment mouse_tracking)
+    foreach(_t keyboard same_different srt adjustment mouse_tracking 2afc_adaptive two_keyboards)
         ysp_add_program(trial_${_t} examples/response/trial_${_t}.c rig methods)
     endforeach()
+    # PsychoPy's dots.py as a trial (docs/rig_spec.md 15.5): RDK direction
+    # discrimination, each row with the field's replay digest.
+    ysp_add_program(trial_rdk examples/rdk/trial_rdk.c rig methods)
     if(TARGET ysp::miniaudio)
         foreach(_t audio_keyboard stop_signal)
             ysp_add_program(trial_${_t} examples/response/trial_${_t}.c rig methods)
         endforeach()
+        # PTB's PsychPortAudioTimingTest (docs/rig_spec.md 16.6): a flash and
+        # a click for one time, the records, and line boards in hardware mode.
+        ysp_add_program(audio_av_sync examples/audio/av_sync.c rig devices)
     endif()
+    # PsychoPy's Sternberg demo (docs/rig_spec.md 15.5): a timed sequence as
+    # an op table, digits from ysp/outline.h. trial_stroop and trial_images
+    # are in pack/CMakeLists.txt: they need the layout library and ypak.
+    ysp_add_program(trial_sternberg examples/timeline/trial_sternberg.c rig methods)
     # The MCU photodiode on ysp/device.h, its events over ysp/screen.h's
     # input bridge: the first real device's hand test.
     ysp_add_program(photodiode_check examples/device/photodiode_check.c rig devices)
+    # The LabStreamer against flip records over LSL (docs/net.md): the hand
+    # test of ysp/net.h.
+    ysp_add_program(net_labstreamer_flip examples/net/labstreamer_flip.c rig devices)
 endif()
 
 # ysp/video.h: ysp::rig carries pl_mpeg when it was found, else these build

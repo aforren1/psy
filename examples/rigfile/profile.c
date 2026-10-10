@@ -15,7 +15,9 @@
  *       Binds ROLE to the device at match key KEY (ysp/device.h, MATCH
  *       KEYS) of a ysp/box.h FAMILY, drops the role's old loopback
  *       numbers, and writes the profile. device_out_latency --list gives
- *       the keys of the serial ports.
+ *       the keys of the serial ports. FAMILY lsl binds ROLE to a Lab
+ *       Streaming Layer stream (ysp/net.h); net_stream_view --list gives
+ *       the keys of the streams.
  *   --dir DIR is a rig folder other than the user's (yrig_dir()).
  *
  * Exit code 0 when the profile is valid and every file it names checks; 3
@@ -182,16 +184,18 @@ int main(int argc, char** argv) {
         int fam = 0, k;
         for (k = 1; k <= YBOX_FAMILY_LAST; k++)
             if (strcmp(ybox_family_name(k), bind[1]) == 0) fam = k;
+        if (strcmp(bind[1], "lsl") == 0) fam = YRIG_FAMILY_LSL;   /* a stream for ysp/net.h */
         if (!fam) {
-            fprintf(stderr, "rigfile_profile: \"%s\" is not a ysp/box.h family:", bind[1]);
+            fprintf(stderr, "rigfile_profile: \"%s\" is not a ysp/box.h family or lsl:", bind[1]);
             for (k = 1; k <= YBOX_FAMILY_LAST; k++) fprintf(stderr, " %s", ybox_family_name(k));
-            fprintf(stderr, "\n");
+            fprintf(stderr, " lsl\n");
             return 2;
         }
         rc = yrig_bind(&g_p, bind[0], fam, bind[2]);
         if (rc != YRIG_OK) {
             fprintf(stderr, "rigfile_profile: cannot bind \"%s\": %s\n", bind[0],
-                    rc == YRIG_ERR_FULL ? "the profile has its 32 roles" : "a role is 1 to 31 of A-Z a-z 0-9 _ . -, a key 1 to 159 bytes");
+                    rc == YRIG_ERR_FULL ? "the profile has its 32 roles" : "a role is 1 to 31 of A-Z a-z 0-9 _ . -, a key 1 to 159 bytes; "
+                    "an lsl key starts with lsl: and a serial key does not");
             return 2;
         }
     }

@@ -1,0 +1,170 @@
+# ysp/net.h mutants: the clock maps, the lifecycle, identify, keys, the
+# stream ring, edges, the loader's bookkeeping. The test runs a fake liblsl
+# on a virtual clock (about 2 s with a 1 s thread part). docs/net.md lists
+# the results.
+header = "ysp/net.h"
+
+[test.net]
+source = "tests/adapt/net_test.c"
+compiler = "gcc"
+flags = ["-std=c11", "-O2", "-w"]
+libs = ["-lsetupapi", "-lm"]
+timeout = 120
+env = { YNET_TEST_SECONDS = "1" }
+
+[[mutant]]
+id = "net-01"
+name = "events at their read time"
+test = "net"
+why = "The sender's stamp is the point: a read time carries liblsl's delivery and the reader's wake-up."
+find = '''    if (t == 0) {
+        t = t_read;
+        e->unc_us = 65535;
+    } else {'''
+replace = '''    t = 0;
+    if (t == 0) {
+        t = t_read;
+        e->unc_us = 65535;
+    } else {'''
+
+[[mutant]]
+id = "net-02"
+name = "no clamp at the read time"
+test = "net"
+why = "An event cannot happen after it arrived; a map past the read time is a fit error or a sender's bad stamp."
+find = '''        if (t > t_read) { t = t_read; in->st.clamped++; }
+    }
+    e->t = t;'''
+replace = '''    }
+    e->t = t;'''
+
+[[mutant]]
+id = "net-03"
+name = "no gap record after a loss"
+test = "net"
+why = "The log must say when samples could not arrive (docs/devices_spec.md 4.7)."
+find = '''        ynet__irec(in, (uint16_t)YNET_REC_GAP, u.i64[1], &u);'''
+replace = '''        (void)u;'''
+
+[[mutant]]
+id = "net-04"
+name = "no silence check"
+test = "net"
+why = "A regular stream that stops sending without a lost error (a sender that hangs) must not look like a quiet stream."
+find = '''    if (in->d.silent_ns > 0 && in->period_s > 0 && t_done - in->st.last_rx_ns > in->d.silent_ns)
+        ynet__lose(in, YNET_WHY_SILENT);'''
+replace = ''
+
+[[mutant]]
+id = "net-05"
+name = "an ambiguous key takes the first stream"
+test = "net"
+why = "Two streams that match one key are two devices; binding either one silently is binding the wrong one half the time."
+find = '''    if (n > 1) {
+        in->st.ambiguous++;'''
+replace = '''    if (n > 99) {
+        in->st.ambiguous++;'''
+
+[[mutant]]
+id = "net-06"
+name = "no identify"
+test = "net"
+why = "A key that finds a stream of another format or width must fail before the session."
+find = '''    if ((in->d.format && fmt != in->d.format) || (in->d.channels && ch != in->d.channels) ||'''
+replace = '''    if (0 ||'''
+
+[[mutant]]
+id = "net-07"
+name = "gaps only above 15 periods"
+test = "net"
+why = "Five missing samples at 1 kHz are 5 ms the data file would not mark."
+find = '''        if (d > 1.5 * in->period_s) {'''
+replace = '''        if (d > 15.0 * in->period_s) {'''
+
+[[mutant]]
+id = "net-08"
+name = "the remote fit kept across a reconnect"
+test = "net"
+why = "An outlet that comes back may be another process on another clock; the old map is wrong by the clocks' difference."
+find = '''    ynet__fit_init(&in->remote, YRT_FIT_UNBIASED, in->d.device, 0, in->d.ring);
+    in->have_rorigin = 0;'''
+replace = '''    in->have_rorigin = in->have_rorigin;'''
+
+[[mutant]]
+id = "net-09"
+name = "string samples not freed"
+test = "net"
+why = "liblsl allocates each string sample, even on a timeout: a marker inlet would leak 100 strings a second."
+find = '''        if (s) in->d.lib->destroy_string(s);   /* allocated even on a timeout */'''
+replace = '''        (void)s;'''
+
+[[mutant]]
+id = "net-10"
+name = "a full ring overwrites"
+test = "net"
+why = "A writer that falls behind must lose the newest samples, counted, never the ones it has not read."
+find = '''            if (head - tail >= cap) { ynet__st(&s->dropped, s->dropped + (uint32_t)(n - i)); break; }'''
+replace = '''            (void)cap;'''
+
+[[mutant]]
+id = "net-11"
+name = "no hysteresis"
+test = "net"
+why = "A photodiode or a force channel near its level would give a burst of edges for one crossing."
+find = '''            if (v > e->level + 0.5f * e->hysteresis) now_hi = 1;
+            else if (v < e->level - 0.5f * e->hysteresis) now_hi = 0;'''
+replace = '''            if (v > e->level) now_hi = 1;
+            else if (v < e->level) now_hi = 0;'''
+
+[[mutant]]
+id = "net-12"
+name = "wide round trips used"
+test = "net"
+why = "A correction over a congested network or Wi-Fi is off by up to half its round trip; one of them moves the map by milliseconds."
+find = '''    if (w > in->d.max_unc_ns) in->st.refused++;'''
+replace = '''    if (w > in->d.max_unc_ns * 1000) in->st.refused++;'''
+
+[[mutant]]
+id = "net-13"
+name = "no uncertainty"
+test = "net"
+why = "unc_us 1 claims a microsecond for a map that rests on a round trip of tens of microseconds or more."
+find = '''        in->unc_ns = r + in->st.local.width_ns;'''
+replace = '''        in->unc_ns = 0 * (r + in->st.local.width_ns);'''
+
+[[mutant]]
+id = "net-14"
+name = "mark_at stamps now"
+test = "net"
+why = "A marker for a flip must carry the flip's time, not the time the program got to send it."
+find = '''    ts = at ? ynet__inverse(&o->fit, o->origin_s, at) : l;'''
+replace = '''    ts = l;'''
+
+[[mutant]]
+id = "net-15"
+name = "the predicate drops the source_id"
+test = "net"
+why = "The source_id is what tells two devices of one model apart."
+find = '''    vals[0] = k->name; vals[1] = k->type; vals[2] = k->source_id; vals[3] = k->hostname;'''
+replace = '''    vals[0] = k->name; vals[1] = k->type; vals[2] = ""; vals[3] = k->hostname;'''
+
+[[mutant]]
+id = "net-16"
+name = "the remote stamp read as local"
+test = "net"
+why = "Without liblsl's offset a remote sender's stamps are on another clock: seconds off."
+find = '''    if (in->st.remote.ready && in->have_rorigin) return yrt_fit_map(&in->remote, ynet__ticks(s, in->rorigin_s));
+    if (in->have_offset) return yrt_fit_map(&in->local, ynet__ticks(s + in->st.offset_s, in->origin_s));'''
+replace = '''    if (in->have_offset) return yrt_fit_map(&in->local, ynet__ticks(s, in->origin_s));'''
+
+[[mutant]]
+id = "net-17"
+name = "the remote fit as a lower envelope"
+test = "net"
+why = "liblsl's offsets scatter both ways; a lower envelope of them is biased (docs/net.md measured 2 to 3 times the error)."
+expect = "survived"
+note = "The test bounds the map at 400 us after 10 s, which both modes meet on its fake; the comparison that decided it is a separate simulation (docs/net.md). Kept as a record of the decision."
+find = '''    ynet__fit_init(&in->remote, YRT_FIT_UNBIASED, in->d.device, 0, in->d.ring);
+    in->have_rorigin = 0;'''
+replace = '''    ynet__fit_init(&in->remote, YRT_FIT_BRACKET, in->d.device, in->d.max_unc_ns, in->d.ring);
+    in->have_rorigin = 0;'''

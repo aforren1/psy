@@ -42,7 +42,7 @@ struct SpyClient : IAudioClient {
     HRESULT STDMETHODCALLTYPE Initialize(AUDCLNT_SHAREMODE, DWORD, REFERENCE_TIME, REFERENCE_TIME, const WAVEFORMATEX*, LPCGUID) override { g_hit = 3; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetBufferSize(UINT32*) override { g_hit = 4; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetStreamLatency(REFERENCE_TIME* l) override { g_hit = 5; *l = 123; return S_OK; }
-    HRESULT STDMETHODCALLTYPE GetCurrentPadding(UINT32*) override { g_hit = 6; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetCurrentPadding(UINT32* n) override { g_hit = 6; *n = 77; return S_OK; }
     HRESULT STDMETHODCALLTYPE IsFormatSupported(AUDCLNT_SHAREMODE, const WAVEFORMATEX*, WAVEFORMATEX**) override { g_hit = 7; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetMixFormat(WAVEFORMATEX**) override { g_hit = 8; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetDevicePeriod(REFERENCE_TIME*, REFERENCE_TIME*) override { g_hit = 9; return S_OK; }
@@ -63,8 +63,10 @@ int main(void) {
     void* clk = nullptr;
     LONGLONG lat = 0;
     UINT64 f = 0, p = 0, q = 0;
+    UINT32 pad = 0;
     CHECK(IsEqualIID(yau__IID_IAudioClock, __uuidof(IAudioClock)));
     CHECK(ac->lpVtbl->GetStreamLatency(ac, &lat) == S_OK && g_hit == 5 && lat == 123);
+    CHECK(ac->lpVtbl->GetCurrentPadding(ac, &pad) == S_OK && g_hit == 6 && pad == 77);
     CHECK(ac->lpVtbl->GetService(ac, &yau__IID_IAudioClock, &clk) == S_OK && g_hit == 14 && clk);
     if (clk) {
         yau__IAudioClock* c = static_cast<yau__IAudioClock*>(clk);

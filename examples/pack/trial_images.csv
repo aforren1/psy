@@ -1,0 +1,13 @@
+block,image,ori,kind,answer
+navon,img/navon_HH.ysptex,0,congruent,f
+navon,img/navon_HS.ysptex,0,incongruent,f
+navon,img/navon_SH.ysptex,0,incongruent,j
+navon,img/navon_SS.ysptex,0,congruent,j
+rotation,img/letter_R.ysptex,0,normal,f
+rotation,img/letter_R.ysptex,60,normal,f
+rotation,img/letter_R.ysptex,120,normal,f
+rotation,img/letter_R.ysptex,180,normal,f
+rotation,img/letter_R_mirror.ysptex,0,mirror,j
+rotation,img/letter_R_mirror.ysptex,60,mirror,j
+rotation,img/letter_R_mirror.ysptex,120,mirror,j
+rotation,img/letter_R_mirror.ysptex,180,mirror,j

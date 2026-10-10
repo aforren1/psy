@@ -93,7 +93,13 @@ frames on the overlay path showed a vblank early (2 to 5 of the first
 frames of a run). Two changes fixed it: every present without a target
 counts (DXGI shows a frame at the first vblank it can, held or not), and
 open() presents black frames until three flips in a row agree, up to 40.
-After the change: 0 early flips in 1200 held fullscreen frames.
+After the change: 0 early flips in 1200 held fullscreen frames. In
+October 2026 every version from v0.2.0 to v0.4.2 showed held frames early
+again on this machine, for another cause; see
+[Held frames a vblank early](#held-frames-a-vblank-early-v043).
+Since v0.4.4 the depth after open comes from the path, never from
+misses, and the learning described below is opt-in; see
+[Depth from the path](#depth-from-the-path-v044).
 
 ## Holding a frame for a later vblank
 
@@ -109,7 +115,10 @@ Two ways were built and measured, the same frame loop asking for a vblank
 
 DXGI's sync interval holds the frame being presented, not the one on the
 screen, so it cannot move a frame later. The sleep is the one kept; the
-other was deleted.
+other was deleted. (The sleep stopped being enough on this machine by
+October 2026, because the grid it wakes on followed DXGI times that were
+off the vblanks; fixed in v0.4.3, see
+[Held frames a vblank early](#held-frames-a-vblank-early-v043).)
 
 ## DXGI reports only the newest flip
 
@@ -424,6 +433,13 @@ on it. The panel held the vblank longer, as variable refresh does, which
 the header does not enable. The record flags these flips GRID_UNSTABLE,
 and their tier is 2.
 
+Correction (v0.4.3, 2026-10-09): the scanline stayed on the grid here,
+so what moved was the reported time, not a vblank of the scanout. The
+probe of [Held frames a vblank early](#held-frames-a-vblank-early-v043)
+found the same on DXGI_FLIP: times up to half a period off, the
+scanout's vblanks steady, each frame flipped on the vblank nearest its
+time. Whether the panel's light moves is not known without a photodiode.
+
 ### Path reports on DXGI_FLIP
 
 `IDXGISwapChainMedia::GetFrameStatisticsMedia` is documented for media
@@ -442,6 +458,9 @@ the forced-composed runs of COMPOSITION use the probe's own controls
 instead, a premultiplied-alpha or rotated surface, which DWM composes.
 
 ### Depth on a backend that holds frames
+
+This is the rule of v0.2.0 to v0.4.3; since v0.4.4 it runs only with
+`desc.depth_learn` (see [Depth from the path](#depth-from-the-path-v044)).
 
 The first COMPOSITION batch showed a fault in the core. A present with a
 target waits for that target, so a flip that is on time shows only that
@@ -646,7 +665,9 @@ logged, on the quiet machine.
 
 ### AUTO
 
-AUTO stays DXGI_FLIP. COMPOSITION was better in a window on every
+Since v0.4.4 AUTO picks COMPOSITION where it opens with independent
+flip; see [AUTO, decided](#auto-decided-v044). Before it, AUTO stayed
+DXGI_FLIP, for these reasons. COMPOSITION was better in a window on every
 measure but the cost of the present call: fewer drops, no early flips,
 fewer flips without a statistic, a lower p99. In fullscreen on the
 quiet machine it did as well, not better (2.36 against 2.33 us p99, no
@@ -656,6 +677,11 @@ Windows 11, and its composed onset is DWM's plan (tier 3) where
 DXGI_FLIP's composed onset is tier 2. A task that runs in a window on
 Windows 11 can ask for COMPOSITION by name.
 
+v0.4.3 measured both in fullscreen with load, misses and holds:
+COMPOSITION dropped fewer heavy frames, showed none early and had no
+off-grid time. The proposal in
+[AUTO, decided](#auto-decided-v044) applies it, after the 10-minute runs.
+
 ### Tiers
 
 | Tier | Backend and path | Why, from the measurements |
@@ -663,7 +689,7 @@ Windows 11 can ask for COMPOSITION by name.
 | 1 | DXGI_FLIP overlay or independent flip | DXGI's vblank time on a flip the OS made; v0.1 prediction p99 2.3 us |
 | 1 | COMPOSITION independent flip | DisplayedTime 13 us after the scanline vblank at p50, 77 us at p99, and it moves with a late frame |
 | 2 | DXGI_FLIP composed | DWM's vblank time; not checked against another source |
-| 2 | any flip off the vblank grid (GRID_UNSTABLE) | the panel stretched frames after a late frame, up to 4.9 ms off the grid |
+| 2 | any flip whose OS time is off the vblank grid (GRID_UNSTABLE); its onset is the grid's vblank | DXGI's times of held frames up to half a period off the scanout's vblanks, which stayed on the grid (v0.4.3) |
 | 3 | COMPOSITION composed or overlay frame (ONSET_PLANNED) | DWM reports the time about 15 ms before the vblank |
 | 3 | any ESTIMATED flip | no OS time at all: the planned vblank |
 | SIM | the simulated display | no display |
@@ -1486,6 +1512,35 @@ injected through the filter in a window, and keys pressed by hand.
 --sim` send a doubled tap through `yscr_key_filter()` and check that it
 counts once.
 
+#### A key-up taken by another keyboard (fixed in v0.4.2)
+
+`examples/response/trial_two_keyboards.c --sim` found a fault in the
+v0.4.1 rule. Player 1's press came twice (the raw report with the
+keyboard's id, then a second report with device 0), and player 2 held
+the same key. The second report's key-up (device 0) found player 2's
+press still down, matched it as device 0 matches every keyboard, and
+passed. Then player 2's own key-up found no press down and passed too.
+So `key_double_ups` stayed 0, and the consumer saw two key-ups for
+player 2.
+
+The fix has two parts:
+
+- A key-up with device 0 first goes to a press kept with a keyboard's id
+  that has a dropped report pending. The kept press's own key-up has
+  that id, so a device-0 key-up there is the second report's, and it is
+  dropped. Where the kept report itself has device 0, its key-up passes
+  as before.
+- A key-up pairs with a kept press of its own device before one with
+  device 0. Before, the first match in the table won, so the table's
+  order could give a device-0 key-up to another keyboard's older press.
+
+The core test plays both: two keyboards on one key, the second report's
+key-up while the other keyboard holds the key, in both orders of the
+first two key-ups; and the kept report with device 0 while another
+keyboard's older press sits earlier in the table. `trial_two_keyboards
+--sim` now also checks `key_double_ups` per trial (1 in trial 3, 0
+elsewhere). Mutants `kd-16` to `kd-18`, caught.
+
 ### Raw mice (v0.3.5)
 
 `desc.raw_mice` (off by default, Windows, a window needed) starts one
@@ -1547,6 +1602,499 @@ off by default, and `caps.raw_keyboard` false on a screen with no window;
 five mutants (`input-00` to `input-04` in `tests/mutate/screen.toml`),
 all caught; the whole list, 19 of 19.
 
+## Driver-forced vsync off: the sync guard (v0.4.2)
+
+A driver panel can force vsync off for every program: AMD Software "Wait
+for Vertical Refresh: Always off", NVIDIA Control Panel "Vertical sync:
+Off", Intel Graphics "Vertical Sync: Speed", and Mesa's `vblank_mode=0`
+on Linux. If such a setting overrides the header's flip-model
+`Present(1)`, frames tear or are discarded, and the flip records still
+look like measurements. `docs/rig_spec.md` section 13 asked for a guard.
+Prior art: the SDL frame pacing sample (TylerGlaiel/SDL-Frame-Pacing-Sample)
+detects "not actually vsynced" from the drift between measured and
+snapped frame times. Read for the idea only; no code is copied. The
+header already has a record per flip with an OS time and count, so the
+guard reads those.
+
+| Question | Decision | Why |
+|---|---|---|
+| Input | Each flip completion with an OS time, after open's black frames; not while the window is occluded | An estimate has no time to test. A hidden window's presents may not be paced. open() may run composed while a window goes fullscreen. |
+| Evidence | Same refresh: the count is not after the previous flip's, or the time is less than half a period after it. No wait: the count is not after the count at the present call, and the time is before the call. Torn: the time is more than a quarter period before the vblank its count names, on the grid the flip was planned with | Under vsync each is impossible: a vblank shows one new frame, and a frame presented in a refresh flips at a later vblank. |
+| Why not every off-grid flip | Only flips a quarter period early | Legitimate OS times go off the grid: DXGI's times of held frames, up to half a period either way, with the scanout's vblanks on the grid (409 of 3600 flips in the stress run below; see [Held frames a vblank early](#held-frames-a-vblank-early-v043)). |
+| Why no wait needs the time too | Count and time | With `screen_flipstats --hold` on DXGI_FLIP fullscreen, a rule on the count alone had 165 hits in 899 flips (2026-10-09): while the vblanks stretch, the grid's count at the call is one too high. With the time as well: 8 in 1800. The core test's legit case 3 plays stretched vblanks and catches the count-only rule (mutant `sg-03`). |
+| Fire (FLIPS) | 32 of the last 64 flips with evidence | A stale count or a jittered stamp is one flip; a forced-off driver gives evidence on nearly every flip. |
+| Fire (RATE) | Over a block of at least 64 refreshes between flips with a time, more presents completed (shown, estimated or skipped) than the refreshes plus 8 | A driver that discards frames without tearing leaves their statistics missing, so they complete as ESTIMATED and look shown. 8 is the frames in flight that begin() can estimate before they show (legit case 5 needs the slack; mutant `sg-13`). |
+| Effect | Once per open, until close: every record from the firing flip on gets YSCR_FLIP_UNSYNCED and tier 3; a YSCR_EV_UNSYNCED ring record; WARNING=not-vsynced in the describe line; `yscr_sync_check()` returns the rule, the frame, the evidence and a message that names the settings | The onsets are not measurements. The run goes on, as for `desc.min_tier`: only the caller knows what to do with its trials. |
+| Opt-out | None | The header never presents with vsync off on purpose, and a legitimate path gives no evidence. |
+
+The flags field of the ring's mode word has 10 bits, so YSCR_FLIP_UNSYNCED
+(0x1000) is not in it, as for CODE_AT_RISK and TEXT_INPUT; the tier
+there is 3, and the YSCR_EV_UNSYNCED record marks the flip.
+
+### What the core test plays
+
+`tests/adapt/screen_test.c` plays a driver with vsync forced off four
+ways on its virtual clock. Each fires the guard once, by the rule its
+evidence feeds:
+
+| Scripted driver | Fires | Evidence |
+|---|---|---|
+| 1: each present flips at once, reported at the vblank of its own refresh (DXGI's vblank-stamped statistics) | FLIPS at frame 31 | no wait on every flip |
+| 2: each present flips 0 to 3/4 of a period after the call, as the GPU finishes, reported at that time with the next vblank's count | FLIPS | torn, then same refresh and no wait as the grid follows the tears |
+| 3: a backend that holds frames to their target, with the target ignored: 3 presents a refresh, each reported | FLIPS | same refresh |
+| 4: as 3, only the newest present of a refresh reported (the others discarded) | RATE | under 32 of 64 per flip |
+
+Then the legitimate paths, each 600 frames: reported times that stretch
+after each late frame; a composed path with drops, held frames,
+preemption and missing statistics; a backend that holds frames to their
+target, with planned onsets, skipped presents and a path and depth that
+flap; vblanks that themselves stretch, with held frames; a timestamp 30%
+of a period early on one flip in 3 (evidence on a third of the flips,
+under the threshold: mutant `sg-06` lowers it to 16 and fires); two
+flips in flight with a statistic for one present in 3. None fires, and
+all but the jittered one give no evidence at all. The SIM backend in
+real time gives none. A counter on the fire hook proves that no other
+case in the file fired it. Mutants `sg-01` to `sg-13`, caught.
+
+### On this laptop
+
+Windows 11, Iris Xe, 60 Hz, AC, no driver setting changed, 2026-10-09.
+`screen_flipstats --frames 3600 --load 4 --overrun 25 --miss 120 --hold`
+(load threads, overruns in 1 frame of 30, heavy GPU frames, held frames
+0 to 4 vblanks ahead), 3600 flips each:
+
+| Backend and window | Path | Drops | Off grid | Evidence: same refresh, no wait, torn | Most in one window of 64 |
+|---|---|---|---|---|---|
+| DXGI_FLIP fullscreen | overlay | 42 | 409 | 0, 3, 8 | 2 |
+| DXGI_FLIP window (kept on top: overlay) | overlay | 40 | 433 | 0, 5, 13 | 3 |
+| DXGI_FLIP fullscreen, a small window over a corner from frame 300 | overlay | 41 | 429 | 0, 2, 18 | 3 |
+| COMPOSITION fullscreen | independent flip | 17 | 0 | 0, 0, 0 | 0 |
+| COMPOSITION window | independent flip | 16 | 0 | 0, 0, 0 | 0 |
+| COMPOSITION, covered corner, on top | independent flip | 16 | 0 | 0, 0, 0 | 0 |
+
+`screen_sync_check --no-flicker --seconds 5`: DXGI_FLIP windowed
+(composed, 11 path changes, 165 estimated flips), DXGI_FLIP fullscreen
+(overlay) and COMPOSITION fullscreen (independent flip): 1.00 flips per
+refresh, no evidence. The guard never fired on this machine. On
+DXGI_FLIP the evidence came with the held frames, which v0.4.2 recorded
+off the grid and a vblank early (EARLY on 285 to 313 flips a run). The
+vblanks were not off the grid; DXGI's times were, and v0.4.2's grid
+followed them. With v0.4.3 the same stress runs gave no guard evidence
+(see [Held frames a vblank early](#held-frames-a-vblank-early-v043)).
+
+### Not known
+
+- Whether any driver panel overrides a flip-model `Present(1)`, on
+  DXGI_FLIP or COMPOSITION. No panel setting was changed: the Intel
+  setting is a hand test (below); AMD and NVIDIA need their hardware
+  (the RTX A500 here has no output); Mesa needs the X11 backend.
+- A driver that tears but reports the next vblank's count and time gives
+  no evidence. `examples/screen/sync_check.c` shows the tear to the eye.
+- Whether the Intel "Speed" mode (application-unaware triple buffering)
+  discards frames under the header's paced loop. On DXGI_FLIP the core
+  holds each present until its vblank's slot, so no two presents meet in
+  one refresh, and nothing is lost.
+
+### Hand test: the Intel setting
+
+1. Run `screen_sync_check --no-flicker` (or without `--no-flicker` if no
+   one with photosensitive epilepsy can see the screen). Expect "verdict:
+   synced", an even pattern and a bar in one piece.
+2. In Intel Graphics Software, set Vertical Sync for
+   `screen_sync_check.exe` (or globally) to Off, then to Speed. Run step 1
+   again for each, also with `--backend composition` and `--windowed`.
+3. Record: the verdict and the guard's evidence, and whether the bar
+   broke or bands crossed the screen. A torn screen with "verdict: synced"
+   is the limit above.
+4. Set Vertical Sync back to the application's choice.
+
+## Held frames a vblank early (v0.4.3)
+
+The v0.4.2 stress runs (previous section) showed held frames on DXGI_FLIP
+off the grid and a vblank early, where v0.1 had measured 0 early in 1200
+(see [Depth](#depth)). All runs below: this laptop, fullscreen unless
+stated, AC power, `screen_flipstats --hold` (0 to 4 vblanks ahead,
+targets up to 0.45 period off the grid), 1200 frames, idle unless stated,
+2026-10-09.
+
+### Regression or stress
+
+Neither: idle holds alone give it, and so does every version in git.
+The same loop, built on each header with that version's own
+`screen_flipstats.c`:
+
+| Header | Flips flagged EARLY | Held frames more than half a period before the vblank asked | Off-grid times |
+|---|---|---|---|
+| v0.2.0 (f71a1e4) | 226 | 72 | 347 |
+| v0.3.0 (58232d8) | 229 | 41 | 282 |
+| v0.3.1 (6d788ba) | 259 | 62 | 327 |
+| v0.4.0 (3f975bb) | 242 | 58 | 334 |
+| v0.4.2 | 187 | 26 | 219 |
+| v0.4.2, no holds | 0 | (no holds) | 0 |
+
+v0.1 is not in git, so it could not be built again. What changed since
+its 0 in 1200 (the driver, the OS or the state of the machine) is not
+known.
+
+### Which stress element
+
+With the probe below, v0.4.2, 1200 frames each:
+
+| Condition | Early (by the scanout) | Off-grid times |
+|---|---|---|
+| 4 load threads, no holds | 0 | 0 |
+| a 25 ms overrun in 1 frame of 30, no holds | 0 | 0 |
+| 3 heavy GPU frames every 120, no holds | 24 | 0 |
+| holds, idle | 63 | 177 |
+| holds, window kept on top | 32 | 77 |
+| holds, load, overruns and heavy frames together | 13 | 17 |
+
+Holds give the off-grid times and most early flips. The heavy GPU frames
+give early flips by another path, the depth rule (below).
+
+### The probe
+
+A copy of v0.4.2 that logged every DXGI statistic, every present (the
+planned vblank, the depth, the wake time, the call and return times, the
+grid at the wake) and every completion, and a thread that polled
+`D3DKMTGetScanLine` and stamped each entry into vertical blank (the
+independent vblank source of the COMPOSITION probe). Results of one idle
+hold run (3730 scanout vblanks, 1200 flips):
+
+- The scanout's vblanks were steady: intervals 16.608 to 16.725 ms, none
+  more than 1% of a period off. No refresh was stretched.
+- DXGI's `SyncQPCTime` was more than 0.5 ms off the nearest scanout
+  vblank on 177 of 1199 statistics, by up to 8.3 ms (half a period),
+  either way, in runs of 1 to 14 flips. Some were later than the time
+  the statistic was read. In a run they sometimes drift back to the grid
+  in small steps (4.89, 4.88, 4.81, 4.51 ms and so on), which looks like
+  a stretched refresh but is not one.
+- DXGI's `SyncRefreshCount` lost 146 of 3730 vblanks (about 1 in 25),
+  always across a held frame.
+- On all 1199, the scanout vblank nearest DXGI's time was the first one
+  after the present call returned: the frame flipped where expected.
+
+So the off-grid times and the lost counts are DXGI's errors, not the
+display's. v0.4.2 anchored its grid on every reported time and count.
+Against the header's own plan (its planned vblank, mapped to the nearest
+scanout vblank):
+
+| Outcome | Flips |
+|---|---|
+| Shown on the planned vblank, not flagged | 990 |
+| Shown on the planned vblank, flagged EARLY (the count had lost a vblank) | 145 |
+| Shown a vblank early, flagged EARLY | 63 |
+| Shown a vblank early, not flagged | 0 |
+
+On all 63 early flips the grid at the wake was more than 0.45 ms before
+the scanout's vblank (planned - depth): the grid had moved to an
+off-grid time, the hold woke before the real vblank, and the present
+made it. The header's planning put them early, not DXGI's presentation.
+
+Display and session: every probe run from then on logged the console
+display state (`GUID_CONSOLE_DISPLAY_STATE`) and the session lock
+(`WTSRegisterSessionNotification` and `WTSQuerySessionInformation`). The
+display was on and the session unlocked from the start to the end of
+every logged run, and the early flips came all the same. The runs before
+the logging had a steady scanout throughout, which a display that is off
+does not have. `--topmost` sends one zero-size mouse move at the start
+to take the foreground.
+
+### The fix
+
+A flip's vblank is now the grid's nearest to the OS's time, not the OS's
+count. A time within 1% of a period of the grid moves it; a time off it
+is flagged GRID_UNSTABLE (tier 2), its onset is the grid's vblank time,
+and the grid stays. 16 off-grid times in a row that agree on a new phase
+move the grid there (DXGI's agreed on at most 5 in a row in five runs),
+so a display whose timing changes is followed. When 48 of the last 64
+times are off the grid, the grid follows each time with the OS's count,
+as before (DXGI's held frames: at most 34 of 64). The sync guard gets
+the OS's count in the grid's numbers.
+
+`tests/adapt/screen_test.c` (`test_held_off_grid`) plays the hardware's
+sequence on the virtual clock: lost counts, off-grid times up to 0.45
+period either way, 3 in a row that agree, with holds; then a display
+whose vblanks move 0.3 period at once. Mutants `eg-01` to `eg-09`, all
+caught; `eg-02` (anchor on every time) is v0.4.2's behavior.
+
+After the fix, probe on v0.4.3, scanout as reference:
+
+| Run | Backend | Frames | On the vblank asked | Early | Dropped | Off-grid times (tier 2) | Guard evidence |
+|---|---|---|---|---|---|---|---|
+| holds, idle | DXGI_FLIP | 1200 | 1200 | 0 | 0 | 163 | 0 |
+| holds, window kept on top | DXGI_FLIP | 1200 | 1196 | 5 (first 6 frames) | 0 | 191 | 0 |
+| holds, load, overruns, heavy frames | DXGI_FLIP | 3600 | 3534 of 3581 | 3 | 44 (heavy frames) | 105 | 0 |
+| same, window kept on top | DXGI_FLIP | 3600 | 3533 of 3580 | 5 | 42 (heavy frames) | 134 | 0 |
+| holds, idle | COMPOSITION | 1200 | 1200 | 0 | 0 | 0 | 0 |
+| holds, load, overruns, heavy frames | COMPOSITION | 3600 | 3565 of 3582 | 0 | 17 (heavy frames) | 0 | 0 |
+
+The early flips left come from the depth rule, not the grid:
+
+- In a window, the first frames run on the composed path at depth 2
+  while the window goes to the overlay path ("Two frames planned for one
+  vblank").
+- After 3 heavy GPU frames in a row, each shown a vblank late, DXGI_FLIP
+  takes depth 2 (three flips in a row at a new depth), and the next 3
+  frames show a vblank early until three votes bring it back. It came
+  once in 30 heavy episodes per run here. The GPU, not the swap path,
+  made those 3 frames late. Fixed in v0.4.4: misses no longer change
+  the depth (see [Depth from the path](#depth-from-the-path-v044)).
+
+### AUTO, decided (v0.4.4)
+
+Decided 2026-10-09 (user): AUTO picks COMPOSITION where it opens and the
+presentation factory reports independent flip for the window's output,
+else DXGI_FLIP, unless the 10-minute runs showed COMPOSITION worse on
+prediction p99, drops, early or late flips, or tiers. They did not.
+
+10 minutes each (36000 frames), idle, no holds, kept on top, AC, v0.4.4's
+depth policy, the console display on and the session unlocked from
+start to end, one after the other in one quiet session, 2026-10-09.
+Prediction is the reported onset minus the predicted one, for frames
+not late and not dropped. "Present call" is the `yscr.present` zone
+(flush, patch and the present).
+
+| Run | Backend | Paths | Prediction p50 / p99 / max, us | Dropped | Early | Late targets | Tier 1 / 2 / 3 | Present call mean / p99, us | Path changes after the first report | Depth changes after open |
+|---|---|---|---|---|---|---|---|---|---|---|
+| fullscreen | DXGI_FLIP | overlay 36000 | 0.62 / 1.88 / 14.05 | 0 | 0 | 0 | 36000 / 0 / 0 | 222 / 603 | 0 | 0 |
+| fullscreen | COMPOSITION | independent 35998, none 2 | 0.62 / 1.92 / 4849.6 | 0 | 0 | 0 | 35998 / 0 / 2 | 463 / 1286 | 0 | 0 |
+| window 800 x 600 | DXGI_FLIP | overlay 35991, composed 6, none 3 | 0.67 / 1.78 / 16666.8 | 1 | 4 | 0 | 35991 / 6 / 3 | 218 / 587 | 1 | 1 |
+| window 800 x 600 | COMPOSITION | independent 35998, overlay 2 | 0.68 / 1.82 / 23.25 | 1 | 0 | 0 | 35998 / 0 / 2 | 464 / 1195 | 3 | 4 |
+
+- Every record worse than tier 1, every early flip and every path change
+  is in the first 10 frames of its run. COMPOSITION's 2 fullscreen
+  records with no statistic are frames 0 and 1, while another window
+  covered ours (the example takes the foreground after open); DXGI_FLIP
+  gets statistics for a covered window, COMPOSITION does not. COMPOSITION's
+  4.85 ms maximum is one frame of 35998.
+- The p99 differs by 0.04 us, as much as two runs of one backend did
+  before ([The fullscreen regression](#the-fullscreen-regression)).
+- The present call costs COMPOSITION twice as much: 463 against 222 us
+  mean, 1.2 to 1.3 ms against 0.6 ms at p99.
+
+The DXGI_FLIP window run predates the early-flip rule of
+[Depth from the path](#depth-from-the-path-v044); its 4 early flips are
+the window's move to the overlay at the start.
+
+Caveats that remain:
+
+- The present call costs about twice as much (above), from the frame's
+  16.7 ms.
+- Windows 11 x64 only; elsewhere AUTO is DXGI_FLIP, and the describe
+  line says why.
+- On COMPOSITION a composed or overlay frame's onset is DWM's plan (tier
+  3), where DXGI_FLIP's composed onset is tier 2. AUTO takes COMPOSITION
+  only where independent flip is supported, but the path can still move.
+- A covered window gets no statistic on COMPOSITION (ESTIMATED,
+  OCCLUDED, tier 3).
+- One machine: the Iris Xe at 60 Hz. No photodiode run: every onset here
+  is the OS's time, not light.
+
+### Display off and a locked session
+
+Not measured: what DXGI_FLIP and COMPOSITION do while the display is off
+or the session is locked (presents shown or not, vblank times simulated,
+OCCLUDED). A rig can blank its display in the middle of a session.
+Proposal: the header registers for `GUID_CONSOLE_DISPLAY_STATE` and
+session lock notices on its window, writes a ring record at each change,
+and gives the flips planned meanwhile a flag and tier 3.
+Decided 2026-10-09 (user): not built. A rig runs a session on an awake
+machine; the case matters only to unattended measurement runs like the
+ones above, which log the display and lock state themselves.
+
+### Hand test: display off and lock
+
+1. Set the display to turn off after 1 minute on AC.
+2. Run `screen_flipstats --backend dxgi --frames 7200 --hold --csv a.csv`
+   and do not touch the machine; the display turns off after 1 minute.
+3. Run it again and lock the session (Windows+L) after 30 s, unlock after
+   30 s.
+4. Record the paths, flags, tiers and drops of the records over the off
+   or locked interval, against the time of the change.
+
+## Depth from the path (v0.4.4)
+
+Decided by the user on 2026-10-09: a depth that rises after misses adds a
+vblank of latency from input to photon in the middle of a task, and the
+task did not ask for it. The depth now comes from the path, never from
+misses. All runs below: this laptop, AC, fullscreen unless stated, the
+console display on and the session unlocked from start to end of every
+run (logged with `GUID_CONSOLE_DISPLAY_STATE` and the WTS session state),
+2026-10-09.
+
+### The policy
+
+| Case | Depth |
+|---|---|
+| open, DXGI_FLIP | measured: black frames until three flips in a row agree (as before), but never above the smallest depth that 2 of them showed on the last path |
+| open, COMPOSITION | the path's (v0.4.3: 1 on every path) |
+| a path change | the new path's: the depth measured at open on that path, else independent flip 1, DXGI overlay 1, COMPOSITION overlay 2, composed 2; an unknown path keeps it |
+| a miss | none: a drop, flagged and counted, its tier as before |
+| DXGI_FLIP: a flip not held, on the grid, shown early | the depth it showed (lower only); the path keeps at least its table depth |
+| `desc.depth = N` | N from open on: no measurement, no path following |
+| `desc.depth_learn` | v0.4.3's rule (opt-in, not with a pin): see below |
+
+Each change writes a `YSCR_EV_DEPTH` ring record (old, new, reason: open,
+path, pin, learner or early; the path; the frame whose record brought it), and
+the describe line reads `depth=2(path,3 changes)`.
+
+**A pin on a path that needs more.** Every flip shows a vblank after the
+one planned: each record has `dropped` 1 and `f.onset` is a period early,
+so the timeline is a frame off until the pin changes. On DXGI_FLIP the
+loop still runs at one frame per vblank; on COMPOSITION, where the slot
+frees at the flip, it can run at half rate (the core test's case 1). **A
+pin above the path's depth** adds that latency and shows every frame on
+time: on DXGI_FLIP the hold wakes at the path's depth, not the pin, and a
+trigger is armed by the path's depth.
+
+**COMPOSITION.** v0.4.3 opened at 1 on every path and let three misses
+raise it; once at 2 on the independent-flip path, the loop ran at half
+rate until slack evidence lowered it (see
+[Depth on a backend that holds frames](#depth-on-a-backend-that-holds-frames)).
+Now no miss changes the depth and the independent-flip path is always 1,
+so that fault cannot come back. On the composed path (2) the loop runs at
+full rate, because DWM's statistic for a composed frame arrives about
+15 ms before its vblank (see
+[Is the onset an observation?](#is-the-onset-an-observation-condition-c)).
+The overlay entry (2) rests on 2 of 2 COMPOSITION overlay frames that
+showed on the vblank after next at depth 1 (see [Latency](#latency)). On
+a backend that holds frames a depth too large costs latency only and one
+too small drops every frame, so 2 is the safe side. In the windowed
+COMPOSITION runs below, the path went to overlay for 2 or 3 frames at the
+start and came back; the depth followed it both ways, with no drop.
+
+### Early flips lower the depth (DXGI_FLIP)
+
+The video worker ran this policy in 39 runs (docs/video.md, "Rerun: the
+early flips"), scanout as reference. In a window in the foreground the
+system moved the window from the composed path to an overlay plane 1.7
+to 1.9 s after open; presents then showed at depth 1, but
+`GetFrameStatisticsMedia` reported "composed" for 5 more flips, so the
+path rule waited for the report: 6 early flips per run (v0.4.3's vote: 3).
+In 3 of 9 windowed runs open() learned 3 on the composed path, and
+nothing lowered it until the path changed: 108 to 116 early flips.
+
+DXGI shows a present at the first vblank it can, so a flip that was not
+held and showed early proves the depth too high. Such a flip, at an OS
+time on the grid (an off-grid DXGI time can map to the vblank before),
+now lowers the depth to what it showed. It only lowers, so it adds no
+latency. The path's remembered depth keeps at least its table depth,
+because the report may lag the flip. open() takes the smallest depth that
+2 of its flips showed on the last path: a flip that waited behind the one
+before it shows "this depth or less", and three such in a row gave 3.
+
+Windowed DXGI_FLIP after the change, kept on top, scanout as reference:
+
+| Run | Runs | Open's depth | Flips flagged EARLY per run | Where |
+|---|---|---|---|---|
+| no holds, 600 frames | 6 | 2 in 6 | 1, 1, 1, 1, 0, 1 | frames 6 to 8, the first after the move; then the depth fell |
+| holds, 1200 frames | 3 | 2 in 3 | 2, 2, 0 | frames 3 and 4 (held flips do not lower it) |
+| holds, load, overruns, heavy frames, 3600 frames | 1 | 2 | 3 | frames 3 to 5 |
+
+open() did not learn 3 in these 10 runs, so the open rule is shown only
+on the virtual clock (`test_depth_early`, case 2); case 1 plays an open
+at 3 on a display at 2: 1 or 2 early flips, not one per frame. The
+scanout analysis also marks frames 0 to 6 early without a flag while the
+window is still composed; it assumes a frame shows on the first vblank
+after its present, which a composed frame does not.
+
+### The learner: kept, opt-in
+
+The user's rule was to keep the miss-driven rule only if a measurement
+showed a case where it beats the default. `screen_flipstats --gpu N`
+gives every frame N full-screen clears (steady GPU work); 900 and 1100
+clears put the work near one period here. 600 frames per run, 3 runs per
+cell (1 for 700), interleaved:
+
+| Backend | GPU work | Default: dropped | Learner: dropped (+ early) | `desc.depth = 2`: dropped |
+|---|---|---|---|---|
+| DXGI_FLIP | 700 clears | 4 | 5 (+5) | 2 |
+| DXGI_FLIP | 900 clears | 11, 46, 3 | 2 (+4), 4 (+3), 1 (+6) | 2, 0, 5 |
+| DXGI_FLIP | 1100 clears | 5, 8, 4 (+4) | 3 (+4), 4 (+4), 2 (+4) | 1, 2, 2 |
+| COMPOSITION | 700 clears | 3 | 3 | 0 |
+| COMPOSITION | 900 clears | 6, 57, 49 | 3, 2, 3 | 46, 0, 0 |
+| COMPOSITION | 1100 clears | 50, 28, 5 | 3, 6, 3 | 0, 36, 2 |
+
+So it does beat the default there: with GPU work close to a period, the
+default dropped up to 1 frame in 10 and the learner, at depth 2, 1 in 100
+or fewer. A pin of 2 did as well in 12 of 14 runs, but dropped 36 and 46
+in two COMPOSITION runs, where the learner (at 2) dropped at most 6. On
+DXGI_FLIP the learner's early flips are at the start: after the window's
+path change, it adopted 3 or 4 from one flip.
+
+Where it costs: short runs of misses. `--miss 120` (3 frames of about
+25 ms of GPU work every 120), 1200 frames, and the v0.4.3 stress run
+(holds, 4 load threads, a 25 ms overrun in 1 of 30, `--miss 120`), 3600
+frames:
+
+| Run | Backend | Rule | Heavy frames dropped | Other frames dropped | Early | Depth changes | Other frames 2 or more vblanks after the one before |
+|---|---|---|---|---|---|---|---|
+| misses | DXGI_FLIP | default | 26 of 30 | 0 | 0 | 0 | 0 |
+| misses | DXGI_FLIP | learner | 30 of 30 | 0 | 30 | 20 | 10 |
+| misses | COMPOSITION | default | 28 of 30 | 0 | 0 | 0 | 0 |
+| misses | COMPOSITION | learner | 30 of 30 | 0 | 0 | 19 | 29 |
+| stress | DXGI_FLIP | default | 42 of 90 | 0 | 0 | 0 | (holds) |
+| stress | DXGI_FLIP | learner | 42 of 90 | 0 | 4 | 3 | (holds) |
+| stress | COMPOSITION | default | 16 of 90 | 0 | 0 | 0 | (holds) |
+| stress | COMPOSITION | learner | 17 of 90 | 0 | 0 | 0 | (holds) |
+
+The learner is kept as `desc.depth_learn`, off by default: it is the
+choice for a loop whose GPU work per frame is close to a period and that
+accepts a depth (and latency) that moves; a loop that knows it needs 2
+can pin it, with the two COMPOSITION outliers above as the caveat.
+
+### The stress runs again
+
+v0.4.3's runs (see [Held frames a vblank early](#held-frames-a-vblank-early-v043))
+on v0.4.4 before the early-flip rule above (the windowed DXGI_FLIP
+runs after it are in that section), the same probe build with the
+scanout source. "Early" is by
+the scanout's own vblanks (D3DKMTGetScanLine) on DXGI_FLIP and by the
+records on COMPOSITION, whose present waits for its target. "Window" is
+800 x 600 kept on top. Before: v0.4.3's table; its depth changes from
+the probe's logs.
+
+| Run | Backend | Frames | On the vblank asked, before / after | Early, before / after | Dropped, before / after | Off-grid (tier 2), before / after | Depth changes after open, before / after |
+|---|---|---|---|---|---|---|---|
+| holds, idle | DXGI_FLIP | 1200 | 1200 / 1200 | 0 / 0 | 0 / 0 | 163 / 171 | 0 / 0 |
+| holds, window | DXGI_FLIP | 1200 | 1196 / 1195 | 5 / 4 | 0 / 0 | 191 / 265 | 1 / 1 |
+| holds, load, overruns, heavy frames | DXGI_FLIP | 3600 | 3534 / 3537 | 3 / 1 | 44 / 43 | 105 / 186 | 2 / 1 |
+| same, window | DXGI_FLIP | 3600 | 3533 / 3534 | 5 / 4 | 42 / 42 | 134 / 120 | 3 / 1 |
+| holds, idle | COMPOSITION | 1200 | 1200 / 1198 of 1198 | 0 / 0 | 0 / 0 | 0 / 65 | 0 / 0 |
+| holds, load, overruns, heavy frames | COMPOSITION | 3600 | 3565 / 3563 | 0 / 0 | 17 / 17 | 0 / 64 | 0 / 0 |
+| holds, window | COMPOSITION | 1200 | not run / 1199 | - / 0 | - / 1 | - / 16 | - / 4 |
+| holds, load, overruns, heavy frames, window | COMPOSITION | 3600 | not run / 3565 | - / 0 | - / 16 | - / 0 | - / 4 |
+
+- Every early flip after v0.4.4 is in the first 6 frames, while the
+  window moves from the composed path to the overlay (open's path change);
+  the v0.4.3 runs had 3 more after the heavy frames (frames 2520 to 2522),
+  from the depth rule. One record in the windowed DXGI stress run was
+  flagged EARLY on an off-grid DXGI time where the scanout shows it on
+  time.
+- Every depth change after open is a path change at the start (DXGI:
+  composed to overlay; COMPOSITION in a window: independent flip to
+  overlay and back, twice).
+- The off-grid records on COMPOSITION fullscreen are frames 3 to 66. The
+  window was covered at open in these runs (the program takes the
+  foreground after open), the first 2 statistics did not come, and the
+  displayed times that followed were 4.7 ms after the scanout's vblank,
+  coming back to it over about 3 s. The header flagged them; see
+  [No OS time at open](#no-os-time-at-open-v044).
+
+### No OS time at open (v0.4.4)
+
+In the first learner batch, run right after the session was unlocked,
+every COMPOSITION run got no statistic during open's black frames (0.7
+s). open() then guessed the grid, and v0.4.3 kept the guess: every record
+was tier 3 and the sync guard fired on flips that were on time (same
+refresh 334 to 968 times). The same binary 10 minutes later, and v0.4.3
+beside it, gave tier 1 and no evidence. Now the first OS time replaces the
+guess, numbered as the guessed vblank nearest it, so frames planned on
+the guess keep their numbers, and that one flip gives the guard no
+evidence. `test_late_statistics` plays it on the virtual clock on both
+kinds of backend; mutants `dp-15` to `dp-17`.
+
 ## Not measured
 
 - Light. No photodiode was attached. `tests/loopback/screen_loopback.c`
@@ -1574,15 +2122,25 @@ all caught; the whole list, 19 of 19.
 - `desc.d3d11_video` with a decoder on the device (ysp/video.h measures
   it).
 - The icons at a display scale above 100%.
-- Early flips in a composed window (open finding, from the ysp_video
-  worker, 2026-10-06). In every real-device run of ysp/video.h (DXGI_FLIP
-  in a composed window, Iris Xe, AC), about 1.3 s after the start, three
-  flips were shown one vblank before ysp_screen's predicted onset, then
-  one flip a vblank late. In one run the compositor showed 3.6 s of flips
-  1 to 2 vblanks late. ysp_video's records report them as they happened.
-  This resembles the early flips of windowed DXGI_FLIP runs before the
-  flip_at fix of 2026-10-05. The composed path is tier 2 at best. To
-  investigate in a later screen round.
+- Early flips when a window leaves the composed path (open finding, from
+  the ysp_video worker, 2026-10-06; cause found 2026-10-09, not fixed).
+  ysp/video.h's runs, done again on v0.4.3 with the scanout as reference
+  (docs/video.md, "Rerun: the early flips"): not the grid. At 1.7 to 1.9 s
+  the system moves a foreground window from the composed path to an
+  overlay plane; presents then show at depth 1, but
+  `GetFrameStatisticsMedia` reports the composed path for 5 more flips,
+  so no path change opens the one-flip window of DEPTH. v0.4.3's learner
+  needs 3 flips in a row: 3 early flips in each of 4 runs. With the
+  in-progress rule where the path sets the depth: 6 early flips (6 runs
+  of 9), and in 3 runs of 9 open() learned depth 3 on the composed path,
+  which nothing lowers before the path changes, so about 105 composed
+  flips were early. Proposal: on DXGI_FLIP a flip not held that shows
+  before its planned vblank proves a smaller depth (DXGI shows a present
+  on the first vblank it can), so lower the depth on that one flip.
+  The late flips of 2026-10-06 did not come again in 39 runs. Also seen:
+  a window in the background got no statistic for 93% of its flips on
+  DXGI_FLIP, and none on COMPOSITION, where it ran one frame each 4
+  vblanks.
 
 ## Left out on purpose
 

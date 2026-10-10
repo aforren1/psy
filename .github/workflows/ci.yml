@@ -27,6 +27,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # liblsl for ysp/net.h's tests, Windows and Linux (no official build
+      # the standard library can unpack for macOS): tools/vendor_lsl.py
+      # fetches v1.17.7 and checks the archive and each file by SHA-256.
+      # Before Configure, so CMake adds compile_lsl_abi to ctest and points
+      # the loopback test at it. The header itself never links it.
+      - name: liblsl cache
+        if: matrix.os != 'macos-latest'
+        uses: actions/cache@v6
+        with:
+          path: ~/ysp-lsl-archives
+          key: liblsl-${{ runner.os }}-${{ hashFiles('tools/vendor_lsl.py') }}
+
+      - name: liblsl (fetched, verified)
+        if: matrix.os != 'macos-latest'
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" tools/vendor_lsl.py --write --cache ~/ysp-lsl-archives
+
       # On Linux only, also fetch Tracy and build ysp/rt.h's YRT_TRACY
       # compile check against the real TracyC.h.
       - name: Configure
@@ -59,6 +78,22 @@ jobs:
         run: |
           cmake -B build-loopback -DCMAKE_BUILD_TYPE=Release -DYSP_BUILD_LOOPBACK=ON -DYSP_FETCH_MINIAUDIO=ON
           cmake --build build-loopback
+
+      # The one loopback that needs no hardware: ysp/net.h against the fetched
+      # liblsl, an outlet and an inlet in one process and in two (markers,
+      # a 10 kHz stream, a stream that goes and comes back). About 30 s,
+      # plus a configure and one target on Windows.
+      - name: LSL loopback
+        if: matrix.os != 'macos-latest'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            cmake -B build-lsl -DYSP_BUILD_LOOPBACK=ON -DYSP_BUILD_EXAMPLES=OFF -DYSP_BUILD_TESTS=OFF
+            cmake --build build-lsl --config Release --target net_loopback
+            build-lsl/Release/net_loopback.exe --two --quick --seconds 3
+          else
+            build-loopback/net_loopback --two --quick --seconds 3
+          fi
 
       # No hardware on CI. Each example must fail with its documented exit
       # code, not crash: a SIGSEGV or 0xC0000005 is a different number.
@@ -123,6 +158,9 @@ jobs:
           # The audio example on miniaudio's null device: no sound hardware.
           expect 0 "$bin/audio_tone" --null
           expect 2 "$bin/audio_tone" --bogus
+          # PTB's sound schedule demos on the null device; 1 if a record is off its plan (about 9 s).
+          expect 0 "$bin/audio_schedule" --null
+          expect 2 "$bin/audio_schedule" --db -10
           # The rig profile (ysp/rigfile.h) in a folder of the runner's, never
           # the user's: a simulated output latency stored into it, then
           # the CLI on it; a second --new must not replace it.
@@ -134,6 +172,13 @@ jobs:
           expect 1 "$bin/rigfile_profile" --dir "$rig" --rig second --new again
           expect 0 "$bin/rigfile_profile" --dir "$rig" --list
           expect 2 "$bin/rigfile_profile" --bogus
+          expect 0 "$bin/rigfile_profile" --dir "$rig" --bind ref lsl lsl:Data::LabStreamer:
+          expect 2 "$bin/rigfile_profile" --dir "$rig" --bind ref lsl serial:0403:6001::
+          # ysp/net.h loads liblsl at run time; the fetched copy is not on the
+          # loader's path, so each program must say so and exit with its
+          # code, not crash.
+          expect 2 "$bin/net_marker_send"
+          expect 2 "$bin/net_stream_view" --list
 
   # --------------------------------------------------------------------- #
   # Extra Linux toolchains and flag sets, one matrix entry each:           #
@@ -735,7 +780,7 @@ jobs:
       # out of this list is compiled nowhere on CI. ctest below runs every
       # test that matches its pattern, built or not.
       - name: Build
-        run: cmake --build build --config Release --target compile_screen_c compile_screen_cxx compile_screen_com test_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma screen_loopback compile_gfx_c compile_gfx_cxx test_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_rdk gfx_rdk_bench compile_video_c compile_video_cxx compile_video_com test_video video_play video_bench video_check test_response_sdl test_input_sdl trial_keyboard trial_same_different trial_srt trial_adjustment trial_mouse_tracking trial_audio_keyboard trial_stop_signal
+        run: cmake --build build --config Release --target compile_screen_c compile_screen_cxx compile_screen_com test_screen screen_hello screen_flipstats screen_input screen_abort screen_gamma screen_sync_check screen_loopback compile_gfx_c compile_gfx_cxx test_gfx gfx_hello gfx_trial gfx_load gfx_calib gfx_bench gfx_gallery gfx_text gfx_gratings gfx_luminance_bits gfx_clut_sync gfx_filtered_noise gfx_gaze_contingent gfx_rdk gfx_rdk_bench trial_rdk compile_video_c compile_video_cxx compile_video_com test_video video_play video_bench video_check test_response_sdl test_input_sdl trial_keyboard trial_same_different trial_srt trial_adjustment trial_mouse_tracking trial_audio_keyboard trial_stop_signal trial_sternberg trial_2afc_adaptive trial_two_keyboards audio_av_sync
 
       # ysp/gfx.h's pixel checks must run where software GL exists; macOS has
       # no EGL, so its test runs the CPU checks only.
@@ -758,6 +803,10 @@ jobs:
           }
           expect 0 "$bin/screen_hello" --sim
           expect 0 "$bin/screen_flipstats" --sim --frames 120
+          # the sync guard: synced on the simulated display; fired (exit 3)
+          # on a simulated swap path with vsync forced off
+          expect 0 "$bin/screen_sync_check" --sim
+          expect 3 "$bin/screen_sync_check" --sim-vsync-off
           expect 2 "$bin/screen_hello" --bogus
           expect 2 "$bin/screen_loopback"       # no args: usage
           # ysp/gfx.h on the simulated display: its null backend draws nothing.
@@ -774,6 +823,21 @@ jobs:
           expect 0 "$bin/trial_mouse_tracking" --sim --raw-mice --out "$RUNNER_TEMP/trial_mouse_tracking_raw.csv" --traj "$RUNNER_TEMP/trial_mouse_tracking_raw_trajectory.csv"
           expect 0 "$bin/trial_audio_keyboard" --sim --out "$RUNNER_TEMP/trial_audio_keyboard.csv"
           expect 0 "$bin/trial_stop_signal" --sim --out "$RUNNER_TEMP/trial_stop_signal.csv"
+          # PTB's KbQueue per keyboard: two players on synthetic keyboards; 1 if a race comes out wrong (about 20 s).
+          expect 0 "$bin/trial_two_keyboards" --sim --out "$RUNNER_TEMP/trial_two_keyboards.csv"
+          expect 2 "$bin/trial_two_keyboards" --sim --one-keyboard
+          # PTB's PsychPortAudioTimingTest: flash and click records, synthetic board edges; 1 if a trial is off (about 12 s).
+          expect 0 "$bin/audio_av_sync" --sim --csv "$RUNNER_TEMP/audio_av_sync.csv"
+          expect 2 "$bin/audio_av_sync" --sim --board serial:16C0:0483::
+          # PsychoPy's staircase demos: a staircase and QUEST+ against a simulated observer; 1 if a row
+          # or an estimate is off (about 35 s).
+          expect 0 "$bin/trial_2afc_adaptive" --sim --out "$RUNNER_TEMP/trial_2afc_adaptive.csv"
+          expect 2 "$bin/trial_2afc_adaptive" --method bogus
+          # PsychoPy's dots.py as a trial; 1 if a row is off or a replay from the steps file differs (about 15 s).
+          expect 0 "$bin/trial_rdk" --sim --out "$RUNNER_TEMP/trial_rdk.csv" --steps "$RUNNER_TEMP/trial_rdk_steps.csv"
+          # PsychoPy's Sternberg demo: digits from a font or the bitmap font, SOAs from flip records (about 27 s).
+          expect 0 "$bin/trial_sternberg" --sim --out "$RUNNER_TEMP/trial_sternberg.csv"
+          expect 2 "$bin/trial_sternberg" --bogus
           expect 2 "$bin/trial_srt" --blocks SX
           expect 0 "$bin/gfx_load" --sim --gabors 10 --dots 100 --seconds 1
           expect 0 "$bin/gfx_calib"                 # no args: the synthetic display
@@ -789,6 +853,14 @@ jobs:
           expect 0 "$bin/gfx_rdk" --sim
           expect 2 "$bin/gfx_rdk" --bogus
           expect 2 "$bin/gfx_rdk_bench" --device bogus
+          # USER shaders on timeline tracks; 1 if a draw is refused or the counterphase track is off.
+          expect 0 "$bin/gfx_gratings" --sim
+          expect 2 "$bin/gfx_gratings" --tf 0
+          expect 0 "$bin/gfx_luminance_bits" --sim   # the output stage modeled: 8-bit, two dithers, PseudoGray
+          expect 0 "$bin/gfx_clut_sync" --sim        # set_lut between frames only; flip records
+          expect 0 "$bin/gfx_filtered_noise" --sim   # FFT round trip, band power, cost
+          expect 0 "$bin/gfx_gaze_contingent" --sim  # synthetic gaze: latency and placement
+          expect 2 "$bin/gfx_clut_sync" --os-ramp    # needs --fullscreen
           # ysp/video.h: a generated frame sequence, plain, QOI and I420.
           expect 0 "$bin/video_play" --sim
           expect 0 "$bin/video_play" --sim --qoi --frames 20
@@ -806,12 +878,15 @@ jobs:
         shell: bash
         run: |
           set -eu
-          cmake --build build --config Release --target test_layout gfx_layout
+          cmake --build build --config Release --target test_layout gfx_layout trial_stroop
           ctest --test-dir build -C Release -R layout --output-on-failure
           if [ "$RUNNER_OS" = Windows ]; then bin=build/pack/Release; else bin=build/pack; fi
           "$bin/gfx_layout" --sim
           "$bin/gfx_layout" --sim --fonts no-such-dir
           if "$bin/gfx_layout" --page 9; then echo "::error::gfx_layout --page 9 exited 0"; exit 1; fi
+          # PsychoPy's Stroop demos with a synthetic participant (about 30 s);
+          # without a font (Linux runners) the trials run with no text drawn.
+          "$bin/trial_stroop" --sim --out "$RUNNER_TEMP/trial_stroop.csv"
 
       # The pack tool (docs/pack.md): its test builds a pack of every kind,
       # verifies, rebuilds and appends it, and compares every entry with
@@ -822,12 +897,16 @@ jobs:
         shell: bash
         run: |
           set -eu
-          cmake --build build --config Release --target test_pack_tool ypak
+          cmake --build build --config Release --target test_pack_tool ypak trial_images
           ctest --test-dir build -C Release -R pack_tool --output-on-failure
           if [ "$RUNNER_OS" = Windows ]; then bin=build/pack/Release; else bin=build/pack; fi
           "$bin/ypak" verify build/pack/pack_tool_work/corpus.ysppak
           "$bin/ypak" list build/pack/pack_tool_work/corpus.ysppak > /dev/null
           if "$bin/ypak" bogus x; then echo "::error::ypak bogus exited 0"; exit 1; fi
+          # trial_images (rig_spec 15.5): the pack path end to end, its pack
+          # built from PNGs made in code, on the simulated display.
+          "$bin/ypak" verify build/pack/trial_images.ysppak
+          "$bin/trial_images" --sim --out "$RUNNER_TEMP/trial_images.csv"
 
       # The runner's MinGW-w64 gcc, warnings as errors, on the same sources.
       - name: MinGW compile checks (Windows)

@@ -3,7 +3,9 @@
  * is found; gfx.cpp builds the same source as C++17. It runs three
  * frames on the simulated display, where ysp/gfx.h opens its null backend,
  * so it passes on a machine with no display and no GPU. The frames hold a
- * group member and a target pass, so v0.2's calls link and run too. */
+ * group member and a target pass, so v0.2's calls link and run too, and
+ * a user shader that samples the target (v0.10.4), refused inside its pass,
+ * and an sRGB-coded gray texture as a pack stores one (v0.10.5). */
 #define YSP_GFX_IMPLEMENTATION
 #include "ysp/gfx.h"
 
@@ -19,6 +21,11 @@ int main(void) {
     ygfx_group grp;
     ygfx_target_desc td;
     ygfx_tex t;
+    ygfx_pipeline_desc pd;
+    ygfx_user_desc ud;
+    ygfx_stim us;
+    ygfx_texture_desc xd;
+    ygfx_tex gray;
     static const float zero[4] = { 0, 0, 0, 0 };
     static const uint8_t mask[4] = { 0, 255, 255, 0 };
     float sdf[16];
@@ -30,6 +37,9 @@ int main(void) {
     memset(&gab, 0, sizeof gab);
     memset(&grd, 0, sizeof grd);
     memset(&td, 0, sizeof td);
+    memset(&pd, 0, sizeof pd);
+    memset(&ud, 0, sizeof ud);
+    memset(&xd, 0, sizeof xd);
     d.backend = YSCR_BACKEND_SIM;
     d.sim_period_ns = 2000000;
     if (!yscr_open(&s, &d)) return 1;
@@ -44,12 +54,26 @@ int main(void) {
     td.w = 64; td.h = 64;
     t = ygfx_target(&g, &td);
     if (t.id == 0) return 9;
+    pd.body = "float ysp_main(vec2 p) { return texelFetch(ysp_tex0, ivec2(p + ysp_size.xy), 0).r; }\n";
+    ud.pipe = ygfx_pipeline(&g, &pd);
+    ud.w = ud.h = 64;
+    ud.tex = t;
+    us = ygfx_user(&ud);
+    if (ud.pipe.id == 0 || us.tex.id != t.id) return 13;
+    xd.w = 2; xd.h = 2; xd.format = YGFX_R8; xd.data = mask;
+    xd.enc.matrix = YGFX_MATRIX_RGB; xd.enc.range = YGFX_RANGE_FULL; xd.enc.transfer = YGFX_TRC_SRGB;
+    xd.enc.primaries = YGFX_PRIM_DEVICE;
+    gray = ygfx_texture(&g, &xd);
+    if (gray.id == 0) return 16;
+    ygfx_texture_free(&g, gray);
     for (i = 0; i < 3; i++) {
         if (yscr_begin(&s, &f) != YSCR_OK) return 3;
         if (ygfx_begin(&g, &f) != YGFX_OK) return 4;
         if (ygfx_begin_target(&g, t, zero) != YGFX_OK) return 10;
         if (ygfx_draw(&g, &st) != YGFX_OK) return 5;
+        if (ygfx_draw(&g, &us) != YGFX_ERR_ORDER) return 14;
         if (ygfx_end_target(&g) != YGFX_OK) return 11;
+        if (ygfx_draw(&g, &us) != YGFX_OK) return 15;
         if (ygfx_draw(&g, &st) != YGFX_OK) return 5;
         if (ygfx_end(&g) != YGFX_OK) return 6;
         if (yscr_flip(&s) != YSCR_OK) return 7;

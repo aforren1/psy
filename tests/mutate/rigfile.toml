@@ -41,8 +41,8 @@ id = "rig-04"
 name = "any family"
 test = "rig"
 why = "An unknown family fails at the session's start instead of at load."
-find = '''    if (!ro->family_id) return yrig__bad(r, yjs_get(o, "family"), f, "\"%s\" is not a ysp/box.h family", ro->family);'''
-replace = '''    if (0) return yrig__bad(r, yjs_get(o, "family"), f, "\"%s\" is not a ysp/box.h family", ro->family);'''
+find = '''    if (!ro->family_id) return yrig__bad(r, yjs_get(o, "family"), f, "\"%s\" is not a ysp/box.h family or lsl", ro->family);'''
+replace = '''    if (0) return yrig__bad(r, yjs_get(o, "family"), f, "\"%s\" is not a ysp/box.h family or lsl", ro->family);'''
 
 [[mutant]]
 id = "rig-05"
@@ -115,16 +115,16 @@ id = "rig-13"
 name = "tier 1 without the check"
 test = "rig"
 why = "Tier 1 rests on a loopback; an unchecked file is no loopback."
-find = '''    if (r && r->bounds.set && r->bounds.check == YRIG_CHECK_OK && yrig__family_id(r->family) == dev->d.family &&'''
-replace = '''    if (r && r->bounds.set && yrig__family_id(r->family) == dev->d.family &&'''
+find = '''    if (r && r->bounds.set && r->bounds.check == YRIG_CHECK_OK && clock && yrig__family_id(r->family) == fam) {'''
+replace = '''    if (r && r->bounds.set && clock && yrig__family_id(r->family) == fam) {'''
 
 [[mutant]]
 id = "rig-14"
 name = "tier 1 for an output"
 test = "rig"
 why = "Tier 1 is a device clock mapped by a checked fit; a trigger box has no clock."
-find = '''        (ybox_caps(dev->d.family) & YBOX_CAP_IN)) {'''
-replace = '''        1) {'''
+find = '''    bool clock = fam == YRIG_FAMILY_LSL || (fam >= 1 && fam <= YBOX_FAMILY_LAST && (ybox_caps(fam) & YBOX_CAP_IN));'''
+replace = '''    bool clock = fam == YRIG_FAMILY_LSL || (fam >= 1 && fam <= YBOX_FAMILY_LAST);'''
 
 [[mutant]]
 id = "rig-15"
@@ -207,3 +207,39 @@ test = "rig"
 why = "Only an output latency file has these fields with these meanings."
 find = '''    if (!(have & 1)) return yrig__err(err, cap, YRIG_ERR_FORMAT, "not an output latency file (no format line)");'''
 replace = '''    have |= 1;'''
+
+# v0.2.0: lsl roles.
+
+[[mutant]]
+id = "rig-25"
+name = "any key for an lsl role"
+test = "rig"
+why = "A serial key on an lsl role would reach ysp/net.h as a key it cannot resolve: a failure at the session, not at load."
+find = '''    if (ro->family_id == YRIG_FAMILY_LSL && (strncmp(ro->key, "lsl:", 4) != 0 || strchr(ro->key, '\'')))'''
+replace = '''    if (ro->family_id == YRIG_FAMILY_LSL && strchr(ro->key, '\''))'''
+
+[[mutant]]
+id = "rig-26"
+name = "an lsl role given to ysp/device.h"
+test = "rig"
+why = "ysp/device.h would take the stream's key as a serial key and look for a port forever."
+find = '''    if (fam == YRIG_FAMILY_LSL)
+        return yrig__err(err, cap, YRIG_ERR_FORMAT, "roles.%s is an LSL stream: start it with ysp/net.h and the role's key",'''
+replace = '''    if (fam == -1)
+        return yrig__err(err, cap, YRIG_ERR_FORMAT, "roles.%s is an LSL stream: start it with ysp/net.h and the role's key",'''
+
+[[mutant]]
+id = "rig-27"
+name = "no tier 1 for an lsl input"
+test = "rig"
+why = "An LSL stream's sender clock is mapped by ysp/net.h's fits; a loopback that checked it earns tier 1 as any device clock does."
+find = '''    bool clock = fam == YRIG_FAMILY_LSL || (fam >= 1 && fam <= YBOX_FAMILY_LAST && (ybox_caps(fam) & YBOX_CAP_IN));'''
+replace = '''    bool clock = (fam >= 1 && fam <= YBOX_FAMILY_LAST && (ybox_caps(fam) & YBOX_CAP_IN));'''
+
+[[mutant]]
+id = "rig-28"
+name = "serial options on an lsl role"
+test = "rig"
+why = "A baud on a stream means nothing; accepting it hides a role bound to the wrong family."
+find = '''        if (ro->family_id == YRIG_FAMILY_LSL && (yjs_get(opt, "baud") || yjs_get(opt, "ftdi_latency_s") || yjs_get(opt, "latched")))'''
+replace = '''        if (ro->family_id == YRIG_FAMILY_LSL && 0)'''

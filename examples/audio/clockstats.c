@@ -1,16 +1,18 @@
 /* audio_clockstats.c - record ysp/audio.h's device clock and callback on this
  * machine. Plays silence only.
  *
- *     audio_clockstats [--null] [--device NAME] [--exclusive] [--period N]
- *                      [--seconds S] [--load N] [--frame-work MS]
+ *     audio_clockstats [--null] [--device NAME] [--exclusive [--long]]
+ *                      [--period N] [--queue Q] [--seconds S] [--load N] [--frame-work MS]
  *                      [--voices N] [--streams N [--wav PATH] [--ring S]]
- *                      [--stall-at S --stall MS]
+ *                      [--stall-at S --stall MS [--stall-every S]]
  *                      [--allocs | --allocs-control] [--csv PREFIX]
  *
  *   --device NAME  the playback device whose name contains NAME
  *   --exclusive    WASAPI exclusive mode; at most 30 s, because every other
- *                  program is silent meanwhile
+ *                  program is silent meanwhile, unless --long is given
  *   --period N     frames per callback asked for (default: the header's)
+ *   --queue Q      desc.queue: WASAPI shared periods queued ahead of the
+ *                  engine (1 or 2; default 2)
  *   --seconds S    run length (default 10)
  *   --load N       N threads spin at normal priority
  *   --frame-work MS  a 60 Hz frame loop on the main thread (elevated), which
@@ -24,6 +26,7 @@
  *   --ring S       ring of each stream in seconds (default 1)
  *   --stall-at S --stall MS  once, S seconds in, the callback sleeps MS ms:
  *                  an injected underrun
+ *   --stall-every S  and again every S seconds after that
  *   --allocs       count C runtime heap calls after the warm-up (MSVC debug
  *                  build) and miniaudio's own; --allocs-control adds one
  *                  malloc per callback, which the count must see
@@ -31,7 +34,10 @@
  *                  PREFIX_ring.csv (every ring record)
  *
  * Prints the describe line and a summary: callback intervals, underruns,
- * GetPosition and render cost, the fit, the frame thread's cost, and with
+ * the queue (stream frames written minus the device position, at callback
+ * entry),
+ * GetPosition and render cost, the fit, the frame thread's cost, every
+ * XRUN record (a halt found from late reports gives its length), and with
  * streams their gaps and the lowest ring fill the frame loop saw.
  *
  * Exit: 0 when the run completed, 1 when the device did not open, 2 usage.
@@ -88,12 +94,15 @@ static void cs_on_end(void) {
 }
 
 /* --- the injected stall, as an Audio source ---------------------------------- */
-static int64_t g_stall_at = 0, g_stall_ns = 0;
+static int64_t g_stall_at = 0, g_stall_ns = 0, g_stall_every = 0;
+static long g_stalls = 0;
+static int64_t g_stall_req = 0;   /* for the summary */
 static void stall_render(void* ctx, float* out, int32_t frames, const yau_clock* clk) {
     (void)ctx; (void)out; (void)frames; (void)clk;
     if (g_stall_ns && (int64_t)yrt_now_ns() >= g_stall_at) {
         int64_t ns = g_stall_ns;
-        g_stall_ns = 0;
+        if (g_stall_every) g_stall_at += g_stall_every; else g_stall_ns = 0;
+        g_stalls++;
         yrt_sleep_until(yrt_now_ns() + (uint64_t)ns, 0);
     }
 }
@@ -137,6 +146,9 @@ static yrt_event g_ev[1024];
 static int64_t g_tmp[CS_MAX];
 static float g_silence[48000 * 2];
 static int64_t g_frame_cost[60 * 700];
+#define CS_XR 256
+static yrt_event g_xr[CS_XR];
+static int n_xr = 0;
 
 /* --- streams ------------------------------------------------------------------------- */
 #define CS_STREAMS 8
@@ -212,7 +224,7 @@ int main(int argc, char** argv) {
     yau_desc d;
     const char* csv = NULL;
     double seconds = 10, stall_at = 0, frame_work = -1;
-    int i, load = 0, voices = 0, allocs = 0;
+    int i, load = 0, voices = 0, allocs = 0, long_excl = 0;
     long n, nframes = 0;
     char line[512];
     FILE* fr = NULL;
@@ -222,6 +234,8 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "--null")) d.backend = YAU_BACKEND_NULL;
         else if (!strcmp(argv[i], "--device") && i + 1 < argc) d.device = argv[++i];
         else if (!strcmp(argv[i], "--exclusive")) d.exclusive = true;
+        else if (!strcmp(argv[i], "--long")) long_excl = 1;
+        else if (!strcmp(argv[i], "--queue") && i + 1 < argc) d.queue = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--period") && i + 1 < argc) d.period = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atof(argv[++i]);
         else if (!strcmp(argv[i], "--load") && i + 1 < argc) load = atoi(argv[++i]);
@@ -233,13 +247,14 @@ int main(int argc, char** argv) {
 #endif
         else if (!strcmp(argv[i], "--ring") && i + 1 < argc) g_ring_s = atof(argv[++i]);
         else if (!strcmp(argv[i], "--stall-at") && i + 1 < argc) stall_at = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--stall") && i + 1 < argc) g_stall_ns = (int64_t)(atof(argv[++i]) * 1e6);
+        else if (!strcmp(argv[i], "--stall") && i + 1 < argc) g_stall_req = g_stall_ns = (int64_t)(atof(argv[++i]) * 1e6);
+        else if (!strcmp(argv[i], "--stall-every") && i + 1 < argc) g_stall_every = (int64_t)(atof(argv[++i]) * 1e9);
         else if (!strcmp(argv[i], "--allocs")) allocs = 1;
         else if (!strcmp(argv[i], "--allocs-control")) { allocs = 1; g_allocs_control = 1; }
         else if (!strcmp(argv[i], "--csv") && i + 1 < argc) csv = argv[++i];
         else { fprintf(stderr, "audio_clockstats: unknown argument %s (see the top of the file)\n", argv[i]); return 2; }
     }
-    if (d.exclusive && seconds > 30) { fprintf(stderr, "audio_clockstats: --exclusive runs at most 30 s\n"); return 2; }
+    if (d.exclusive && seconds > 30 && !long_excl) { fprintf(stderr, "audio_clockstats: --exclusive runs at most 30 s without --long\n"); return 2; }
     if (seconds <= 0 || seconds > 660 || voices < 0 || voices > 32 || load < 0 || load > 32) { fprintf(stderr, "audio_clockstats: bad --seconds, --voices or --load\n"); return 2; }
 #if YAU_VERSION_MINOR >= 2
     if (g_nstreams < 0 || g_nstreams > CS_STREAMS || g_ring_s < 0.05 || g_ring_s > 4) { fprintf(stderr, "audio_clockstats: --streams 0..%d, --ring 0.05..4\n", CS_STREAMS); return 2; }
@@ -365,6 +380,11 @@ int main(int argc, char** argv) {
             }
             while ((k = yrt_ring_drain(&g_ring, g_ev, 1024)) > 0) {
                 int j;
+                for (j = 0; j < k; j++) {
+                    const yrt_event* e = &g_ev[j];
+                    if (e->source == YRT_SRC_AUDIO && e->kind == YAU_EV_XRUN && n_xr < CS_XR)
+                        g_xr[n_xr++] = *e;
+                }
                 if (!fr) continue;
                 for (j = 0; j < k; j++) {
                     const yrt_event* e = &g_ev[j];
@@ -432,6 +452,15 @@ int main(int argc, char** argv) {
         qsort(g_tmp, (size_t)m, sizeof g_tmp[0], cmp_i64);
         printf("GetPosition us p50 %.2f p99 %.2f max %.2f\n", pct(g_tmp, m, 0.5) / 1e3, pct(g_tmp, m, 0.99) / 1e3, g_tmp[m - 1] / 1e3);
         m = 0;
+        for (i = 0; i < n; i++)
+            if (g_ticks[i].pos > 0) g_tmp[m++] = g_ticks[i].w - g_ticks[i].pos;
+        if (m > 0) {
+            qsort(g_tmp, (size_t)m, sizeof g_tmp[0], cmp_i64);
+            printf("queue (written - position) frames min %lld p1 %lld p50 %lld p99 %lld max %lld\n", (long long)g_tmp[0],
+                   (long long)pct(g_tmp, m, 0.01), (long long)pct(g_tmp, m, 0.5), (long long)pct(g_tmp, m, 0.99),
+                   (long long)g_tmp[m - 1]);
+        }
+        m = 0;
         for (i = 0; i < n; i++) g_tmp[m++] = g_ticks[i].t_end - g_ticks[i].t_hook;
         qsort(g_tmp, (size_t)m, sizeof g_tmp[0], cmp_i64);
         {
@@ -442,6 +471,13 @@ int main(int argc, char** argv) {
                    pct(g_tmp, m, 0.5) / 1e3, pct(g_tmp, m, 0.99) / 1e3, g_tmp[m - 1] / 1e3, voices, g_nstreams);
         }
     }
+    if (g_stalls) printf("stalls injected %ld, %.1f ms each\n", g_stalls, (double)g_stall_req / 1e6);
+    printf("xrun records %d\n", n_xr);
+    for (i = 0; i < n_xr; i++)
+        printf("  xrun %d at %.3f s: frame %lld, gap %lld frames, halt %.3f ms at position %lld\n", i + 1,
+               n > 0 ? (double)((int64_t)g_xr[i].t_ns - g_ticks[0].t_entry) / 1e9 : 0.0,
+               (long long)g_xr[i].u.i64[0], (long long)g_xr[i].u.i64[1],
+               (double)g_xr[i].u.i64[2] / 1e6, (long long)g_xr[i].u.i64[3]);
     if (nframes > 0) {
         double mean = 0;
         for (i = 0; i < nframes; i++) mean += (double)g_frame_cost[i];

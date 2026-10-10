@@ -54,6 +54,10 @@ static int test_bell(int seq);
  * set (no other library), else 0 or 1 as another library left it. */
 static int g_ti = -1;
 #define YSCR__TEXT_INPUT_ACTIVE(s) (g_ti >= 0 ? g_ti : (s)->text_input)
+/* The sync guard's fires, over every case: only the forced-off ones may
+ * fire, so main() checks the total against the fires they expect. */
+static int g_unsynced_fires;
+#define YSCR__ON_UNSYNCED(s) ((void)(s), g_unsynced_fires++)
 
 #define YSP_SCREEN_IMPLEMENTATION
 #include "ysp/screen.h"
@@ -132,6 +136,7 @@ static void fail_i(int line, const char* what, long long got, long long want) {
 typedef struct flight {
     uint64_t id;
     int64_t  count;
+    int64_t  t;                   /* the flip's own time; 0 = its vblank's  */
     uint8_t  path;
     int      used;
 } flight;
@@ -148,6 +153,9 @@ typedef struct script {
                                    * depth switch every flap presents     */
     int      free_at_flip;        /* the slot frees at the flip, as on
                                    * COMPOSITION, not depth - 1 before    */
+    int      path_lag;            /* the new path is reported this many
+                                   * presents after change_id, as DXGI's
+                                   * did 5 flips late in a window        */
     unsigned char drop[MAX_ID];   /* one extra vblank for this present     */
     unsigned char missing[MAX_ID];/* no statistic for this present          */
     unsigned char act[MAX_ID];    /* 1 skipped, 2 canceled, 3 no time with
@@ -156,6 +164,27 @@ typedef struct script {
                                    * the header planned its flip            */
     int64_t  gpu_ns[MAX_ID];      /* GPU work after the present call        */
     int64_t  gpu_done_t[MAX_ID];  /* when that work finished                */
+    int64_t  t_off[MAX_ID];       /* added to the reported time: a panel
+                                   * that stretches frames, or DXGI's
+                                   * off-grid times of held frames         */
+    int64_t  count_off[MAX_ID];   /* taken from the reported count: the
+                                   * vblanks DXGI's count has lost so far  */
+    int64_t  vb_off[MAX_ID];      /* per vblank count, nondecreasing: the
+                                   * vblanks themselves come later, as a
+                                   * panel's stretched refreshes do        */
+    int      vsync_off;           /* a driver that forces vsync off: the
+                                   * slot is free at once and a present
+                                   * flips at once, reported as
+                                   * 1: in the refresh it was presented in,
+                                   *    at that refresh's vblank time;
+                                   * 2: with the next vblank's count and the
+                                   *    flip's own time, which follows the
+                                   *    call by 0 to 3/4 of a period, as
+                                   *    the GPU finishes (torn);
+                                   * 3: at the next vblank, several presents
+                                   *    in one refresh, each reported;
+                                   * 4: as 3, only the newest of a refresh
+                                   *    reported (the others discarded) */
     uint64_t max_id;
     /* codes as a draws_patch presenter got them, per present id */
     uint32_t code_seen[MAX_ID][3];
@@ -166,9 +195,17 @@ typedef struct script {
 
 static int64_t now_ns(void) { return vnow(); }
 
+/* The time of vblank k. */
+static int64_t sc_vt(const script* c, int64_t k) {
+    return c->t0 + k * P_NS + (k <= 0 ? 0 : c->vb_off[k < MAX_ID ? k : MAX_ID - 1]);
+}
+
+/* The last vblank at or before t. */
 static int64_t sc_count(const script* c, int64_t t) {
     int64_t d = t - c->t0;
-    return d >= 0 ? d / P_NS : -((-d + P_NS - 1) / P_NS);
+    int64_t k = d >= 0 ? d / P_NS : -((-d + P_NS - 1) / P_NS);
+    while (k > 0 && sc_vt(c, k) > t) k--;
+    return k;
 }
 
 static int sc_open(void* ctx, const yscr_presenter_open* in, yscr_caps* caps, char* err, size_t cap) {
@@ -207,10 +244,11 @@ static int sc_acquire(void* ctx, int64_t deadline_ns, yscr_vblank* newest) {
     int i;
     int64_t until = 0;
     (void)deadline_ns;
+    if (c->vsync_off) { newest->t_ns = 0; return YSCR_OK; }
     for (i = 0; i < 8; i++) {
         if (!c->fl[i].used) continue;
         {
-            int64_t free_at = c->t0 + (c->fl[i].count - (c->free_at_flip ? 1 : sc_depth(c, c->fl[i].id)) + 1) * P_NS;
+            int64_t free_at = sc_vt(c, c->fl[i].count - (c->free_at_flip ? 1 : sc_depth(c, c->fl[i].id)) + 1);
             if (free_at > until) until = free_at;
         }
     }
@@ -224,6 +262,26 @@ static int sc_present(void* ctx, const yscr_present_req* req) {
     int i, depth = sc_depth(c, req->present_id);
     int64_t shown;
     if (c->preempt_next) { vlose(c->preempt_next); c->preempt_next = 0; }
+    if (c->vsync_off) {
+        int64_t k = sc_count(c, now_ns());
+        shown = c->vsync_off == 1 ? k : k + 1;
+        for (i = 0; i < 8; i++)
+            if (c->vsync_off == 4 && c->fl[i].used && c->fl[i].count == shown && c->fl[i].id < MAX_ID)
+                c->missing[c->fl[i].id] = 1;
+        for (i = 0; i < 8; i++) {
+            if (c->fl[i].used) continue;
+            c->fl[i].used = 1;
+            c->fl[i].id = req->present_id;
+            c->fl[i].count = shown;
+            c->fl[i].t = c->vsync_off == 2
+                ? now_ns() + (int64_t)(((req->present_id * 2654435761u) >> 8) % (uint64_t)(3 * P_NS / 4)) : 0;
+            c->fl[i].path = c->path;
+            break;
+        }
+        c->last_shown = shown;
+        c->presents++;
+        return YSCR_OK;
+    }
     shown = sc_count(c, now_ns()) + depth;
     if (req->present_id < MAX_ID) {
         int64_t done = now_ns() + c->gpu_ns[req->present_id];
@@ -245,11 +303,20 @@ static int sc_present(void* ctx, const yscr_present_req* req) {
         c->fl[i].used = 1;
         c->fl[i].id = req->present_id;
         c->fl[i].count = shown;
+        c->fl[i].t = 0;
         c->fl[i].path = sc_second(c, req->present_id) ? c->path2 : c->path;
+        if (c->path_lag && !c->flap && req->present_id >= c->change_id &&
+            req->present_id < c->change_id + (uint64_t)c->path_lag)
+            c->fl[i].path = c->path;
         break;
     }
     c->presents++;
     return YSCR_OK;
+}
+
+/* When a flight flips: its vblank, or its own time, plus a stretch. */
+static int64_t sc_flip_t(const script* c, const flight* f) {
+    return (f->t ? f->t : sc_vt(c, f->count)) + (f->id < MAX_ID ? c->t_off[f->id] : 0);
 }
 
 static int sc_completions(void* ctx, yscr_vblank* out, int cap) {
@@ -259,13 +326,13 @@ static int sc_completions(void* ctx, yscr_vblank* out, int cap) {
     for (;;) {   /* oldest first */
         int i, best = -1;
         for (i = 0; i < 8; i++)
-            if (c->fl[i].used && c->t0 + c->fl[i].count * P_NS <= now && (best < 0 || c->fl[i].id < c->fl[best].id)) best = i;
+            if (c->fl[i].used && sc_flip_t(c, &c->fl[i]) <= now && (best < 0 || c->fl[i].id < c->fl[best].id)) best = i;
         if (best < 0 || n >= cap) break;
         c->fl[best].used = 0;
         if (c->fl[best].id < MAX_ID && c->missing[c->fl[best].id]) continue;
         out[n].present_id = c->fl[best].id;
-        out[n].t_ns = c->t0 + c->fl[best].count * P_NS;
-        out[n].count = c->fl[best].count;
+        out[n].t_ns = sc_flip_t(c, &c->fl[best]);
+        out[n].count = c->fl[best].count - (c->fl[best].id < MAX_ID ? c->count_off[c->fl[best].id] : 0);
         out[n].path = c->fl[best].path;
         out[n].flags = 0;
         if (c->fl[best].id < MAX_ID) switch (c->act[c->fl[best].id]) {
@@ -317,6 +384,9 @@ static int ring_drain(void) {
     return n < 0 ? 0 : n;
 }
 
+/* desc.depth and desc.depth_learn for the next open_scripted() */
+static int g_pin, g_learn;
+
 static bool open_scripted(yscr_screen* s, script* c, double lead, uint32_t index) {
     yscr_desc d;
     memset(s, 0, sizeof *s);
@@ -327,7 +397,20 @@ static bool open_scripted(yscr_screen* s, script* c, double lead, uint32_t index
     d.ring = &g_ring;
     d.display_index = index;
     d.lead = lead;
+    d.depth = g_pin;
+    d.depth_learn = g_learn != 0;
     return yscr_open(s, &d);
+}
+
+/* The YSCR_EV_DEPTH records in g_ev[0..n): their count, and the last one. */
+static int depth_events(int n, yrt_event* last) {
+    int j, k = 0;
+    for (j = 0; j < n; j++)
+        if (g_ev[j].source == YRT_SRC_SCREEN && g_ev[j].kind == YSCR_EV_DEPTH) {
+            k++;
+            if (last) *last = g_ev[j];
+        }
+    return k;
 }
 
 static void busy_until(int64_t t) {
@@ -447,8 +530,7 @@ static void test_drop_and_late(void) {
     }
 }
 
-/* A path change brings a new depth, adopted at once; a depth change on the
- * same path takes three votes. */
+/* A path change brings the new path's depth, at once (DEPTH). */
 static void test_depth(void) {
     static script c;
     yscr_screen s;
@@ -469,6 +551,11 @@ static void test_depth(void) {
         CHECK_I(yscr_begin(&s, &f), YSCR_OK);
         CHECK_I(yscr_flip(&s), YSCR_OK);
     }
+    {
+        char line[512];
+        CHECK(yscr_describe(&s, line, sizeof line) > 0);
+        CHECK(strstr(line, "depth=2(path,1 changes)") != NULL);
+    }
     yscr_close(&s);
     memset(dropped, 0, sizeof dropped);
     memset(flags, 0, sizeof flags);
@@ -482,6 +569,17 @@ static void test_depth(void) {
         }
     }
     CHECK_I(path_events, 1);
+    {   /* open, then the path: two records, the second from 1 to 2 */
+        yrt_event last;
+        memset(&last, 0, sizeof last);
+        CHECK_I(depth_events(n, &last), 2);
+        CHECK_I(last.u.u16[0], 1);
+        CHECK_I(last.u.u16[1], 2);
+        CHECK_I(last.u.u16[2], YSCR_DEPTH_PATH);
+        CHECK_I(last.u.u16[3], YSCR_PATH_COMPOSED);
+        CHECK_I(last.aux, 3);
+        CHECK(last.u.i64[1] >= 28 && last.u.i64[1] <= 32);   /* the first flip on the new path */
+    }
     if (getenv("YSCR_TEST_TRACE"))
         for (i = 26; i < 42; i++) printf("  depth case: frame %d dropped %u flags 0x%x\n", i, dropped[i], flags[i]);
     /* Frames 30 and 31 were predicted at depth 1 and drop. The change is
@@ -496,16 +594,19 @@ static void test_depth(void) {
 }
 
 /* A backend that shows a frame at its target cannot show a smaller depth
- * by an on-time flip, and the header never tries one (a failed try drops a
- * frame). Case 0: three misses raise the depth, and the slack seen before
- * them lowers it again within a few flips, with no miss (COMPOSITION ran
- * at half rate without this). Case 1: the display really needs 2 from the
- * misses on and frees its slot at the flip; the old evidence may cost one
- * miss, which clears it, and then no more. Case 2: the same, but the slot
- * frees a vblank early, as DXGI composed does. A random wait of up to a
- * quarter period before each flip gives the slack a spread, as a real
- * frame loop has. */
-static void test_native_depth(int case_) {
+ * by an on-time flip. Case 0: three misses. Case 1: the display really
+ * needs 2 from the misses on, on the same path, and frees its slot at the
+ * flip. Case 2: the same, but the slot frees a vblank early, as DXGI
+ * composed does. A random wait of up to a quarter period before each flip
+ * gives the slack a spread, as a real frame loop has.
+ * The default (learn 0): misses are drops and never change the depth, so
+ * case 0 costs nothing after the misses, and in cases 1 and 2 every frame
+ * drops: such a display needs desc.depth = 2.
+ * The learner (learn 1, desc.depth_learn): three misses raise the depth,
+ * and the slack seen before them lowers it again within a few flips, with
+ * no miss (COMPOSITION ran at half rate without this); in cases 1 and 2 the
+ * old evidence may cost one miss, which clears it, and then no more. */
+static void test_native_depth(int case_, int learn) {
     static script c;
     yscr_screen s;
     static yscr_frame f;   /* static: gcc -O3 cannot see begin() fill it */
@@ -529,7 +630,9 @@ static void test_native_depth(int case_) {
         c.free_at_flip = case_ == 1;
     }
     ring_reset();
+    g_learn = learn;
     CHECK(open_scripted(&s, &c, 0, 3));
+    g_learn = 0;
     if (!yscr_is_open(&s)) return;
     for (i = 0; i < N; i++) {
         CHECK_I(yscr_begin(&s, &f), YSCR_OK);
@@ -567,7 +670,15 @@ static void test_native_depth(int case_) {
         if (!(flags[i + 1] & YSCR_FLIP_LATE_TARGET) && onset[i + 1] - onset[i] == want) steady++;
     }
     CHECK(steady >= 30);
-    if (case_ == 0) {
+    if (!learn) {
+        CHECK_I(depth_events(n, NULL), 1);   /* open's */
+        if (case_ == 0) {
+            CHECK_I(drops_after, 0);
+            CHECK_I(half, 0);
+        } else {
+            CHECK(drops_end >= 140);   /* misses stay misses */
+        }
+    } else if (case_ == 0) {
         CHECK_I(drops_after, 0);
         /* back to one frame per vblank within a few flips: 7 or 14 here, as
          * the streak of 4 can break on a slack with little evidence */
@@ -576,15 +687,341 @@ static void test_native_depth(int case_) {
         CHECK(drops_after <= 1);   /* at most the miss that clears the evidence */
         CHECK_I(drops_end, 0);
     }
-    if (late) printf("  native depth %d: %d frames late on this machine\n", case_, late);
+    if (late) printf("  native depth %d/%d: %d frames late on this machine\n", case_, learn, late);
     if (getenv("YSCR_TEST_TRACE"))
-        printf("  native depth %d: drops after the misses %d, half-rate gaps %d\n", case_, drops_after, half);
+        printf("  native depth %d/%d: drops after the misses %d, half-rate gaps %d\n", case_, learn, drops_after, half);
+}
+
+/* v0.4.4: misses never change the depth by default (DEPTH). Episodes of 3
+ * frames in a row with GPU work that ends 0.6 period after the vblank
+ * they were planned for, the present on time: on DXGI_FLIP v0.4.3 took
+ * depth 2 from them (three flips in a row at 2) and the next frames showed
+ * early; on a backend that holds frames its learner raised the depth and
+ * the loop ran slow until evidence lowered it. Now the heavy frames are
+ * drops, every other frame is on time, the loop keeps one frame per
+ * vblank, and the ring has one depth record: open's. With learn set
+ * (desc.depth_learn) the depth rises, as v0.4.3's did. */
+static void test_depth_misses(int native, int learn) {
+    static script c;
+    yscr_screen s;
+    static yscr_frame f;
+    enum { N = 240 };
+    static int64_t onset[N], target[N];
+    static uint32_t dropped[N];
+    static uint16_t flags[N];
+    static unsigned char heavy[N];
+    int i, j, n, other_drops = 0, early = 0, gaps = 0, raised = 0;
+    yrt_event last;
+    memset(&c, 0, sizeof c);
+    memset(heavy, 0, sizeof heavy);
+    c.depth = 1;
+    c.native = native;
+    c.path = native ? YSCR_PATH_INDEPENDENT : YSCR_PATH_OVERLAY;
+    c.free_at_flip = native;   /* COMPOSITION frees its slot at the flip */
+    ring_reset();
+    g_learn = learn;
+    CHECK(open_scripted(&s, &c, 0, 2));
+    g_learn = 0;
+    if (!yscr_is_open(&s)) return;
+    for (i = 0; i < N; i++) {
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        if (i >= 40 && i % 60 >= 40 && i % 60 < 43) {
+            /* the GPU ends 0.6 period after the vblank planned */
+            c.gpu_ns[s.next_id + 1] = f.onset - now_ns() + 3 * P_NS / 5;
+            heavy[i] = 1;
+        }
+        CHECK_I(yscr_flip(&s), YSCR_OK);
+        if (s.depth != 1) raised = 1;
+    }
+    yscr_close(&s);
+    memset(onset, 0, sizeof onset);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const yrt_event* e = &g_ev[j];
+        uint32_t idx;
+        if (e->source != YRT_SRC_SCREEN || e->kind != YSCR_EV_FLIP) continue;
+        idx = e->u.u32[9];
+        if (idx >= N) continue;
+        onset[idx] = (int64_t)e->t_ns;
+        target[idx] = e->u.i64[0];
+        dropped[idx] = e->u.u16[4];
+        flags[idx] = (uint16_t)YSCR_EV_FLAGS_OF(e->u.u16[5]);
+    }
+    for (i = 30; i < N; i++) {
+        if (flags[i] & YSCR_FLIP_EARLY) early++;
+        if (heavy[i]) { CHECK(dropped[i] >= 1); continue; }
+        if (dropped[i] || (flags[i] & YSCR_FLIP_LATE_TARGET)) other_drops++;
+        /* a frame after a heavy one may wait for its slot */
+        if (i + 1 < N && !heavy[i - 1] && !heavy[i + 1] && onset[i + 1] - onset[i] != P_NS) gaps++;
+    }
+    if (getenv("YSCR_TEST_TRACE"))
+        printf("  depth misses %d/%d: depth raised %d, early %d, other frames dropped or late %d, gaps %d\n",
+               native, learn, raised, early, other_drops, gaps);
+    if (!learn) {
+        CHECK_I(raised, 0);
+        CHECK_I(early, 0);
+        CHECK_I(other_drops, 0);
+        CHECK_I(gaps, 0);
+        memset(&last, 0, sizeof last);
+        CHECK_I(depth_events(n, &last), 1);
+        CHECK_I(last.u.u16[0], 0);
+        CHECK_I(last.u.u16[1], 1);
+        CHECK_I(last.u.u16[2], YSCR_DEPTH_OPEN);
+        CHECK_I(last.u.i64[1], -1);
+        CHECK_I(last.aux, 2);
+    } else {
+        CHECK_I(raised, 1);   /* the learner's rule, as before */
+        CHECK(depth_events(n, NULL) >= 2);
+        if (!native) CHECK(early >= 1);   /* v0.4.3's early flips after heavy frames */
+    }
+    (void)target;
+}
+
+/* The depth follows the path on a backend that holds frames, both ways:
+ * independent flip 1, composed 2, back to 1 at once. v0.4.3 started at 1
+ * and kept 2 on the fast path until slack evidence lowered it. */
+static void test_depth_path_native(void) {
+    static script c;
+    yscr_screen s;
+    static yscr_frame f;
+    enum { N = 240 };
+    static int64_t onset[N];
+    static uint8_t path[N];
+    int i, j, n, k = 0, slow = 0, fast_frames = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.native = 1;
+    c.path = YSCR_PATH_INDEPENDENT;
+    c.change_id = 60;
+    c.flap = 60;
+    c.depth2 = 2;
+    c.path2 = YSCR_PATH_COMPOSED;
+    c.free_at_flip = 1;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!yscr_is_open(&s)) return;
+    CHECK_I(s.depth, 1);
+    for (i = 0; i < N; i++) {
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        CHECK_I(yscr_flip(&s), YSCR_OK);
+    }
+    yscr_close(&s);
+    memset(onset, 0, sizeof onset);
+    memset(path, 0, sizeof path);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const yrt_event* e = &g_ev[j];
+        if (e->source != YRT_SRC_SCREEN) continue;
+        if (e->kind == YSCR_EV_DEPTH && k++ > 0) {
+            /* every change after open's is the path's, 1 to 2 or 2 to 1 */
+            CHECK_I(e->u.u16[2], YSCR_DEPTH_PATH);
+            CHECK_I(e->u.u16[1], e->u.u16[3] == YSCR_PATH_COMPOSED ? 2 : 1);
+            CHECK_I(e->u.u16[0] + e->u.u16[1], 3);
+        }
+        if (e->kind == YSCR_EV_FLIP && e->u.u32[9] < N) {
+            onset[e->u.u32[9]] = (int64_t)e->t_ns;
+            path[e->u.u32[9]] = (uint8_t)YSCR_EV_PATH_OF(e->u.u16[5]);
+        }
+    }
+    CHECK(k >= 4);   /* open, and at least 3 path changes */
+    /* on the fast path, once two frames in a row are on it: one frame
+     * per vblank, not the half rate a stuck depth of 2 gives */
+    for (i = 2; i + 1 < N; i++)
+        if (path[i - 2] == YSCR_PATH_INDEPENDENT && path[i - 1] == YSCR_PATH_INDEPENDENT &&
+            path[i] == YSCR_PATH_INDEPENDENT && path[i + 1] == YSCR_PATH_INDEPENDENT) {
+            fast_frames++;
+            if (onset[i + 1] - onset[i] != P_NS) slow++;
+        }
+    CHECK(fast_frames >= 100);
+    CHECK_I(slow, 0);
+
+    /* open on the composed path: its depth, 2, at once and on time; v0.4.3
+     * started at 1 and dropped the first 3 frames */
+    memset(&c, 0, sizeof c);
+    c.depth = 2;
+    c.native = 1;
+    c.path = YSCR_PATH_COMPOSED;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!yscr_is_open(&s)) return;
+    CHECK_I(s.depth, 2);
+    for (i = 0; i < 20; i++) {
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        CHECK_I(yscr_flip(&s), YSCR_OK);
+    }
+    yscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++)
+        if (g_ev[j].source == YRT_SRC_SCREEN && g_ev[j].kind == YSCR_EV_FLIP)
+            CHECK_I(g_ev[j].u.u16[4], 0);
+}
+
+/* A path's depth measured at open wins over the table: a DXGI-like path
+ * reported as independent flip that shows at 2 (a display the table does
+ * not describe) keeps 2 when the path comes back to it after a change. */
+static void test_depth_measured(void) {
+    static script c;
+    yscr_screen s;
+    static yscr_frame f;
+    enum { N = 200 };
+    static uint32_t dropped[N];
+    static uint16_t flags[N];
+    static uint8_t path[N];
+    int i, j, n, bad = 0, back = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 2;
+    c.path = YSCR_PATH_INDEPENDENT;
+    c.change_id = 40;
+    c.flap = 40;
+    c.depth2 = 2;
+    c.path2 = YSCR_PATH_COMPOSED;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!yscr_is_open(&s)) return;
+    CHECK_I(s.depth, 2);
+    for (i = 0; i < N; i++) {
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        CHECK_I(yscr_flip(&s), YSCR_OK);
+    }
+    yscr_close(&s);
+    memset(dropped, 0, sizeof dropped);
+    memset(flags, 0, sizeof flags);
+    memset(path, 0, sizeof path);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const yrt_event* e = &g_ev[j];
+        if (e->source != YRT_SRC_SCREEN || e->kind != YSCR_EV_FLIP || e->u.u32[9] >= N) continue;
+        dropped[e->u.u32[9]] = e->u.u16[4];
+        flags[e->u.u32[9]] = (uint16_t)YSCR_EV_FLAGS_OF(e->u.u16[5]);
+        path[e->u.u32[9]] = (uint8_t)YSCR_EV_PATH_OF(e->u.u16[5]);
+    }
+    for (i = 2; i < N; i++) {
+        if (path[i] != YSCR_PATH_INDEPENDENT || path[i - 1] != YSCR_PATH_INDEPENDENT ||
+            path[i - 2] != YSCR_PATH_INDEPENDENT) continue;
+        if (i > 60) back++;
+        if (dropped[i] || (flags[i] & YSCR_FLIP_EARLY)) bad++;
+    }
+    CHECK(back >= 50);
+    CHECK_I(bad, 0);
+}
+
+/* v0.4.4: no OS time during open's black frames (a window covered at
+ * open; COMPOSITION's first statistics came late after a session unlock).
+ * open() guesses the grid; v0.4.3 kept the guess: every record tier 3, and
+ * the sync guard fired on flips that were on time. Now the first OS time
+ * replaces the guess: the records after it are tier 1, on their predicted
+ * onset, and the guard sees nothing. */
+static void test_late_statistics(int native) {
+    static script c;
+    yscr_screen s;
+    static yscr_frame f;
+    enum { N = 160 };
+    static int64_t pred[N], onset[N];
+    static uint16_t flags[N];
+    static uint8_t tier[N];
+    int i, j, n, exact = 0, worse = 0;
+    yscr_sync_info si;
+    uint64_t id;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.native = native;
+    c.path = native ? YSCR_PATH_INDEPENDENT : YSCR_PATH_OVERLAY;
+    for (id = 1; id <= 60; id++) c.missing[id] = 1;   /* open's frames and the first few */
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!yscr_is_open(&s)) return;
+    CHECK(!s.caps.hw_onset);   /* a guess so far */
+    for (i = 0; i < N; i++) {
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        pred[i] = f.onset;
+        CHECK_I(yscr_flip(&s), YSCR_OK);
+    }
+    CHECK(s.caps.hw_onset);
+    yscr_sync_check(&s, &si);
+    CHECK(!si.untimed);
+    CHECK_I(si.peak, 0);
+    yscr_close(&s);
+    memset(onset, 0, sizeof onset);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const yrt_event* e = &g_ev[j];
+        if (e->source != YRT_SRC_SCREEN || e->kind != YSCR_EV_FLIP || e->u.u32[9] >= N) continue;
+        onset[e->u.u32[9]] = (int64_t)e->t_ns;
+        flags[e->u.u32[9]] = (uint16_t)YSCR_EV_FLAGS_OF(e->u.u16[5]);
+        tier[e->u.u32[9]] = (uint8_t)YSCR_EV_TIER_OF(e->u.u16[5]);
+    }
+    for (i = 80; i < N - 1; i++) {
+        if (tier[i] != YSCR_TIER_1) worse++;
+        if (onset[i] == pred[i] && !(flags[i] & (YSCR_FLIP_EARLY | YSCR_FLIP_ESTIMATED))) exact++;
+    }
+    if (getenv("YSCR_TEST_TRACE")) printf("  late statistics %d: exact %d, worse than tier 1 %d\n", native, exact, worse);
+    CHECK_I(worse, 0);
+    CHECK(exact >= N - 85);
+}
+
+/* DXGI_FLIP: a flip that was not held and showed early lowers the depth
+ * to what it showed (the video worker's windowed runs, 2026-10-09).
+ * Case 0: the window goes from composed (2) to overlay (1) 5 presents
+ * before DXGI reports it; the path rule alone showed 5 early, now 1 or 2.
+ * Case 1: open() saw every black frame at 3 (each waited behind the one
+ * before), the display shows at 2: 1 or 2 early flips (one frame is in
+ * flight when the first one's record comes), not one per frame.
+ * Case 2: open()'s first frames showed at 2 and the rest at 3: open()
+ * takes the smallest depth 2 of its flips showed, and no flip is early. */
+static void test_depth_early(int case_) {
+    static script c;
+    yscr_screen s;
+    static yscr_frame f;
+    enum { N = 120 };
+    int i, j, n, early = 0, recs = 0;
+    uint64_t id;
+    memset(&c, 0, sizeof c);
+    c.depth = 2;
+    c.path = YSCR_PATH_COMPOSED;
+    if (case_ == 0) {
+        c.change_id = 40;
+        c.depth2 = 1;
+        c.path2 = YSCR_PATH_OVERLAY;
+        c.path_lag = 5;
+    } else {
+        for (id = case_ == 1 ? 1 : 5; id <= 40; id++) c.drop[id] = 1;
+    }
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (!yscr_is_open(&s)) return;
+    CHECK_I(s.depth, case_ == 1 ? 3 : 2);
+    if (case_ == 1) for (id = s.next_id + 1; id <= 40; id++) c.drop[id] = 0;
+    for (i = 0; i < N; i++) {
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        CHECK_I(yscr_flip(&s), YSCR_OK);
+    }
+    CHECK_I(s.depth, case_ == 0 ? 1 : 2);
+    CHECK_I(s.depth_of[YSCR_PATH_COMPOSED], 2);
+    yscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const yrt_event* e = &g_ev[j];
+        if (e->source != YRT_SRC_SCREEN) continue;
+        if (e->kind == YSCR_EV_FLIP && (YSCR_EV_FLAGS_OF(e->u.u16[5]) & YSCR_FLIP_EARLY)) early++;
+        if (e->kind == YSCR_EV_DEPTH && e->u.u16[2] == YSCR_DEPTH_EARLY) {
+            recs++;
+            CHECK_I(e->u.u16[1], case_ == 0 ? 1 : 2);
+        }
+    }
+    if (getenv("YSCR_TEST_TRACE")) printf("  depth early %d: early %d, records %d\n", case_, early, recs);
+    /* the frame presented before the first early one's record is early too */
+    if (case_ == 2) CHECK_I(early, 0);
+    else CHECK(early >= 1 && early <= 2);
+    CHECK_I(recs, case_ == 2 ? 0 : 1);
 }
 
 /* A single miss on a backend that holds frames to their target is a drop,
- * not a new depth: three in a row are needed. And a flip the display shows
- * before its planned vblank (a DXGI-like path whose depth fell from 2 to
- * 1) carries EARLY, and only such a flip does. */
+ * not a new depth. A DXGI-like path whose depth falls from 2 to 1 with the
+ * path (composed to overlay) shows no flip early: the first flip on the
+ * new path waits behind the one before it, and its record brings the new
+ * depth (v0.4.3's vote took it a flip later, and that flip showed early).
+ * A flip the display shows before its planned vblank carries EARLY, and
+ * only such a flip does: one is made early by a time a period early. */
 static void test_one_miss_and_early(void) {
     static script c;
     yscr_screen s;
@@ -618,6 +1055,7 @@ static void test_one_miss_and_early(void) {
     if (!yscr_is_open(&s)) return;
     for (i = 0; i < 60; i++) {
         CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        if (i == 50) c.t_off[s.next_id + 1] = -P_NS;
         CHECK_I(yscr_flip(&s), YSCR_OK);
     }
     yscr_close(&s);
@@ -631,7 +1069,7 @@ static void test_one_miss_and_early(void) {
         if (flagged) early++;
         if (is_early != flagged) wrong++;
     }
-    CHECK(early >= 1);   /* the first flip after the depth fell */
+    CHECK_I(early, 1);   /* the one made early */
     CHECK_I(wrong, 0);
 }
 
@@ -660,7 +1098,8 @@ static void test_flap_prediction(int native) {
     c.change_id = 30;
     c.flap = 9;
     c.depth2 = 1;
-    c.path2 = YSCR_PATH_OVERLAY;
+    /* COMPOSITION's fast path is the independent flip */
+    c.path2 = native ? YSCR_PATH_INDEPENDENT : YSCR_PATH_OVERLAY;
     ring_reset();
     CHECK(open_scripted(&s, &c, 0, 0));
     if (!yscr_is_open(&s)) return;
@@ -699,10 +1138,13 @@ static void test_flap_prediction(int native) {
     CHECK_I(same, 0);
     CHECK_I(back, 0);
     CHECK(max_run <= 1);
-    /* On a backend that holds frames, one frame in flight at depth 2 runs
-     * at half rate on a path whose depth the header has not lowered; that
-     * is the depth rule (DEPTH), not this check. */
-    if (!native) { CHECK(early >= 1); CHECK_I(unexplained, 0); }
+    /* The depth follows the path's reports, so a fall shows no flip early
+     * here (16 with v0.4.3's vote), and every vblank no frame shows on
+     * comes before a late flip, at a rise. On a backend that holds frames
+     * the same holds now: v0.4.3 ran this at half rate on the fast path,
+     * where its learner had not lowered the depth. */
+    CHECK_I(early, 0);
+    CHECK_I(unexplained, 0);
 
     /* flip_at() keeps the rule too: a target on the vblank the last frame
      * was planned for, after that frame completed (as an early one does),
@@ -801,7 +1243,7 @@ static void test_preemption(int native) {
     memset(&c, 0, sizeof c);
     c.depth = 1;
     c.native = native;
-    c.path = YSCR_PATH_OVERLAY;
+    c.path = native ? YSCR_PATH_INDEPENDENT : YSCR_PATH_OVERLAY;
     ring_reset();
     CHECK(open_scripted(&s, &c, 0, 3));
     if (!yscr_is_open(&s)) return;
@@ -897,11 +1339,132 @@ static bool open_trig(yscr_screen* s, script* c, int n_ch, const int64_t* offset
     d.triggers = td;
     d.n_triggers = n_ch;
     d.trigger_fence = fence;
+    d.depth = g_pin;
     g_tl.n = 0;
     g_fl.n = 0;
     if (!yscr_open(s, &d)) return false;
     yscr_on_flip(s, fl_fn, NULL);
     return true;
+}
+
+/* desc.depth pins the depth. Pinned above the path's (2 on a DXGI-like
+ * path that shows at 1): every frame is held to its planned vblank, on
+ * time, none early, 2 vblanks after begin(); a path change moves neither
+ * the depth nor the ring. Pinned below it (1 on a path that shows at 2):
+ * every frame is shown a vblank late and each record says so. On a
+ * backend that holds frames, a pin above is on time too. Open rejects
+ * a pin out of range and a pin with the learner. */
+static void test_depth_pin(void) {
+    static script c;
+    yscr_screen s;
+    static yscr_frame f;
+    enum { N = 120 };
+    static uint32_t dropped[N];
+    static uint16_t flags[N];
+    static int64_t onset[N], target[N];
+    int i, j, n, pass, ahead_ok = 0;
+    char line[512];
+    yrt_event last;
+    for (pass = 0; pass < 3; pass++) {
+        memset(&c, 0, sizeof c);
+        c.native = pass == 2;
+        c.depth = pass == 1 ? 2 : 1;
+        c.path = pass == 1 ? YSCR_PATH_COMPOSED : pass == 2 ? YSCR_PATH_INDEPENDENT : YSCR_PATH_OVERLAY;
+        if (pass == 0) {   /* the path changes; the pin stays */
+            c.change_id = 60;
+            c.depth2 = 2;
+            c.path2 = YSCR_PATH_COMPOSED;
+        }
+        ring_reset();
+        g_pin = pass == 1 ? 1 : 2;
+        CHECK(open_scripted(&s, &c, 0, 1));
+        g_pin = 0;
+        if (!yscr_is_open(&s)) return;
+        for (i = 0; i < N; i++) {
+            int64_t t0 = now_ns();
+            CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+            CHECK_I(s.depth, pass == 1 ? 1 : 2);
+            if (pass != 1 && f.onset - t0 > P_NS) ahead_ok++;
+            CHECK_I(yscr_flip(&s), YSCR_OK);
+        }
+        CHECK(yscr_describe(&s, line, sizeof line) > 0);
+        CHECK(strstr(line, pass == 1 ? "depth=1(pin,0 changes)" : "depth=2(pin,0 changes)") != NULL);
+        yscr_close(&s);
+        memset(dropped, 0, sizeof dropped);
+        memset(flags, 0, sizeof flags);
+        n = ring_drain();
+        for (j = 0; j < n; j++) {
+            const yrt_event* e = &g_ev[j];
+            uint32_t idx;
+            if (e->source != YRT_SRC_SCREEN || e->kind != YSCR_EV_FLIP) continue;
+            idx = e->u.u32[9];
+            if (idx >= N) continue;
+            onset[idx] = (int64_t)e->t_ns;
+            target[idx] = e->u.i64[0];
+            dropped[idx] = e->u.u16[4];
+            flags[idx] = (uint16_t)YSCR_EV_FLAGS_OF(e->u.u16[5]);
+        }
+        memset(&last, 0, sizeof last);
+        CHECK_I(depth_events(n, &last), 1);
+        CHECK_I(last.u.u16[2], YSCR_DEPTH_PIN);
+        CHECK_I(last.u.u16[1], pass == 1 ? 1 : 2);
+        for (i = 2; i < N; i++) {
+            if (pass == 0 && i >= 50 && i < 56) continue;   /* the path change */
+            CHECK(!(flags[i] & YSCR_FLIP_EARLY));
+            if (flags[i] & YSCR_FLIP_LATE_TARGET) continue;
+            CHECK_I(dropped[i], pass == 1 ? 1 : 0);
+            CHECK_I(onset[i] - target[i], pass == 1 ? P_NS : 0);
+        }
+    }
+    CHECK(ahead_ok >= 2 * N - 10);
+    /* A trigger with a pin above the path's depth: the present goes out at
+     * the path's depth before the planned vblank, so the trigger is not
+     * moved and fires on the onset. */
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = YSCR_PATH_OVERLAY;
+    ring_reset();
+    g_pin = 2;
+    CHECK(open_trig(&s, &c, 1, NULL, false));
+    g_pin = 0;
+    if (yscr_is_open(&s)) {
+        int moved = 0, off = 0;
+        for (i = 0; i < 40; i++) {
+            CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+            CHECK_I(yscr_trigger(&s, 0, (uint32_t)i), YSCR_OK);
+            CHECK_I(yscr_flip(&s), YSCR_OK);
+        }
+        yscr_close(&s);
+        vforget(&s);
+        for (j = 0; j < g_fl.n; j++) {
+            if (g_fl.nt[j] != 1 || g_fl.r[j].index < 2) continue;
+            if (g_fl.t[j].flags & YSCR_TRIG_MOVED) moved++;
+            if (g_fl.t[j].fired_ns != g_fl.r[j].onset) off++;
+        }
+        CHECK(g_fl.n >= 38);
+        CHECK_I(moved, 0);
+        CHECK_I(off, 0);
+    }
+    /* open's checks */
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    g_pin = 9;
+    CHECK(!open_scripted(&s, &c, 0, 0));
+    CHECK(strstr(yscr_error(&s), "desc.depth") != NULL);
+    g_pin = -1;
+    CHECK(!open_scripted(&s, &c, 0, 0));
+    g_pin = 2;
+    g_learn = 1;
+    CHECK(!open_scripted(&s, &c, 0, 0));
+    g_pin = 0;
+    g_learn = 0;
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0, 0));
+    if (yscr_is_open(&s)) {
+        CHECK(yscr_describe(&s, line, sizeof line) > 0);
+        CHECK(strstr(line, "depth=1(path,0 changes)") != NULL);
+        yscr_close(&s);
+    }
 }
 
 /* A trigger fires at its flip's planned vblank. Lateness the header knows
@@ -1695,6 +2258,46 @@ static void test_key_double(void) {
     CHECK(!yscr__key_keep(NULL, &e));
     e = key_ev(KMS(1200), 9, 0, YIN_RELEASE, 0);  /* a stray up: not ours to drop */
     CHECK(yscr__key_keep(NULL, &e));
+    /* v0.4.2: two keyboards on one key, and the second report's key-up
+     * (device 0) comes while the other keyboard holds the key. Up to
+     * v0.4.1 it took that keyboard's press: no key_double_ups, and the
+     * other keyboard's own key-up passed too (trial_two_keyboards). Both
+     * orders of the two first key-ups. */
+    for (j = 0; j < 2; j++) {
+        bridge_reset();
+        e = key_ev(KMS(1000), 9, 65601, YIN_PRESS, 0);
+        CHECK(yscr__key_keep(NULL, &e));
+        e = key_ev(KMS(1009), 9, 0, YIN_PRESS, 0);       /* its second report */
+        CHECK(!yscr__key_keep(NULL, &e));
+        e = key_ev(KMS(1020), 9, 65659, YIN_PRESS, 0);   /* the other keyboard */
+        CHECK(yscr__key_keep(NULL, &e));
+        e = key_ev(KMS(j ? 1089 : 1080), 9, 65601, YIN_RELEASE, 0);
+        CHECK(yscr__key_keep(NULL, &e));
+        e = key_ev(KMS(j ? 1080 : 1089), 9, 0, YIN_RELEASE, 0);
+        CHECK(!yscr__key_keep(NULL, &e));
+        e = key_ev(KMS(1100), 9, 65659, YIN_RELEASE, 0);
+        CHECK(yscr__key_keep(NULL, &e));
+        CHECK_I(yscr__in.key_doubles, 1);
+        CHECK_I(yscr__in.key_double_ups, 1);
+    }
+    /* the kept report is device 0 and the raw one dropped, while another
+     * keyboard holds the key from earlier (its slot first in the table):
+     * device 0's key-up is the kept press's, the raw key-up drops, and the
+     * other keyboard's key-up passes */
+    bridge_reset();
+    e = key_ev(KMS(900), 9, 65659, YIN_PRESS, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1000), 9, 0, YIN_PRESS, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1001), 9, 65601, YIN_PRESS, 0);
+    CHECK(!yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1080), 9, 0, YIN_RELEASE, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1081), 9, 65601, YIN_RELEASE, 0);
+    CHECK(!yscr__key_keep(NULL, &e));
+    e = key_ev(KMS(1200), 9, 65659, YIN_RELEASE, 0);
+    CHECK(yscr__key_keep(NULL, &e));
+    CHECK_I(yscr__in.key_double_ups, 1);
     /* distinct keys 2 ms apart; two keyboards on one key 5 ms apart */
     bridge_reset();
     CHECK_I(key_tap(NULL, KMS(1000), 9, 0), 3);
@@ -1963,6 +2566,88 @@ static void test_snap_and_hold(int native, double lead) {
     CHECK(checked >= 60);
 }
 
+/* Held frames on a DXGI-like display, from the probe of 2026-10-09
+ * (docs/screen.md, "Held frames a vblank early"): the vblanks stay on the
+ * grid, but the OS's count loses a vblank now and then, and in episodes
+ * the OS's time is up to 0.45 period off the vblank, some of them in
+ * agreement with each other. Each frame flips on the vblank nearest its
+ * time. Before v0.4.3 the grid moved to such a time, the next hold woke
+ * before the real vblank and its frame showed a vblank early; and a count
+ * that had lost a vblank flagged on-time frames EARLY.
+ * jump > 0: from that vblank on, the vblanks themselves come 0.3 period
+ * later (the display's timing changed). The grid moves there after 16
+ * agreeing times; until then frames may show early, after it none does. */
+static void test_held_off_grid(int jump) {
+    static script c;
+    yscr_screen s;
+    static yscr_frame f;   /* static: gcc -O3 cannot see begin() fill it */
+    static int64_t want[600];
+    yscr_sync_info si;
+    int i, j, n, checked = 0, unstable = 0, early = 0, late_part = 0;
+    int64_t lag = 0;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = YSCR_PATH_OVERLAY;
+    for (i = 0; i < MAX_ID; i++) {
+        int k = i % 20;
+        if (jump) {
+            c.vb_off[i] = i >= jump ? (int64_t)P_NS * 3 / 10 : 0;
+            continue;
+        }
+        if (k == 7 || k == 13) lag++;   /* 13: a lost count with an on-grid time */
+        c.count_off[i] = lag;
+        if (k == 7) c.t_off[i] = -(int64_t)P_NS * 40 / 100;
+        if (k == 8) c.t_off[i] = (int64_t)P_NS * 30 / 100;
+        if (k >= 9 && k <= 11) c.t_off[i] = -(int64_t)P_NS * 45 / 100;   /* 3 agree */
+    }
+    ring_reset();
+    CHECK(open_scripted(&s, &c, 0.5, 4));
+    if (!yscr_is_open(&s)) return;
+    for (i = 0; i < 600; i++) {
+        int ahead = i % 5;
+        int64_t u = (int64_t)P_NS * ((i * 7) % 9 - 4) / 10;   /* within +-0.4 period */
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        want[i] = f.onset + (int64_t)ahead * P_NS;
+        CHECK_I(yscr_flip_at(&s, want[i] + u, NULL), YSCR_OK);
+    }
+    yscr_sync_check(&s, &si);
+    CHECK_I(si.untimed, 0);
+    CHECK(si.peak < 16);
+    yscr_close(&s);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const yrt_event* e = &g_ev[j];
+        uint32_t idx, flags;
+        if (e->source != YRT_SRC_SCREEN || e->kind != YSCR_EV_FLIP) continue;
+        idx = e->u.u32[9];
+        flags = YSCR_EV_FLAGS_OF(e->u.u16[5]);
+        if (idx >= 600 || (flags & YSCR_FLIP_LATE_TARGET)) continue;
+        checked++;
+        if (flags & YSCR_FLIP_GRID_UNSTABLE) {
+            unstable++;
+            CHECK_I(YSCR_EV_TIER_OF(e->u.u16[5]), YSCR_TIER_2);
+        }
+        if (flags & YSCR_FLIP_EARLY) early++;
+        if (!jump || idx >= 300) {
+            /* on the vblank asked for, and the onset is that vblank's time */
+            CHECK_I((int64_t)e->t_ns, want[idx]);
+            CHECK(!(flags & YSCR_FLIP_EARLY));
+            CHECK_I(e->u.u16[4], 0);
+            if (jump) CHECK(!(flags & YSCR_FLIP_GRID_UNSTABLE));
+            late_part++;
+        }
+    }
+    CHECK(checked >= 500);
+    CHECK(late_part >= 250);
+    if (jump) {
+        CHECK(unstable >= 16 && unstable <= 17);   /* 16 agreeing times, then the grid moved */
+        CHECK(early <= 17);
+    } else {
+        CHECK(unstable >= 100);
+        CHECK_I(early, 0);
+    }
+}
+
 /* Phases, wait_flip, offsets and the patch value clamp. */
 static void test_phases_and_wait(void) {
     static script c;
@@ -2190,6 +2875,7 @@ static void test_mode_multiple(void) {
     yscr_mode list[6], out;
     double ppm = 0;
     int k;
+    memset(&out, 0, sizeof out);   /* gcc -O3 cannot see that a match fills it */
     list[0] = mk(1920, 1080, 60, 1);
     list[1] = mk(1920, 1080, 60000, 1001);
     list[2] = mk(1920, 1080, 120, 1);
@@ -2284,10 +2970,255 @@ static void test_sim(void) {
     }
     CHECK(yscr_describe(&s, line, sizeof line) > 0);
     CHECK(strstr(line, "backend=sim") != NULL);
+    {   /* v0.4.2: the sync guard saw nothing, in real time */
+        yscr_sync_info si;
+        yscr_sync_check(&s, &si);
+        CHECK_I(si.untimed, 0);
+        CHECK_I(si.same_refresh + si.no_wait + si.torn, 0);
+        CHECK(si.observed >= 100);
+    }
     yscr_close(&s);
     g_virtual = 1;
     CHECK(completed >= 1);
     if (late || onset_ok < completed) printf("  sim: %d of 120 frames late, %d of %d on the prediction\n", late, onset_ok, completed);
+}
+
+/* --------------------------------------------------------- the sync guard */
+
+static int g_unsynced_want;   /* the fires the forced-off cases expect */
+static struct { int n_unstable, n_unsynced; uint16_t flags[2048]; uint8_t tier[2048]; } g_sr;
+
+/* n frames by yscr_flip(), or every hold-th frame 3 vblanks later; step:
+ * the frame's busy time. Keeps each completed record's flags and tier. */
+static void sync_frames(yscr_screen* s, int n, int64_t step, int hold) {
+    static yscr_frame f;   /* static: gcc -O3 cannot see begin() fill it */
+    int i, k;
+    for (i = 0; i < n; i++) {
+        if (yscr_begin(s, &f) != YSCR_OK) { fail(__LINE__, "begin"); return; }
+        for (k = 0; k < f.n_done; k++) {
+            const yscr_record* r = &f.done[k];
+            if (r->index < 0 || r->index >= 2048) continue;
+            g_sr.flags[r->index] = r->flags;
+            g_sr.tier[r->index] = r->tier;
+            g_sr.n_unstable += (r->flags & YSCR_FLIP_GRID_UNSTABLE) != 0;
+            g_sr.n_unsynced += (r->flags & YSCR_FLIP_UNSYNCED) != 0;
+        }
+        if (step) busy_until(now_ns() + step);
+        if (hold && i % hold == hold - 1) {
+            if (yscr_flip_at(s, f.onset + 3 * P_NS, NULL) != YSCR_OK) { fail(__LINE__, "flip_at"); return; }
+        } else if (yscr_flip(s) != YSCR_OK) {
+            fail(__LINE__, "flip");
+            return;
+        }
+    }
+}
+
+static bool open_sync(yscr_screen* s, script* c) {
+    yscr_desc d;
+    memset(s, 0, sizeof *s);
+    memset(&d, 0, sizeof d);
+    d.backend = YSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted;
+    d.presenter_ctx = c;
+    d.ring = &g_ring;
+    d.display_index = 2;
+    d.min_tier = 1;
+    memset(&g_sr, 0, sizeof g_sr);
+    return yscr_open(s, &d);
+}
+
+/* A driver that forces vsync off, four ways (script.vsync_off). Each fires
+ * the guard once, by the rule its evidence feeds; from that flip on every
+ * record is tier 3 and UNSYNCED, and the ring, the describe line and the
+ * message say so. */
+static void test_sync_forced_off(int mode) {
+    static script c;
+    yscr_screen s;
+    yscr_sync_info si;
+    yscr_caps caps;
+    char line[1024];
+    int fires = g_unsynced_fires, n, j, recs = 0, after = 0;
+    int64_t fired;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.native = mode >= 3;
+    c.path = YSCR_PATH_INDEPENDENT;
+    c.vsync_off = mode;
+    ring_reset();
+    CHECK(open_sync(&s, &c));
+    if (!yscr_is_open(&s)) return;
+    yscr_sync_check(&s, &si);
+    CHECK_I(si.untimed, 0);
+    CHECK_I(si.fired_index, -1);
+    CHECK_I(si.message[0], 0);
+    sync_frames(&s, mode >= 3 ? 600 : 200, mode >= 3 ? P_NS / 3 : 0, 0);
+    yscr_sync_check(&s, &si);
+    CHECK_I(si.untimed, 1);
+    CHECK_I(g_unsynced_fires - fires, 1);
+    g_unsynced_want++;
+    CHECK_I(si.rule, mode == 4 ? YSCR_SYNC_RULE_RATE : YSCR_SYNC_RULE_FLIPS);
+    if (mode == 1) CHECK(si.no_wait >= 32);
+    if (mode == 2) CHECK(si.torn >= 16);   /* then the grid moves with the tears: no_wait */
+    if (mode == 3) CHECK(si.same_refresh >= 32);
+    if (mode == 4) CHECK(si.same_refresh + si.no_wait + si.torn < 32);   /* the rate alone */
+    if (mode == 1) CHECK(si.fired_index < 40);   /* 32 flips after open's own */
+    if (mode != 4) CHECK(si.peak >= 32 && si.peak >= si.evidence);
+    CHECK(strstr(si.message, "\"Wait for Vertical Refresh: Always off\"") != NULL);
+    CHECK(strstr(si.message, "\"Vertical sync: Off\"") != NULL);
+    CHECK(strstr(si.message, "\"Vertical Sync: Speed\"") != NULL);
+    CHECK(strstr(si.message, "vblank_mode=0") != NULL);
+    CHECK(strstr(si.message, "application's choice.") != NULL);   /* not cut short */
+    yscr_get_caps(&s, &caps);
+    CHECK_I(caps.worst_tier, YSCR_TIER_3);
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, "WARNING=not-vsynced") != NULL);
+    fired = si.fired_index;
+    CHECK(fired >= 0 && fired < 1900);
+    if (fired >= 0 && fired < 1900) {
+        for (j = 0; j < (int)fired; j++) CHECK(!(g_sr.flags[j] & YSCR_FLIP_UNSYNCED));
+        for (j = (int)fired; j < (int)fired + 100 && j < (mode >= 3 ? 590 : 190); j++) {
+            if (!g_sr.flags[j] || (g_sr.flags[j] & (YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED))) continue;
+            after++;
+            CHECK(g_sr.flags[j] & YSCR_FLIP_UNSYNCED);
+            CHECK(g_sr.flags[j] & YSCR_FLIP_BELOW_TIER);
+            CHECK_I(g_sr.tier[j], YSCR_TIER_3);
+        }
+    }
+    CHECK(after >= 50);
+    yscr_close(&s);
+    yscr_sync_check(&s, &si);   /* closed: zeroes */
+    CHECK_I(si.untimed, 0);
+    CHECK_I(si.fired_index, -1);
+    n = ring_drain();
+    for (j = 0; j < n; j++) {
+        const yrt_event* e = &g_ev[j];
+        if (e->source != YRT_SRC_SCREEN || e->kind != YSCR_EV_UNSYNCED) continue;
+        recs++;
+        CHECK_I(e->aux, 2);
+        CHECK_I(e->u.u32[0], mode == 4 ? YSCR_SYNC_RULE_RATE : YSCR_SYNC_RULE_FLIPS);
+        CHECK_I(e->u.i64[3], fired);
+        if (mode == 4) {
+            CHECK(e->u.u32[4] >= 64);
+            CHECK(e->u.u32[3] > e->u.u32[4] + 8);
+        } else {
+            CHECK(e->u.u32[1] >= 32);
+            CHECK(e->u.u32[2] >= e->u.u32[1]);
+        }
+    }
+    CHECK_I(recs, 1);
+}
+
+/* Legitimate paths never fire it, and give it no evidence at all:
+ * 0: reported times that stretch after each late frame (later than the
+ *    grid by up to 1.2 ms, then back in steps of 3% of a period, off the
+ *    grid each time);
+ * 1: a composed path with drops, held frames, preemption and missing
+ *    statistics;
+ * 2: a backend that holds frames to their target, with planned onsets,
+ *    skipped presents and a path and depth that flap;
+ * 3: vblanks that themselves come later, 10 long refreshes every 32, with
+ *    held frames: most times are off the grid, so it follows them (THE
+ *    GRID). The case was written for a panel that stretches frames; the
+ *    scanout probe of 2026-10-09 found DXGI's times off the grid with the
+ *    vblanks steady (test_held_off_grid plays that), so this is a display
+ *    whose timing moves, which no measured one did.
+ * 4: a timestamp 30% of a period early on one flip in 3 gives evidence
+ *    on a third of the flips, and it stays under the threshold, with a
+ *    count that loses a vblank every 50 presents, as DXGI's did;
+ * 5: two flips in flight with a statistic for 1 present in 3: begin()
+ *    estimates a flip before it shows, so the presents run ahead of the
+ *    refreshes by up to the frames in flight. */
+static void test_sync_legit(int which) {
+    static script c;
+    static const int64_t stretch_us[16] = { 0, 300, 600, 900, 1200, 1080, 960, 840, 720, 600, 480, 360, 240, 120, 0, 0 };
+    int64_t extra = 0;
+    yscr_screen s;
+    yscr_sync_info si;
+    int fires = g_unsynced_fires, i;
+    memset(&c, 0, sizeof c);
+    c.depth = 1;
+    c.path = YSCR_PATH_INDEPENDENT;
+    if (which == 0) {
+        for (i = 0; i < MAX_ID; i++) {
+            c.t_off[i] = stretch_us[i % 16] * 1000;
+            c.drop[i] = i % 16 == 0;
+        }
+    } else if (which == 5) {
+        /* two flips in flight on a backend that holds frames to their
+         * target, with no statistic for 2 presents in 3: begin() finds 3
+         * pending and estimates them, one before it shows */
+        c.native = 1;
+        c.depth = 2;
+        c.path = YSCR_PATH_COMPOSED;
+        for (i = 0; i < MAX_ID; i++) c.missing[i] = i % 3 != 0;
+    } else if (which == 4) {
+        /* one flip in 3 with a time stamped 30% of a period early, a
+         * presenter's clock error: evidence on a third of the flips, under
+         * the threshold */
+        for (i = 0; i < MAX_ID; i++) {
+            c.t_off[i] = i % 3 == 0 ? -(int64_t)P_NS * 3 / 10 : 0;
+            c.count_off[i] = i / 50;   /* and a count that loses a vblank now and then, as DXGI's */
+        }
+    } else if (which == 3) {
+        /* the vblanks themselves stretch: every 32 refreshes, 10 longer
+         * ones (20% of a period longer, then 2% less each), as measured;
+         * the grid's count at a present call is then one too high */
+        for (i = 0; i < MAX_ID; i++) {
+            if (i % 32 >= 1 && i % 32 <= 10) extra += P_NS * (22 - 2 * (i % 32)) / 100;
+            c.vb_off[i] = extra;
+        }
+    } else if (which == 1) {
+        c.depth = 2;
+        c.path = YSCR_PATH_COMPOSED;
+        for (i = 0; i < MAX_ID; i++) {
+            c.drop[i] = i % 7 == 3;
+            c.missing[i] = i % 13 == 5;
+        }
+    } else {
+        c.native = 1;
+        c.depth = 2;
+        c.path = YSCR_PATH_COMPOSED;
+        c.free_at_flip = 1;
+        c.change_id = 200;
+        c.depth2 = 1;
+        c.path2 = YSCR_PATH_INDEPENDENT;
+        c.flap = 50;
+        for (i = 0; i < MAX_ID; i++) {
+            c.drop[i] = i % 7 == 3;
+            c.act[i] = (unsigned char)(i % 17 == 9 ? 1 : i % 3 == 0 ? 4 : 0);
+        }
+    }
+    ring_reset();
+    CHECK(open_sync(&s, &c));
+    if (!yscr_is_open(&s)) return;
+    if (which == 0 || which == 4 || which == 5) {
+        sync_frames(&s, 600, 0, 0);
+    } else if (which == 3) {
+        sync_frames(&s, 600, 0, 4);
+    } else {
+        for (i = 0; i < 30; i++) {
+            c.preempt_next = (i % 3 + 1) * (P_NS / 3);
+            sync_frames(&s, 20, P_NS / 4, 5);
+        }
+    }
+    yscr_sync_check(&s, &si);
+    CHECK_I(si.untimed, 0);
+    CHECK_I(g_unsynced_fires - fires, 0);
+    CHECK(si.observed >= (which == 5 ? 150u : 300u));
+    if (which == 4) {
+        CHECK(si.peak >= 16 && si.peak < 32);
+        CHECK(si.torn >= 150);
+        yscr_close(&s);
+        return;
+    }
+    CHECK_I(si.peak, 0);
+    CHECK_I(si.same_refresh, 0);
+    CHECK_I(si.no_wait, 0);
+    CHECK_I(si.torn, 0);
+    CHECK_I(g_sr.n_unsynced, 0);
+    if (which == 0) CHECK(g_sr.n_unstable >= 200);   /* the stretch was seen */
+    if (which == 3) CHECK(g_sr.n_unstable >= 100);
+    yscr_close(&s);
 }
 
 /* ------------------------------------------------------------ abort, panic */
@@ -2596,9 +3527,24 @@ int main(void) {
     test_prediction_and_ring();
     test_drop_and_late();
     test_depth();
-    test_native_depth(0);
-    test_native_depth(1);
-    test_native_depth(2);
+    test_native_depth(0, 0);
+    test_native_depth(1, 0);
+    test_native_depth(2, 0);
+    test_native_depth(0, 1);
+    test_native_depth(1, 1);
+    test_native_depth(2, 1);
+    test_depth_misses(0, 0);
+    test_depth_misses(1, 0);
+    test_depth_misses(0, 1);
+    test_depth_misses(1, 1);
+    test_depth_path_native();
+    test_depth_measured();
+    test_depth_early(0);
+    test_depth_early(1);
+    test_depth_early(2);
+    test_late_statistics(0);
+    test_late_statistics(1);
+    test_depth_pin();
     test_one_miss_and_early();
     test_flap_prediction(0);
     test_flap_prediction(1);
@@ -2623,6 +3569,8 @@ int main(void) {
     test_snap_and_hold(0, 0);
     test_snap_and_hold(1, YSCR_LEAD_NONE);
     test_snap_and_hold(0, YSCR_LEAD_NONE);
+    test_held_off_grid(0);
+    test_held_off_grid(400);
     test_phases_and_wait();
     test_group();
     test_unshown_and_tiers();
@@ -2631,6 +3579,18 @@ int main(void) {
     test_panic_rule();
     test_icon();
     test_sim();
+    test_sync_forced_off(1);
+    test_sync_forced_off(2);
+    test_sync_forced_off(3);
+    test_sync_forced_off(4);
+    test_sync_legit(0);
+    test_sync_legit(1);
+    test_sync_legit(2);
+    test_sync_legit(3);
+    test_sync_legit(4);
+    test_sync_legit(5);
+    /* no case but the forced-off ones fired the guard */
+    CHECK_I(g_unsynced_fires, g_unsynced_want);
     if (g_failures) {
         fprintf(stderr, "screen_test: %d failure(s)\n", g_failures);
         return 1;

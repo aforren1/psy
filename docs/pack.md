@@ -402,14 +402,14 @@ test corpus:
       "lodepng": "e584a8490db1b76b81bf298c11c09d3b55d9c270",
       "ysp/audio.h": "0.2.1",
       "ysp/color.h": "0.1.0",
-      "ysp/gfx.h": "0.10.3",
+      "ysp/gfx.h": "0.10.5",
       "ysp/json.h": "0.1.0",
       "ysp/outline.h": "0.2.1",
       "ysp/pack.h": "0.1.0",
       "ysp/table.h": "0.1.0"
     },
     "name": "ypak",
-    "version": "0.1.1"
+    "version": "0.2.0"
   },
   "version": 1
 }
@@ -583,7 +583,7 @@ STREAM).
 | 20 | 4 | flags: bit 0 reads `ysp_time`, bit 1 reads `ysp_seed`, bit 2 validated by glslang (never set yet) |
 | 24 | 4 | params: bit k for `ysp_param(k)` with a literal k; all ones when a k is not a literal |
 | 28 | 4 | textures: bits for `ysp_tex0` to `ysp_tex2`, `ysp_utex0` |
-| 32 | 4 | `YGFX_SHADER_CONTRACT` at build (ysp/gfx.h v0.10.3) |
+| 32 | 4 | `YGFX_SHADER_CONTRACT` at build (ysp/gfx.h v0.10.3; 2 from v0.10.5) |
 | 36 | 4 | 0 |
 | 40 | 8 | XXH64 of `ygfx_shader_wrap()`'s output at build |
 | 48 | 4, 4 | body offset (64), body length |
@@ -601,7 +601,7 @@ and logs a different wrap hash. Parameter: `mode` (required).
 | 8 | 4, 4 | version 1, header size 64 |
 | 16 | 4, 4 | w, h (1 to 65536) |
 | 24 | 4 | format: `ygfx_format`'s value (R8 1, RG8 2, RGBA8 3, R16F 4, RGBA16F 5, R32F 6, RGBA32F 7, R16UI 8) |
-| 28 | 8 | `ygfx_encoding`'s bytes: matrix, range, transfer, primaries, siting, chroma_nearest, 0, 0 |
+| 28 | 8 | `ygfx_encoding`'s bytes as `ygfx_texture()` takes them: matrix, range, transfer, primaries, siting, chroma_nearest, 0, 0 (see the table below) |
 | 36 | 4 | compression: 0 raw, 1 QOI (RGBA8 only) |
 | 40 | 8 | stored bytes |
 | 48 | 8 | raw bytes (w h texel size) |
@@ -618,6 +618,34 @@ for 8-bit), `linear` or `device`; a 16-bit PNG has no default. An `iCCP`
 chunk, a `gAMA` other than 45455 and a `cHRM` other than sRGB's are
 refused by name. `compression`: `raw` (default) or `qoi`; the reader's
 `ypak_qoi_decode()` checks the raw hash.
+
+The encoding bytes are the `enc` of `ygfx_texture_desc` (ysp/gfx.h
+v0.10.5), copied unchanged: the tool refuses at build every texture that
+`ygfx_texture()` would refuse at load for its encoding, so the player
+guesses nothing. `primaries` (`bt709` or `device`) is given only where the
+table asks for it; elsewhere it is refused.
+
+| Format | `encoding` | `primaries` | Bytes 28 to 31 | At load |
+|---|---|---|---|---|
+| any | `linear` | refused | 0, 0, 0, 0 | Linear values: every use (color, modulation, add, coverage, a shader's texture) |
+| r8, rg8 | `srgb`, `device` | refused | RGB 1, full 2, the transfer (sRGB 3, device 1), device 1 | A color image; gray is the display's white at each level |
+| rgba8, rgba32f | `device` | refused | 1, 2, 1, 1 | A color image; the codes go through the display's own transfer |
+| rgba8, rgba32f | `srgb` | required | 1, 2, 3, then BT.709 2 or device 1 | A color image. `bt709`: converted through the rig's calibration, which must have chromaticities (`ygfx_texture()` refuses without one). `device`: the transfer decoded, the RGB shown as the display's |
+| r16ui | `linear` only | refused | 0, 0, 0, 0 | Linear values; ysp/gfx.h decodes no transfer on R16UI: use `"format": "rgba32f"` for sRGB or device codes |
+
+Why `primaries` is required for sRGB codes in RGB and has no default: an
+untagged PNG does not say whether its RGB is BT.709's or the display's,
+and an `sRGB` chunk says BT.709 while most laboratories show images as
+the display's RGB. Either default would be a guess that changes the light;
+the build stops and names both choices. Gray needs no choice: it has no
+chromaticity of its own. The tool does not linearize 8-bit sRGB codes:
+in 8 bits that merges the dark codes (the 256 sRGB codes become 183 linear
+codes; codes 0 to 6 all become 0, and 7 to 17 all 1), so ysp/gfx.h
+decodes the transfer per pixel instead. An
+encoded texture draws as a color image only; a coverage, mask, modulation
+or shader texture is built `linear`. Changed in tool v0.2.0 (2026-10-09):
+v0.1.1 wrote matrix, range and transfer on every texture with primaries
+0, which `ygfx_texture()` refused, and refused any encoding on R8 and RG8.
 
 ### 4.10 VIDEO, VIDEO_INDEX, FRAMESEQ (phase 3, not built)
 
@@ -738,7 +766,7 @@ the tool and requires the same bytes (open question 2).
 | GLYPHRUNS | view; one `ygfx_crun()` per run, items from the entry | none |
 | AUDIO | `yau_wav_load()` from data, or `yau_wav_open()` with a cursor | widened to float (load) or streamed |
 | SHADER | view, `ygfx_pipeline()` | none |
-| TEXTURE | view, `ygfx_texture()`; QOI decoded first | none raw; one buffer for QOI |
+| TEXTURE | view, `ygfx_texture()` with the stored `enc` bytes unchanged (4.9); QOI decoded first | none raw; one buffer for QOI |
 | VIDEO | `yvid_desc.reader` = cursor, `.index` = index entry | streamed |
 
 ## 7. Determinism
@@ -901,6 +929,18 @@ because a chunk-list hash refused the same pack a step later; k-02 needed
 a fetched range one byte too long; v-01, v-03 and v-04 needed view inputs
 that break only the rule under test. Second run: 36 of 36 killed.
 `tests/mutate/audio.toml`: 4 of 4. `gfx.toml` v10-07: killed.
+
+**Tool v0.2.0: mutations of the TEXTURE encoding, by hand.** The runner
+in `tests/mutate` builds one test source against copied headers and
+cannot build the tool, so these 8 mutants of `pack/pack_tool.c` were
+applied one at a time, `test_pack_tool` rebuilt (MSVC 19.44) and run,
+and the file restored (2026-10-09). All 8 killed: linear stores the
+encoding bytes (8 failing checks); gray and device primaries left 0 (5);
+sRGB RGB without `primaries` taken (the test crashed on the missing
+name); `bt709` stored as device (4); r16ui with a transfer taken (1); the
+primaries not recorded for the rebuild (1: the rebuild refuses); an
+unknown primaries name taken (11); `primaries` taken where none apply
+(32). Counts include checks that fail after the first one.
 
 **Phase 2: fuzzing.** `tests/fuzz/pack_fuzz.c` under MSVC 19.44
 `/fsanitize=address /fsanitize=fuzzer`, from 23 seeds (three packs built
@@ -1084,7 +1124,10 @@ one function in the tool.
     record at the end of the file, so a player signed after the pack was
     appended does not open its pack. Not measured.
 11. **Shader contract version. Built** (ysp/gfx.h v0.10.3,
-    `YGFX_SHADER_CONTRACT` = 1, recorded in each SHADER entry).
+    `YGFX_SHADER_CONTRACT` = 1, recorded in each SHADER entry). Raised to 2
+    in ysp/gfx.h v0.10.5 (the user, 2026-10-09): v0.10.4 binds `stim.tex`
+    as `ysp_tex0`, and a body that samples it reads garbage on a contract-1
+    player. No pack existed outside the repository.
 
 ## 11. Phase 2: what was built
 
@@ -1092,16 +1135,16 @@ one function in the tool.
 |---|---|---|
 | `include/ysp/pack.h` | 0.1.0 | The reader (2.12) |
 | `include/ysp/audio.h` | 0.2.1 | `yau_wav_probe()` (docs/audio.md, "The WAV probe") |
-| `include/ysp/gfx.h` | 0.10.3 | `YGFX_SHADER_CONTRACT` (docs/gfx.md, "v0.10.3") |
-| `pack/ysp/pack_tool.h`, `pack/pack_tool.c`, `pack/pack_impl.c` | 0.1.1 | The tool library. 0.1.1 (2026-10-09): the JSON reader and writer moved to `include/ysp/json.h`; every corpus pack is byte-identical to 0.1.0's but for the manifest, which now names ysp/json.h |
+| `include/ysp/gfx.h` | 0.10.5 | `YGFX_SHADER_CONTRACT` (docs/gfx.md, "v0.10.3"; 2 from v0.10.5); encoded R8 and RG8 textures, so a TEXTURE entry loads as stored (docs/gfx.md, "v0.10.5") |
+| `pack/ysp/pack_tool.h`, `pack/pack_tool.c`, `pack/pack_impl.c` | 0.2.0 | The tool library. 0.1.1 (2026-10-09): the JSON reader and writer moved to `include/ysp/json.h`; every corpus pack is byte-identical to 0.1.0's but for the manifest, which now names ysp/json.h. 0.2.0 (2026-10-09): TEXTURE encoding bytes as `ygfx_texture()` takes them, `primaries` (4.9); the shader contract 2 in SHADER entries |
 | `include/ysp/json.h` | 0.1.0 | The strict JSON reader and canonical writer (docs/json.md) |
-| `pack/ypak.c` | 0.1.1 | The CLI |
+| `pack/ypak.c` | 0.2.0 | The CLI (it prints the tool library's version) |
 | `tools/vendor_pack.py` | | Fetches and verifies lodepng |
 | `tests/adapt/pack_test.c` | | The reader's test, with its own writer: 29 faults, every bit flip and truncation of a small pack, the four sources, cursors, the arena, a virtual 4.3 GB entry and 65,537 entries (zip64 by size, offset and count), the views |
 | `tests/compile/pack.c`, `pack.cpp` | | C11 and C++17 compile checks |
 | `tests/fuzz/pack_fuzz.c` | | The libFuzzer target (four targets: memory, incremental, range reader, views) |
 | `tests/mutate/pack.toml`, `audio.toml`; `gfx.toml` v10-07 | | Mutations |
-| `tests/pack/tool_test.c`, `tests/pack/corpus/` | | The tool end to end: every kind, build twice, verify, rebuild, append, extract, damage, 23 refused descriptions |
+| `tests/pack/tool_test.c`, `tests/pack/corpus/` | | The tool end to end: every kind, build twice, verify, rebuild, append, extract, damage, 29 refused descriptions; every corpus texture into `ygfx_texture()` as stored, on the null backend, with and without a calibration |
 | `tests/pack/compat.py` | | The six readers (9.1) |
 | `examples/pack/bench.c` | | Section 8 (`pack_bench`) |
 

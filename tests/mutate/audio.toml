@@ -51,3 +51,149 @@ find = '''    rc = yau__wav_scan(&src, info, err, cap);
     return rc;'''
 replace = '''    rc = yau__wav_scan(&src, info, err, cap);
     return rc;'''
+
+# v0.3.0: the WASAPI shared queue (docs/audio.md, "Periods and buffers").
+# The gate's wait on the WASAPI event and the exclusive one-period buffer
+# run only on hardware; audio_clockstats --queue and --exclusive measure
+# them, so they have no mutant here.
+
+[[mutant]]
+id = "q-01"
+name = "queue 3 accepted"
+test = "audio"
+why = "A queue of 3 periods does not fit a 1056-frame buffer; the open must refuse it, not run ungated."
+find = '''|| d.queue < 0 || d.queue > 2) {'''
+replace = '''|| d.queue < 0 || d.queue > 3) {'''
+
+[[mutant]]
+id = "q-02"
+name = "no default queue"
+test = "audio"
+why = "A zeroed desc must get the measured default of 2 periods, not miniaudio's own order, which costs 10 ms of lead."
+find = '''    if (!d.queue) d.queue = 2;'''
+replace = ''''''
+
+[[mutant]]
+id = "q-03"
+name = "queue not passed to the device"
+test = "audio"
+why = "The device, not the core, keeps the queue; it must receive desc.queue."
+find = '''    in.queue = d.queue;'''
+replace = '''    in.queue = 0;'''
+
+[[mutant]]
+id = "q-04"
+name = "gate threshold one period high"
+test = "audio"
+why = "The gate opens at queue - 1 periods left in the buffer; one more keeps an extra period queued, 10 ms more lead."
+find = '''     ? -1 : ((queue) - 1) * (period))'''
+replace = '''     ? -1 : (queue) * (period))'''
+
+[[mutant]]
+id = "q-05"
+name = "gate without the room check"
+test = "audio"
+why = "Without room for a period when the gate opens, miniaudio waits on the event the gate already took and the stream stalls."
+find = '''     || (int64_t)(buffer) - (period) < (int64_t)((queue) - 1) * (period)              \
+'''
+replace = ''''''
+
+[[mutant]]
+id = "q-06"
+name = "gate in exclusive mode"
+test = "audio"
+why = "Exclusive mode takes a whole buffer per event; a padding gate there would wait on the wrong condition."
+find = '''    ((exclusive) || (queue) <= 0 || (period) <= 0                                     \'''
+replace = '''    ((queue) <= 0 || (period) <= 0                                                   \'''
+
+[[mutant]]
+id = "q-07"
+name = "caps.queue not reported"
+test = "audio"
+why = "The describe line and yau_get_caps() must say which queue ran, so a log shows the lead it had."
+find = '''    out->queue = au->dcaps.queue;'''
+replace = ''''''
+
+# v0.3.1: an underrun of about a period, found from reports that stay late
+# against the fit (docs/audio.md, "Halts"). test_halt in the core test.
+
+[[mutant]]
+id = "h-01"
+name = "late threshold two periods"
+test = "audio"
+why = "A halt of one period makes every later report a period late; a threshold above that never sees it, and later onsets are off by the halt while they say tier 2."
+find = '''            if (r > half) {'''
+replace = '''            if (r > 4.0 * half) {'''
+
+[[mutant]]
+id = "h-02"
+name = "two late reports make a halt"
+test = "audio"
+why = "Two reports in a row late by most of a period, with no halt, must not restart the fit or flag sounds."
+find = '''#define YAU__HALT_REPORTS 3 '''
+replace = '''#define YAU__HALT_REPORTS 2 '''
+
+[[mutant]]
+id = "h-03"
+name = "an on-time report does not end the run"
+test = "audio"
+why = "Late reports one at a time, with on-time reports between them, are not a halt."
+find = '''            } else {
+                au->early_run = 0;
+                au->late_run = 0;
+            }'''
+replace = '''            } else {
+                au->early_run = 0;
+            }'''
+
+[[mutant]]
+id = "h-04"
+name = "late reports confirm onsets"
+test = "audio"
+why = "A report of a halt not yet confirmed must not confirm a sound tier 2 on the old timing."
+find = '''            if (pw <= v->start || au->late_run > 0) continue;'''
+replace = '''            if (pw <= v->start) continue;'''
+
+[[mutant]]
+id = "h-05"
+name = "the halt's first report counts in its length"
+test = "audio"
+why = "The first late report can be the halt half over; the record's halt must come from a report after the device played again."
+find = '''                else if (au->late_run == 2 || r < au->late_min) au->late_min = r;'''
+replace = '''                if (au->late_run == 1 || r < au->late_min) au->late_min = r;'''
+
+[[mutant]]
+id = "h-06"
+name = "the fit keeps its points after a halt"
+test = "audio"
+why = "After a halt every frame plays later by the halt; a fit of the old points puts later onsets off by it."
+find = '''                    yau__xrun_rec(au, now_t, 0, 1, (int64_t)au->late_min, au->late_w0, au->late_again);
+                    au->first_block = 0;
+                    au->fit.w0 = pw; au->fit.t0 = tk->pos_t; au->fit.k = yau__k_nom(au);'''
+replace = '''                    yau__xrun_rec(au, now_t, 0, 0, (int64_t)au->late_min, au->late_w0, au->late_again);'''
+
+[[mutant]]
+id = "h-07"
+name = "the fit starts over on the next callback"
+test = "audio"
+why = "The sounds the halt moved complete in the callback that finds it; their times must come from the new timing, not the old fit."
+find = '''                    au->first_block = 0;
+                    au->fit.w0 = pw; au->fit.t0 = tk->pos_t; au->fit.k = yau__k_nom(au);
+                } else {'''
+replace = '''                } else {'''
+
+[[mutant]]
+id = "h-08"
+name = "the XRUN record without the halt"
+test = "audio"
+why = "The record says how long the device stood, so the analysis can move the times of what played after it."
+find = '''    u.i64[2] = halt_ns;'''
+replace = '''    u.i64[2] = 0;'''
+
+[[mutant]]
+id = "h-09"
+name = "an underrun counted twice"
+test = "audio"
+why = "Measured at queue 2: the report before a halt can be early by most of a period, which has its own XRUN record; the halt that follows is the same underrun and must not count again."
+find = '''    if (!again) au->xruns++;'''
+replace = '''    au->xruns++;'''

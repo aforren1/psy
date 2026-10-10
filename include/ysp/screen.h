@@ -1,4 +1,4 @@
-/* ysp/screen.h - v0.4.0 - public domain single-header display library
+/* ysp/screen.h - v0.4.4 - public domain single-header display library
  *
  *   The window, the GL ES 3.0 context, the display mode and the swap path
  *   of a stimulus display, with flip at a time: each frame learns the
@@ -22,6 +22,60 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.4.4 - The depth comes from the path, never from misses (DEPTH;
+ *          decided 2026-10-09): measured at open on DXGI_FLIP (never above
+ *          the smallest depth 2 of open's flips showed), the path's on
+ *          COMPOSITION (independent flip 1, composed and overlay 2), the
+ *          new path's at each path change. A miss is a drop and nothing
+ *          more. On DXGI_FLIP a flip that was not held and showed early
+ *          lowers it to what it showed, since only that proves it too high.
+ *          desc.depth pins it; desc.depth_learn keeps v0.4.3's rule
+ *          (opt-in: with steady GPU work near a period it dropped 1 to 6
+ *          frames in 600 where the default dropped 3 to 57). Each change
+ *          writes a YSCR_EV_DEPTH ring record and the describe line counts
+ *          them. Measured on v0.4.3's stress runs: no early flip after
+ *          heavy frames (3 per run before); every early flip and depth
+ *          change left is in a run's first 6 frames.
+ *          AUTO picks COMPOSITION where it opens with independent flip,
+ *          else DXGI_FLIP (BACKENDS; decided 2026-10-09 on 10-minute runs:
+ *          equal prediction p99, drops and tiers, no early flip); the
+ *          describe line and YSCR_EV_MODE's u.i32[5] say what AUTO did.
+ *          Fixed: when open() got no OS time (a window covered at open;
+ *          COMPOSITION after a session unlock), the guessed grid stayed:
+ *          every record tier 3 and the sync guard fired on on-time flips.
+ *          The first OS time now replaces the guess.
+ *   v0.4.3 - Fixed: held frames shown a vblank early on DXGI_FLIP (THE
+ *          GRID; docs/screen.md, "Held frames a vblank early"). While
+ *          frames were held, DXGI's refresh count lost about 1 vblank in
+ *          25 and 15% of its vblank times were up to half a period off
+ *          the vblanks, which D3DKMTGetScanLine showed steady. The grid
+ *          moved to those times, so the next hold woke before the real
+ *          vblank: 26 to 72 of 1200 held frames were shown a vblank
+ *          early in fullscreen, idle, in every version since v0.2.0, and
+ *          the lost counts flagged about 145 more EARLY that were on time.
+ *          Now a flip's vblank is the grid's nearest to the OS's time;
+ *          only times on the grid move it, or 16 in a row that agree on a
+ *          new phase; when 48 of 64 times are off it, it follows them as
+ *          before. A record whose OS time is off the grid has the grid's
+ *          vblank time as onset (GRID_UNSTABLE, tier 2). Measured: 0 early
+ *          in 1200 held frames fullscreen; with load, misses and holds,
+ *          3 of 3600 (from the depth rule, not the grid).
+ *   v0.4.2 - The sync guard (SYNC GUARD): a driver setting that forces
+ *          vsync off is detected from the flips. When 32 of the last 64
+ *          flips with an OS time came two in one refresh, flipped with no
+ *          vblank after their present, or tore, or a block of 64 or more
+ *          refreshes saw more presents complete than its refreshes plus
+ *          8, the screen is untimed: from that flip
+ *          on every record is tier 3 with the new flag YSCR_FLIP_UNSYNCED,
+ *          a YSCR_EV_UNSYNCED ring record marks the flip, the describe
+ *          line warns, and yscr_sync_check() gives the evidence and a
+ *          message that names the AMD, NVIDIA, Intel and Mesa settings.
+ *          Fixed (INPUT, "Second key reports"): a device-0 key-up of a
+ *          dropped report could take another keyboard's held key, so
+ *          key_double_ups missed it and that keyboard's own key-up passed
+ *          too; a device-0 key-up now goes first to a press kept with a
+ *          keyboard's id that has a dropped report pending, and a key-up
+ *          pairs with its own device's press before one with device 0.
  *   v0.4.1 - yscr_event_input() drops SDL 3.4's second key reports (INPUT,
  *          "Second key reports"): a key-down of the same key within 50 ms
  *          of the last one kept, from the same keyboard or with either
@@ -140,7 +194,8 @@
  *          groups, input restamping, mode lists and the parameter table.
  *          The other swap paths are stubs that refuse to open.
  *
- *   STATUS: v0.4.1 (the key filter; INPUT has its checks). Two swap paths run, DXGI_FLIP and COMPOSITION, on one
+ *   STATUS: v0.4.4 (the depth from the path, AUTO = COMPOSITION;
+ *   docs/screen.md, "Depth from the path" and "AUTO, decided"). Two swap paths run, DXGI_FLIP and COMPOSITION, on one
  *   machine: a Windows 11 25H2 laptop whose Intel Iris Xe drives a 1920 x
  *   1200 panel at 60.0008 Hz (60 Hz is its only rate), with the ANGLE that
  *   ships in Docker Desktop's Electron front end (2.1.23876, git
@@ -193,10 +248,13 @@
  *   frame waits for the last one's statistic, and the loop used about 99%
  *   of vblanks
  *   in a window (16.85 ms mean frame time).
- *   AUTO stays DXGI_FLIP: COMPOSITION did better in a window, but only as
- *   well in fullscreen on the quiet machine, its present call costs more,
- *   it needs Windows 11, and its composed onset is tier 3 where
- *   DXGI_FLIP's is tier 2.
+ *   AUTO (v0.4.4) picks COMPOSITION where it opens with independent
+ *   flip. 10 minutes each, idle, AC: fullscreen 1.92 us p99 against
+ *   DXGI_FLIP's 1.88, in a window 1.82 against 1.78; 0 and 1 drops on
+ *   both; no early flip against 4 (DXGI_FLIP's window, at the start).
+ *   Against it: its present call costs about twice as much (463 against
+ *   222 us mean), it needs Windows 11 x64, its composed onset is tier 3
+ *   where DXGI_FLIP's is tier 2, and a covered window gets no statistic.
  *   What the onset is (measured against the scanout's own vblank entry,
  *   polled with D3DKMTGetScanLine): an independent flip's DisplayedTime
  *   was 13 us after it at p50 and 77 us at p99, came 0.3 ms later, and
@@ -212,8 +270,9 @@
  *   machine whose QPC runs at another rate this is unverified.
  *   Tiers, from these runs: DXGI_FLIP overlay and COMPOSITION independent
  *   flip are tier 1; DXGI_FLIP composed is tier 2 (DWM's vblank, measured
- *   against nothing else); a flip off the grid (the panel stretched frames
- *   after a late one, up to 4.9 ms) is tier 2; COMPOSITION composed or
+ *   against nothing else); a flip whose OS time is off the grid (up to
+ *   half a period; the scanout's vblanks stayed on it) is tier 2, with the
+ *   grid's vblank time as onset; COMPOSITION composed or
  *   overlay frames and every ESTIMATED flip are tier 3.
  *   Input: SDL's tick clock correlates to the ysp_rt clock within 0.1 us.
  *   Keys sent with SendInput(): on the raw path, stamped 0.18 to 0.67 ms
@@ -230,7 +289,7 @@
  *   under ASan and UBSan, and 8 of 8 runs with a busy loop on its CPU) and
  *   clang (emcc, run in node); 43 deliberate mutations of the header
  *   each make it fail (v0.3.1's 12 and v0.3.2's 2 checked with MinGW
- *   only). v0.3.2's text input: its records and flag on the scripted path
+ *   only), and the 9 of v0.4.3 (eg- in tests/mutate/screen.toml). v0.3.2's text input: its records and flag on the scripted path
  *   (MSVC, MinGW); its SDL calls by hand in examples/layout/gfx_layout.c.
  *   CODES and TRIGGERS (v0.3.0, measured on battery, Balanced plan; the
  *   tables are in docs/screen.md): the open-time self test passed on
@@ -382,45 +441,74 @@
  *     the mode's rational period at first, then the period fitted from the
  *     OS's vblank times over at least 64 vblanks. The describe line shows
  *     the fitted refresh and its difference from the mode's (this laptop's
- *     panel: 60.0008 Hz). A vblank more than 1% of a period off the grid
- *     sets YSCR_FLIP_GRID_UNSTABLE on its record; one more than a quarter
- *     period off restarts the fit.
+ *     panel: 60.0008 Hz). A flip's vblank is the grid's nearest to the
+ *     OS's time, not the OS's count: on this laptop's DXGI_FLIP, while
+ *     frames were held, the count lost about 1 vblank in 25, and 15% of
+ *     the times were up to half a period off the vblanks, which the
+ *     scanout (D3DKMTGetScanLine) showed steady on the grid; each frame
+ *     flipped on the vblank nearest its time. An OS time more than 1% of a
+ *     period off the grid sets YSCR_FLIP_GRID_UNSTABLE on its record, the
+ *     record's onset is then the grid's vblank time, and the grid does not
+ *     move to it: a grid moved there woke the next hold before the real
+ *     vblank, and that frame was shown a vblank early (v0.4.2 and before).
+ *     The grid moves to a new phase when 16 off-grid times in a row agree
+ *     on it, as a changed display timing gives (DXGI's off-grid times
+ *     agreed on at most 5 in a row). When 48 of the last 64 times are off
+ *     the grid, the vblanks themselves move, or no grid fits: then the
+ *     grid follows each time and takes the OS's count, as before v0.4.3,
+ *     until 16 of 64 or fewer are off it (DXGI's held frames: at most 34
+ *     of 64).
  *
  *   DEPTH
  *     The depth is the number of vblanks from a present call to the flip
  *     that shows it: 1 on an overlay or independent-flip path, 2 when the
- *     compositor copies the frame (measured, docs/screen.md). The
- *     header learns it from the flips: three flips in a row at a new depth
- *     change it, so one late flip is a drop and not a new depth, and one
- *     flip is enough after the path changes. A flip shown on the vblank
- *     right after the flip before it may have waited behind that flip, so
- *     its count says "this depth or less"; up to 3 such flips do not use up
- *     a path change's one-flip window. open() presents black frames
- *     until three flips agree, because a window that has just gone
- *     fullscreen is composed for a few frames.
- *     When the depth falls (composed to overlay), the flip planned at the
- *     old depth shows a vblank early (EARLY). The next frame is planned a
- *     vblank after the early one's plan, never on it, so the early frame
+ *     compositor copies the frame (measured, docs/screen.md). It comes
+ *     from the path, never from misses (decided 2026-10-09: a depth that
+ *     rises after misses adds a vblank of latency in the middle of a
+ *     task):
+ *       - open(), DXGI_FLIP: measured. Black frames until three flips in
+ *         a row agree, at least 6 and at most 40, because a window that
+ *         has just gone fullscreen is composed for a few frames.
+ *       - open(), COMPOSITION: the path's. A present there waits for its
+ *         target, so an on-time flip shows only that the depth was enough.
+ *       - a path change (YSCR_EV_PATH): the new path's, at once. That is
+ *         the depth open() measured on that path, else 1 for independent
+ *         flip and a DXGI overlay, 2 for composed and for COMPOSITION's
+ *         overlay frames (they come with the compositor's statistics and
+ *         showed on the vblank after next). An unknown path keeps it.
+ *       - a miss: none. It is a drop, flagged and counted; its tier is as
+ *         before.
+ *     desc.depth = N (1 to 8) pins it: no measurement, no path following.
+ *     On a path that needs more, every flip shows a vblank late (each
+ *     record dropped 1, and f.onset a period early); on a path that needs
+ *     less, every frame waits the extra vblanks and shows on time (on
+ *     DXGI_FLIP the hold wakes at the path's depth, not the pin). A loop
+ *     whose GPU work per frame is close to a period can pin 2.
+ *     desc.depth_learn (opt-in, not with a pin) is v0.4.3's rule: on
+ *     DXGI_FLIP three flips in a row at a new depth change it, and one
+ *     flip after a path change; on COMPOSITION three misses in a row
+ *     raise it, and it falls only on evidence: per path, the slack of each
+ *     flip (the planned vblank's time minus the return of the present
+ *     call), on time and missed, must show on 4 flips in a row that one
+ *     depth less would have been on time 8 times as often as a miss with
+ *     that slack or more; a miss within 4 flips of a lowering clears that
+ *     path's on-time counts. Measured (docs/screen.md, "Depth from the
+ *     path"): with steady GPU work near a period it dropped 1 to 6 frames
+ *     in 600 where the default dropped 3 to 57; after each short run of
+ *     misses it moved the depth twice, and the frames after showed early
+ *     (DXGI_FLIP) or a vblank apart (COMPOSITION).
+ *     Every change writes a YSCR_EV_DEPTH ring record (old, new, reason,
+ *     path, frame), and the describe line reads depth=2(path,3 changes).
+ *     When the depth falls (composed to overlay), a flip planned at the
+ *     old depth can show a vblank early (EARLY). The next frame is planned
+ *     a vblank after the early one's plan, never on it, so the early frame
  *     stays on the screen two vblanks; f.onset and f.vblank always rise
  *     from one frame to the next. When the depth rises, a flip planned at
  *     the old depth is shown late (a drop), and the next frame's f.vblank
  *     is 2 on: begin() runs before that drop's record completes.
- *     A backend that shows a frame at its target (COMPOSITION) holds an
- *     early present back, so an on-time flip cannot show that a smaller
- *     depth would do, and a try at one less drops a frame when it fails.
- *     There the header never tries. Three misses in a row raise the depth
- *     by one. It lowers the depth only on evidence: per path, it counts
- *     the slack of each flip (the planned vblank's time minus the return
- *     of the present call), on time and missed. On 4 flips in a row, the
- *     slack one depth less would have had must have been seen on time at
- *     least 8 times as often as a miss with that slack or more. A miss
- *     within 4 flips of a lowering clears that path's on-time counts, so
- *     the same evidence cannot cost a second frame; this can happen only
- *     when the system's deadline changed after the evidence was taken.
- *     Counts halve every 4096 flips. Each path keeps its last depth, so a
- *     window that moves between composed and independent flip does not
- *     learn again. open() does not learn the depth on these backends; it
- *     starts at 1.
+ *     When open() gets no OS time (a window covered at open, or
+ *     COMPOSITION's first statistics late), the grid is a guess and onsets
+ *     are tier 3; the first OS time replaces the guess.
  *
  *   PREDICTION
  *     yscr_begin() predicts the first vblank a present made now can
@@ -452,7 +540,9 @@
  *     target    t as given to flip_at
  *     planned   the vblank time the flip was planned for, + offset
  *     onset     the time of the vblank it was shown on, + offset: the OS's
- *               vblank timestamp on DXGI, not a photon. The photodiode
+ *               vblank timestamp on DXGI, or the grid's vblank nearest
+ *               it when it is off the grid (GRID_UNSTABLE), not a
+ *               photon. The photodiode
  *               test (tests/loopback/) measures the difference, which goes
  *               in desc.onset_offset_ns.
  *     residual  onset - target
@@ -463,7 +553,8 @@
  *     flags     PENDING (not shown yet), ESTIMATED (no OS time for this
  *               present; onset is the planned vblank), LATE_TARGET,
  *               OCCLUDED (no statistic came: the window was covered),
- *               GRID_UNSTABLE (the vblank was off the grid), EARLY (shown
+ *               GRID_UNSTABLE (the OS's time was off the vblank grid;
+ *               onset is the grid's vblank nearest it), EARLY (shown
  *               before the planned vblank), SKIPPED and CANCELED (never
  *               shown: a later present took the vblank; onset 0, residual
  *               0), ONSET_PLANNED (the onset is the vblank the system
@@ -508,10 +599,11 @@
  *     vblank in t_ns, because the ring reads 0 as "now". Also
  *     YSCR_EV_PATH when the path
  *     changes (u.u16[0] old, u.u16[1] new) and YSCR_EV_MODE at open
- *     (u.i32[0..4] w, h, refresh_num, refresh_den, backend). Records arrive
- *     in completion order, which is not always frame order.
- *     YSCR_EV_TEXT_INPUT, YSCR_EV_DEVICE, YSCR_EV_RAW_MICE and
- *     YSCR_EV_INPUT_LOST: INPUT.
+ *     (u.i32[0..5] w, h, refresh_num, refresh_den, backend, and how AUTO
+ *     chose it: YSCR_AUTO_*). Records arrive in completion order, which is
+ *     not always frame order. YSCR_EV_DEPTH at open and at each change of
+ *     depth (DEPTH). YSCR_EV_TEXT_INPUT, YSCR_EV_DEVICE, YSCR_EV_RAW_MICE
+ *     and YSCR_EV_INPUT_LOST: INPUT. YSCR_EV_UNSYNCED: SYNC GUARD.
  *
  *   ONE FRAME IN FLIGHT
  *     begin() waits until the swap path takes a frame, so the frame drawn
@@ -558,7 +650,8 @@
  *          (IndependentFlipFrame's displayed time sat within 0.1 ms of the
  *          scanout's own vblank, and moved with a late frame)
  *       2  good under conditions: DXGI_FLIP composed (DWM's vblank, one
- *          display), and any flip off the vblank grid (GRID_UNSTABLE)
+ *          display), and any flip whose OS time was off the vblank grid
+ *          (GRID_UNSTABLE: its onset is the grid's vblank)
  *       3  for task development only: an ESTIMATED or ONSET_PLANNED onset,
  *          such as every composed or overlay frame of COMPOSITION, whose
  *          time is DWM's plan for a vblank about 15 ms ahead
@@ -572,7 +665,16 @@
  *   ---------------------------------------------------------------------
  *   BACKENDS
  *   ---------------------------------------------------------------------
- *   YSCR_BACKEND_DXGI_FLIP (Windows 10 and 11; desc.backend 0 picks it)
+ *   YSCR_BACKEND_AUTO (desc.backend 0)
+ *     COMPOSITION where it opens and the presentation factory reports
+ *     independent flip for the window's output (Windows 11 x64), else
+ *     DXGI_FLIP. Decided 2026-10-09 on 10-minute runs that showed
+ *     COMPOSITION no worse (docs/screen.md, "AUTO"). The describe line
+ *     says backend=composition(auto), or backend=dxgi_flip(auto,
+ *     composition-refused:"why"), and YSCR_EV_MODE's u.i32[5] is
+ *     YSCR_AUTO_NAMED, _COMPOSITION or _FALLBACK. A backend named in
+ *     desc.backend is opened or fails, as before.
+ *   YSCR_BACKEND_DXGI_FLIP (Windows 10 and 11)
  *     SDL3 makes the window. The header makes a D3D11 device on the adapter
  *     whose output shows the window (on a laptop with two GPUs, the one
  *     wired to the panel; any other means a copy between adapters and a
@@ -616,7 +718,7 @@
  *     declarations return SystemInterruptTime and LUID by value where the
  *     C++ methods return them through a hidden pointer;
  *     tests/compile/screen_com.cpp checks every slot against the SDK.
- *     AUTO does not pick it (STATUS gives the reasons).
+ *     AUTO picks it where it opens with independent flip.
  *   YSCR_BACKEND_SIM
  *     No window, no GL: a vblank grid on the ysp_rt clock with
  *     desc.sim_period_ns (default 1/60 s), which shows every frame on the
@@ -1051,7 +1153,12 @@
  *     - after such a drop, the first key-up of that key that finds no
  *       kept key-down still down is dropped too, so the consumer sees one
  *       down and one up; the kept press's own key-up passes, whichever
- *       comes first;
+ *       comes first, and a key-up is paired with a kept key-down of its
+ *       own device before one with device 0;
+ *     - a key-up with device 0 is dropped first where a press kept with a
+ *       keyboard's id has a dropped report pending (v0.4.2): the kept
+ *       press's own key-up has that id, so this one is the second
+ *       report's, also while another keyboard holds the same key;
  *     - an OS repeat (YIN_REPEAT) passes: SDL's key state marks the second
  *       report of a held key so, and a consumer's held-key rule reads it;
  *     - a key-down with the same time, device and key as the one kept is
@@ -1263,8 +1370,56 @@
  *   interval sweep and the luminance-versus-interval sweep on that panel
  *   first. The header always presents with a sync interval of 1 and never
  *   with tearing. A driver that varies the refresh on its own shows up as
- *   off-grid vblanks (YSCR_FLIP_GRID_UNSTABLE) and as a warning in the
- *   describe line.
+ *   off-grid times (YSCR_FLIP_GRID_UNSTABLE) and as a warning in the
+ *   describe line; once most times are off the grid, the grid follows
+ *   them (THE GRID).
+ *
+ *   ---------------------------------------------------------------------
+ *   SYNC GUARD
+ *   ---------------------------------------------------------------------
+ *   A driver panel can force vsync off for every program: AMD Software
+ *   "Wait for Vertical Refresh: Always off", NVIDIA Control Panel
+ *   "Vertical sync: Off", Intel Graphics "Vertical Sync: Speed", and on
+ *   Linux Mesa's vblank_mode=0. Whether a panel overrides a flip-model
+ *   Present(1) is not measured (docs/screen.md, "Driver-forced vsync
+ *   off"). If one does, frames tear or are discarded, and the onsets are
+ *   not measurements. The guard looks at every flip that has an OS time
+ *   (after open's black frames, and not while the window is occluded) for
+ *   evidence that is impossible under vsync:
+ *     - same refresh: its vblank count is not after the previous flip's,
+ *       or its time is less than half a period after it;
+ *     - no wait: it flipped in the refresh its present call was made in
+ *       (the count is not after the count at the call, and the time is
+ *       before the call: DXGI's count lost vblanks while frames were
+ *       held, so it can be one behind the grid's count at the call);
+ *     - torn: its time is more than a quarter period before the vblank
+ *       its count names, on the grid it was planned with.
+ *   It fires when 32 of the last 64 such flips have evidence (FLIPS), or
+ *   when, over a block of at least 64 refreshes between such flips, more
+ *   presents completed (shown, estimated or skipped) than the refreshes
+ *   plus 8, the frames that can be in flight (RATE). The rate catches a
+ *   driver that discards frames without tearing: their statistics are
+ *   missing, so they complete as ESTIMATED and look shown.
+ *   Legitimate cases give no evidence: a held frame or a drop shows fewer
+ *   frames than refreshes; COMPOSITION's present at a time and the SIM
+ *   backend show each frame on a vblank of its own after its present;
+ *   DXGI's off-grid times of held frames (GRID_UNSTABLE) gave a torn
+ *   flip now and then, never many in a row. One stale count or
+ *   jittered time is one flip of 32. tests/adapt/screen_test.c plays a
+ *   forced-off driver four ways (each fires) and the legitimate paths
+ *   (none fires). On this laptop's DXGI_FLIP, with load, misses and held
+ *   frames, at most 3 of 64 flips had evidence; on COMPOSITION, none
+ *   (docs/screen.md, "Driver-forced vsync off").
+ *   When it fires, once per open: the screen is untimed. Every record
+ *   from the flip that fired it on carries YSCR_FLIP_UNSYNCED and tier 3
+ *   (so desc.min_tier flags it, and caps.worst_tier is 3). The ring gets
+ *   one YSCR_EV_UNSYNCED record; the describe line says
+ *   WARNING=not-vsynced(driver-setting?); yscr_sync_check() returns the
+ *   rule, the frame, the evidence counts and a message to show the
+ *   operator. The run goes on: only the caller knows what to do with its
+ *   trials. Limit: a driver that tears but reports the next vblank's
+ *   count and time gives no evidence; examples/screen/sync_check.c shows
+ *   tearing to the eye.
  *
  *   ---------------------------------------------------------------------
  *   PARAMETERS
@@ -1318,8 +1473,8 @@
 
 #define YSCR_VERSION_MAJOR 0
 #define YSCR_VERSION_MINOR 4
-#define YSCR_VERSION_PATCH 1
-#define YSCR_VERSION_STRING "0.4.1"
+#define YSCR_VERSION_PATCH 4
+#define YSCR_VERSION_STRING "0.4.4"
 
 #include "ysp/rt.h"
 #include "ysp/input.h"
@@ -1385,6 +1540,10 @@ union SDL_Event;
 #define YSCR_FLIP_TEXT_INPUT    0x800u /* planned while text input was on:
                                           * keys were off the raw path; not
                                           * in the ring's mode word (INPUT) */
+#define YSCR_FLIP_UNSYNCED     0x1000u /* the sync guard fired: flips are not
+                                          * synced to the vblank, the screen
+                                          * is untimed (tier 3); not in the
+                                          * ring's mode word (SYNC GUARD)   */
 
 /* How far a flip's onset can be trusted, from its backend, path and the
  * source of its time (TIERS in the manual). Lower is better. */
@@ -1454,6 +1613,54 @@ typedef yin_mouse_report yscr_mouse_event;
  * u.u32[4] the kept report's device. */
 #define YSCR_EV_KEY_DOUBLE 13u
 
+/* YSCR_EV_UNSYNCED: the sync guard fired, once per open (SYNC GUARD).
+ * t_ns the onset of the flip that fired it, aux desc.display_index,
+ * u.u32[0] the rule (YSCR_SYNC_RULE_*), u.u32[1] flips with evidence in
+ * the window, u.u32[2] the window's flips, u.u32[3] presents and u.u32[4]
+ * refreshes of the rate block (0 for the flip rule), u.i64[3] the frame
+ * index of that flip. */
+#define YSCR_EV_UNSYNCED 14u
+#define YSCR_SYNC_RULE_FLIPS 1u   /* at least 32 of the last 64 flips     */
+#define YSCR_SYNC_RULE_RATE  2u   /* more presents than refreshes + 8     */
+
+/* YSCR_EV_DEPTH: the depth changed (DEPTH). t_ns when, aux
+ * desc.display_index, u.u16[0] the old depth (0 at open), u.u16[1] the new,
+ * u.u16[2] the reason (YSCR_DEPTH_*), u.u16[3] the path, u.i64[1] the
+ * frame whose flip record brought the change (-1 at open). */
+#define YSCR_EV_DEPTH 15u
+
+/* YSCR_EV_MODE's u.i32[5]: how the backend was chosen (BACKENDS). */
+#define YSCR_AUTO_NAMED       0   /* desc.backend named it                 */
+#define YSCR_AUTO_COMPOSITION 1   /* AUTO, and COMPOSITION opened          */
+#define YSCR_AUTO_FALLBACK    2   /* AUTO, COMPOSITION refused: DXGI_FLIP  */
+#define YSCR_DEPTH_OPEN    1u   /* measured at open, or the path's at open */
+#define YSCR_DEPTH_PATH    2u   /* the path changed                       */
+#define YSCR_DEPTH_PIN     3u   /* desc.depth, at open                    */
+#define YSCR_DEPTH_LEARNER 4u   /* desc.depth_learn: misses or evidence   */
+#define YSCR_DEPTH_EARLY   5u   /* DXGI_FLIP: a flip not held showed early */
+
+/* What the sync guard saw (SYNC GUARD), from yscr_sync_check(). Counts are
+ * of flips with an OS time since open, after open's own black frames. */
+typedef struct yscr_sync_info {
+    int32_t  untimed;        /* 1: the guard fired; stays until close       */
+    uint32_t rule;           /* YSCR_SYNC_RULE_* that fired it; 0           */
+    int64_t  fired_index;    /* frame index of the flip that fired it; -1   */
+    int32_t  window;         /* flips in the window, at most 64             */
+    int32_t  evidence;       /* of them, flips with evidence of no sync     */
+    int32_t  peak;           /* the most evidence one window held since
+                              * open: the margin to 32                      */
+    uint32_t observed;       /* flips with an OS time, total                */
+    uint32_t same_refresh;   /* evidence: two flips in one refresh          */
+    uint32_t no_wait;        /* evidence: shown in the refresh it was
+                              * presented in, with no vblank between        */
+    uint32_t torn;           /* evidence: over a quarter period before the
+                              * vblank its count names                      */
+    uint32_t block_presents; /* the rate block so far: presents completed   */
+    uint32_t block_refreshes;/* ... and refreshes between its flips         */
+    char     message[512];   /* "" until it fires; then the reason and the
+                              * driver settings that force vsync off        */
+} yscr_sync_info;
+
 /* The bridge's counters, totals since the process started. */
 typedef struct yscr_input_stats {
     uint32_t stored;        /* events stored by yscr_push_input() and raw mice */
@@ -1505,7 +1712,7 @@ typedef void (*yscr_panic_fn)(void* ctx);
 #define YSCR_PATCH_DEFAULT_SIZE 32
 
 typedef enum yscr_backend {
-    YSCR_BACKEND_AUTO = 0,
+    YSCR_BACKEND_AUTO = 0,       /* COMPOSITION where it runs, else DXGI_FLIP */
     YSCR_BACKEND_DXGI_FLIP,      /* Windows 10 and 11                      */
     YSCR_BACKEND_COMPOSITION,    /* Windows 11 composition swapchain       */
     YSCR_BACKEND_GLX_OML,        /* Linux X11: stub                        */
@@ -1846,6 +2053,9 @@ typedef struct yscr_desc {
     int64_t        key_dedup_ns;     /* yscr_event_input() drops a key's second
                                       * report within this time; 0 = 50 ms,
                                       * < 0 = off, at most 1 s (INPUT)       */
+    /* the depth (DEPTH) */
+    int32_t        depth;            /* 0 = from the path; 1 to 8 pins it    */
+    bool           depth_learn;      /* misses raise it (opt-in; not with a pin) */
 } yscr_desc;
 
 /* Private. One flip between flip_at() and its completion. */
@@ -1855,8 +2065,10 @@ typedef struct yscr__pend {
     int64_t     planned_count;
     int64_t     count_at_present;
     int64_t     t_ret;            /* when the present call returned         */
+    int64_t     t_call;           /* when it was made                       */
     uint32_t    code_vals[YSCR_MAX_CODES];  /* for the CODE record        */
     int32_t     asap;
+    int32_t     held;             /* planned after the first vblank it could make */
     int32_t     used;
 } yscr__pend;
 
@@ -1868,6 +2080,10 @@ typedef struct yscr__pend {
 #define YSCR__SLACK_BINS  128
 #define YSCR__SLACK_PATHS 5
 #define YSCR__SLACK_DECAY 4096   /* flips between halvings of the counts  */
+/* Off-grid OS times in a row that agree with the first of them on a new
+ * phase, and so move the grid there. DXGI's off-grid times agreed so on
+ * at most 5 in a row (docs/screen.md, "Held frames a vblank early"). */
+#define YSCR__REGRID_N 16
 #define YSCR__BACKEND_WORDS 192
 
 /* Private. One at-onset trigger job. */
@@ -1932,12 +2148,23 @@ typedef struct yscr_screen {
     int                     have_anchor;
     int64_t                 vb_t, vb_count;
     int64_t                 ref_t, ref_count;
+    int64_t                 count_bias;   /* the grid's vblank number minus the OS's count */
+    int64_t                 cand_t;       /* an off-grid time: a new phase may start there */
+    int32_t                 cand_n;       /* off-grid times since that agree with it */
+    uint64_t                grid_hist;    /* a bit per OS time, newest in bit 0: 1 = off the grid */
+    int32_t                 grid_n;       /* bits in grid_hist, at most 64 */
+    int32_t                 grid_follow;  /* 1: most times are off it, so it follows them */
     double                  period_f;
     double                  nominal_f;
     int64_t                 margin_ns;
     int32_t                 depth, depth_cand, depth_votes, depth_need;
+    int32_t                 show_depth;   /* where a present on this path shows; = depth unless pinned */
+    int32_t                 depth_pin;    /* desc.depth; 0 = from the path */
+    int32_t                 depth_learn;  /* desc.depth_learn */
+    uint32_t                depth_changes;   /* after open's */
     int32_t                 adopt_left;   /* queued flips a path change's window survives */
     int32_t                 last_obs, obs_streak;
+    uint8_t                 warm_seen[9]; /* open's flips per depth shown, on the last path */
     int32_t                 depth_of[YSCR__SLACK_PATHS];   /* 0 = not known yet */
     int32_t                 lower_streak, fresh_lower;
     uint32_t                slack_n;
@@ -1945,6 +2172,22 @@ typedef struct yscr_screen {
     uint16_t                slack_miss[YSCR__SLACK_PATHS][YSCR__SLACK_BINS];
     uint8_t                 path;
     uint32_t                unstable;
+    int32_t                 anchor_guessed;   /* open() got no OS time: the grid is a guess */
+    bool                    hw_onset_pr;      /* the presenter's caps.hw_onset */
+    /* the sync guard (SYNC GUARD) */
+    uint64_t                sync_hist;    /* a bit per observed flip, newest
+                                           * in bit 0: 1 = evidence        */
+    int32_t                 sync_win;     /* bits in sync_hist, at most 64 */
+    int32_t                 sync_peak;    /* the most bits set at once     */
+    int32_t                 sync_off;     /* 1: fired                      */
+    uint32_t                sync_rule;
+    uint32_t                sync_obs, sync_same, sync_nowait, sync_torn;
+    uint32_t                sync_p, sync_r;   /* the rate block            */
+    int32_t                 sync_have_prev;
+    int64_t                 sync_prev_count, sync_prev_t;
+    int64_t                 sync_index;
+    uint32_t                sync_fire[3]; /* evidence, presents, refreshes
+                                           * when it fired                 */
     int32_t                 min_tier;
     int32_t                 worst_tier;
     int64_t                 prev_shown;
@@ -2009,6 +2252,8 @@ typedef struct yscr_screen {
 #endif
     char                    error[256];
     uint64_t                backend_mem[YSCR__BACKEND_WORDS];
+    int32_t                 auto_pick;    /* YSCR_AUTO_*: what AUTO did */
+    char                    auto_why[96]; /* why AUTO fell back to DXGI_FLIP */
 } yscr_screen;
 
 /* --- API ----------------------------------------------------------------- */
@@ -2068,6 +2313,12 @@ YSCR_API void        yscr_get_caps(const yscr_screen* s, yscr_caps* out);
 /* One line for the log: backend, adapter, ANGLE version, mode, measured
  * refresh, path, depth, lead, and warnings. Returns snprintf's count. */
 YSCR_API int         yscr_describe(const yscr_screen* s, char* buf, size_t cap);
+
+/* The sync guard's state (SYNC GUARD): whether flips have shown that they
+ * are not synced to the vblank (a driver setting that forces vsync off),
+ * the evidence, and a message for the operator. Zeroes (fired_index -1)
+ * when the screen is not open. */
+YSCR_API void        yscr_sync_check(const yscr_screen* s, yscr_sync_info* out);
 
 /* Starts a frame. Pumps SDL's events (read them with yscr_poll()), waits
  * until the swap path takes a frame (at most one is in flight), completes
@@ -2369,6 +2620,10 @@ enum {
 #endif
 #endif
 static void yscr__text_input_set(yscr_screen* s, int on, int external, int x, int y, int w, int h);
+/* Called once when the sync guard fires; a test counts the fires. */
+#ifndef YSCR__ON_UNSYNCED
+#define YSCR__ON_UNSYNCED(s) ((void)(s))
+#endif
 
 /* One YSCR_EV_DEVICE record per change of a device: present at open,
  * added, removed. The table makes a device that SDL reports twice (its
@@ -2749,11 +3004,31 @@ static int yscr__key_keep(yscr_screen* s, const yin_event* e) {
     int i;
     if (e->kind != YIN_KIND_KEYBOARD || win <= 0) return 1;
     if (e->type == YIN_RELEASE) {
-        /* the kept press's key-up first, whichever report it came from */
+        yscr__key* any = NULL;
+        /* A device-0 key-up cannot be the key-up of a press kept with a
+         * keyboard's id, so where such a press has a dropped report
+         * pending, it is that report's. Else it could take another
+         * keyboard's held key, and that keyboard's own key-up would pass
+         * too (found by examples/response/trial_two_keyboards.c, v0.4.2). */
+        if (e->device == 0)
+            for (i = 0; i < YSCR__KEYS; i++) {
+                k = &yscr__in.key[i];
+                if (!k->used || !k->dropped || !k->device || k->control != e->control) continue;
+                k->dropped--;
+                yscr__a_inc(&yscr__in.key_double_ups);
+                return 0;
+            }
+        /* the kept press's key-up first, whichever report it came from;
+         * the same device before device 0, so table order cannot pair a
+         * key-up with another keyboard's press */
         for (i = 0; i < YSCR__KEYS; i++) {
             k = &yscr__in.key[i];
             if (!k->used || !k->down || k->control != e->control || !yscr__key_dev(k->device, e->device)) continue;
-            k->down = 0;
+            if (k->device == e->device) { any = k; break; }
+            if (!any) any = k;
+        }
+        if (any) {
+            any->down = 0;
             return 1;
         }
         for (i = 0; i < YSCR__KEYS; i++) {
@@ -4406,6 +4681,10 @@ static void yscr__comp_drain(yscr__comp* c) {
 
 static void yscr__comp_close(void* vctx);
 
+/* Set by open() around AUTO's try of COMPOSITION; open() calls are never
+ * concurrent (MEMORY AND THREADS). */
+static int yscr__comp_auto;
+
 static int yscr__comp_open(void* vctx, const yscr_presenter_open* in, yscr_caps* caps,
                              char* err, size_t err_cap) {
     yscr__comp* c = (yscr__comp*)vctx;
@@ -4487,6 +4766,13 @@ static int yscr__comp_open(void* vctx, const yscr_presenter_open* in, yscr_caps*
     if (FAILED(hr) || !YSCR__C0(c->pf, IsPresentationSupported)) {
         yscr__comp_close(c);
         yscr__set_error(err, err_cap, "ysp_screen: this GPU and driver do not support the composition swapchain");
+        return YSCR_ERR_NOT_IMPLEMENTED;
+    }
+    /* AUTO takes COMPOSITION only where its frames can reach the tier 1
+     * path; a composed onset there is DWM's plan (tier 3). */
+    if (yscr__comp_auto && !YSCR__C0(c->pf, IsPresentationSupportedWithIndependentFlip)) {
+        yscr__comp_close(c);
+        yscr__set_error(err, err_cap, "ysp_screen: no independent flip for the composition swapchain on this output");
         return YSCR_ERR_NOT_IMPLEMENTED;
     }
     caps->vrr_capable = false;
@@ -5545,9 +5831,11 @@ static uint8_t yscr__tier(const yscr_screen* s, const yscr_record* r) {
         }
     }
     if ((r->flags & (YSCR_FLIP_ESTIMATED | YSCR_FLIP_ONSET_PLANNED)) && t < YSCR_TIER_3) t = YSCR_TIER_3;
-    /* off the vblank grid: the panel stretched a frame (measured on this
-     * laptop after a late frame on independent flip); the time is still
-     * the system's, the grid is not */
+    /* not synced to the vblank: no onset is a measurement (SYNC GUARD) */
+    if (s->sync_off && t < YSCR_TIER_3) t = YSCR_TIER_3;
+    /* the OS's time was off the vblank grid (measured on this laptop's
+     * held frames, while the scanout's vblanks stayed on it): the onset
+     * is the grid's vblank, not an OS observation of it */
     if ((r->flags & YSCR_FLIP_GRID_UNSTABLE) && t < YSCR_TIER_2) t = YSCR_TIER_2;
     return (uint8_t)t;
 }
@@ -5559,6 +5847,16 @@ static void yscr__finish(yscr_screen* s, yscr__pend* p, int64_t shown) {
     if (shown > s->prev_shown) s->prev_shown = shown;
     p->used = 0;
     if (s->warming) return;
+    /* the rate block counts every present that completed, shown or not,
+     * from its first flip with a time on; a hidden window's presents may
+     * not be paced, so it starts again */
+    if (r->flags & YSCR_FLIP_OCCLUDED) {
+        s->sync_p = s->sync_r = 0;
+        s->sync_have_prev = 0;
+    } else if (s->sync_have_prev) {
+        s->sync_p++;
+    }
+    if (s->sync_off) r->flags |= YSCR_FLIP_UNSYNCED;
     if (!(r->flags & (YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED))) {
         r->tier = yscr__tier(s, r);
         if (r->tier > s->worst_tier) s->worst_tier = r->tier;
@@ -5591,22 +5889,32 @@ static void yscr__estimate(yscr_screen* s, yscr__pend* p) {
     yscr__finish(s, p, p->planned_count);
 }
 
-static void yscr__anchor(yscr_screen* s, int64_t t, int64_t count) {
-    if (!s->have_anchor) {
+/* How far d is from a whole number of periods, in ns. */
+static double yscr__phase_off(const yscr_screen* s, int64_t d) {
+    double r = (double)d - (double)llround((double)d / s->period_f) * s->period_f;
+    return r < 0 ? -r : r;
+}
+
+/* The grid's vblank nearest t, and whether t is within 1% of a period of
+ * it: an OS time on the grid. */
+static int yscr__on_grid(const yscr_screen* s, int64_t t, int64_t* nc) {
+    *nc = s->vb_count + (int64_t)llround((double)(t - s->vb_t) / s->period_f);
+    return yscr__phase_off(s, t - yscr__time_of(s, *nc)) <= s->period_f / 100;
+}
+
+/* restart: the display's timing changed, so the fit starts again. */
+static void yscr__anchor(yscr_screen* s, int64_t t, int64_t count, int restart) {
+    if (!s->have_anchor || restart) {
         s->vb_t = t; s->vb_count = count;
         s->ref_t = t; s->ref_count = count;
+        if (restart) {
+            s->period_f = s->nominal_f;
+            yscr__update_lead(s);
+        }
         s->have_anchor = 1;
         return;
     }
     if (count < s->vb_count) return;
-    {
-        int64_t dev = t - yscr__time_of(s, count);
-        if (dev < 0) dev = -dev;
-        if ((double)dev > s->period_f / 4) {   /* a jump: start the fit again */
-            s->ref_t = t; s->ref_count = count;
-            s->period_f = s->nominal_f;
-        }
-    }
     s->vb_t = t; s->vb_count = count;
     if (count - s->ref_count >= 64) {
         s->period_f = (double)(t - s->ref_t) / (double)(count - s->ref_count);
@@ -5619,6 +5927,58 @@ static int yscr__slack_bin(const yscr_screen* s, int64_t slack) {
     if (b < 0) return 0;
     if (b >= YSCR__SLACK_BINS - 1) return YSCR__SLACK_BINS - 1;
     return (int)b;
+}
+
+/* The depth a path shows at when open() did not measure it there: 1 where
+ * the scanout reads the frame itself, 2 where the compositor copies it
+ * (docs/screen.md, "Depth"). COMPOSITION's overlay frames come with the
+ * compositor's statistics and showed on the vblank after next (2 of 2);
+ * on a backend that holds frames, a depth too large costs latency only,
+ * where one too small drops every frame. Unknown: no change. */
+static int32_t yscr__path_table(const yscr_screen* s, int path) {
+    switch (path) {
+    case YSCR_PATH_COMPOSED:    return 2;
+    case YSCR_PATH_OVERLAY:     return s->caps.native_target ? 2 : 1;
+    case YSCR_PATH_INDEPENDENT:
+    case YSCR_PATH_SIMULATED:   return 1;
+    default:                    return 0;
+    }
+}
+
+static int32_t yscr__path_depth(const yscr_screen* s, int path) {
+    int32_t d;
+    if (path < YSCR__SLACK_PATHS && s->depth_of[path]) return s->depth_of[path];
+    d = yscr__path_table(s, path);
+    return d ? d : s->show_depth;
+}
+
+/* A change of depth changes the time from a present to its flip, so the
+ * ring gets one record per change and the describe line counts them: a
+ * task can see where its latency moved. show is where a present shows on
+ * the path; a pin holds the planned depth, and a DXGI hold still wakes at
+ * show (FLIP AT A TIME). */
+static void yscr__depth_set(yscr_screen* s, int32_t show, uint16_t why, int64_t t, int64_t frame) {
+    int32_t old = s->depth, d;
+    yrt_event ev;
+    if (show < 1) show = 1;
+    if (show > 8) show = 8;
+    s->show_depth = show;
+    d = s->depth_pin ? s->depth_pin : show;
+    if (d == old) return;   /* open() sets old to 0, so its record always comes */
+    s->depth = d;
+    if (old) s->depth_changes++;
+    YRT_PLOT("yscr depth", (double)d);
+    memset(&ev, 0, sizeof ev);
+    ev.t_ns = (uint64_t)t;
+    ev.source = (uint16_t)YRT_SRC_SCREEN;
+    ev.kind = (uint16_t)YSCR_EV_DEPTH;
+    ev.aux = s->display_index;
+    ev.u.u16[0] = (uint16_t)old;
+    ev.u.u16[1] = (uint16_t)d;
+    ev.u.u16[2] = why;
+    ev.u.u16[3] = s->path;
+    ev.u.i64[1] = frame;
+    yscr__push(s, &ev);
 }
 
 /* A present with a target waits for it, so an on-time flip shows only that
@@ -5651,15 +6011,14 @@ static void yscr__native_depth(yscr_screen* s, yscr__pend* p, int64_t count) {
             memset(s->slack_ok[path], 0, sizeof s->slack_ok[path]);
             s->fresh_lower = 0;
             s->depth_votes = 0;
-            s->depth++;
+            yscr__depth_set(s, s->depth + 1, YSCR_DEPTH_LEARNER, p->rec.onset, p->rec.index);
         } else if (++s->depth_votes >= 3) {
             s->depth_votes = 0;
-            if (s->depth < 8) s->depth++;
+            if (s->depth < 8) yscr__depth_set(s, s->depth + 1, YSCR_DEPTH_LEARNER, p->rec.onset, p->rec.index);
         } else {
             return;
         }
         s->depth_of[path] = s->depth;
-        YRT_PLOT("yscr depth", (double)s->depth);
         return;
     }
     if (s->slack_ok[path][bin] < 0xFFFF) s->slack_ok[path][bin]++;
@@ -5676,24 +6035,108 @@ static void yscr__native_depth(yscr_screen* s, yscr__pend* p, int64_t count) {
     }
     if (s->lower_streak >= 4) {
         s->lower_streak = 0;
-        s->depth--;
+        yscr__depth_set(s, s->depth - 1, YSCR_DEPTH_LEARNER, p->rec.onset, p->rec.index);
         s->depth_of[path] = s->depth;
         s->fresh_lower = 4;
-        YRT_PLOT("yscr depth", (double)s->depth);
+    }
+}
+
+static int yscr__popcount64(uint64_t x) {
+    int n = 0;
+    for (; x; x &= x - 1) n++;
+    return n;
+}
+
+static void yscr__sync_fire(yscr_screen* s, uint32_t rule, const yscr__pend* p, int64_t t, int ev) {
+    yrt_event e;
+    int k;
+    s->sync_off = 1;
+    s->sync_rule = rule;
+    /* a completion with no record left: the oldest record still to come
+     * is the first one flagged */
+    s->sync_index = s->index;
+    if (p) s->sync_index = p->rec.index;
+    else
+        for (k = 0; k < YSCR__MAX_PEND; k++)
+            if (s->pend[k].used && s->pend[k].rec.index < s->sync_index) s->sync_index = s->pend[k].rec.index;
+    s->sync_fire[0] = (uint32_t)ev;
+    s->sync_fire[1] = s->sync_p;
+    s->sync_fire[2] = s->sync_r;
+    memset(&e, 0, sizeof e);
+    e.t_ns = (uint64_t)(t + s->offset);
+    e.source = (uint16_t)YRT_SRC_SCREEN;
+    e.kind = (uint16_t)YSCR_EV_UNSYNCED;
+    e.aux = s->display_index;
+    e.u.u32[0] = rule;
+    e.u.u32[1] = (uint32_t)ev;
+    e.u.u32[2] = (uint32_t)s->sync_win;
+    if (rule == YSCR_SYNC_RULE_RATE) { e.u.u32[3] = s->sync_p; e.u.u32[4] = s->sync_r; }
+    e.u.i64[3] = s->sync_index;
+    yscr__push(s, &e);
+    YSCR__ON_UNSYNCED(s);
+}
+
+/* The sync guard (SYNC GUARD), on a flip with an OS time. Under vsync a
+ * vblank shows at most one new frame, and a frame presented in one
+ * refresh flips at a vblank after it, so each piece of evidence below is
+ * impossible there; one can still come from a stale count or a jittered
+ * time, so the guard wants half of 64 flips, or a rate over 64 refreshes.
+ * DXGI's held frames on this laptop had times off the grid (docs/screen.md,
+ * "Held frames a vblank early"), a quarter period early on a few flips,
+ * never on many in a row. */
+static void yscr__sync_flip(yscr_screen* s, const yscr__pend* p, int64_t count, int64_t t, uint16_t vflags) {
+    int ev = 0, n;
+    if (s->warming) return;
+    if (vflags & YSCR_FLIP_OCCLUDED) {   /* a hidden window may not be paced */
+        s->sync_p = s->sync_r = 0;
+        s->sync_have_prev = 0;
+        return;
+    }
+    s->sync_obs++;
+    if (s->sync_have_prev) {
+        if (count <= s->sync_prev_count || (double)(t - s->sync_prev_t) < s->period_f / 2) {
+            ev = 1;
+            s->sync_same++;
+        }
+        if (count > s->sync_prev_count) s->sync_r += (uint32_t)(count - s->sync_prev_count);
+    }
+    /* a completion whose present was estimated already has no plan. Both
+     * the count and the time: DXGI's count can be a vblank behind the
+     * grid's, and the time alone cannot tell a vblank during the call from
+     * one before it */
+    if (p && count <= p->count_at_present && t < p->t_call) {
+        ev = 1;
+        s->sync_nowait++;
+    }
+    /* torn: before the vblank its count names, on the grid it was planned
+     * with (a grid that follows the flips, as when most times are off
+     * it, moves with a steady tear) */
+    if (p && (double)(p->rec.planned - s->offset - t) + (double)(count - p->planned_count) * s->period_f > s->period_f / 4) {
+        ev = 1;
+        s->sync_torn++;
+    }
+    if (!s->sync_have_prev || count > s->sync_prev_count) s->sync_prev_count = count;
+    s->sync_prev_t = t;
+    s->sync_have_prev = 1;
+    s->sync_hist = (s->sync_hist << 1) | (uint64_t)ev;
+    if (s->sync_win < 64) s->sync_win++;
+    n = yscr__popcount64(s->sync_hist);
+    if (n > s->sync_peak) s->sync_peak = n;
+    if (!s->sync_off && n >= 32) yscr__sync_fire(s, YSCR_SYNC_RULE_FLIPS, p, t, n);
+    if (s->sync_r >= 64) {
+        /* presents that completed between the block's flips, against the
+         * refreshes: queued and estimated presents shift a few across the
+         * block's edges, at most the frames in flight (8) */
+        if (!s->sync_off && s->sync_p > s->sync_r + YSCR__MAX_PEND) yscr__sync_fire(s, YSCR_SYNC_RULE_RATE, p, t, n);
+        s->sync_p = s->sync_r = 0;
     }
 }
 
 static void yscr__complete(yscr_screen* s, const yscr_vblank* v) {
     int i;
     yscr__pend* p = NULL;
-    int64_t count = v->count, t = v->t_ns;
-    bool unstable = false;
-    if (s->have_anchor) {
-        int64_t dev = t - yscr__time_of(s, count);
-        if (dev < 0) dev = -dev;
-        unstable = (double)dev > s->period_f / 100;
-        if (unstable) s->unstable++;
-    }
+    int64_t count = v->count, t = v->t_ns, onset;
+    bool unstable = false, guessed = false;
     for (i = 0; i < YSCR__MAX_PEND; i++) {
         yscr__pend* q = &s->pend[i];
         if (!q->used) continue;
@@ -5720,16 +6163,22 @@ static void yscr__complete(yscr_screen* s, const yscr_vblank* v) {
         ev.u.u16[1] = v->path;
         yscr__push(s, &ev);
         s->path = v->path;
-        if (s->caps.native_target) {
+        if (!s->warming && !s->depth_learn) {
+            /* the path sets the depth, and only the path: a miss never
+             * does (DEPTH) */
+            yscr__depth_set(s, yscr__path_depth(s, v->path), YSCR_DEPTH_PATH, t ? t : yscr__now(), p ? p->rec.index : -1);
+        } else if (s->caps.native_target) {
             /* the depth this path had last time; a path seen first keeps
              * the current one until misses show otherwise */
-            if (v->path < YSCR__SLACK_PATHS && s->depth_of[v->path]) s->depth = s->depth_of[v->path];
+            if (v->path < YSCR__SLACK_PATHS && s->depth_of[v->path])
+                yscr__depth_set(s, s->depth_of[v->path], YSCR_DEPTH_PATH, t ? t : yscr__now(), p ? p->rec.index : -1);
             s->depth_votes = 0;
             s->lower_streak = 0;
             s->fresh_lower = 0;
         } else {
             s->depth_need = 1;   /* a new path may have a new depth: adopt it */
             s->adopt_left = 3;
+            memset(s->warm_seen, 0, sizeof s->warm_seen);
         }
     }
     if (v->flags & (YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED)) {
@@ -5749,9 +6198,79 @@ static void yscr__complete(yscr_screen* s, const yscr_vblank* v) {
         yscr__estimate(s, p);
         return;
     }
-    yscr__anchor(s, t, count);
+    /* The vblank is the grid's nearest to the OS's time, not the OS's
+     * count: on this laptop's DXGI_FLIP, while frames were held, the
+     * refresh count lost about 1 vblank in 25 and 15% of the times were
+     * up to half a period off the vblanks, which D3DKMTGetScanLine showed
+     * steady on the grid. Each frame still flipped on the vblank nearest
+     * its time. A grid moved to such a time woke the next hold early, and
+     * that frame did show a vblank early (docs/screen.md, "Held frames a
+     * vblank early"). So only times on the grid move it, or 16 in a row
+     * that agree on a new phase, as a changed display timing gives. When
+     * 48 of the last 64 times are off the grid, the vblanks themselves
+     * move (or the grid is wrong): the grid then follows each time and
+     * takes the OS's count, as before v0.4.3, until 16 of 64 or fewer
+     * are off it. DXGI's held frames put at most 34 of 64 off it. */
+    if (s->anchor_guessed) {
+        /* open() got no OS time, so the grid is a guess: a window covered
+         * at open, or COMPOSITION's first statistics late (seen for about
+         * 0.7 s after a session unlock), made every record tier 3 and fired
+         * the sync guard. The first OS time replaces the guess, numbered
+         * as its nearest guessed vblank, so the flips planned on the guess
+         * keep their numbers. */
+        int64_t nc = s->vb_count + (int64_t)llround((double)(t - s->vb_t) / s->period_f);
+        s->anchor_guessed = 0;
+        guessed = true;   /* its plan was made on the guess: no evidence */
+        s->caps.hw_onset = s->hw_onset_pr;
+        s->count_bias = nc - v->count;
+        s->cand_n = 0;
+        s->grid_hist = 0;
+        s->grid_n = 0;
+        s->grid_follow = 0;
+        yscr__anchor(s, t, nc, 1);
+    }
+    onset = t;
+    if (!s->have_anchor) {
+        yscr__anchor(s, t, count, 0);
+    } else {
+        int64_t nc;
+        int on = yscr__on_grid(s, t, &nc), n_off;
+        s->grid_hist = (s->grid_hist << 1) | (uint64_t)!on;
+        if (s->grid_n < 64) s->grid_n++;
+        n_off = yscr__popcount64(s->grid_hist);
+        if (!s->grid_follow && s->grid_n >= 64 && n_off >= 48) s->grid_follow = 1;
+        else if (s->grid_follow && n_off <= 16) s->grid_follow = 0;
+        if (!on) {
+            unstable = true;
+            s->unstable++;
+        }
+        if (s->grid_follow) {
+            int64_t d = t - yscr__time_of(s, v->count + s->count_bias);
+            count = v->count + s->count_bias;
+            s->cand_n = 0;
+            yscr__anchor(s, t, count, (double)(d < 0 ? -d : d) > s->period_f / 4);   /* a jump: fit again */
+        } else if (on) {
+            s->count_bias = nc - v->count;
+            s->cand_n = 0;
+            count = nc;
+            yscr__anchor(s, t, count, 0);
+        } else {
+            if (s->cand_n > 0 && yscr__phase_off(s, t - s->cand_t) <= s->period_f / 100) s->cand_n++;
+            else { s->cand_t = t; s->cand_n = 1; }
+            count = nc;
+            if (s->cand_n > YSCR__REGRID_N) {
+                s->count_bias = nc - v->count;
+                s->cand_n = 0;
+                yscr__anchor(s, t, count, 1);
+            } else {
+                onset = yscr__time_of(s, nc);
+            }
+        }
+    }
+    /* the guard reads the OS's own time, and its count in the grid's numbers */
+    if (!guessed) yscr__sync_flip(s, p, v->count + s->count_bias, t, v->flags);
     if (!p) return;
-    p->rec.onset = t + s->offset;
+    p->rec.onset = onset + s->offset;
     p->rec.path = v->path;
     p->rec.tier = v->tier;
     p->rec.flags |= (uint16_t)(v->flags & YSCR_FLIP_ONSET_PLANNED);
@@ -5763,24 +6282,45 @@ static void yscr__complete(yscr_screen* s, const yscr_vblank* v) {
     } else {
         p->rec.dropped = (uint32_t)(count - p->planned_count);
     }
+    /* DXGI shows a present at the first vblank it can, so a flip that was
+     * not held and showed early, at a time on the grid, proves the depth
+     * too high: the depth falls to what it showed. The video worker's
+     * windowed runs: the path moved from composed to overlay 5 flips
+     * before DXGI reported it, and open() learned 3 on the composed path
+     * in 3 of 9 runs (108 to 116 early flips). Only a lower depth comes
+     * from it, so no latency is added. The path keeps at least its table
+     * depth: the report may lag the flip that showed early. */
+    if (!s->caps.native_target && !s->warming && !s->depth_learn && count < p->planned_count && !unstable &&
+        !p->held) {
+        int32_t obs = (int32_t)(count - p->count_at_present);
+        if (obs >= 1 && obs < s->show_depth) {
+            int path = s->path < YSCR__SLACK_PATHS ? s->path : 0;
+            int32_t keep = yscr__path_table(s, path);
+            if (keep < obs) keep = obs;
+            yscr__depth_set(s, obs, YSCR_DEPTH_EARLY, onset, p->rec.index);
+            if (s->depth_of[path] > keep) s->depth_of[path] = keep;
+        }
+    }
     /* Depth: vblanks from the present call to the flip. */
     if (s->caps.native_target) {
         int32_t obs = (int32_t)(count - p->count_at_present);
         if (obs == s->last_obs) s->obs_streak++;
         else { s->last_obs = obs; s->obs_streak = 1; }
-        if (!s->warming) yscr__native_depth(s, p, count);
-    } else if (p->asap) {
+        if (!s->warming && s->depth_learn) yscr__native_depth(s, p, count);
+    } else if (p->asap && (s->warming || s->depth_learn)) {
+        /* open() measures the depth here; after it only the learner does */
         int32_t obs = (int32_t)(count - p->count_at_present);
         if (obs == s->last_obs) s->obs_streak++;
         else { s->last_obs = obs; s->obs_streak = 1; }
+        if (s->warming && obs >= 1 && obs <= 8 && s->warm_seen[obs] < 255) s->warm_seen[obs]++;
         if (obs >= 1 && obs <= 8 && obs != s->depth) {
             if (obs == s->depth_cand) s->depth_votes++;
             else { s->depth_cand = obs; s->depth_votes = 1; }
             if (s->depth_votes >= s->depth_need) {
-                s->depth = obs;
+                if (s->warming) s->depth = s->show_depth = obs;
+                else yscr__depth_set(s, obs, s->depth_need == 1 ? YSCR_DEPTH_PATH : YSCR_DEPTH_LEARNER, onset, p->rec.index);
                 s->depth_votes = 0;
                 s->depth_need = 3;
-                YRT_PLOT("yscr depth", (double)obs);
             }
         } else if (obs == s->depth) {
             /* Shown on the vblank after the flip before it, it may have
@@ -6235,7 +6775,7 @@ static void yscr__trig_arm_flip(yscr_screen* s, const yscr__pend* p) {
     uint16_t moved = 0;
     int r, i;
     if (s->n_req < 1) return;
-    e = yscr__count_at(s, p->t_ret + s->margin_ns) + s->depth;
+    e = yscr__count_at(s, p->t_ret + s->margin_ns) + s->show_depth;
     if (e > c) { c = e; moved = YSCR_TRIG_MOVED; }
     yscr__lock(s);
     for (r = 0; r < s->n_req; r++) {
@@ -6361,7 +6901,7 @@ static void yscr__warmup(yscr_screen* s) {
         newest.t_ns = 0;
         if (s->pr->acquire(s->pr_ctx, now + 200000000, &newest) < 0) break;
         yscr__drain(s);
-        if (newest.t_ns && !s->have_anchor) yscr__anchor(s, newest.t_ns, newest.count);
+        if (newest.t_ns && !s->have_anchor) yscr__anchor(s, newest.t_ns, newest.count, 0);
         yscr__clear_black(s);
         memset(&req, 0, sizeof req);
         req.present_id = ++s->next_id;
@@ -6407,7 +6947,25 @@ static void yscr__warmup(yscr_screen* s) {
         s->ref_t = s->vb_t;
         s->ref_count = 0;
         s->have_anchor = 1;
+        s->anchor_guessed = 1;
+        s->hw_onset_pr = s->caps.hw_onset;
         s->caps.hw_onset = false;
+    }
+    {   /* The depth at open: measured where a present shows at the first
+         * vblank it can; the path's where the system holds it to its
+         * target, since an on-time flip there shows only that the depth
+         * was enough (DEPTH). */
+        int32_t d = s->depth, k;
+        /* A flip that waited behind the one before it shows "this depth or
+         * less"; three such in a row gave 3 on the composed path (the video
+         * worker, 3 of 9 windowed runs). So never more than the smallest
+         * depth 2 of open's flips on this path showed. */
+        for (k = 1; k < d && !s->caps.native_target && !s->depth_learn; k++)
+            if (s->warm_seen[k] >= 2) { d = k; break; }
+        if (s->caps.native_target && !s->depth_learn) d = yscr__path_depth(s, s->path);
+        else if (!s->caps.native_target && s->path < YSCR__SLACK_PATHS) s->depth_of[s->path] = d;
+        s->depth = 0;
+        yscr__depth_set(s, d, s->depth_pin ? YSCR_DEPTH_PIN : YSCR_DEPTH_OPEN, yscr__now(), -1);
     }
 }
 
@@ -6567,6 +7125,11 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
         yscr__copy(s->error, sizeof s->error, "ysp_screen: desc.lead must be 0, in (0, 1) or YSCR_LEAD_NONE");
         return false;
     }
+    if (desc->depth < 0 || desc->depth > 8 || (desc->depth && desc->depth_learn)) {
+        yscr__copy(s->error, sizeof s->error, "ysp_screen: desc.depth must be 0 (from the path) or 1 to 8, "
+                     "and not set with desc.depth_learn");
+        return false;
+    }
     if (desc->min_tier < 0 || desc->min_tier > YSCR_TIER_3) {
         yscr__copy(s->error, sizeof s->error, "ysp_screen: desc.min_tier must be 0 (off) or 1 to 3");
         return false;
@@ -6598,9 +7161,13 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
         return false;
     }
     s->backend = desc->backend;
+    s->auto_pick = YSCR_AUTO_NAMED;
     if (s->backend == YSCR_BACKEND_AUTO) {
 #if defined(YSCR__DXGI)
-        s->backend = YSCR_BACKEND_DXGI_FLIP;
+        /* COMPOSITION, decided 2026-10-09 on the 10-minute runs (BACKENDS,
+         * docs/screen.md "AUTO"); DXGI_FLIP where it does not open */
+        s->backend = YSCR_BACKEND_COMPOSITION;
+        s->auto_pick = YSCR_AUTO_COMPOSITION;
 #else
         yscr__copy(s->error, sizeof s->error, "ysp_screen: no display backend on this platform in v0.1 "
                      "(Linux X11, Wayland, macOS and the web are stubs); BACKEND_SIM runs without a display");
@@ -6796,7 +7363,24 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
 #endif
     if (!s->abort_slot) yscr__slot_take(s, 0);
 
+#if defined(YSCR__DXGI)
+    yscr__comp_auto = s->auto_pick == YSCR_AUTO_COMPOSITION;
+#endif
     rc = s->pr->open(s->pr_ctx, &in, &s->caps, s->error, sizeof s->error);
+#if defined(YSCR__DXGI)
+    yscr__comp_auto = 0;
+    if (rc == YSCR_ERR_NOT_IMPLEMENTED && s->auto_pick == YSCR_AUTO_COMPOSITION) {
+        /* not Windows 11 x64, or no support on this GPU or output */
+        const char* why = strncmp(s->error, "ysp_screen: ", 12) ? s->error : s->error + 12;
+        yscr__copy(s->auto_why, sizeof s->auto_why, why);
+        s->error[0] = 0;
+        s->backend = YSCR_BACKEND_DXGI_FLIP;
+        s->auto_pick = YSCR_AUTO_FALLBACK;
+        s->pr = &yscr__dxgi_presenter;
+        memset(s->backend_mem, 0, sizeof s->backend_mem);
+        rc = s->pr->open(s->pr_ctx, &in, &s->caps, s->error, sizeof s->error);
+    }
+#endif
     s->pr_open = rc >= 0;
     if (rc < 0) {
         if (!s->error[0]) yscr__set_error(s->error, sizeof s->error, "ysp_screen: %s open: %s", s->pr->name, yscr_strerror(rc));
@@ -6830,6 +7414,10 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
     s->nominal_f = (double)s->caps.period_ns;
     s->period_f = s->nominal_f;
     s->depth = 1;
+    s->show_depth = 1;
+    s->depth_pin = desc->depth;
+    s->depth_learn = desc->depth_learn;
+    s->sync_index = -1;
     s->depth_need = 1;
     s->path = YSCR_PATH_UNKNOWN;
     s->min_tier = desc->min_tier;
@@ -6889,6 +7477,7 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
         ev.u.i32[2] = s->caps.mode.refresh_num;
         ev.u.i32[3] = s->caps.mode.refresh_den;
         ev.u.i32[4] = (int32_t)s->backend;
+        ev.u.i32[5] = s->auto_pick;
         yscr__push(s, &ev);
     }
     yscr__warmup(s);
@@ -7002,6 +7591,41 @@ static const char* yscr__path_name(uint16_t p) {
     }
 }
 
+YSCR_API void yscr_sync_check(const yscr_screen* s, yscr_sync_info* out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    out->fired_index = -1;
+    if (!s || !s->open) return;
+    out->untimed = s->sync_off;
+    out->rule = s->sync_rule;
+    out->fired_index = s->sync_index;
+    out->window = s->sync_win;
+    out->evidence = yscr__popcount64(s->sync_hist);
+    out->peak = s->sync_peak;
+    out->observed = s->sync_obs;
+    out->same_refresh = s->sync_same;
+    out->no_wait = s->sync_nowait;
+    out->torn = s->sync_torn;
+    out->block_presents = s->sync_p;
+    out->block_refreshes = s->sync_r;
+    if (!s->sync_off) return;
+    {
+        char why[96];
+        if (s->sync_rule == YSCR_SYNC_RULE_RATE)
+            snprintf(why, sizeof why, "%u presents completed in %u refreshes", (unsigned)s->sync_fire[1],
+                     (unsigned)s->sync_fire[2]);
+        else
+            snprintf(why, sizeof why, "%u of 64 flips came two in one refresh, without a vblank wait, or torn",
+                     (unsigned)s->sync_fire[0]);
+        snprintf(out->message, sizeof out->message,
+                 "ysp_screen: flips are not synced to the vblank (%s), so from frame %lld the screen is untimed "
+                 "(tier 3, YSCR_FLIP_UNSYNCED). A driver setting may force vsync off: AMD \"Wait for Vertical "
+                 "Refresh: Always off\", NVIDIA \"Vertical sync: Off\", Intel \"Vertical Sync: Speed\", Mesa "
+                 "vblank_mode=0. Set it to the application's choice.",
+                 why, (long long)s->sync_index);
+    }
+}
+
 YSCR_API int yscr_describe(const yscr_screen* s, char* buf, size_t cap) {
     char extra[448], abort_s[40];
     double hz, ppm;
@@ -7047,12 +7671,19 @@ YSCR_API int yscr_describe(const yscr_screen* s, char* buf, size_t cap) {
             else snprintf(abort_s + n, sizeof abort_s - n, "key0x%x", (unsigned)k);
         }
     }
-    return snprintf(buf, cap, "ysp_screen %s: backend=%s %s mode=%dx%d@%d/%d measured=%.4fHz(%+.0fppm) "
-                    "path=%s depth=%d lead=%.2f worst_tier=%d abort=%s panic=%s%s%s",
-                    YSCR_VERSION_STRING, s->pr->name, extra, s->caps.mode.w, s->caps.mode.h,
+    return snprintf(buf, cap, "ysp_screen %s: backend=%s%s%s%s %s mode=%dx%d@%d/%d measured=%.4fHz(%+.0fppm) "
+                    "path=%s depth=%d(%s,%u changes) lead=%.2f worst_tier=%d abort=%s panic=%s%s%s%s",
+                    YSCR_VERSION_STRING, s->pr->name,
+                    s->auto_pick == YSCR_AUTO_COMPOSITION ? "(auto)"
+                        : s->auto_pick == YSCR_AUTO_FALLBACK ? "(auto,composition-refused:\"" : "",
+                    s->auto_pick == YSCR_AUTO_FALLBACK ? s->auto_why : "",
+                    s->auto_pick == YSCR_AUTO_FALLBACK ? "\")" : "", extra, s->caps.mode.w, s->caps.mode.h,
                     s->caps.mode.refresh_num, s->caps.mode.refresh_den, hz, ppm,
-                    yscr__path_name(s->path), s->depth, s->lead < 0 ? -1.0 : s->lead, s->worst_tier, abort_s,
+                    yscr__path_name(s->path), s->depth,
+                    s->depth_pin ? "pin" : s->depth_learn ? "learner" : "path", (unsigned)s->depth_changes,
+                    s->lead < 0 ? -1.0 : s->lead, s->worst_tier, abort_s,
                     s->panic_armed == 1 ? "armed" : s->panic_armed == 2 ? "idle(windowed)" : s->panic_armed == 3 ? "n/a" : "off",
+                    s->sync_off ? " WARNING=not-vsynced(driver-setting?)" : "",
                     s->unstable ? " WARNING=off-grid-vblanks" : "",
                     (ppm > 200 || ppm < -200) ? " WARNING=period-differs-from-mode" : "");
 }
@@ -7087,7 +7718,14 @@ YSCR_API int yscr_begin(yscr_screen* s, yscr_frame* f) {
         rc = s->pr->acquire(s->pr_ctx, t0 + (int64_t)(8 * s->period_f) + 200000000, &newest);
         YRT_ZONE_END(z_wait);
         if (rc < 0) { YRT_ZONE_END(z_begin); return rc; }
-        if (newest.t_ns && newest.count > s->vb_count) yscr__anchor(s, newest.t_ns, newest.count);
+        if (newest.t_ns) {   /* on the grid only, in its numbers (yscr__complete) */
+            int64_t nc;
+            if (!s->have_anchor) yscr__anchor(s, newest.t_ns, newest.count, 0);
+            else if (yscr__on_grid(s, newest.t_ns, &nc) && nc > s->vb_count) {
+                s->count_bias = nc - newest.count;
+                yscr__anchor(s, newest.t_ns, nc, 0);
+            }
+        }
     } else if (s->pr->bind) {
         s->pr->bind(s->pr_ctx);
     }
@@ -7201,7 +7839,7 @@ YSCR_API int yscr_flip_at(yscr_screen* s, int64_t t, yscr_record* out) {
         int64_t guard = (int64_t)(s->period_f / 8);
         int64_t wake;
         if (guard > 500000) guard = 500000;
-        wake = yscr__time_of(s, planned - s->depth) + guard;
+        wake = yscr__time_of(s, planned - s->show_depth) + guard;
         if (wake > yscr__now()) {
             YRT_ZONE(z_hold, "yscr.hold");
             /* DXGI keeps only the newest flip's statistic, and it lags the
@@ -7246,6 +7884,7 @@ YSCR_API int yscr_flip_at(yscr_screen* s, int64_t t, yscr_record* out) {
      * or not, so every one measures the depth; one with a target only
      * when the target was the first vblank it could make. */
     p->asap = planned == earliest || !s->caps.native_target;
+    p->held = planned > earliest;
 
     memset(&req, 0, sizeof req);
     req.present_id = p->id;
@@ -7267,6 +7906,7 @@ YSCR_API int yscr_flip_at(yscr_screen* s, int64_t t, yscr_record* out) {
     if (codes) memcpy(p->code_vals, code_vals, sizeof(uint32_t) * (size_t)s->n_codes);
     yscr__drain_overdue(s);
     t_call = yscr__now();
+    p->t_call = t_call;
     p->count_at_present = yscr__count_at(s, t_call);
     {
         YRT_ZONE(z_present, "yscr.present");
@@ -7828,6 +8468,8 @@ YSCR_API const yscr_param* yscr_params(int* n) {
         { "key_dedup_ns",    "i64", -1, 1e9, 0, "ns",             "drop a key's second report within this time; 0 = 50 ms, -1 = off" },
         { "onset_offset_ns", "i64", -1e9, 1e9, 0, "ns",           "added to every onset; from the photodiode test" },
         { "min_tier",        "i32",  0, 3, 0, "",                 "flag flips whose tier is worse; 0 = off" },
+        { "depth",           "i32",  0, 8, 0, "vblank",           "vblanks from a present to its flip; 0 = from the path, else pinned" },
+        { "depth_learn",     "bool", 0, 1, 0, "",                 "let misses raise the depth (adds latency; not with a pin)" },
         { "sim_period_ns",   "i64",  0, 1e10, 16666667, "ns",     "frame period of the simulated display" }
     };
     if (n) *n = (int)(sizeof table / sizeof table[0]);

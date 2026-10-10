@@ -51,6 +51,7 @@ CMakeUserPresets.json
 .DS_Store
 
 # vendored layout sources: fetched and verified by tools/vendor_layout.py
-# (third_party/README.md); the recipe (patches, manifest, CMake) is tracked
+# (third_party/README.md); the recipe (patches, manifest, CMake) is tracked.
+# Also lodepng (tools/vendor_pack.py) and liblsl (tools/vendor_lsl.py).
 /third_party/*/
 !/third_party/patches/

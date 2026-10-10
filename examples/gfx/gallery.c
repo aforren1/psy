@@ -2183,7 +2183,7 @@ static float dz_value(int code) {
         double lo = 0, hi = 1;
         for (i = 0; i < 48; i++) {
             ycol_rgb c;
-            uint32_t q[3];
+            uint32_t q[3] = { 0, 0, 0 };   /* gcc -O2 cannot see the call fill it */
             c.r = c.g = c.b = 0.5 * (lo + hi);
             ycol_output_code(&cal, c, 8, q);
             if ((int)q[0] >= code + k) hi = c.r; else lo = c.r;

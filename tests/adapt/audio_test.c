@@ -85,6 +85,19 @@ typedef struct sdev {
     double   report_noise_ns;  /* mean lateness of a report's position         */
     int64_t  pos_jump;      /* frames added to the reports only               */
     int      stall_halts;   /* a stall halts the position (else it counts)    */
+    int64_t  halt_pipe;     /* with stall_halts: the engine reads this far ahead
+                               of the position, so it runs dry and the position
+                               halts this short of the frames written, for whole
+                               periods (0: at the frames written)             */
+    int64_t  stale_ns;      /* the next stale_n reports read a position this
+                               much older than their stamp                    */
+    int      stale_n;
+    int64_t  halt_ns;       /* the last halt, for the checks                  */
+    int64_t  stood_ahead;   /* with halt_pipe: the report that reads the
+                               position standing is this many frames ahead
+                               (measured at queue 2: about 9 ms early)       */
+    int64_t  last_t;        /* with halt_pipe: callbacks after a halt come in
+                               order, not before the late one                */
     uint64_t rng;
     int      fail_open;
     /* the run */
@@ -99,6 +112,7 @@ typedef struct sdev {
     void   (*on_block)(struct sdev* s, const float* out, int32_t n);  /* f32 only */
     unsigned char out_mem[8192 * 8 * 4];
     int      started, stopped, closed;
+    int32_t  queue_asked;   /* yau_device_open.queue at the last open          */
 } sdev;
 
 static sdev g_sd;
@@ -139,6 +153,10 @@ static int sd_open(void* ctx, const yau_device_open* in, yau_device_caps* caps, 
     caps->pos_source = s->pos_source;
     caps->tier = s->tier;
     snprintf(caps->name, sizeof caps->name, "scripted");
+#if YAU_VERSION_MINOR >= 3
+    s->queue_asked = in->queue;
+    caps->queue = in->queue;   /* a device that keeps the queue it was asked for */
+#endif
     return 0;
 }
 static int sd_start(void* ctx, yau_render_fn r, void* host) {
@@ -165,10 +183,34 @@ static void sd_block(sdev* s) {
     int halted = 0;
     yau_tick tk;
     int64_t i;
+    if (s->halt_pipe > 0) {
+        if (t < s->last_t) t = s->last_t;
+        s->last_t = t;
+    }
     if (t > g_vt) g_vt = t;
     /* the report: the position a little before its stamp (an engine pass
      * the call reads), late by an exponential with a small mean */
     pass = t - (s->report_noise_ns > 0 ? (int64_t)(-s->report_noise_ns * log(sd_rand(s))) : 0);
+    if (s->stall_ns && s->stall_halts && s->halt_pipe > 0) {
+        /* WASAPI shared, measured: the engine needed frame W when the
+         * position was halt_pipe short of it; it ran dry, the position
+         * stood there, and the next passes came whole periods later. The
+         * report of this block may read the position standing. */
+        double need = (double)s->T0 + (double)(s->W - s->halt_pipe + s->L) * kd;
+        if ((double)t > need) {
+            double per = (double)s->period * kd;
+            int64_t h = (int64_t)floor(ceil(((double)t - need) / per) * per + 0.5);
+            s->T0 += h;
+            s->halt_ns = h;
+            s->stall_ns = 0;
+            memset(&tk, 0, sizeof tk);
+            tk.t_entry = t;
+            tk.pos = s->W - s->halt_pipe + s->stood_ahead;
+            tk.pos_t = t;
+            goto rendered;
+        }
+        s->stall_ns = 0;
+    }
     if (s->stall_ns) {
         /* The device ran dry and played silence until this block came; its
          * position counted the silence (the case the header must handle). */
@@ -197,9 +239,15 @@ static void sd_block(sdev* s) {
         if (tk.pos < 0) tk.pos = 0;
         tk.pos_t = s->T0 + (int64_t)floor((double)f * kd + 0.5) + (t - pass);
         if (halted) { tk.pos = s->W + s->g; tk.pos_t = t; }   /* stood at the frames written */
+        if (s->stale_n > 0) {
+            int64_t fs = (int64_t)floor((double)(pass - s->stale_ns - s->T0) / kd + 1e-3);
+            tk.pos = fs - s->L;
+            s->stale_n--;
+        }
     } else {
         tk.pos = -1;
     }
+rendered:
     s->render(s->host, s->out_mem, s->period, &tk);
     if (s->on_block) s->on_block(s, (const float*)(const void*)s->out_mem, s->period);
     if (s->tape && s->W + s->period <= TAPE_FRAMES) {
@@ -616,6 +664,147 @@ static void test_xrun(void) {
     CHECK_I(yau_result(&g_au, id, &r), YAU_OK);
     CHECK(llabs(r.start_frame - sd_frame_of(s, t)) <= 1);
     yau_close(&g_au);
+}
+
+/* HALT: the underrun that WASAPI shared showed after stalls of 20 to 35 ms
+ * (docs/audio.md): the engine runs dry before the position reaches the
+ * frames written, the position stands for whole periods, and every later
+ * frame plays that much later. x_per: how far past the queue's margin the
+ * stall goes, in periods (under 0: ridden out). A sound planned before the
+ * halt on a frame it moved: XRUN, UNCONFIRMED, tier 3, its time the new
+ * fit's, which is the truth. The XRUN record has the halt. A later sound
+ * is on the truth's frame, tier 2. ahead: the report of the late block
+ * reads the position that many frames ahead, so it is early and has an
+ * XRUN record of its own; the halt's record continues it, one underrun. */
+static void halt_case(double x_per, int64_t want_periods, int64_t ahead) {
+    sdev* s = &g_sd;
+    yau_buf b;
+    yau_onset r = { 0 };
+    yau_id id;
+    yrt_event ev[512];
+    int64_t t, fa, ws, xr_halt = -1, xr_at = -1, stall;
+    uint32_t x0;
+    int n, i, xr_seen = 0;
+    uint32_t xr_aux[4] = { 0, 0, 0, 0 };
+    double kd;
+    sd_default(s);
+    s->jitter_ns = 50000;
+    s->stall_halts = 1;
+    s->halt_pipe = 480;
+    s->stood_ahead = ahead;
+    CHECK(open_dev(s, NULL));
+    kd = sd_kd(s);
+    sd_run_s(s, 8.0);
+    yau_update(&g_au);
+    x0 = g_au.xruns_ft;
+    memset(&b, 0, sizeof b);
+    b.frames = g_buf; b.n = 100; b.channels = 1;
+    t = g_vt + 100000000 + 3333;
+    fa = sd_frame_of(s, t);
+    id = yau_play_at(&g_au, b, t);
+    /* stall the block after the one that renders the sound: its frame is
+     * between the halt (W - pipe) and the frames written */
+    ws = (fa / s->period + 1) * s->period;
+    while (s->W < ws) sd_block(s);
+    while (yrt_ring_drain(&g_ring, ev, 512) > 0) {}
+    stall = (int64_t)(((double)(s->L - s->halt_pipe) + x_per * (double)s->period) * kd);
+    s->stall_ns = stall;
+    s->halt_ns = 0;
+    sd_run_s(s, 1.0);
+    yau_update(&g_au);
+    CHECK_I(s->halt_ns, (int64_t)floor((double)want_periods * (double)s->period * kd + 0.5));
+    CHECK_I(g_au.xruns_ft, x0 + (want_periods > 0));
+    CHECK_I(yau_result(&g_au, id, &r), YAU_OK);
+    CHECK_I(r.start_frame, fa);
+    if (want_periods > 0) {
+        CHECK((r.flags & YAU_ONSET_XRUN) && (r.flags & YAU_ONSET_UNCONFIRMED));
+        CHECK_I(r.tier, YAU_TIER_3);
+        /* its time is the new fit's: the frame played after the halt.
+         * With the early report the sound completes on that report, with
+         * the old fit's time: which is right is not known (no loopback
+         * ran), and the record says XRUN, tier 3. */
+        if (ahead == 0) {
+            CHECK(llabs(r.onset - sd_truth(s, fa)) < 60000);
+            CHECK(llabs(r.residual - s->halt_ns) < 60000);
+        }
+    } else {
+        CHECK(!(r.flags & YAU_ONSET_XRUN));
+        CHECK_I(r.tier, YAU_TIER_2);
+    }
+    while ((n = yrt_ring_drain(&g_ring, ev, 512)) > 0)
+        for (i = 0; i < n; i++)
+            if (ev[i].source == YRT_SRC_AUDIO && ev[i].kind == YAU_EV_XRUN) {
+                if (xr_seen < 4) xr_aux[xr_seen] = ev[i].aux;
+                xr_seen++;
+                xr_halt = ev[i].u.i64[2];
+                xr_at = ev[i].u.i64[3];
+            }
+    CHECK_I(xr_seen, want_periods > 0 ? 1 + (ahead > 0) : 0);
+    if (ahead > 0) CHECK_I(xr_aux[1], xr_aux[0]);
+    if (want_periods > 0) {
+        CHECK(llabs(xr_halt - s->halt_ns) < 60000);
+        CHECK(xr_at >= ws - s->halt_pipe && xr_at < ws + 4 * s->period);
+    }
+    printf("halt: stall %.1f ms, halt %.1f ms, seen %d, record %.3f ms, onset - truth %lld ns\n",
+           (double)stall / 1e6, (double)s->halt_ns / 1e6, xr_seen, (double)xr_halt / 1e6,
+           (long long)(r.onset - sd_truth(s, fa)));
+    sd_run_s(s, 1.0);
+    t = g_vt + 100000000;
+    id = yau_play_at(&g_au, b, t);
+    sd_run_s(s, 0.5);
+    CHECK_I(yau_result(&g_au, id, &r), YAU_OK);
+    CHECK(llabs(r.start_frame - sd_frame_of(s, t)) <= 1);
+    CHECK(!(r.flags & YAU_ONSET_XRUN) && r.tier == YAU_TIER_2);
+    yau_close(&g_au);
+}
+
+/* Reports late by most of a period with no halt (a call preempted between
+ * the position and its stamp): two in a row, or one at a time, are not a
+ * halt, and the sound they pass is confirmed, tier 2, on its frame. */
+static void stale_case(int n_in_row, int times) {
+    sdev* s = &g_sd;
+    yau_buf b;
+    yau_onset r = { 0 };
+    yau_id id;
+    int64_t t, fc;
+    uint32_t x0;
+    int k;
+    sd_default(s);
+    s->jitter_ns = 50000;
+    s->stall_halts = 1;
+    s->halt_pipe = 480;
+    CHECK(open_dev(s, NULL));
+    sd_run_s(s, 8.0);
+    yau_update(&g_au);
+    x0 = g_au.xruns_ft;
+    memset(&b, 0, sizeof b);
+    b.frames = g_buf; b.n = 100; b.channels = 1;
+    t = g_vt + 60000000;
+    fc = sd_frame_of(s, t);
+    id = yau_play_at(&g_au, b, t);
+    for (k = 0; k < times; k++) {
+        s->stale_ns = 9000000;
+        s->stale_n = n_in_row;
+        sd_run(s, n_in_row + 1);
+    }
+    sd_run_s(s, 0.5);
+    yau_update(&g_au);
+    CHECK_I(g_au.xruns_ft, x0);
+    CHECK_I(yau_result(&g_au, id, &r), YAU_OK);
+    CHECK_I(r.start_frame, fc);
+    CHECK(!(r.flags & YAU_ONSET_XRUN) && r.tier == YAU_TIER_2);
+    yau_close(&g_au);
+}
+
+static void test_halt(void) {
+    halt_case(-0.5, 0, 0);   /* ridden out */
+    halt_case(0.3, 1, 0);    /* the report of the late block is on time */
+    halt_case(0.7, 1, 0);    /* it is late by most of the halt: not its length */
+    halt_case(1.5, 2, 0);
+    halt_case(2.7, 3, 0);
+    halt_case(0.1, 1, 360);  /* it is early: one underrun, two records */
+    stale_case(2, 1);
+    stale_case(1, 4);
 }
 
 /* A device with callback times only: planned onsets, tier 3; an underrun
@@ -2256,6 +2445,49 @@ static void test_wav_pump(void) {
 
 #endif /* YAU_VERSION_MINOR >= 2 */
 
+#if YAU_VERSION_MINOR >= 3
+/* QUEUE (v0.3.0): desc.queue reaches the device and the caps (0 means 2),
+ * out-of-range values are refused, and the gate's threshold. The gate itself waits on
+ * WASAPI's event; audio_clockstats --queue measures it on hardware. */
+static void test_queue(void) {
+    sdev* s = &g_sd;
+    yau_desc d;
+    yau_caps c;
+    char line[512];
+    int q;
+    for (q = 0; q <= 2; q++) {
+        sd_default(s);
+        memset(&d, 0, sizeof d);
+        d.queue = q;
+        CHECK(open_dev(s, &d));
+        CHECK_I(s->queue_asked, q == 0 ? 2 : q);    /* 0 = the default, 2 */
+        yau_get_caps(&g_au, &c);
+        CHECK_I(c.queue, q == 0 ? 2 : q);
+        yau_describe(&g_au, line, sizeof line);
+        CHECK(strstr(line, q == 1 ? "queue=1" : "queue=2") != NULL);
+        yau_close(&g_au);
+    }
+    sd_default(s);
+    memset(&d, 0, sizeof d);
+    d.queue = 3;
+    CHECK(!open_dev(s, &d));
+    CHECK(strstr(yau_error(&g_au), "queue 0..2") != NULL);
+    d.queue = -1;
+    CHECK(!open_dev(s, &d));
+    /* the threshold: the measured endpoint's 480-frame period and 1056-frame
+     * buffer (docs/audio.md, "Periods and buffers") */
+    CHECK_I(YAU__QUEUE_PAD(1, 480, 1056, 0), 0);
+    CHECK_I(YAU__QUEUE_PAD(2, 480, 1056, 0), 480);
+    CHECK_I(YAU__QUEUE_PAD(3, 480, 1056, 0), -1);    /* 576 frames of room, not 960 */
+    CHECK_I(YAU__QUEUE_PAD(2, 480, 960, 0), 480);
+    CHECK_I(YAU__QUEUE_PAD(2, 480, 959, 0), -1);
+    CHECK_I(YAU__QUEUE_PAD(0, 480, 1056, 0), -1);
+    CHECK_I(YAU__QUEUE_PAD(1, 480, 1056, 1), -1);    /* exclusive: no gate */
+    CHECK_I(YAU__QUEUE_PAD(1, 0, 1056, 0), -1);
+    CHECK_I(YAU__QUEUE_PAD(1, 144, 288, 0), 0);
+}
+#endif
+
 static void test_misc(void) {
     int n = 0;
     const yau_param* p = yau_params(&n);
@@ -2284,6 +2516,7 @@ int main(int argc, char** argv) {
     test_controls();
     test_replan();
     test_xrun();
+    test_halt();
     test_callback_source();
     test_ring();
     test_limits();
@@ -2305,6 +2538,9 @@ int main(int argc, char** argv) {
 #if !defined(YRT_NO_THREADS)
     test_wav_pump();
 #endif
+#endif
+#if YAU_VERSION_MINOR >= 3
+    test_queue();
 #endif
     test_misc();
     free(g_tape);

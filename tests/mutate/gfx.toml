@@ -889,3 +889,67 @@ env = { YGFX_TEST_PARTS = "none", YGFX_TEST_DEVICES = "none" }
 why = "v0.10.3: the test pins the wrapper's text per mode, so a change to it cannot ship without a decision on YGFX_SHADER_CONTRACT (packs record the version)."
 find = '''    ygfx__sb_add(&b, "#line 1\n");'''
 replace = '''    ygfx__sb_add(&b, "#line 1 \n");'''
+
+[[mutant]]
+id = "v10-08"
+name = "a user stimulus's tex not bound"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.10 user tex", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.10.4: stim.tex is the body's ysp_tex0; unbound, the body reads what the previous draw left on unit 0, and the feedback check cannot see its own target."
+find = '''
+            if (r->format == YGFX_R16UI) cmd->tex[3] = r->bid; else cmd->tex[0] = r->bid;
+        }
+        break;
+    default:'''
+replace = '''
+        }
+        break;
+    default:'''
+
+[[mutant]]
+id = "v10-09"
+name = "ygfx_user() drops desc.tex"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.10 user tex", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.10.4: the constructor must carry the desc's texture into the stimulus."
+find = '''
+    s.tex = d->tex;
+    return s;'''
+replace = '''
+    return s;'''
+
+[[mutant]]
+id = "v10-10"
+name = "an encoding on a gray texture refused"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.4 video", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.10.5: a pack stores an 8-bit gray PNG as sRGB codes on R8; refused, the documented load path fails for the common case."
+find = 'int gray = format == YGFX_R8 || format == YGFX_RG8;'
+replace = 'int gray = 0;'
+
+[[mutant]]
+id = "v10-11"
+name = "other primaries on a gray texture taken"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.4 video", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.10.5: gray has no chromaticity of its own; BT.709 on gray would tint it to D65 through the calibration, or fail later with a message about calibrations."
+find = 'else if (gray && e->primaries != YGFX_PRIM_DEVICE)'
+replace = 'else if (0)'
+
+[[mutant]]
+id = "v10-12"
+name = "a gray texture's level not spread to rgb"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.4 video", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.10.5: an R8 texture samples as (r, 0, 0, 1); without the spread an encoded gray image draws red."
+find = 'vec4 v = ch == 1 ? vec4(y.rrr, 1.0) : (ch == 2 ? vec4(y.rrr, y.g) : y);'
+replace = 'vec4 v = y;'
+
+[[mutant]]
+id = "v10-13"
+name = "an RG8 texture's alpha dropped"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.4 video", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.10.5: gray and alpha PNGs arrive as RG8; alpha is in g."
+find = '(ch == 2 ? vec4(y.rrr, y.g) : y)'
+replace = '(ch == 2 ? vec4(y.rrr, 1.0) : y)'

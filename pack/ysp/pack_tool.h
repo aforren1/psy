@@ -1,4 +1,4 @@
-/* ysp/pack_tool.h - v0.1.1 - the pack tool as a library (prefix ypt_)
+/* ysp/pack_tool.h - v0.2.0 - the pack tool as a library (prefix ypt_)
  *
  *   Builds, verifies, lists, extracts, rebuilds and appends ysp packs
  *   (docs/pack.md). The CLI `ypak` (pack/ypak.c) is a thin layer over these
@@ -18,6 +18,14 @@
  *   the repository's one strict reader. Every pack of the test corpus is
  *   byte-identical to v0.1.0's but for the manifest, which now names
  *   ysp/json.h among the libraries.
+ *
+ *   v0.2.0 (2026-10-09): a TEXTURE entry's encoding bytes are what
+ *   ygfx_texture() takes (ysp/gfx.h v0.10.5), so the documented load path
+ *   works: "linear" stores all 0; "device" and "srgb" store primaries
+ *   DEVICE, except sRGB codes in RGB, which need "primaries": "bt709" or
+ *   "device" in the description (refused without); r16ui is linear only.
+ *   Texture entries and the chunk list differ from v0.1.1's; so does a
+ *   SHADER entry, which records YGFX_SHADER_CONTRACT 2.
  *
  *   Every call returns 0 or a negative code (ysp/pack.h's YPAK_ERR_*
  *   values) and writes one line into err: what failed, where, and what to
@@ -40,7 +48,7 @@
 extern "C" {
 #endif
 
-#define YPT_VERSION_STRING "0.1.1"
+#define YPT_VERSION_STRING "0.2.0"
 
 typedef struct ypt_options {
     const char* sources;   /* the sources' folder; NULL: the description's folder */

@@ -30,6 +30,9 @@ endif()
 if(YSP_BUILD_EXAMPLES AND TARGET SDL3::SDL3)
     ysp_add_program(gfx_layout ${PROJECT_SOURCE_DIR}/examples/layout/gfx_layout.c rig)
     target_link_libraries(gfx_layout PRIVATE ysp_layout)
+    # PsychoPy's Stroop demos (docs/rig_spec.md 15.5): words laid out here.
+    ysp_add_program(trial_stroop ${PROJECT_SOURCE_DIR}/examples/response/trial_stroop.c rig methods)
+    target_link_libraries(trial_stroop PRIVATE ysp_layout)
 endif()
 
 # The pack tool (docs/pack.md): the library, the ypak CLI and its test. The
@@ -76,5 +79,28 @@ if(YSP_BUILD_PACK)
         target_compile_definitions(test_pack_tool PRIVATE YPT_TEST_DIR="${PROJECT_SOURCE_DIR}/tests/pack"
             YPT_TEST_FONTS="${YSP_PACK_TEST_FONTS}")
         add_test(NAME test_pack_tool COMMAND test_pack_tool WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
+
+    # trial_images (docs/rig_spec.md 15.5), the pack path end to end. Its
+    # pack is built here: trial_images_assets writes PNGs made in code and
+    # copies the committed conditions CSV, then ypak builds the pack, so the
+    # repository holds no binary image and every platform makes the same
+    # pack.
+    if(YSP_BUILD_EXAMPLES AND TARGET SDL3::SDL3)
+        add_executable(trial_images_assets ${PROJECT_SOURCE_DIR}/examples/pack/trial_images_assets.c)
+        target_compile_options(trial_images_assets PRIVATE ${YSP_WARNINGS})
+        set_target_properties(trial_images_assets PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+        set(_ti_src ${CMAKE_CURRENT_BINARY_DIR}/trial_images_src)
+        set(_ti_pack ${CMAKE_CURRENT_BINARY_DIR}/trial_images.ysppak)
+        add_custom_command(OUTPUT ${_ti_pack}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${_ti_src}/img
+            COMMAND trial_images_assets ${_ti_src} ${PROJECT_SOURCE_DIR}/examples/pack/trial_images.csv
+            COMMAND ypak build ${_ti_src}/trial_images.json -o ${_ti_pack}
+            DEPENDS trial_images_assets ypak ${PROJECT_SOURCE_DIR}/examples/pack/trial_images.csv
+            COMMENT "trial_images: its pack, from generated PNGs (ypak build)" VERBATIM)
+        add_custom_target(trial_images_pack DEPENDS ${_ti_pack})
+        ysp_add_program(trial_images ${PROJECT_SOURCE_DIR}/examples/pack/trial_images.c rig methods)
+        add_dependencies(trial_images trial_images_pack)
+        target_compile_definitions(trial_images PRIVATE TRIAL_IMAGES_PACK="${_ti_pack}")
     endif()
 endif()

@@ -489,7 +489,7 @@ static void test_tables(void) {
         static char wt[65536];
         int md;
         volatile int contract = YGFX_SHADER_CONTRACT;   /* volatile: MSVC C4127 on a constant condition */
-        CHECK(contract == 1);
+        CHECK(contract == 2);
         for (md = 0; md < 3; md++) {
             int wn = ygfx_shader_wrap(bodies[md], (ygfx_shader_mode)md, wt, sizeof wt);
             uint64_t h = 0xCBF29CE484222325ULL;
@@ -3398,6 +3398,8 @@ typedef struct stats6 {
     /* VIDEO */
     double vid_1x, vid_trc, vid_prim, vid_lin, vid_part, rebind_diff, import_gl_diff, import_d3d_diff;
     long vid_cases, codes_bad, vid_refused_ok, vid_refused_n, d3d_ran;
+    double gray_diff;               /* v0.10.5: R8 and RG8 with a stated transfer */
+    long gray_cases, gray_refused_ok, gray_refused_n;
     double shared_diff[2];          /* NT handle + keyed mutex; legacy handle + event query */
     const char* shared_why[2];
     /* INSTANCES */
@@ -4197,6 +4199,75 @@ static void gl_v04_video(stats* st) {
         }
     }
 #endif
+    /* v0.10.5: gray textures (R8, RG8) with a stated transfer, as a pack
+     * stores an 8-bit gray PNG: the level in r through the transfer's
+     * formula, alpha in g over the black background */
+    {
+        static uint8_t px[128 * 2];
+        static const int trs[2] = { YGFX_TRC_SRGB, YGFX_TRC_GAMMA22 };
+        ygfx_texture_desc td;
+        ygfx_image_desc idd;
+        ygfx_stim s;
+        ygfx_tex gt;
+        int fm, tr, rc[5];
+        for (fm = 0; fm < 2; fm++)
+            for (tr = 0; tr < 2; tr++) {
+                int ch = fm ? 2 : 1;
+                for (i = 0; i < 128; i++) {
+                    px[i * ch] = (uint8_t)(2 * i + (tr ? 0 : 1));                  /* every code, across the two transfers */
+                    if (ch == 2) px[i * 2 + 1] = (uint8_t)(255 - (i * 37) % 256);   /* alphas from 255 down, scattered */
+                }
+                memset(&td, 0, sizeof td);
+                td.w = 128; td.h = 1; td.format = fm ? YGFX_RG8 : YGFX_R8; td.data = px;
+                td.enc.matrix = YGFX_MATRIX_RGB; td.enc.range = YGFX_RANGE_FULL; td.enc.transfer = (uint8_t)trs[tr];
+                td.enc.primaries = YGFX_PRIM_DEVICE;
+                gt = ygfx_texture(&R->g, &td);
+                CHECK(gt.id != 0);
+                memset(&idd, 0, sizeof idd);
+                idd.tex = gt; idd.place = YGFX_TOP_LEFT; idd.anchor = YGFX_TOP_LEFT; idd.y = 3;
+                s = ygfx_image(&R->g, &idd);
+                gl_frame(&s, 1);
+                for (i = 0; i < 128; i++) {
+                    double a = ch == 2 ? px[i * 2 + 1] / 255.0 : 1.0, want = trc_ref(px[i * ch] / 255.0, trs[tr]) * a;
+                    int c;
+                    for (c = 0; c < 3; c++) S6.gray_diff = maxd(S6.gray_diff, fabs(R->scene[(3 * W + i) * 4 + c] - want));
+                }
+                S6.gray_cases++;
+                ygfx_texture_free(&R->g, gt);
+            }
+        /* other primaries on gray; an encoding on R16UI; an encoded gray
+         * texture as a modulation and as coverage; drawn as a color image */
+        memset(&td, 0, sizeof td);
+        td.w = 4; td.h = 4; td.format = YGFX_R8;
+        td.enc.matrix = YGFX_MATRIX_RGB; td.enc.range = YGFX_RANGE_FULL; td.enc.transfer = YGFX_TRC_SRGB;
+        td.enc.primaries = YGFX_PRIM_BT709;
+        rc[0] = ygfx_texture(&R->g, &td).id == 0 && strstr(ygfx_error(&R->g), "gray") != NULL;
+        td.enc.primaries = YGFX_PRIM_DEVICE; td.format = YGFX_R16UI;
+        rc[1] = ygfx_texture(&R->g, &td).id == 0;
+        td.format = YGFX_R8;
+        gt = ygfx_texture(&R->g, &td);
+        CHECK(gt.id != 0);
+        CHECK(yscr_begin(&R->scr, &R->f) == YSCR_OK);
+        CHECK(ygfx_begin(&R->g, &R->f) == YGFX_OK);
+        memset(&idd, 0, sizeof idd);
+        idd.tex = gt; idd.modulation = true;
+        s = ygfx_image(&R->g, &idd);
+        rc[2] = ygfx_draw(&R->g, &s) == YGFX_ERR_ARG;
+        idd.modulation = false; idd.coverage = true;
+        s = ygfx_image(&R->g, &idd);
+        rc[3] = ygfx_draw(&R->g, &s) == YGFX_ERR_ARG;
+        idd.coverage = false;
+        s = ygfx_image(&R->g, &idd);
+        rc[4] = ygfx_draw(&R->g, &s) == YGFX_OK;   /* the control: as a color image */
+        CHECK(ygfx_end(&R->g) == YGFX_OK);
+        CHECK(yscr_flip(&R->scr) == YSCR_OK);
+        ygfx_texture_free(&R->g, gt);
+        for (k = 0; k < 5; k++) {
+            S6.gray_refused_n++;
+            S6.gray_refused_ok += rc[k];
+            if (!rc[k]) fprintf(stderr, "  gray case %d not as the manual says\n", k);
+        }
+    }
     /* refusals */
     {
         ygfx_texture_desc td;
@@ -5232,6 +5303,7 @@ static void gl_v06_blur(stats* st);
 static void gl_v08(stats* st);
 static void s10_report(void);
 static void gl_v10_simplex(stats* st);
+static void gl_v10_user_tex(stats* st);
 static void s11_report(void);
 static void test_v10_simplex_cpu(void);
 typedef struct stats9 {
@@ -5432,12 +5504,12 @@ static int gl_suite(const char* name, ygfx_hl_device dev) {
                                                  gl_strokes, gl_masks, gl_sprites, gl_tint, gl_groups, gl_targets,
                                                  gl_alpha_passes, gl_edge_truth, gl_v03_kinds, gl_v03_truth, gl_v03_fx, gl_v03_paint, gl_v03_msdf,
                                                  gl_v04_cache, gl_v04_fixes, gl_v04_video, gl_v04_inst, gl_v04_order, gl_v05_color,
-                                                 gl_v06_text, gl_v06_blur, gl_v05_kinds, gl_v08, gl_v10_simplex };
+                                                 gl_v06_text, gl_v06_blur, gl_v05_kinds, gl_v08, gl_v10_simplex, gl_v10_user_tex };
         static const char* const names[] = { "shapes", "gratings", "gabors", "dots", "images", "noise",
                                              "output", "user+batch+rows", "strokes", "masks", "sprites", "tint",
                                              "groups", "targets", "alpha+passes", "edge truth", "v0.3 kinds", "v0.3 truth", "v0.3 fx", "v0.3 paint", "v0.3 msdf",
                                              "v0.4 cache", "v0.4 fixes", "v0.4 video", "v0.4 inst", "v0.4 order", "v0.5 color",
-                                             "v0.6 text", "v0.6 blur", "vspec", "v0.8", "v0.10 simplex" };
+                                             "v0.6 text", "v0.6 blur", "vspec", "v0.8", "v0.10 simplex", "v0.10 user tex" };
         int k;
         memset(&S2, 0, sizeof S2);
         memset(&S3, 0, sizeof S3);
@@ -5666,6 +5738,11 @@ static int gl_suite(const char* name, ygfx_hl_device dev) {
         CHECK_LE(S6.import_gl_diff, 2e-6);
         CHECK_LE(S6.import_d3d_diff, 2e-6);
         CHECK(S6.vid_refused_ok == S6.vid_refused_n);
+        printf("  v0.10.5 gray: R8 and RG8 with sRGB and gamma 2.2 transfers, %ld cases, %.2e; refusals and control %ld of %ld\n",
+               S6.gray_cases, S6.gray_diff, S6.gray_refused_ok, S6.gray_refused_n);
+        CHECK_LE(S6.gray_diff, 2e-6);
+        CHECK(S6.gray_refused_ok == S6.gray_refused_n);
+        if (S6.vid_refused_n) CHECK(S6.gray_cases == 4 && S6.gray_refused_n == 5);
 #if defined(_WIN32)
         if (dev != YGFX_HL_SWIFTSHADER && S6.vid_refused_n) CHECK(S6.d3d_ran == 1);
         if (S6.d3d_ran) {
@@ -7455,6 +7532,93 @@ static void gl_v10_simplex(stats* st) {
         CHECK(ygfx_end(&R->g) == YGFX_OK);
         CHECK(yscr_flip(&R->scr) == YSCR_OK);
     }
+    ygfx_close(&R->g);
+}
+
+/* v0.10.4: a user shader samples stim.tex as ysp_tex0, an uploaded texture
+ * or a render target (docs/rig_spec.md 15.6). Before v0.10.4 a USER draw
+ * bound no texture, so ysp_tex0 read whatever the previous draw left on
+ * unit 0: the first frame below puts another texture there. */
+static void gl_v10_user_tex(stats* st) {
+    static const char* body =
+        "float ysp_main(vec2 p) {\n"
+        "    ivec2 t = ivec2(floor(p + ysp_size.xy));\n"
+        "    return texelFetch(ysp_tex0, t, 0).r;\n"
+        "}\n";
+    static float a1[W * H * 4];
+    static const float clear[4] = { 0.3f, 0.6f, 0.9f, 1.0f };
+    unsigned char texa[16 * 16], texb[16 * 16];
+    ygfx_pipeline_desc pd;
+    ygfx_user_desc ud;
+    ygfx_image_desc idd;
+    ygfx_texture_desc tdd;
+    ygfx_target_desc tgd;
+    ygfx_stim u, img, other, bad;
+    ygfx_tex ta, tb, tg;
+    double d_img = 0, d_tg = 0, want;
+    int i, j;
+    (void)st;
+    if (!gl_open(1, YGFX_RGBA32F, YGFX_DITHER_NONE)) return;
+    for (i = 0; i < 16 * 16; i++) { texa[i] = (unsigned char)((i * 37 + 11) & 255); texb[i] = (unsigned char)(255 - texa[i]); }
+    memset(&tdd, 0, sizeof tdd);
+    tdd.w = 16; tdd.h = 16; tdd.format = YGFX_R8;
+    tdd.data = texa;
+    ta = ygfx_texture(&R->g, &tdd);
+    tdd.data = texb;
+    tb = ygfx_texture(&R->g, &tdd);
+    memset(&tgd, 0, sizeof tgd);
+    tgd.w = 16; tgd.h = 16;
+    tg = ygfx_target(&R->g, &tgd);
+    CHECK(ta.id != 0 && tb.id != 0 && tg.id != 0);
+    memset(&pd, 0, sizeof pd);
+    pd.body = body; pd.mode = YGFX_MODULATION; pd.name = "tex0";
+    memset(&ud, 0, sizeof ud);
+    ud.pipe = ygfx_pipeline(&R->g, &pd);
+    CHECK(ud.pipe.id != 0);
+    ud.w = ud.h = 16; ud.contrast = 0.5f; ud.tex = ta;
+    u = ygfx_user(&ud);
+    CHECK(u.tex.id == ta.id);
+    /* the reference: the same texture as a modulation image */
+    memset(&idd, 0, sizeof idd);
+    idd.tex = ta; idd.modulation = true; idd.contrast = 0.5f;
+    img = ygfx_image(&R->g, &idd);
+    gl_frame(&img, 1);
+    memcpy(a1, R->scene, sizeof a1);
+    idd.tex = tb; idd.x = 60;
+    other = ygfx_image(&R->g, &idd);
+    gl_frame(&other, 1);                  /* unit 0 now holds tb */
+    gl_frame(&u, 1);
+    for (i = 0; i < W * H * 4; i++) d_img = maxd(d_img, fabs(a1[i] - R->scene[i]));
+    CHECK_LE(d_img, 1e-6);
+    /* a target, filled at setup, as ysp_tex0 */
+    CHECK(ygfx_begin_setup(&R->g) == YGFX_OK);
+    CHECK(ygfx_begin_target(&R->g, tg, clear) == YGFX_OK);
+    CHECK(ygfx_end_target(&R->g) == YGFX_OK);
+    CHECK(ygfx_end_setup(&R->g) == YGFX_OK);
+    u.tex = tg;
+    gl_frame(&u, 1);
+    /* the texel as stored: 0.3 as a half float rounds down on D3D11 and to
+     * the nearest on SwiftShader (0.29980 against 0.30005) */
+    {
+        float texel[4] = { 0, 0, 0, 0 };
+        CHECK(ygfx_read_target(&R->g, tg, 8, 8, 1, 1, texel) == YGFX_OK);
+        CHECK(fabs(texel[0] - 0.3) < 2.5e-4);
+        want = 0.5 * (1.0 + 0.5 * texel[0]);
+    }
+    for (j = H / 2 - 8; j < H / 2 + 8; j++)
+        for (i = W / 2 - 8; i < W / 2 + 8; i++) d_tg = maxd(d_tg, fabs(R->scene[(j * W + i) * 4] - want));
+    CHECK_LE(d_tg, 1e-6);
+    /* refused: a draw into the target it samples, and a texture of no gfx */
+    CHECK(yscr_begin(&R->scr, &R->f) == YSCR_OK);
+    CHECK(ygfx_begin(&R->g, &R->f) == YGFX_OK);
+    CHECK(ygfx_begin_target(&R->g, tg, NULL) == YGFX_OK);
+    CHECK(ygfx_draw(&R->g, &u) == YGFX_ERR_ORDER);
+    CHECK(ygfx_end_target(&R->g) == YGFX_OK);
+    bad = u; bad.tex.id = YGFX_MAX_TEXTURES + 1;
+    CHECK(ygfx_draw(&R->g, &bad) == YGFX_ERR_ARG);
+    CHECK(ygfx_end(&R->g) == YGFX_OK);
+    CHECK(yscr_flip(&R->scr) == YSCR_OK);
+    printf("  measured: user ysp_tex0 against the image %.2e, against the target %.2e\n", d_img, d_tg);
     ygfx_close(&R->g);
 }
 

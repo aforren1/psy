@@ -470,7 +470,8 @@ unknown.
 
 ## What the examples show
 
-Status: 2026-10-08, the seven programs in `examples/response/`. The
+Status: 2026-10-08, the seven programs in `examples/response/`; on
+2026-10-09, five more examples that use the header (the last five rows). The
 question was whether `ysp/response.h` does work that plain SDL events
 would leave to each program. This section gives the facts per example. It
 does not recommend.
@@ -481,6 +482,12 @@ lines of the frame loop in `main()` and of its input helpers (`adjust()`,
 lines of that logic that name a `yrsp_` function or type. Setup (window,
 conditions, the collector's description) and the data file's header are
 not counted.
+The last five rows were counted by a script with this rule: comments and
+blank lines out, and each `if`, `for` or `while` whose condition starts
+with `sim` out with its body. On the current sources the script gives
+exactly the rows of `trial_audio_keyboard` (66, 8) and
+`trial_stop_signal` (120, 9), and 101 and 10 for `trial_keyboard`, whose
+loop has changed since its row was counted.
 
 | Example | jsPsych | Trial logic | yrsp lines | `ysp/response.h` features used | Plain SDL events would need |
 |---|---|---|---|---|---|
@@ -491,6 +498,11 @@ not counted.
 | `trial_mouse_tracking` | `extension-mouse-tracking` (MouseTracker style) | 150 | 17 | A DISTANCE crossing (movement onset, 10 px from the position at `yrsp_arm()`); `persist`; the trace (one entry per event); the source's tier (3 for SDL's pointer, 0 for raw mice); `yrsp_cursor` for raw counts; `yrsp_entries()` for an EARLY crossing | A start point and a distance test; an array of samples; the onset kept to subtract. The hit tests, the conversion of raw counts to positions and the choice between SDL's and the bridge's mouse events are the example's own code in both versions |
 | `trial_audio_keyboard` | `audio-keyboard-response` | 66 | 8 | The onset from the tone's record (`yrsp_onset_audio()`: the target time, then the fit's time); `duration` from that onset; EARLY in the foreperiod; anticipations; the onset tier in the row | As `trial_keyboard`, with the record from `yau_result()` in place of the flip record |
 | `trial_stop_signal` | contrib `plugin-stop-signal` | 120 | 9 | As `trial_keyboard`; TIMEOUT is a successful stop, a response on a signal trial a failed one | As `trial_keyboard`. The SSD as shown (tone record minus go flip onset) and the staircase are the example's code with `ysp/audio.h` and `ysp/stair.h` |
+| `trial_2afc_adaptive` | None in the core (a 2AFC keyboard trial) | 91 | 9 | Two arrow keys; the window opens at the gabor's flip and lasts 2.5 s; presses in the foreperiod are EARLY (`n_early`); the onset as a plan, then the flip record, with its landing residual | As `trial_keyboard`. A trial with no response goes back to its track; the contrast shown and the two tracks are the example's code with `ysp/color.h`, `ysp/stair.h` and `ysp/quest.h` |
+| `trial_rdk` (`examples/rdk/`) | contrib `plugin-rdk` | 108 | 9 | Two arrow keys; RT from the motion onset's flip record; `duration` 1.5 s; `minimum_valid_rt` 0.1 s (`n_anticipations`) | As `trial_keyboard`. The dots' replay digest and the steps file are `ysp/rdk.h` and the example's code |
+| `trial_stroop` | `html-keyboard-response` | 111 | 11 | Three choices by scancode; RT from the word's flip record; `duration` 2 s; anticipations; TIMEOUT and the key choose the practice feedback; the result's flags in the row | As `trial_keyboard`. The words, the feedback text and the order rule are the example's code with `pack/layout`, `ysp/table.h` and `ysp/trials.h` |
+| `trial_sternberg` (`examples/timeline/`) | `animation`, then `html-keyboard-response` | 153 | 12 | Two choices; presses during the memory set are EARLY (`n_early`); RT from the probe's flip record; `duration` 2 s; anticipations; the flags | As `trial_same_different`. The op table and the SOAs from the digits' flip records are the example's code with `ysp/timeline.h` |
+| `trial_images` (`examples/pack/`) | `image-keyboard-response` | 105 | 9 | Two choices; RT from the image's flip record; `duration` 2.5 s; anticipations; the flags | As `trial_keyboard`. The blocks and the textures from the pack are the example's code with `ysp/trials.h` and `ysp/pack.h` |
 
 ### Where the header removed work
 

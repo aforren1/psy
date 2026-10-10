@@ -8,8 +8,9 @@ the per-user folders), `ysp/input.h` v0.3.0, `ysp/response.h` v0.1.4,
 `examples/device/photodiode_check.c`, `out_latency.c` and
 `trigger_flip.c` (docs/rt.md, docs/box.md, docs/device.md). The rig
 profile (section 11.2) was decided on 2026-10-09 and is built:
-`ysp/rigfile.h` v0.1.0 on the strict JSON reader `ysp/json.h` v0.1.0. The
-rest is not built. No device in this document was attached to the
+`ysp/rigfile.h` v0.1.0 on the strict JSON reader `ysp/json.h` v0.1.0. Step
+4 of section 14.2 (LSL) is built on 2026-10-09: `ysp/net.h` v0.1.0 and
+`ysp/rigfile.h` v0.2.0 (family `lsl`) (docs/net.md). The rest is not built. No device in this document was attached to the
 development machine, and no timing number in it was measured on a device
 here. A number from another source carries its
 source. "Unverified" marks a statement that was not checked against a
@@ -353,7 +354,7 @@ crossings). Not measured: the bridge above 4 kHz in total.
 | `ysp/rigfile.h` | v0.1.0, built 2026-10-09 | The rig profile (11.2): load with errors that name the field, the SHA-256 check of each loopback file, the canonical write and the profile's hash, a role's desc and start, a binding, a stored loopback result | `ysp/device.h`, `ysp/json.h` |
 | `ysp/screen.h` | v0.4.0 exists | Device path and match key in `YSCR_EV_DEVICE`; nothing else | SDL3 |
 | `ysp/hid.h` | new, later | HID enumeration, input reports on overlapped reads, output and feature reports | OS (SetupAPI and hid.dll; hidraw; IOKit on macOS) |
-| `ysp/net.h` | planned (rig_spec 4.7) | TCP and UDP transports, cross-machine clock offsets, LSL inlets and outlets with liblsl loaded at run time | OS; liblsl at run time |
+| `ysp/net.h` | v0.1.0, built 2026-10-09 (LSL only) | LSL inlets and outlets with liblsl loaded at run time (docs/net.md); later: TCP and UDP transports, cross-machine clock offsets | `ysp/rt.h`, `ysp/input.h`; liblsl at run time |
 | `ysp/audio.h` | v0.2.0 exists | Capture (planned): sample blocks on the capture fit, for the edge detector | miniaudio |
 | `ysp/eyelink.h`, `ysp/tobii.h`, `ysp/labjack.h`, `ysp/daqmx.h`, `ysp/dpx.h` | new, later, one each | Vendor glue: the vendor library loaded at run time, only the functions used declared | the vendor library at run time |
 
@@ -817,6 +818,18 @@ After these, in order:
    not read here) becomes the rig's independent reference instrument. It
    cross-checks the MCU photodiode on the same flips, and it can replace
    the line-in as the reference of section 12.
+   Built 2026-10-09 (docs/net.md): `ysp/net.h` v0.1.0, two instance types
+   (`ynet_outlet`, `ynet_inlet`) beside `ysp/device.h`'s, with its
+   lifecycle numbers, roles, record layouts and sink; the sender's stamps
+   mapped through a fit of `lsl_local_clock()` and a least-squares fit of
+   liblsl's time corrections; marker events, threshold crossings and a
+   stream ring; `ysp/rigfile.h` v0.2.0 binds a role to a stream (family
+   `lsl`). The LabStreamer's manual was read: it is a networked box with its
+   own clock that listens to one trigger stream and sends Data (10 kHz, 6
+   float32 channels), Latencies (JSON) and Messages; it binds as three
+   roles (docs/net.md, "The LabStreamer"). Measured against the real
+   liblsl on Windows (1.17.7, fetched by `tools/vendor_lsl.py`) and WSL2.
+   Not run: a LabStreamer.
 5. The two other response devices the user has (to be named), after the
    Cedrus XID decoder of step 2.
 6. EyeLink glue (rank 4), audio capture and the edge detector (rank 6),

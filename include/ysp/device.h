@@ -1,4 +1,4 @@
-/* ysp/device.h - v0.2.0 - public domain single-header device layer
+/* ysp/device.h - v0.2.1 - public domain single-header device layer
  *
  *   A response box, a trigger box or a microcontroller board as a producer
  *   of ysp/input.h events with times on the ysp_rt clock, and as a target
@@ -20,6 +20,9 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.1 - Builds with YRT_NO_THREADS again (v0.2.0 refused it): no
+ *          trailing-edge worker there, so a host-timed pulse ends in
+ *          ydev_poll(), as on a device with desc.now.
  *   v0.2.0 - Outputs: ydev_out_set(), ydev_out_pulse(), ydev_out_mark(),
  *          ydev_out_trigger() and the YDEV_REC_OUT record; the output
  *          families of ysp/box.h v0.2.0 (TriggerBox, BioSemi, MMBT-S, DTR
@@ -259,8 +262,8 @@
 
 #define YDEV_VERSION_MAJOR 0
 #define YDEV_VERSION_MINOR 2
-#define YDEV_VERSION_PATCH 0
-#define YDEV_VERSION_STRING "0.2.0"
+#define YDEV_VERSION_PATCH 1
+#define YDEV_VERSION_STRING "0.2.1"
 
 #include "ysp/rt.h"
 #include "ysp/input.h"
@@ -271,9 +274,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#if defined(YRT_NO_THREADS)
-#error "ysp/device.h needs threads: its reader and its trailing edges run on threads (do not define YRT_NO_THREADS or YSER_NO_THREADS)"
-#endif
+/* With YRT_NO_THREADS there is no trailing-edge worker: a host-timed
+ * pulse ends in ydev_poll() (manual mode), which is the threadless form. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -439,7 +441,9 @@ typedef struct ydev_device {
     union { unsigned char b[64]; void* p; int64_t i; double f; } thread_mem, lock_mem;
     /* outputs: written under the output lock */
     union { unsigned char b[64]; void* p; int64_t i; double f; } out_lock_mem;
+#ifndef YRT_NO_THREADS
     yrt_worker     worker;          /* host-timed trailing edges               */
+#endif
     ydev_out_info  last_out;
     uint64_t       outs, out_errors;
     int64_t        trail_at;        /* an armed trailing edge: its deadline    */
@@ -1042,9 +1046,11 @@ static void ydev__trail(ydev_device* dev, uint32_t token, bool flushed) {
     ydev__unlock(ydev__omx(dev));
 }
 
+#ifndef YRT_NO_THREADS
 static void ydev__trail_job(void* ctx, const yrt_job_info* info) {
     ydev__trail((ydev_device*)ctx, info->seq, info->flushed);
 }
+#endif
 
 /* Every output call. width_ns < 0: a set; else a pulse (0 = the family's
  * fixed width). */
@@ -1074,7 +1080,9 @@ static int ydev__out(ydev_device* dev, uint32_t code, int64_t width_ns, uint32_t
         /* a set means "hold this"; a pulse moves the one trailing edge */
         dev->trail_token = 0;
         if (pulse) flags |= YDEV_OUT_REPLACED;
+#ifndef YRT_NO_THREADS
         if (dev->have_worker) (void)yrt_worker_cancel(&dev->worker);
+#endif
     }
     if (fixed > 0) {
         rc = ydev__put(dev, code, 0, &t0, &t1);
@@ -1093,11 +1101,14 @@ static int ydev__out(ydev_device* dev, uint32_t code, int64_t width_ns, uint32_t
             dev->trail_at = t1 + width_ns;
             dev->trail_lead = t0;
             dev->trail_seq = seq;
+#ifndef YRT_NO_THREADS
             if (dev->have_worker) {
                 int job = yrt_worker_submit(&dev->worker, (uint64_t)dev->trail_at, ydev__trail_job, dev);
                 dev->trail_token = job > 0 ? (uint32_t)job : 0u;
                 if (job <= 0) rc = YDEV_ERR_IO;
-            } else {
+            } else
+#endif
+            {
                 dev->trail_token = 1u;   /* a virtual clock: ydev_poll() ends it */
             }
         }
@@ -1464,6 +1475,7 @@ YDEV_API bool ydev_start(ydev_device* dev, const ydev_desc* desc) {
     dev->tr = desc->transport.open ? desc->transport : ydev_serial_transport(dev);
     ydev__lock_init(ydev__mx(dev));
     ydev__lock_init(ydev__omx(dev));
+#ifndef YRT_NO_THREADS
     if (ydev__host_pulse(dev) && (ybox_caps(dev->d.family) & YBOX_CAP_OUT) && !dev->d.now) {
         yrt_worker_desc wd;
         memset(&wd, 0, sizeof wd);
@@ -1478,6 +1490,7 @@ YDEV_API bool ydev_start(ydev_device* dev, const ydev_desc* desc) {
         }
         dev->have_worker = 1;
     }
+#endif
     dev->state = YDEV_CLOSED;
     ydev__text(dev, "role", dev->d.role);
     ydev__set_state(dev, YDEV_OPENING, YDEV_WHY_START);
@@ -1502,7 +1515,9 @@ YDEV_API bool ydev_start(ydev_device* dev, const ydev_desc* desc) {
     }
 #endif
     if (!dev->have_thread) {
+#ifndef YRT_NO_THREADS
         if (dev->have_worker) { yrt_worker_stop(&dev->worker); dev->have_worker = 0; }
+#endif
         ydev__lock_free(ydev__omx(dev));
         ydev__lock_free(ydev__mx(dev));
         if (dev->role) dev->d.roles->dev[dev->role - 1] = NULL;
@@ -1533,8 +1548,11 @@ YDEV_API void ydev_stop(ydev_device* dev) {
         dev->have_thread = 0;
     }
     /* outputs end idle: a pending trailing edge now, then a held code */
+#ifndef YRT_NO_THREADS
     if (dev->have_worker) { yrt_worker_stop(&dev->worker); dev->have_worker = 0; }
-    else if (dev->trail_token) ydev__trail(dev, 0, true);
+    else
+#endif
+    if (dev->trail_token) ydev__trail(dev, 0, true);
     ydev__out_close(dev);
     ydev__close_conn(dev);
     ydev__set_state(dev, YDEV_CLOSED, YDEV_WHY_STOP);

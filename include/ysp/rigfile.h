@@ -1,4 +1,4 @@
-/* ysp/rigfile.h - v0.1.0 - public domain single-header rig profile
+/* ysp/rigfile.h - v0.2.0 - public domain single-header rig profile
  *
  *   The file on a rig that says which device plays each role and what the
  *   rig's loopbacks measured, kept outside every pack (docs/devices_spec.md
@@ -18,10 +18,16 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.2.0 - Family "lsl": a role bound to a Lab Streaming Layer stream
+ *          (ysp/net.h), keyed "lsl:<name>:<type>:<source_id>:<hostname>",
+ *          with no serial options and no pulse_s; YRIG_FAMILY_LSL;
+ *          yrig_desc() and yrig_start() refuse it, naming ysp/net.h;
+ *          yrig_source_role(), the tier rule by role name, for instances
+ *          that are not ysp/device.h's. The file format is unchanged.
  *   v0.1.0 - first version: the "ysp-rig 1" format, load, check, write,
  *          hash, bind, store a loopback result.
  *
- *   STATUS: v0.1.0, 2026-10-09. docs/device.md ("The rig profile") has the
+ *   STATUS: v0.2.0, 2026-10-09. docs/device.md ("The rig profile") has the
  *   how-to, the reference and the test counts.
  *
  *   ---------------------------------------------------------------------
@@ -57,14 +63,18 @@
  *     display   { onset_offset_s, calibration: { file, sha256 } }
  *   A role:
  *     family    a ysp/box.h family name: xid, line, photo, triggerbox,
- *               biosemi, mmbts, lines, parallel                required
- *     key       the match key (ysp/device.h, MATCH KEYS)     required
+ *               biosemi, mmbts, lines, parallel; or lsl, a Lab
+ *               Streaming Layer stream (ysp/net.h)             required
+ *     key       the match key (ysp/device.h, MATCH KEYS; for lsl,
+ *               ysp/net.h's "lsl:<name>:<type>:<source_id>:<hostname>",
+ *               no quote)                                      required
  *     options   { baud, latched, ftdi_latency_s, buttons }: baud 1 to
  *               10,000,000; latched (MMBT-S at switch S) for mmbts only;
  *               ftdi_latency_s 0.001 to 0.255 as measured; buttons
  *               { CODE: NAME }, at most 16, CODE 1 to 15 bytes, NAME 1
- *               to 31
- *     pulse_s   the rig's fixed pulse width, above 0, at most 10
+ *               to 31; an lsl role takes buttons only
+ *     pulse_s   the rig's fixed pulse width, above 0, at most 10; not
+ *               for lsl
  *     latency   an output's write to edge: { n, p5_s, median_s, p95_s,
  *               max_s, date, sha256 }, all required, p5 <= median <= p95
  *               <= max
@@ -112,8 +122,11 @@
  *   a load error: the rig can still run, with the tier it can prove.
  *   TIER. yrig_source() gives YIN_TIER_1 and the bounds (lo_us, hi_us)
  *   only for a role whose bounds' check is OK and whose family maps a
- *   device clock (an input family: xid, line, photo), as ysp/input.h
- *   defines tier 1; else the device's own source with YIN_TIER_UNKNOWN.
+ *   device clock (an input family: xid, line, photo; and lsl, whose
+ *   sender's clock ysp/net.h maps), as ysp/input.h defines tier 1; else
+ *   the device's own source with YIN_TIER_UNKNOWN. yrig_source_role() is
+ *   the same rule by role name, for an instance of another header (an
+ *   LSL inlet's ynet_inlet_source()).
  *
  *   ---------------------------------------------------------------------
  *   BINDING
@@ -122,7 +135,10 @@
  *   fixes it) pulse_ns of a ydev_desc; yrig_start() copies a base desc
  *   (sink, ring, roles, transport, ...) and starts the instance with
  *   them. desc.role and desc.key point into the profile, so the profile
- *   must outlive the instance. yrig_bind() sets a role's family and key
+ *   must outlive the instance. Both refuse an lsl role (YRIG_ERR_FORMAT,
+ *   the message names ysp/net.h): give its key to a ysp/net.h inlet or
+ *   outlet instead (yrig_find(p, role)->key). yrig_bind() sets a role's
+ *   family and key
  *   (a binder by activity, the designer's Run view) and clears its
  *   latency and bounds, which belonged to the old device; yrig_save()
  *   writes it.
@@ -134,9 +150,9 @@
 #define YSP_RIGFILE_H_INCLUDED
 
 #define YRIG_VERSION_MAJOR 0
-#define YRIG_VERSION_MINOR 1
+#define YRIG_VERSION_MINOR 2
 #define YRIG_VERSION_PATCH 0
-#define YRIG_VERSION_STRING "0.1.0"
+#define YRIG_VERSION_STRING "0.2.0"
 
 #include "ysp/device.h"
 #include "ysp/json.h"
@@ -158,6 +174,10 @@ extern "C" {
 #define YRIG_MAX_BUTTONS 16
 #define YRIG_MAX_NOTES   16
 #define YRIG_MAX_BYTES   ((size_t)1 << 20)
+
+/* The family id of "lsl": a Lab Streaming Layer stream, started with
+ * ysp/net.h. Not a YBOX_ family, so no ysp/box.h number can take it. */
+#define YRIG_FAMILY_LSL  64
 
 /* Results */
 #define YRIG_OK          0
@@ -196,8 +216,8 @@ typedef struct yrig_button {
 
 typedef struct yrig_role {
     char          name[32];
-    char          family[16];    /* ybox_family_name()                       */
-    int           family_id;     /* YBOX_*                                    */
+    char          family[16];    /* ybox_family_name(), or "lsl"             */
+    int           family_id;     /* YBOX_*, or YRIG_FAMILY_LSL               */
     char          key[160];
     uint32_t      baud;          /* 0 = the family's                         */
     bool          latched;
@@ -271,6 +291,10 @@ YRIG_API int  yrig_desc(const yrig_profile* p, const char* role, ydev_desc* d, c
 YRIG_API bool yrig_start(ydev_device* dev, const yrig_profile* p, const char* role, const ydev_desc* base,
                          char* err, size_t cap);
 YRIG_API yin_source yrig_source(const yrig_profile* p, const ydev_device* dev);
+/* The same rule by role name: src with tier 1 and the role's bounds when
+ * they checked and the family maps a device clock, else src with tier
+ * UNKNOWN and no bounds. */
+YRIG_API yin_source yrig_source_role(const yrig_profile* p, const char* role, yin_source src);
 
 #ifdef __cplusplus
 }
@@ -718,6 +742,7 @@ static int yrig__family_id(const char* name) {
     int k;
     for (k = 1; k <= YBOX_FAMILY_LAST; k++)
         if (strcmp(ybox_family_name(k), name) == 0) return k;
+    if (strcmp(name, "lsl") == 0) return YRIG_FAMILY_LSL;
     return 0;
 }
 
@@ -744,10 +769,16 @@ static int yrig__role(yrig__rd* r, const yjs_member* m, yrig_role* ro) {
     snprintf(f, sizeof f, "roles.%s.family", ro->name);
     if ((rc = yrig__str(r, o, "family", f, ro->family, 15, true)) != YRIG_OK) return rc;
     ro->family_id = yrig__family_id(ro->family);
-    if (!ro->family_id) return yrig__bad(r, yjs_get(o, "family"), f, "\"%s\" is not a ysp/box.h family", ro->family);
+    if (!ro->family_id) return yrig__bad(r, yjs_get(o, "family"), f, "\"%s\" is not a ysp/box.h family or lsl", ro->family);
     snprintf(f, sizeof f, "roles.%s.key", ro->name);
     if ((rc = yrig__str(r, o, "key", f, ro->key, sizeof ro->key - 1, true)) != YRIG_OK) return rc;
+    if (ro->family_id == YRIG_FAMILY_LSL && (strncmp(ro->key, "lsl:", 4) != 0 || strchr(ro->key, '\'')))
+        return yrig__bad(r, yjs_get(o, "key"), f, "an lsl key is lsl:<name>:<type>:<source_id>:<hostname>, no quote");
+    if (ro->family_id != YRIG_FAMILY_LSL && strncmp(ro->key, "lsl:", 4) == 0)
+        return yrig__bad(r, yjs_get(o, "key"), f, "an lsl key needs the family lsl");
     snprintf(f, sizeof f, "roles.%s.pulse_s", ro->name);
+    if (ro->family_id == YRIG_FAMILY_LSL && yjs_get(o, "pulse_s"))
+        return yrig__bad(r, yjs_get(o, "pulse_s"), f, "an lsl role has no pulse");
     if ((rc = yrig__secs(r, o, "pulse_s", f, &ro->pulse_ns, 1, (int64_t)10000000000LL, false)) != YRIG_OK) return rc;
     opt = yjs_get(o, "options");
     if (opt) {
@@ -755,6 +786,9 @@ static int yrig__role(yrig__rd* r, const yjs_member* m, yrig_role* ro) {
         int64_t baud = 0;
         snprintf(f, sizeof f, "roles.%s.options", ro->name);
         if ((rc = yrig__keys(r, opt, f, okeys)) != YRIG_OK) return rc;
+        snprintf(f, sizeof f, "roles.%s.options", ro->name);
+        if (ro->family_id == YRIG_FAMILY_LSL && (yjs_get(opt, "baud") || yjs_get(opt, "ftdi_latency_s") || yjs_get(opt, "latched")))
+            return yrig__bad(r, opt, f, "an lsl role has no serial options (baud, ftdi_latency_s, latched)");
         snprintf(f, sizeof f, "roles.%s.options.baud", ro->name);
         if ((rc = yrig__int(r, opt, "baud", f, &baud, 1, 10000000, false)) != YRIG_OK) return rc;
         ro->baud = (uint32_t)baud;
@@ -1236,14 +1270,24 @@ YRIG_API bool yrig_remove(yrig_profile* p, const char* role) {
 
 YRIG_API int yrig_bind(yrig_profile* p, const char* role, int family, const char* key) {
     yrig_role* r;
-    if (!p || !role || !key || !key[0] || strlen(key) >= sizeof r->key || family < 1 || family > YBOX_FAMILY_LAST) return YRIG_ERR_ARG;
+    const char* fname;
+    if (!p || !role || !key || !key[0] || strlen(key) >= sizeof r->key ||
+        ((family < 1 || family > YBOX_FAMILY_LAST) && family != YRIG_FAMILY_LSL))
+        return YRIG_ERR_ARG;
+    if ((family == YRIG_FAMILY_LSL) != (strncmp(key, "lsl:", 4) == 0) || strchr(key, '\'')) return YRIG_ERR_ARG;
     r = yrig_find(p, role);
     if (!r && p->n_roles >= YRIG_MAX_ROLES) return YRIG_ERR_FULL;
     if (!r && !(r = yrig_add(p, role))) return YRIG_ERR_ARG;
-    yrig__copy(r->family, sizeof r->family, ybox_family_name(family), strlen(ybox_family_name(family)));
+    fname = family == YRIG_FAMILY_LSL ? "lsl" : ybox_family_name(family);
+    yrig__copy(r->family, sizeof r->family, fname, strlen(fname));
     r->family_id = family;
     yrig__copy(r->key, sizeof r->key, key, strlen(key));
     if (family != YBOX_MMBTS) r->latched = false;
+    if (family == YRIG_FAMILY_LSL) {   /* no serial options, no pulse */
+        r->baud = 0;
+        r->ftdi_latency_ns = -1;
+        r->pulse_ns = -1;
+    }
     memset(&r->latency, 0, sizeof r->latency);   /* measured on the old device */
     memset(&r->bounds, 0, sizeof r->bounds);
     return YRIG_OK;
@@ -1275,6 +1319,9 @@ YRIG_API int yrig_desc(const yrig_profile* p, const char* role, ydev_desc* d, ch
     /* by its name, which is what the file holds */
     fam = yrig__family_id(r->family);
     if (!fam || !r->key[0]) return yrig__err(err, cap, YRIG_ERR_FORMAT, "roles.%s: no device is bound", r->name);
+    if (fam == YRIG_FAMILY_LSL)
+        return yrig__err(err, cap, YRIG_ERR_FORMAT, "roles.%s is an LSL stream: start it with ysp/net.h and the role's key",
+                         r->name);
     d->role = r->name;
     d->family = fam;
     d->key = r->key;
@@ -1297,17 +1344,13 @@ YRIG_API bool yrig_start(ydev_device* dev, const yrig_profile* p, const char* ro
     return true;
 }
 
-YRIG_API yin_source yrig_source(const yrig_profile* p, const ydev_device* dev) {
-    yin_source s;
-    const yrig_role* r;
-    memset(&s, 0, sizeof s);
-    if (!dev) return s;
-    s = ydev_source(dev);
+/* Tier 1 with the role's bounds when they checked and fam maps a device
+ * clock; else tier UNKNOWN. */
+static yin_source yrig__tier(const yrig_role* r, int fam, yin_source s) {
+    bool clock = fam == YRIG_FAMILY_LSL || (fam >= 1 && fam <= YBOX_FAMILY_LAST && (ybox_caps(fam) & YBOX_CAP_IN));
     s.tier = (uint8_t)YIN_TIER_UNKNOWN;
     s.lo_us = s.hi_us = 0;
-    r = dev->d.role ? yrig_find(p, dev->d.role) : NULL;
-    if (r && r->bounds.set && r->bounds.check == YRIG_CHECK_OK && yrig__family_id(r->family) == dev->d.family &&
-        (ybox_caps(dev->d.family) & YBOX_CAP_IN)) {
+    if (r && r->bounds.set && r->bounds.check == YRIG_CHECK_OK && clock && yrig__family_id(r->family) == fam) {
         /* ysp/input.h's tier 1: a device clock whose fit a loopback checked */
         s.tier = (uint8_t)YIN_TIER_1;
         s.lo_us = (int32_t)(r->bounds.lo_ns >= 0 ? (r->bounds.lo_ns + 500) / 1000 : -((-r->bounds.lo_ns + 500) / 1000));
@@ -1317,6 +1360,18 @@ YRIG_API yin_source yrig_source(const yrig_profile* p, const ydev_device* dev) {
         s.note = "ysp_rig: no checked loopback for this role: tier UNKNOWN";
     }
     return s;
+}
+
+YRIG_API yin_source yrig_source(const yrig_profile* p, const ydev_device* dev) {
+    yin_source s;
+    memset(&s, 0, sizeof s);
+    if (!dev) return s;
+    return yrig__tier(dev->d.role && p ? yrig_find(p, dev->d.role) : NULL, dev->d.family, ydev_source(dev));
+}
+
+YRIG_API yin_source yrig_source_role(const yrig_profile* p, const char* role, yin_source src) {
+    const yrig_role* r = p && role ? yrig_find(p, role) : NULL;
+    return yrig__tier(r, r ? yrig__family_id(r->family) : 0, src);
 }
 
 #ifdef __cplusplus

@@ -996,17 +996,18 @@ static int build_shader(B* b, E* e) {
 }
 
 static int build_texture(B* b, E* e) {
-    static const char* const keys[] = { "name", "kind", "source", "license", "compression", "encoding", "format", NULL };
+    static const char* const keys[] = { "name", "kind", "source", "license", "compression", "encoding", "primaries", "format", NULL };
     const char* src = str_of(e->res, "source", NULL);
     const char* comp = str_of(e->res, "compression", "raw");
     const char* encs = str_of(e->res, "encoding", NULL);
     const char* fmts = str_of(e->res, "format", NULL);
+    const char* prims = str_of(e->res, "primaries", NULL);
     LodePNGState st;
     unsigned w = 0, h = 0, err;
     unsigned char* px = NULL;
     const uint8_t* png;
     int64_t n;
-    uint32_t fmt = 0, tb, trc = 0;
+    uint32_t fmt = 0, tb, trc = 0, prim = 0;
     uint8_t* raw;
     uint64_t raw_n;
     char ver[96];
@@ -1052,6 +1053,31 @@ static int build_texture(B* b, E* e) {
     else if (!strcmp(encs, "linear")) trc = 4;
     else if (!strcmp(encs, "device")) trc = 1;
     else return lodepng_state_cleanup(&st), cfail(b->c, YPAK_ERR_FORMAT, "'%s': encoding must be srgb, linear or device", e->name);
+    /* The stored bytes are what ygfx_texture() takes (docs/pack.md 4.9), so
+     * every choice ysp/gfx.h would refuse at load is refused here, and
+     * nothing is left for the player to guess: linear values carry no
+     * encoding; gray has no primaries of its own (the display's white);
+     * sRGB codes in RGB name their primaries, because an untagged PNG does
+     * not say whether its RGB is BT.709's or the display's. */
+    if (prims && strcmp(prims, "bt709") && strcmp(prims, "device"))
+        return lodepng_state_cleanup(&st), cfail(b->c, YPAK_ERR_FORMAT, "'%s': primaries must be bt709 or device", e->name);
+    if (fmt == YPAK_TEX_R16UI && trc != 4)
+        return lodepng_state_cleanup(&st), cfail(b->c, YPAK_ERR_FORMAT, "'%s': r16ui holds linear values (ysp/gfx.h decodes no transfer on it): "
+                                                 "set \"encoding\": \"linear\", or \"format\": \"rgba32f\" for %s codes", e->name, encs);
+    if (trc == 4 || fmt == YPAK_TEX_R8 || fmt == YPAK_TEX_RG8 || trc == 1) {
+        if (prims)
+            return lodepng_state_cleanup(&st), cfail(b->c, YPAK_ERR_FORMAT, "'%s': no \"primaries\" here: %s", e->name,
+                                                     trc == 4 ? "linear values carry no encoding (the display's own RGB)"
+                                                     : trc == 1 ? "device codes are the display's own RGB"
+                                                                : "a gray texture is the display's white at each level");
+        prim = trc == 4 ? 0 : 1;   /* YGFX_PRIM_DEVICE */
+    } else if (!prims) {
+        return lodepng_state_cleanup(&st), cfail(b->c, YPAK_ERR_FORMAT, "'%s': sRGB codes in RGB need \"primaries\": \"bt709\" (converted "
+                                                 "through the rig's calibration, which must have chromaticities) or \"device\" (the "
+                                                 "transfer decoded, the RGB shown as the display's)", e->name);
+    } else {
+        prim = !strcmp(prims, "bt709") ? 2 : 1;   /* YGFX_PRIM_BT709, YGFX_PRIM_DEVICE */
+    }
     if (strcmp(comp, "raw") && strcmp(comp, "qoi"))
         return lodepng_state_cleanup(&st), cfail(b->c, YPAK_ERR_FORMAT, "'%s': compression must be raw or qoi", e->name);
     if (!strcmp(comp, "qoi") && fmt != YPAK_TEX_RGBA8)
@@ -1100,7 +1126,7 @@ static int build_texture(B* b, E* e) {
         if (!d) return cfail(b->c, YPAK_ERR_NOMEM, "out of memory");
         memcpy(d, "YSPTEXR1", 8);
         w32(d + 8, 1); w32(d + 12, 64); w32(d + 16, w); w32(d + 20, h); w32(d + 24, fmt);
-        d[28] = 1; d[29] = 2; d[30] = (uint8_t)trc;   /* matrix RGB, full range, the transfer */
+        if (trc != 4) { d[28] = 1; d[29] = 2; d[30] = (uint8_t)trc; d[31] = (uint8_t)prim; }   /* matrix RGB, full range; linear: all 0 */
         w32(d + 36, q ? YPAK_TEX_QOI : YPAK_TEX_RAW); w64(d + 40, stored); w64(d + 48, raw_n); w64(d + 56, ypak_xxh64(raw, (size_t)raw_n, 0));
         memcpy(d + 64, q ? q : raw, (size_t)stored);
         e->data = d;
@@ -1111,6 +1137,7 @@ static int build_texture(B* b, E* e) {
     jset(b->c, e->deriv, "compression", jstrz(b->c, comp));
     jset(b->c, e->deriv, "encoding", jstrz(b->c, encs));
     jset(b->c, e->deriv, "format", jstrz(b->c, fmts));
+    if (prims) jset(b->c, e->deriv, "primaries", jstrz(b->c, prims));
     return 0;
 }
 

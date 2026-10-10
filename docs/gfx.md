@@ -3016,9 +3016,128 @@ module it unloads, which a suppression cannot name, so the test runs GL
 under a sanitizer only when `YGFX_TEST_DEVICES` asks for it. Locally,
 with GL on, everything passed under ASan and UBSan apart from that leak.
 
+## v0.10.5: a pack's textures load as stored; shader contract 2
+
+Found by `examples/pack/trial_images.c` (docs/rig_spec.md 15.5): the
+documented load path of a TEXTURE entry, the view's encoding bytes into
+`ygfx_texture()`, failed in the common case. The pack tool (v0.1.1) wrote
+matrix RGB, full range and the transfer on every texture with primaries 0,
+which `ygfx_texture()` refuses; it also refused any encoding on R8 and
+RG8, and the tool's default for an 8-bit gray PNG is sRGB. The example
+mapped the bytes by hand.
+
+The decision (the tool's half is in docs/pack.md 4.9): the stored bytes
+are `texture_desc.enc`, unchanged, and every encoding that `ygfx_texture()`
+would refuse is refused at build.
+
+- Linear values carry no encoding (all 0), the only form that every use
+  takes: modulation, ADD, coverage and a shader's `ysp_tex0` read raw
+  values, and an encoded texture draws as a color image only.
+- Gray (R8, RG8) may state a transfer, matrix RGB and primaries DEVICE.
+  Gray has no chromaticity of its own; its light is the display's white at
+  each level. Other primaries on gray are refused. The alternative, the
+  tool linearizing 8-bit sRGB to 8-bit linear, merges the dark codes: the
+  256 sRGB codes become 183 linear codes (codes 0 to 6 all 0, 7 to 17 all
+  1). To R16F it would keep them, at twice the GPU memory and four times
+  the pack size (R16F is stored as f32).
+- sRGB codes in RGB need their primaries named in the source description
+  (`bt709`: converted through the calibration's chromaticities; `device`:
+  the transfer decoded, the RGB shown as the display's). An untagged PNG
+  does not say which, so the tool stops rather than guess.
+
+The change here: `ygfx__enc_check()` takes R8 and RG8 with primaries
+DEVICE, and the video program's RGB branch spreads a gray texture's level
+to rgb and takes alpha from g, by the channel count that every IMAGE block
+already carries (`ysp_misc.x`). 10 lines of code. The refusals of an
+encoded texture as a modulation, ADD, coverage or shader texture now say
+why: those uses read linear values.
+
+| Check (`v0.10.5 gray`, RGBA32F scene, black background) | Iris Xe (D3D11) | WARP | SwiftShader | Tolerance |
+|---|---|---|---|---|
+| R8 and RG8 with the SRGB and GAMMA22 transfers, 128 texels each (every code once across the two R8 cases), against the formula; RG8 alpha over black | 2.2e-7 | 1.6e-7 | 5.1e-7 | 2e-6 |
+| Refusals: BT.709 primaries on R8 (by its own message); an encoding on R16UI; an encoded R8 as a modulation; as coverage. Control: as a color image | 5 of 5 | 5 of 5 | 5 of 5 | all |
+
+Mesa llvmpipe (WSL2, gcc 11.4 `-O2 -Wall -Wextra -Werror`): 5.1e-7 and
+5 of 5.
+
+The pack tool's test (`tests/pack/tool_test.c`) puts each corpus texture
+into `ygfx_texture()` as stored on the null backend, without and with a
+nominal calibration: 9 of 9 made, and the BT.709 texture refused without
+the calibration by the calibration message. `trial_images` now copies the
+bytes.
+
+`YGFX_SHADER_CONTRACT` is 2 (the user, 2026-10-09; see "v0.10.4"): a body
+that samples `ysp_tex0` needs v0.10.4's binding, and a contract-1 player
+would run it and read garbage. The wrapper's text did not change, so its
+pinned hashes did not; the test now requires 2. The corpus pack's SHADER
+entry records the contract, so its SHA-256 changed (docs/pack.md).
+
+Mutants v10-10 to v10-13 (`gfx.toml`: gray refused, other primaries taken
+on gray, the level not spread to rgb, RG8's alpha dropped): 4 of 4 killed,
+each by the new part (5, 1, 1 and 1 new failing checks).
+
+## v0.10.4: a user shader samples stim.tex
+
+docs/rig_spec.md 15.6 asked whether a USER shader can sample a render
+target as `ysp_tex0` (PsychoPy's `VSHD_Distortion.py` and the panorama
+demo need it). `examples/gfx/gratings.c` tried it, with a target and with
+an uploaded image, on 2026-10-09 (Iris Xe, ANGLE on D3D11).
+
+What v0.10.3 did: the contract named `ysp_tex0`, but the pack step of a
+USER draw set no texture, and the backend binds a unit only when a draw
+names a texture for it. So `ysp_tex0` read whatever the previous draw left
+on unit 0. The new test part (`v0.10 user tex`) shows it on v0.10.3: the
+body read the other image of the frame before (0.25 of full scale from the
+reference), the target's value was off by 0.075, a draw into the target it
+samples was not refused, and a texture id of no gfx was not refused.
+
+The change is in the pack step: `stim.tex` of a USER stimulus (and
+`ygfx_user_desc.tex`, appended) goes to unit 0, or to `ysp_utex0` for an
+R16UI texture, as an IMAGE's does. Because the texture is now in the draw's
+command, the existing feedback check refuses a draw into the target the
+body samples (`YGFX_ERR_ORDER`), and runs split where the texture changes.
+A texture id that is not this gfx's is refused (`YGFX_ERR_ARG`), and so is
+a video texture (its planes need the video program). 14 lines of code.
+
+| Check (`v0.10 user tex`, ANGLE D3D11 hardware) | v0.10.3 | v0.10.4 |
+|---|---|---|
+| Body `texelFetch(ysp_tex0, ...)` against the same R8 texture as a modulation IMAGE, after a frame that drew another texture | 0.25 | 0 |
+| Body against a target cleared to 0.3 in a setup pass (expected 0.5 (1 + 0.5 v), v the texel read back) | 0.075 | 0 |
+| Draw into the target it samples | drawn | `YGFX_ERR_ORDER` |
+| A texture id above `YGFX_MAX_TEXTURES` | drawn | `YGFX_ERR_ARG` |
+
+v0.10.4 gives 0 in both rows on ANGLE's D3D11 hardware, WARP and
+SwiftShader renderers and on Mesa llvmpipe. The target's texel is read
+back for the expected value, because the renderers store the clear value
+0.3 differently in RGBA16F: D3D11 (hardware and WARP) 0.29980, rounded
+down, and SwiftShader 0.30005, the nearest half float. A fixed expected
+value failed on SwiftShader by 6.1e-5.
+
+Without `stim.tex`, `ysp_tex0` stays unbound for a USER draw, and the
+manual says its value is undefined. Binding a 1 x 1 texture there would
+cost a bind per run for a body that has no use for it.
+
+`YGFX_SHADER_CONTRACT` stays 1: the wrapper's text and the names did not
+change, and no body could have used `ysp_tex0` before. A pack whose body
+samples it on a v0.10.3 player reads garbage; a contract 2 would make such
+a player refuse it, and would make v0.10.4 refuse every pack made so far.
+Not decided here. Decided on 2026-10-09 by the user: the contract is 2
+from v0.10.5 (see "v0.10.5"), because no pack existed outside the
+repository.
+
+The graded mask (rig_spec 15.6, `face_jpg.py`): with this change, a body
+multiplies a carrier by `ysp_bilinear(ysp_tex0, ...)` of any image, which
+is tile 6 of `gfx_gratings`. MASK_TEX stays a distance shape.
+
+Mutants v10-08 (the bind removed) and v10-09 (`ygfx_user()` drops
+`desc.tex`): 2 of 2 caught (3 and 2 new failing checks). The part gives
+0 on Mesa llvmpipe too (WSL2, gcc 11.4 `-O2 -Werror`). The compile check
+draws a user stimulus that samples its target on the null backend:
+`YGFX_ERR_ORDER` inside the target's pass, `YGFX_OK` after it.
+
 ## v0.10.3: the shader contract version
 
-`YGFX_SHADER_CONTRACT` (1) names the SHADER CONTRACT. The pack stores it
+`YGFX_SHADER_CONTRACT` (1; 2 from v0.10.5) names the SHADER CONTRACT. The pack stores it
 with each shader entry (docs/pack.md, SHADER) and the player refuses a
 shader built for another version, so a pack never runs a body under a
 wrapper that means something else. The number changes when what the

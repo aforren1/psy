@@ -1,4 +1,4 @@
-/* ysp/audio.h - v0.2.1 - public domain single-header audio library
+/* ysp/audio.h - v0.3.1 - public domain single-header audio library
  *
  *   Sound at a time on the ysp/rt.h clock. A buffer is played with
  *   yau_play_at(buf, t); the header plans its first sample on the device
@@ -26,6 +26,31 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.3.1 - HALT: an underrun of about a period is now found. On WASAPI
+ *          shared mode it halts the position short of the frames written,
+ *          so v0.3.0 never saw it, and every later onset time was off by
+ *          the halt (10 ms here) while its record said tier 2. A report late
+ *          against the fit by more than half a period, three moving reports
+ *          in a row, is a halt: an XRUN record (u.i64[2] the halt in ns,
+ *          [3] the position where it was seen), counted in caps.xruns, the
+ *          fit starts over from that report, and every sound in flight is
+ *          flagged XRUN, UNCONFIRMED, tier 3. Late reports confirm nothing
+ *          until the run ends. An early report that comes just before the
+ *          run (measured at queue 2) is the same underrun, counted once.
+ *   v0.3.0 - QUEUE: on WASAPI shared mode the device thread renders a
+ *          block only when the engine has taken the buffer down to
+ *          desc.queue - 1 periods (default 2), on the event miniaudio waits
+ *          on, instead of a period before it waits. Shortest safe lead on
+ *          the test laptop 50 ms before, 40 ms at the default, 30 ms at
+ *          desc.queue = 1; each period saved is also a period less margin
+ *          against a stalled callback. miniaudio's own order (0 before) is
+ *          gone. yau_desc.queue, yau_caps.queue, yau_device_open.queue,
+ *          yau_device_caps.queue; queue= in the describe line. WASAPI
+ *          exclusive mode asks miniaudio for one period per buffer: with
+ *          three, each event took three callbacks in a burst and the run had
+ *          underruns and onsets 62 ms off the plan; with one, no underrun and
+ *          onsets on the plan, but this laptop's driver still buffers about
+ *          100 ms in exclusive mode (docs/audio.md, "Periods and buffers").
  *   v0.2.1 - yau_wav_probe(): the WAV parse without a device, for the pack
  *          tool (docs/pack.md, AUDIO), with the same refusals except the
  *          device's rate, channels and speaker map, which the caller
@@ -49,7 +74,41 @@
  *          positions, miniaudio's null device, the device and source
  *          interfaces, synthesis, the records, the parameter table.
  *
- *   STATUS: v0.2.0. Streams, measured on the same laptop and device (AC,
+ *   STATUS: v0.3.1. Halts, measured on the same laptop (docs/audio.md,
+ *   "Halts"): injected callback stalls of 5, 10, 15, 20 and 30 ms, 21 of
+ *   each at queue 1 and at queue 2. Every stall that halted the position
+ *   was found (126 of 126), 49 to 70 ms after the stall, the halt in the
+ *   record within -0.19 to +0.36 ms of the position's shift; no record
+ *   for the 84 stalls the queue rode out. False records in the long runs
+ *   of v0.3.0, run again (10 minutes idle and 3 under load at queue 2 and
+ *   at queue 1, 156,325 callbacks) and in 60 s of exclusive mode: 0. No
+ *   report there was more than 0.72 ms late against its own line; the
+ *   rule's threshold is 5 ms. With a sound each frame through 21 halts at
+ *   queue 1, every flagged onset's time was within -150 to +161 us (p1 to
+ *   p99) of the reports after the halt; at queue 2, 80 of 105 were, and
+ *   25 that an early report passed kept the old time, 10.1 ms before
+ *   (which is right is not known: no loopback). Shortest safe lead and
+ *   tier 2 residuals as in v0.3.0. Queue 1 stays opt-in: its margin is 8
+ *   to 10 ms of callback lateness, at the 8 ms measured with MMCSS.
+ *   v0.3.0. Periods and buffers, measured on the same laptop
+ *   (docs/audio.md, "Periods and buffers"): the endpoint's shared-mode
+ *   engine period is 480 frames only (IAudioClient3 minimum = maximum =
+ *   default), so no shared stream runs under 10 ms here; the shared buffer
+ *   is 1056 frames. Frames written minus the device position, 10 minutes
+ *   idle: 1898 (39.5 ms) before, 1418 at the default queue, 938 at queue 1.
+ *   0 underruns at each queue in 10 minutes idle and 3 minutes under load;
+ *   callback interval p99 10.17 to 10.34 ms, max 11.6 to 12.5 ms. Shortest
+ *   safe lead (audio_schedule, 2 runs each): 50, 40 and 30 ms. A callback
+ *   stall the queue rides out: 25 but not 35 ms before, 15 but not 25 ms at
+ *   the default, 8 but not 15 ms at queue 1. Onset residuals within -32 to
+ *   +21 us, tier 2, at every queue. An underrun that a stall of that size
+ *   causes halts the position for about a period and was not detected
+ *   (xruns 0; the position never reaches the frames written): v0.3.1
+ *   finds it.
+ *   Exclusive mode: 0 underruns in 60 s at 480 and 144 frames, onsets on
+ *   the plan, but the driver queues 30 to 110 ms and the shortest safe lead
+ *   is 125 ms; raw WASAPI shows the same, so it is the driver.
+ *   v0.2.0. Streams, measured on the same laptop and device (AC,
  *   MSVC /O2, rows interleaved; docs/audio.md "Streams"): render cost
  *   per callback with 32 voices 10.35 us mean (v0.1.0 in the same session
  *   11.38), with 1 stream 10.48, with 4 streams 12.07 (p99 34.7); 0 gaps
@@ -239,6 +298,23 @@
  *     still be met now: the time of the first frame the next callback will
  *     render, plus one period, minus now. Hand sounds over at least that
  *     far ahead; ysp/timeline.h's look-ahead for audio is this number.
+ *     On WASAPI shared mode it is mostly the queue (QUEUE) and the
+ *     engine's own period and pipeline.
+ *
+ *   QUEUE (desc.queue, WASAPI shared mode)
+ *     The periods of sound queued in the WASAPI buffer ahead of the
+ *     engine's next pass when a block is rendered: 2 by default, or 1.
+ *     Each period less is a period (10 ms here) less lead, and a period
+ *     less margin against a callback that runs late: the queue must not
+ *     run dry before the late block arrives. Measured on the test laptop:
+ *     shortest safe lead 40 ms at 2, 30 ms at 1; a stall of 15 ms was
+ *     ridden out at 2 and not at 1. miniaudio by itself renders one period
+ *     before it waits for room, which the header no longer lets it do.
+ *     An underrun at either queue is found and recorded (UNDERRUNS), but
+ *     the sound still has a gap in it. Use 1 only on a machine where
+ *     audio_clockstats --queue 1 under the experiment's load shows
+ *     callbacks never 8 ms late. Exclusive mode has no queue: the device
+ *     takes one whole buffer per event.
  *
  *   UNDERRUNS
  *     A callback that comes too late leaves the device without data. The
@@ -252,6 +328,21 @@
  *     from the next reports. A device whose position counts the silence it
  *     played instead shows it as the position past the frames written; the
  *     header then shifts its map by that many frames and keeps the fit.
+ *     HALT: a short underrun (a period or so on WASAPI shared) halts the
+ *     position before it reaches the frames written: the engine runs dry
+ *     ahead of the position. The header sees it from the reports after it,
+ *     which are all late against the fit by the halt: three moving reports
+ *     in a row, each late by more than half a period, are a halt. Measured
+ *     on the test laptop, no report was ever 1 ms late without one. Until
+ *     the third, the late reports confirm nothing; then the XRUN record
+ *     gives the halt's length, the fit starts over from the last report,
+ *     and every sound in flight (planned on the old timing, played after
+ *     the halt, or not yet confirmed) is XRUN, UNCONFIRMED, tier 3, its
+ *     time the new fit's. A sound whose frame a report passed between the
+ *     last on-time report and the first late one may have played before
+ *     the halt: its time can be off by the halt either way, and its record
+ *     says so (XRUN). The fit has no slope for 5 s after it and is not
+ *     checked for halts for 0.5 s.
  *
  *   THE RECORD (yau_onset)
  *     id, target (t as given), onset (+ desc.onset_offset_ns), residual
@@ -280,7 +371,7 @@
  *        the capture against the record 67 us p99 from its median idle and
  *        20 us under load in one run (STATUS)
  *     3  unconfirmed (no report past the frame), or a path no loopback
- *        checked (WASAPI exclusive, which did not run usably here), or
+ *        checked (WASAPI exclusive, which the loopback capture cannot see), or
  *        callback times only (CoreAudio, ALSA, PulseAudio, Web Audio in
  *        v0.1)
  *     YAU_TIER_SIM  the null device, or a device that says so
@@ -313,8 +404,13 @@
  *     YAU_EV_FIT     t_ns t0; aux generation; i64[0] W0; f64[1] frames
  *                      per second; f64[2] spread in ns; u32[6] points;
  *                      u32[7] 1 = reports, 0 = callback times
- *     YAU_EV_XRUN    t_ns when seen; i64[0] stream frame; i64[1] frames
- *                      the device position moved without data
+ *     YAU_EV_XRUN    t_ns when seen; aux the underrun's number (caps.xruns);
+ *                      i64[0] stream frame; i64[1] frames the device
+ *                      position moved without data; [2] a HALT's length in
+ *                      ns (the least late of its reports but the first),
+ *                      else 0; [3] the position where the halt was seen.
+ *                      A halt right after an early report continues that
+ *                      report's record: the same aux, counted once
  *     YAU_EV_OPEN    i32[0] rate, [1] channels, [2] device format
  *                      (YAU_OUT_*), [3] period, [4] buffer, [5] exclusive,
  *                      [6] low latency, [7] backend, [8] reports (0 or 1)
@@ -560,9 +656,14 @@
  *   YAU_BACKEND_WASAPI (Windows; AUTO there)
  *     Shared mode by default; desc.exclusive takes the device for this
  *     program alone, and every other program goes silent. Through
- *     miniaudio with low-latency shared mode (IAudioClient3) when the
- *     driver has it, no automatic conversion, no hardware offload and no
- *     automatic rerouting: a default-device change makes the device LOST.
+ *     miniaudio with IAudioClient3 at desc.period when that is a multiple
+ *     of the endpoint's fundamental period from its minimum to its
+ *     maximum, or at the minimum when desc.period is under it; any other
+ *     period falls back to the endpoint's default period. Only some
+ *     drivers offer periods under the default: audio_wasapi_periods
+ *     says. No automatic conversion, no hardware offload
+ *     and no automatic rerouting: a default-device change makes the device
+ *     LOST. Exclusive mode: one buffer of one period, event-driven.
  *     Positions: IAudioClock, called in each callback.
  *   YAU_BACKEND_COREAUDIO, _ALSA, _PULSE, _WEB
  *     Compiled through miniaudio. v0.1 reads no position on them, so every
@@ -646,9 +747,9 @@
 #define YSP_AUDIO_H_INCLUDED
 
 #define YAU_VERSION_MAJOR 0
-#define YAU_VERSION_MINOR 2
+#define YAU_VERSION_MINOR 3
 #define YAU_VERSION_PATCH 1
-#define YAU_VERSION_STRING "0.2.1"
+#define YAU_VERSION_STRING "0.3.1"
 
 #include "ysp/rt.h"
 
@@ -854,6 +955,7 @@ typedef struct yau_device_open {
     int32_t     period;         /* frames asked for; 0 = the device's choice */
     bool        exclusive;
     const char* device;         /* desc.device                               */
+    int32_t     queue;          /* desc.queue                                */
 } yau_device_open;
 
 typedef struct yau_device_caps {
@@ -875,6 +977,8 @@ typedef struct yau_device_caps {
     int64_t  os_stream_latency_ns; /* the API's own latency figure for the
                                     * stream; -1 = none                       */
     char     os_latency_src[32];   /* the API the claim comes from            */
+    int32_t  queue;             /* periods kept ahead of the device; 0 = the
+                                 * backend's own                             */
 } yau_device_caps;
 
 #define YAU_DEVICE_VERSION 1
@@ -923,6 +1027,9 @@ typedef struct yau_desc {
     void*                source_ctx;
     const yau_device*  dev;           /* YAU_BACKEND_CUSTOM              */
     void*                dev_ctx;
+    int32_t              queue;         /* WASAPI shared: periods queued
+                                         * ahead of the engine, 1 or 2;
+                                         * 0 = 2 (QUEUE)                    */
 } yau_desc;
 
 typedef struct yau_caps {
@@ -947,6 +1054,8 @@ typedef struct yau_caps {
     int64_t    os_stream_latency_ns;  /* the API's latency figure; -1 = none  */
     char       os_latency_src[32];    /* the API both come from             */
     uint32_t   gaps;            /* stream GAPS since open, every stream      */
+    int32_t    queue;           /* periods queued ahead of the device; 0 = the
+                                 * backend's own (QUEUE)                     */
 } yau_caps;
 
 typedef struct yau_param {
@@ -1244,6 +1353,10 @@ typedef struct yau_audio {
     int64_t        last_pos;
     int32_t        early_run;   /* reports in a row far before the fit      */
     int64_t        early_since;
+    int32_t        late_run;    /* reports in a row far after the fit (HALT) */
+    int64_t        late_w0;
+    int32_t        late_again;  /* the run came right after an early report */
+    double         late_min;
     int64_t        last_fit_t;
     int32_t        clip_any;
     uint32_t       gaps;
@@ -1492,6 +1605,7 @@ extern "C" {
 #define YAU__WARM_NS   500000000LL    /* open() waits for this much fit     */
 #define YAU__SLOPE_NS  5000000000LL   /* fit the slope from this span on    */
 #define YAU__REANCHOR_NS 2000000000LL /* reports early this long: start over */
+#define YAU__HALT_REPORTS 3           /* late reports in a row that make a halt */
 
 enum { YAU__OP_PLAY = 1, YAU__OP_CANCEL, YAU__OP_STOP, YAU__OP_GAIN };
 enum { YAU__M_ONSET = 1, YAU__M_END, YAU__M_FIT, YAU__M_XRUN, YAU__M_FREE };
@@ -2172,12 +2286,16 @@ static void yau__write_out(yau_audio* au, void* out, int64_t off, int32_t cn, in
     *clipped = clip;
 }
 
-/* restart: the old fit points describe timing that no longer holds */
-static void yau__xrun(yau_audio* au, int64_t t, int64_t gap, int restart) {
+/* restart: the old fit points describe timing that no longer holds;
+ * halt_ns and at: a halt found from late reports (HALT), else 0; again:
+ * the record continues the last one (the same underrun), not counted */
+static void yau__xrun_rec(yau_audio* au, int64_t t, int64_t gap, int restart, int64_t halt_ns, int64_t at,
+                          int again) {
     yau__msg m;
     yrt_payload u;
     int i;
-    au->xruns++;
+    if (!again) au->xruns++;
+    au->late_run = 0;
     if (gap > 0) {
         /* The device counted gap frames of silence, so every frame from here
          * plays gap frames later than the fit said: move the old points by
@@ -2202,13 +2320,20 @@ static void yau__xrun(yau_audio* au, int64_t t, int64_t gap, int restart) {
     memset(&u, 0, sizeof u);
     u.i64[0] = au->w;
     u.i64[1] = gap;
+    u.i64[2] = halt_ns;
+    u.i64[3] = at;
     yau__ring(au, (uint16_t)YAU_EV_XRUN, t, au->xruns, &u);
+    if (again) return;
     memset(&m, 0, sizeof m);
     m.kind = YAU__M_XRUN;
     m.a = au->w;
     m.b = gap;
     (void)yau__msg_push(au, &m);
     YRT_MESSAGE("yau underrun");
+}
+
+static void yau__xrun(yau_audio* au, int64_t t, int64_t gap, int restart) {
+    yau__xrun_rec(au, t, gap, restart, 0, 0, 0);
 }
 
 static void yau__publish_fit(yau_audio* au) {
@@ -2310,7 +2435,42 @@ YAU_API void yau_render(void* host, void* out, int32_t frames, const yau_tick* t
          * reports as they are. */
         if (pw > au->last_pos && au->fit.ready) {
             double r = (double)(tk->pos_t - yau__fit_time(&au->fit, pw));
-            if (r < -0.5 * (double)au->dcaps.period * au->fit.k) {
+            double half = 0.5 * (double)au->dcaps.period * au->fit.k;
+            if (r > half) {
+                /* HALT. An underrun of about a period: the engine ran dry
+                 * before the position reached the frames written, the
+                 * position stood for a pass, and every later frame plays
+                 * that much later (measured on WASAPI shared: 10.3 ms
+                 * after stalls of 20 to 35 ms; docs/audio.md). From then
+                 * on every report is late by the halt. One report can be
+                 * late without a halt (a call preempted between reading
+                 * the position and its stamp), so it takes
+                 * YAU__HALT_REPORTS in a row. Until then the reports stay
+                 * out of the fit and confirm nothing. Then the fit starts
+                 * over, as after any underrun, from this report at once,
+                 * so the sounds in flight, flagged XRUN because they were
+                 * planned on the old timing, get times on the new one.
+                 * The record's halt is the least late of the run but its
+                 * first, which can be the halt half over (the position
+                 * moved, then stood); a later report moved, so the device
+                 * played again and the whole halt is in it. Measured at
+                 * queue 2, the report before such a run was 9 ms early (the
+                 * position ran ahead, then stood): that report has its
+                 * XRUN record already, and the halt's record continues it,
+                 * one underrun, counted once. */
+                if (au->late_run++ == 0) { au->late_w0 = pw; au->late_again = au->early_run > 0; }
+                else if (au->late_run == 2 || r < au->late_min) au->late_min = r;
+                au->early_run = 0;
+                if (au->late_run >= YAU__HALT_REPORTS) {
+                    yau__xrun_rec(au, now_t, 0, 1, (int64_t)au->late_min, au->late_w0, au->late_again);
+                    au->first_block = 0;
+                    au->fit.w0 = pw; au->fit.t0 = tk->pos_t; au->fit.k = yau__k_nom(au);
+                } else {
+                    au->last_pos = pw;
+                    goto fed;
+                }
+            } else if (r < -half) {
+                au->late_run = 0;
                 if (au->early_run++ == 0) {
                     au->early_since = tk->pos_t;
                     yau__xrun(au, now_t, 0, 0);
@@ -2326,6 +2486,7 @@ YAU_API void yau_render(void* host, void* out, int32_t frames, const yau_tick* t
                 }
             } else {
                 au->early_run = 0;
+                au->late_run = 0;
             }
         }
         if (pw > au->last_pos) yau__feed(au, pw, tk->pos_t);
@@ -2364,7 +2525,7 @@ YAU_API void yau_render(void* host, void* out, int32_t frames, const yau_tick* t
         for (i = 0; i < YAU_MAX_VOICES; i++) {
             yau__voice* v = &au->voice[i];
             if (!(v->state == 2 || v->state == 3) || v->onset_done || v->start < 0) continue;
-            if (pw <= v->start) continue;
+            if (pw <= v->start || au->late_run > 0) continue;
             /* a report the fit has set aside confirms nothing */
             if (au->early_run > 0) v->flags |= YAU_ONSET_XRUN;
             yau__onset_done(au, v, yau__fit_time(&au->fit, v->start), tk->pos,
@@ -2467,6 +2628,19 @@ YAU_API void yau_render(void* host, void* out, int32_t frames, const yau_tick* t
     YRT_ZONE_END(zr);
 }
 
+/* --- the queue gate (QUEUE) ---------------------------------------------------- */
+
+/* The WASAPI buffer fill at or under which the gate lets a render through,
+ * or -1 for no gate: shared mode only (exclusive mode takes a whole buffer
+ * per event), and only when miniaudio's GetBuffer of one period always
+ * finds room once the gate opens, so miniaudio never waits on the event
+ * the gate took. A macro, not a function, because only the WASAPI build
+ * uses it and the core test checks it without a device. */
+#define YAU__QUEUE_PAD(queue, period, buffer, exclusive)                              \
+    ((exclusive) || (queue) <= 0 || (period) <= 0                                     \
+     || (int64_t)(buffer) - (period) < (int64_t)((queue) - 1) * (period)              \
+     ? -1 : ((queue) - 1) * (period))
+
 /* --- device thread setup ------------------------------------------------------ */
 
 YAU_API void yau_rt_thread_init(void* host) {
@@ -2498,7 +2672,8 @@ typedef struct yau__IAudioClock { const yau__IAudioClockV* lpVtbl; } yau__IAudio
 typedef struct yau__IAudioClientV {
     void* slots0_[5];   /* IUnknown (3), Initialize, GetBufferSize */
     HRESULT (STDMETHODCALLTYPE *GetStreamLatency)(void*, LONGLONG*);
-    void* slots1_[8];   /* GetCurrentPadding .. SetEventHandle */
+    HRESULT (STDMETHODCALLTYPE *GetCurrentPadding)(void*, UINT32*);
+    void* slots1_[7];   /* IsFormatSupported .. SetEventHandle */
     HRESULT (STDMETHODCALLTYPE *GetService)(void*, const IID*, void**);
 } yau__IAudioClientV;
 typedef struct yau__IAudioClient { const yau__IAudioClientV* lpVtbl; } yau__IAudioClient;
@@ -2518,6 +2693,8 @@ typedef struct yau__ma {
 #if defined(MA_SUPPORT_WASAPI)
     yau__IAudioClock* clock;
     uint64_t   freq;
+    int        gate;        /* the queue gate is on (QUEUE)                */
+    uint32_t   gate_pad;    /* render when the WASAPI buffer holds at most this */
 #endif
 } yau__ma;
 typedef char yau__ma_fits[sizeof(yau__ma) <= sizeof(((yau_audio*)0)->backend_mem) ? 1 : -1];
@@ -2526,10 +2703,33 @@ static void* yau__ma_malloc(size_t sz, void* ud) { ((yau__ma*)ud)->allocs++; ret
 static void* yau__ma_realloc(void* p, size_t sz, void* ud) { ((yau__ma*)ud)->allocs++; return realloc(p, sz); }
 static void  yau__ma_free(void* p, void* ud) { if (p) ((yau__ma*)ud)->allocs++; free(p); }
 
+#if defined(MA_SUPPORT_WASAPI)
+/* QUEUE: miniaudio renders a block, then waits until the WASAPI buffer has
+ * room for it, so the block waits one period in miniaudio and then lands
+ * behind up to two periods in the buffer. The gate holds the render until
+ * the engine has taken the buffer down to gate_pad frames, on the same
+ * event miniaudio waits on. miniaudio's GetBuffer then always finds room,
+ * so it never waits on the event the gate took. */
+static void yau__ma_gate(yau__ma* m, ma_device* d) {
+    yau__IAudioClient* ac = (yau__IAudioClient*)d->wasapi.pAudioClientPlayback;
+    UINT32 pad = 0;
+    int k;
+    for (k = 0; k < 8 && !m->closing; k++) {
+        if (FAILED(ac->lpVtbl->GetCurrentPadding(ac, &pad)) || pad <= m->gate_pad) return;
+        /* a period is at most a few tens of ms; 100 ms means the device
+         * stopped, and miniaudio's own wait then takes over */
+        if (WaitForSingleObject((HANDLE)d->wasapi.hEventPlayback, 100) != WAIT_OBJECT_0) return;
+    }
+}
+#endif
+
 static void yau__ma_data(ma_device* d, void* out, const void* in, ma_uint32 n) {
     yau__ma* m = (yau__ma*)d->pUserData;
     yau_tick tk;
     (void)in;
+#if defined(MA_SUPPORT_WASAPI)
+    if (m->gate) yau__ma_gate(m, d);
+#endif
     tk.t_entry = (int64_t)yrt_now_ns();
     tk.pos = -1;
     tk.pos_t = 0;
@@ -2622,6 +2822,11 @@ static int yau__ma_open(void* ctx, const yau_device_open* in, yau_device_caps* c
     dc.playback.pChannelMap = NULL;
     dc.playback.shareMode = in->exclusive ? ma_share_mode_exclusive : ma_share_mode_shared;
     dc.periodSizeInFrames = (ma_uint32)in->period;
+    /* Exclusive mode: miniaudio's default of 3 makes one buffer of three
+     * periods, filled by three callbacks in a burst per event; measured, it
+     * had underruns and onsets 62 ms off the plan, one period had neither
+     * (docs/audio.md). Shared mode ignores it (IAudioClient3). */
+    dc.periods = in->exclusive ? 1 : 0;
     dc.performanceProfile = ma_performance_profile_low_latency;
     dc.noFixedSizedCallback = MA_TRUE;
     dc.noClip = MA_TRUE;
@@ -2694,10 +2899,18 @@ static int yau__ma_open(void* ctx, const yau_device_open* in, yau_device_caps* c
                 caps->pos_source = YAU_POS_DEVICE;
                 /* shared mode: tier 2 on the conditions the digital
                  * loopback test checked (STATUS); exclusive mode cannot be
-                 * loopback-captured and did not run usably here */
+                 * loopback-captured */
                 caps->tier = caps->exclusive ? YAU_TIER_3 : YAU_TIER_2;
                 caps->os_latency_ns = 0;
                 snprintf(caps->os_latency_src, sizeof caps->os_latency_src, "wasapi:iaudioclock");
+            }
+        }
+        {
+            int32_t pad = YAU__QUEUE_PAD(in->queue, caps->period, caps->buffer, caps->exclusive);
+            if (pad >= 0) {
+                m->gate = 1;
+                m->gate_pad = (uint32_t)pad;
+                caps->queue = in->queue;
             }
         }
     }
@@ -3214,6 +3427,7 @@ YAU_API void yau_get_caps(const yau_audio* au, yau_caps* out) {
     out->os_stream_latency_ns = au->dcaps.os_stream_latency_ns;
     memcpy(out->os_latency_src, au->dcaps.os_latency_src, sizeof out->os_latency_src);
     out->gaps = yau__ld32(&au->gaps_pub);
+    out->queue = au->dcaps.queue;
 }
 
 static const char* yau__out_name(int o) {
@@ -3240,11 +3454,11 @@ YAU_API int yau_describe(const yau_audio* au, char* buf, size_t cap) {
     if (au->dev && au->dev->describe) (void)au->dev->describe(au->dev_ctx, be, sizeof be);
     else snprintf(be, sizeof be, "%s", au->dev && au->dev->name ? au->dev->name : "?");
     return snprintf(buf, cap,
-        "ysp_audio: backend=%s device='%s' rate=%u ch=%u out=%s period=%d buffer=%d "
+        "ysp_audio: backend=%s device='%s' rate=%u ch=%u out=%s period=%d buffer=%d queue=%d "
         "share=%s%s pos=%s drift=%+.2fppm spread=%.0fns lead=%.2fms xruns=%u gaps=%u worst_tier=%d "
         "os_claim=%s%s",
         be, c.name, (unsigned)c.rate, (unsigned)c.channels, yau__out_name(c.out),
-        (int)c.period, (int)c.buffer, c.exclusive ? "exclusive" : "shared",
+        (int)c.period, (int)c.buffer, (int)c.queue, c.exclusive ? "exclusive" : "shared",
         c.low_latency ? "(ac3)" : "", c.pos_source == YAU_POS_DEVICE ? "device" : "callback",
         c.drift_ppm, c.fit_spread_ns, (double)c.lead_ns / 1e6, (unsigned)c.xruns,
         (unsigned)c.gaps, (int)c.worst_tier, claim, yau__ld32(&au->lost) ? " LOST" : "");
@@ -3277,13 +3491,14 @@ YAU_API bool yau_open(yau_audio* au, const yau_desc* desc) {
     if (!d.voices) d.voices = 32;
     if (d.voices < 0 || d.voices > YAU_MAX_VOICES) { yau__err(au, "ysp_audio: voices must be 1..%d", YAU_MAX_VOICES); return false; }
     if (d.format.channels > YAU_MAX_CHANNELS || d.format.sample > YAU_S24 || d.format.rate > 768000
-        || d.period < 0 || d.min_tier < 0 || d.min_tier > 3 || d.device_index > 7) {
+        || d.period < 0 || d.min_tier < 0 || d.min_tier > 3 || d.device_index > 7 || d.queue < 0 || d.queue > 2) {
         yau__err(au, "ysp_audio: a desc field is out of range (channels <= %d, sample, rate, "
-                   "period >= 0, min_tier 0..3, device_index 0..7)", YAU_MAX_CHANNELS);
+                   "period >= 0, min_tier 0..3, device_index 0..7, queue 0..2)", YAU_MAX_CHANNELS);
         return false;
     }
     if (d.source && d.source->version != YAU_SOURCE_VERSION) { yau__err(au, "ysp_audio: source version %u, header wants %d", d.source->version, YAU_SOURCE_VERSION); return false; }
     if (!d.period) d.period = (int32_t)(d.format.rate / 100);
+    if (!d.queue) d.queue = 2;
     au->desc = d;
     au->fmt = d.format;
     au->voices_max = d.voices;
@@ -3314,6 +3529,7 @@ YAU_API bool yau_open(yau_audio* au, const yau_desc* desc) {
     in.period = d.period;
     in.exclusive = d.exclusive;
     in.device = d.device;
+    in.queue = d.queue;
     rc = au->dev->open(au->dev_ctx, &in, &au->dcaps, au->error, sizeof au->error);
     if (rc < 0) {
         if (!au->error[0]) yau__err(au, "ysp_audio: the device did not open (%s)", yau_strerror(rc));
@@ -4052,6 +4268,7 @@ YAU_API const yau_param* yau_params(int* n) {
         { "backend",         "enum", 0, 7, 0, "",                  "0 auto, 1 wasapi, 2 coreaudio, 3 alsa, 4 pulse, 5 web, 6 null, 7 custom" },
         { "exclusive",       "bool", 0, 1, 0, "",                  "WASAPI exclusive mode; silences every other program" },
         { "period",          "i32",  0, 65536, 480, "frame",       "frames per callback; 0 = 10 ms" },
+        { "queue",           "i32",  0, 2, 2, "period",            "WASAPI shared: periods queued ahead of the engine; 1 saves a period of lead and a period of stall margin" },
         { "voices",          "i32",  1, YAU_MAX_VOICES, 32, "",  "sounds playing or waiting at once" },
         { "device_index",    "u32",  0, 7, 0, "",                  "device number in the records" },
         { "min_tier",        "i32",  0, 3, 0, "",                  "flag onsets whose tier is worse; 0 = off" },

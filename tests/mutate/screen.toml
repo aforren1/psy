@@ -3,7 +3,9 @@
 # 41 that ysp/screen.h's header comment counts, v0.3.2's 2 (text input,
 # both killed on 2026-10-07), v0.3.3's 5 (input), v0.3.4's 3 (devices),
 # v0.3.5's 5 (raw mice; the 2 on its queue went with the queue),
-# v0.4.0's 6 (the input bridge) and v0.4.1's 15 (the key filter, kd-). The 29 earlier mutants (docs/screen.md,
+# v0.4.0's 6 (the input bridge), v0.4.1's 15 (the key filter, kd-) and
+# v0.4.2's 3 (kd-16 to kd-18, the key-up fix) and 13 (the sync guard,
+# sg-), v0.4.3's 9 (eg-, held frames), v0.4.4's 20 (dp-, the depth policy, the guessed grid, early flips). The 29 earlier mutants (docs/screen.md,
 # "Mutations") were run from scripts that were not kept.
 header = "ysp/screen.h"
 
@@ -413,7 +415,378 @@ id = "kd-15"
 name = "kept key-up dropped"
 test = "screen"
 why = "The kept press's own key-up passes, whichever report comes first."
-find = '''            k->down = 0;
+find = '''            any->down = 0;
             return 1;'''
-replace = '''            k->down = 0;
+replace = '''            any->down = 0;
             return 0;'''
+
+[[mutant]]
+id = "kd-16"
+name = "device-0 key-up takes a held key"
+test = "screen"
+why = "The v0.4.1 fault: the second report's key-up (device 0) took another keyboard's held key, so key_double_ups missed it and that keyboard's own key-up passed too."
+find = '        if (e->device == 0)'
+replace = '        if (0)'
+
+[[mutant]]
+id = "kd-17"
+name = "device-0 key-up takes a device-0 press's drop"
+test = "screen"
+why = "When the kept report is device 0, a device-0 key-up is the kept press's own and passes; the raw report's key-up is the one to drop."
+find = '!k->used || !k->dropped || !k->device || k->control != e->control'
+replace = '!k->used || !k->dropped || k->control != e->control'
+
+[[mutant]]
+id = "kd-18"
+name = "key-up pairs in table order"
+test = "screen"
+why = "A key-up pairs with its own device's press before one with device 0, so a slot earlier in the table cannot take another keyboard's press."
+find = '            if (k->device == e->device) { any = k; break; }'
+replace = ''
+
+[[mutant]]
+id = "sg-01"
+name = "same refresh ignored"
+test = "screen"
+why = "Several presents completing in one refresh is the forced-off native path (scripted mode 3)."
+find = '        if (count <= s->sync_prev_count || (double)(t - s->sync_prev_t) < s->period_f / 2) {'
+replace = '        if (0) {'
+
+[[mutant]]
+id = "sg-02"
+name = "no wait ignored"
+test = "screen"
+why = "A flip in the refresh its present was made in is the forced-off DXGI path (scripted mode 1)."
+find = '    if (p && count <= p->count_at_present && t < p->t_call) {'
+replace = '    if (0) {'
+
+[[mutant]]
+id = "sg-03"
+name = "no wait by count only"
+test = "screen"
+why = "DXGI's count can be a vblank behind the grid's; only the time before the call proves no wait (test_held_off_grid, legit case 3; 165 hits in 899 held frames on hardware)."
+find = '    if (p && count <= p->count_at_present && t < p->t_call) {'
+replace = '    if (p && count <= p->count_at_present) {'
+
+[[mutant]]
+id = "sg-04"
+name = "torn ignored"
+test = "screen"
+why = "A flip before the vblank its count names is a tear (scripted mode 2)."
+find = '(double)(count - p->planned_count) * s->period_f > s->period_f / 4) {'
+replace = '(double)(count - p->planned_count) * s->period_f > 1e18) {'
+
+[[mutant]]
+id = "sg-05"
+name = "torn without a margin"
+test = "screen"
+why = "A stretched panel's flips come back to the grid in small steps; only a quarter period before the vblank is a tear (legit case 0)."
+find = '(double)(count - p->planned_count) * s->period_f > s->period_f / 4) {'
+replace = '(double)(count - p->planned_count) * s->period_f > 0) {'
+
+[[mutant]]
+id = "sg-06"
+name = "threshold 16"
+test = "screen"
+why = "Isolated evidence (a jittered stamp, a stale count) must not fire it; legit case 4 holds about 22 of 64."
+find = '    if (!s->sync_off && n >= 32) yscr__sync_fire'
+replace = '    if (!s->sync_off && n >= 16) yscr__sync_fire'
+
+[[mutant]]
+id = "sg-07"
+name = "rate ignored"
+test = "screen"
+why = "A driver that discards frames without tearing shows only in the rate (scripted mode 4)."
+find = '        if (!s->sync_off && s->sync_p > s->sync_r + YSCR__MAX_PEND) yscr__sync_fire'
+replace = '        if (0) yscr__sync_fire'
+
+[[mutant]]
+id = "sg-08"
+name = "tier kept"
+test = "screen"
+why = "An untimed screen's flips are tier 3: no onset is a measurement."
+find = '    if (s->sync_off && t < YSCR_TIER_3) t = YSCR_TIER_3;'
+replace = ''
+
+[[mutant]]
+id = "sg-09"
+name = "no flag"
+test = "screen"
+why = "Every record from the firing flip on says UNSYNCED."
+find = '    if (s->sync_off) r->flags |= YSCR_FLIP_UNSYNCED;'
+replace = ''
+
+[[mutant]]
+id = "sg-10"
+name = "open's frames count"
+test = "screen"
+why = "open's black frames may be composed while a window goes fullscreen; the guard starts after them."
+find = '''
+    int ev = 0, n;
+    if (s->warming) return;'''
+replace = '''
+    int ev = 0, n;'''
+
+[[mutant]]
+id = "sg-11"
+name = "fires every flip"
+test = "screen"
+why = "It fires once per open: one ring record, one hook call."
+find = '    if (!s->sync_off && n >= 32) yscr__sync_fire'
+replace = '    if (n >= 32) yscr__sync_fire'
+
+[[mutant]]
+id = "sg-12"
+name = "no ring record"
+test = "screen"
+why = "The data file must show where the screen became untimed."
+find = '    e.kind = (uint16_t)YSCR_EV_UNSYNCED;'
+replace = '    e.kind = (uint16_t)YSCR_EV_INPUT_LOST;'
+
+[[mutant]]
+id = "sg-13"
+name = "rate without slack"
+test = "screen"
+why = "Queued and estimated presents shift a few across a block's edges; without the slack of the frames in flight, a legitimate path could fire."
+find = 's->sync_p > s->sync_r + YSCR__MAX_PEND) yscr__sync_fire'
+replace = 's->sync_p > s->sync_r) yscr__sync_fire'
+
+# v0.4.3: held frames a vblank early (the grid moves only on OS times on it).
+
+[[mutant]]
+id = "eg-01"
+name = "the OS's count"
+test = "screen"
+why = "DXGI's refresh count lost a vblank about 1 in 25 held frames; on its count, on-time frames were flagged EARLY (145 of 1200 on hardware)."
+find = '''
+            count = nc;
+            yscr__anchor(s, t, count, 0);'''
+replace = '''
+            count = v->count;
+            yscr__anchor(s, t, count, 0);'''
+
+[[mutant]]
+id = "eg-02"
+name = "anchor on any time"
+test = "screen"
+why = "A grid moved to an off-grid OS time wakes the next hold before the real vblank, and that frame shows a vblank early (63 of 1200 on hardware)."
+find = '                onset = yscr__time_of(s, nc);'
+replace = '                yscr__anchor(s, t, count, 0);'
+
+[[mutant]]
+id = "eg-03"
+name = "off-grid onset kept"
+test = "screen"
+why = "The frame flipped on the grid's vblank nearest the OS's time; the OS's time itself was up to half a period off it."
+find = '                onset = yscr__time_of(s, nc);'
+replace = '                (void)nc;'
+
+[[mutant]]
+id = "eg-04"
+name = "never moves to a new phase"
+test = "screen"
+why = "When the display's timing changes, the grid must follow after 16 agreeing times, or every later hold wakes on the old phase."
+find = '            if (s->cand_n > YSCR__REGRID_N) {'
+replace = '            if (0) {'
+
+[[mutant]]
+id = "eg-05"
+name = "new phase on 2 times"
+test = "screen"
+why = "DXGI's off-grid times agreed with each other on up to 5 in a row; 2 would move the grid onto them."
+find = '            if (s->cand_n > YSCR__REGRID_N) {'
+replace = '            if (s->cand_n > 1) {'
+
+[[mutant]]
+id = "eg-06"
+name = "follows at 8 of 64"
+test = "screen"
+why = "DXGI's held frames put up to 34 of 64 times off the grid; following them is the v0.4.2 fault."
+find = 'n_off >= 48) s->grid_follow = 1;'
+replace = 'n_off >= 8) s->grid_follow = 1;'
+
+[[mutant]]
+id = "eg-07"
+name = "the guard gets the OS's count"
+test = "screen"
+why = "Once DXGI's count has lost a vblank, a tear reads as a vblank late and the torn rule goes blind (legit case 4 with lost counts)."
+find = '    if (!guessed) yscr__sync_flip(s, p, v->count + s->count_bias, t, v->flags);'
+replace = '    if (!guessed) yscr__sync_flip(s, p, v->count, t, v->flags);'
+
+[[mutant]]
+id = "eg-08"
+name = "never follows"
+test = "screen"
+why = "When most times are off the grid (vblanks that move, or a tearing driver), the grid must follow them, or counts and the torn rule break (forced-off case 2, legit case 3)."
+find = '        if (!s->grid_follow && s->grid_n >= 64 && n_off >= 48) s->grid_follow = 1;'
+replace = '        if (0) s->grid_follow = 1;'
+
+[[mutant]]
+id = "eg-09"
+name = "on the grid within half a period"
+test = "screen"
+why = "Every time would count as on the grid and move it, as before v0.4.3."
+find = '    return yscr__phase_off(s, t - yscr__time_of(s, *nc)) <= s->period_f / 100;'
+replace = '    return yscr__phase_off(s, t - yscr__time_of(s, *nc)) <= s->period_f / 2;'
+
+[[mutant]]
+id = "dp-01"
+name = "a path change keeps the depth"
+test = "screen"
+why = "The path sets the depth by default; a window that goes from overlay to composed would drop every frame."
+find = '            yscr__depth_set(s, yscr__path_depth(s, v->path), YSCR_DEPTH_PATH, t ? t : yscr__now(), p ? p->rec.index : -1);'
+replace = '            (void)0;'
+
+[[mutant]]
+id = "dp-02"
+name = "misses move a holding backend's depth"
+test = "screen"
+why = "By default misses are drops and never change the depth (the user's rule of 2026-10-09); this is v0.4.3's learner always on."
+find = '        if (!s->warming && s->depth_learn) yscr__native_depth(s, p, count);'
+replace = '        if (!s->warming) yscr__native_depth(s, p, count);'
+
+[[mutant]]
+id = "dp-03"
+name = "DXGI votes after open"
+test = "screen"
+why = "Three GPU-heavy frames voted DXGI_FLIP to depth 2 in v0.4.3 and the next frames showed early."
+find = '    } else if (p->asap && (s->warming || s->depth_learn)) {'
+replace = '    } else if (p->asap) {'
+
+[[mutant]]
+id = "dp-04"
+name = "the pin is ignored"
+test = "screen"
+why = "desc.depth pins the planned depth through path changes."
+find = '    d = s->depth_pin ? s->depth_pin : show;'
+replace = '    d = show;'
+
+[[mutant]]
+id = "dp-05"
+name = "a hold wakes at the pinned depth"
+test = "screen"
+why = "DXGI shows a present at the first vblank it can, so the hold must wake at the path's depth, or a pin above it shows every frame early."
+find = '        wake = yscr__time_of(s, planned - s->show_depth) + guard;'
+replace = '        wake = yscr__time_of(s, planned - s->depth) + guard;'
+
+[[mutant]]
+id = "dp-06"
+name = "triggers armed at the pinned depth"
+test = "screen"
+why = "A trigger moves only when its present cannot make the planned vblank, which the path's depth decides, not a pin."
+find = '    e = yscr__count_at(s, p->t_ret + s->margin_ns) + s->show_depth;'
+replace = '    e = yscr__count_at(s, p->t_ret + s->margin_ns) + s->depth;'
+
+[[mutant]]
+id = "dp-07"
+name = "a holding backend opens at 1"
+test = "screen"
+why = "COMPOSITION opened at 1 in v0.4.3; on a composed path the first frames dropped until misses raised it."
+find = '        if (s->caps.native_target && !s->depth_learn) d = yscr__path_depth(s, s->path);'
+replace = '        if (s->caps.native_target && !s->depth_learn) d = 1;'
+
+[[mutant]]
+id = "dp-08"
+name = "no ring record"
+test = "screen"
+why = "Every depth change writes a YSCR_EV_DEPTH record, so a data file shows where the latency moved."
+find = '''
+    ev.u.i64[1] = frame;
+    yscr__push(s, &ev);'''
+replace = '    ev.u.i64[1] = frame;'
+
+[[mutant]]
+id = "dp-09"
+name = "changes not counted"
+test = "screen"
+why = "The describe line counts the depth changes after open's."
+find = '    if (old) s->depth_changes++;'
+replace = ''
+
+[[mutant]]
+id = "dp-10"
+name = "composed at depth 1"
+test = "screen"
+why = "The compositor copies the frame: a vblank more (measured 2 on DXGI_FLIP and COMPOSITION)."
+find = '    case YSCR_PATH_COMPOSED:    return 2;'
+replace = '    case YSCR_PATH_COMPOSED:    return 1;'
+
+[[mutant]]
+id = "dp-11"
+name = "DXGI overlay at depth 2"
+test = "screen"
+why = "A DXGI overlay frame shows on the next vblank; at 2 every hold wakes a vblank early and every frame shows early."
+find = '    case YSCR_PATH_OVERLAY:     return s->caps.native_target ? 2 : 1;'
+replace = '    case YSCR_PATH_OVERLAY:     return 2;'
+
+[[mutant]]
+id = "dp-12"
+name = "a pin with the learner"
+test = "screen"
+why = "A pin and the learner contradict each other; open() must refuse both."
+find = '    if (desc->depth < 0 || desc->depth > 8 || (desc->depth && desc->depth_learn)) {'
+replace = '    if (desc->depth < 0 || desc->depth > 8) {'
+
+[[mutant]]
+id = "dp-13"
+name = "the table over the measurement"
+test = "screen"
+why = "A path's depth measured at open wins over the table when the path comes back."
+find = '    if (path < YSCR__SLACK_PATHS && s->depth_of[path]) return s->depth_of[path];'
+replace = ''
+
+[[mutant]]
+id = "dp-14"
+name = "open's measurement not kept"
+test = "screen"
+why = "A DXGI path's depth measured at open is that path's depth from then on."
+find = '        else if (!s->caps.native_target && s->path < YSCR__SLACK_PATHS) s->depth_of[s->path] = d;'
+replace = ''
+
+[[mutant]]
+id = "dp-15"
+name = "the guessed grid stays"
+test = "screen"
+why = "With no OS time at open the grid is a guess; v0.4.3 kept it, every record was tier 3 and the sync guard fired on on-time flips."
+find = '    if (s->anchor_guessed) {'
+replace = '    if (0) {'
+
+[[mutant]]
+id = "dp-16"
+name = "hw_onset not restored"
+test = "screen"
+why = "Once OS times come, onsets are observations again: tier 1, not 3."
+find = '        s->caps.hw_onset = s->hw_onset_pr;'
+replace = ''
+
+[[mutant]]
+id = "dp-17"
+name = "the guard reads the regrid flip"
+test = "screen"
+why = "The flip that replaces the guess was planned on it; its offset is the guess's, not evidence of a driver without vsync."
+find = '        guessed = true;   /* its plan was made on the guess: no evidence */'
+replace = ''
+
+[[mutant]]
+id = "dp-18"
+name = "an early flip does not lower the depth"
+test = "screen"
+why = "DXGI reported the window's move to overlay 5 flips late, and open() learned 3 on the composed path in 3 of 9 runs (108 to 116 early flips)."
+find = '        if (obs >= 1 && obs < s->show_depth) {'
+replace = '        if (0) {'
+
+[[mutant]]
+id = "dp-19"
+name = "the lowered path keeps no floor"
+test = "screen"
+why = "The report can lag the early flip; without the table's floor the composed path would keep depth 1 and drop every frame when the window comes back to it."
+find = '            int32_t keep = yscr__path_table(s, path);'
+replace = '            int32_t keep = 0;'
+
+[[mutant]]
+id = "dp-20"
+name = "open takes the last depth, not the smallest"
+test = "screen"
+why = "A flip that waited behind the one before shows a depth too large; open() takes the smallest depth 2 of its flips showed."
+find = '            if (s->warm_seen[k] >= 2) { d = k; break; }'
+replace = ''

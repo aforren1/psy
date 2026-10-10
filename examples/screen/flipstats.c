@@ -2,7 +2,8 @@
  *
  *     screen_flipstats [--sim | --backend dxgi|composition] [--windowed] [--topmost]
  *                      [--cover N] [--frames N] [--load N]
- *                      [--overrun MS] [--miss N] [--hold] [--patch]
+ *                      [--overrun MS] [--miss N] [--gpu N] [--hold] [--patch]
+ *                      [--depth N | --depth-learn] [--long]
  *                      [--codes] [--row clear|update] [--verify N]
  *                      [--trigger] [--fence] [--d3d11-video]
  *                      [--group] [--allocs | --allocs-control] [--csv FILE]
@@ -21,7 +22,11 @@
  *   --overrun MS in a random 1 of 30 frames, busy-wait MS ms before the flip
  *   --miss N     every N frames, 3 frames in a row with about 25 ms of GPU
  *                work, which miss their vblank with the present on time:
- *                the swap path's own lateness, which raises the depth
+ *                the swap path's own lateness
+ *   --gpu N      N full-screen clears in every frame: steady GPU work
+ *   --depth N    pin the depth to N vblanks (desc.depth)
+ *   --depth-learn  let misses raise the depth (desc.depth_learn)
+ *   --long       fullscreen runs longer than 7200 frames (up to 40000)
  *   --hold       ask for a vblank 0 to 4 frames ahead, between grid points
  *   --patch      the photodiode patch, alternating between two dark grays
  *                (bottom left with --codes)
@@ -48,7 +53,8 @@
  * Esc or closing the window ends the run at once. The screen stays dark gray;
  * only the small patch changes, and only between two dark grays.
  *
- * Prints the describe line, then one table: prediction error of on-time
+ * Prints the describe line, each path and depth change, then one table:
+ * prediction error of on-time
  * frames, late targets, drops, early flips, estimated records, paths, the
  * phases and the header's own cost per frame. The header cost comes from
  * ysp/rt.h's trace ring (this file defines YRT_TRACE_RING): the begin zone
@@ -204,6 +210,7 @@ static void flip_fn(void* ctx, const yscr_record* r, const yscr_trigger_result* 
     }
 }
 static int g_timeouts;   /* begin() timeouts survived: the swap path stalled */
+static int g_depth_changes;   /* YSCR_EV_DEPTH records after open's */
 
 /* Every zone's durations by name, for the cost breakdown. */
 #define MAX_ZONES 24
@@ -267,6 +274,11 @@ static void drain(void) {
                 fprintf(stderr, "ring lost %llu records\n", (unsigned long long)e->u.u64[0]);
             } else if (e->source == YRT_SRC_SCREEN && e->kind == YSCR_EV_PATH) {
                 printf("  path change at %.3f s: %u -> %u\n", (double)e->t_ns * 1e-9, e->u.u16[0], e->u.u16[1]);
+            } else if (e->source == YRT_SRC_SCREEN && e->kind == YSCR_EV_DEPTH) {
+                static const char* const why[6] = { "?", "open", "path", "pin", "learner", "early" };
+                printf("  depth at %.3f s: %u -> %u (%s, path %u, frame %lld)\n", (double)e->t_ns * 1e-9, e->u.u16[0],
+                       e->u.u16[1], why[e->u.u16[2] < 6 ? e->u.u16[2] : 0], e->u.u16[3], (long long)e->u.i64[1]);
+                if (e->u.u16[0]) g_depth_changes++;
             }
         }
     }
@@ -328,7 +340,7 @@ int main(int argc, char** argv) {
     HWND cover_window = NULL;
 #endif
     double overrun = 0;
-    int miss_every = 0;
+    int miss_every = 0, gpu_clears = 0, depth = 0, depth_learn = 0, long_run = 0;
     int codes = 0, row_method = -1, verify = 0, trigger = 0, fence = 0, video = 0;
     double trig_offset_us = 0;
     int trig_cpu = 0;
@@ -359,6 +371,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--load") && i + 1 < argc) load = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--overrun") && i + 1 < argc) overrun = atof(argv[++i]);
         else if (!strcmp(argv[i], "--miss") && i + 1 < argc) miss_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gpu") && i + 1 < argc) gpu_clears = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--depth") && i + 1 < argc) depth = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--depth-learn")) depth_learn = 1;
+        else if (!strcmp(argv[i], "--long")) long_run = 1;
         else if (!strcmp(argv[i], "--hold")) hold = 1;
         else if (!strcmp(argv[i], "--codes")) codes = 1;
         else if (!strcmp(argv[i], "--row") && i + 1 < argc) { i++; row_method = !strcmp(argv[i], "update") ? 0 : 8; }
@@ -382,7 +398,7 @@ int main(int argc, char** argv) {
     if (topmost || cover) fprintf(stderr, "screen_flipstats: --topmost and --cover act on Win32 windows; ignored here\n");
 #endif
     if (frames < 1 || frames > MAX_FRAMES) { fprintf(stderr, "--frames must be 1..%d\n", MAX_FRAMES); return 2; }
-    if (!sim && !windowed && frames > 7200) frames = 7200;
+    if (!sim && !windowed && !long_run && frames > 7200) frames = 7200;
     if (group) n_screens = 2;
 
     pol = yrt_thread_elevate(NULL);
@@ -405,6 +421,8 @@ int main(int argc, char** argv) {
         d.display_index = (uint32_t)i;
         d.patch.on = patch != 0;
         d.d3d11_video = video != 0;
+        d.depth = depth;
+        d.depth_learn = depth_learn != 0;
         if (codes) {
             d.patch.corner = YSCR_BOTTOM_LEFT;
             d.codes[0] = yscr_slot_pixel_mode();
@@ -463,8 +481,9 @@ int main(int argc, char** argv) {
                (unsigned long)(uint32_t)nat.luid_high, (unsigned long)nat.luid_low);
     }
 #endif
-    printf("frame thread: %s; load threads %d; overrun %.1f ms in 1 of 30; hold %d; patch %d; frames %d\n",
-           yrt_policy_name(pol), load, overrun, hold, patch, frames);
+    printf("frame thread: %s; load threads %d; overrun %.1f ms in 1 of 30; hold %d; patch %d; frames %d; "
+           "gpu clears %d; depth %d%s\n", yrt_policy_name(pol), load, overrun, hold, patch, frames, gpu_clears, depth,
+           depth_learn ? " (learner)" : "");
     start_load(load);
 #if defined(_MSC_VER) && defined(_DEBUG)
     if (allocs) _CrtSetAllocHook(alloc_hook);
@@ -513,6 +532,10 @@ int main(int argc, char** argv) {
             gl[k].Clear(0x4000u);
             if (patch) yscr_set_patch(&scr[k], (i & 1) ? 0.3f : 0.2f);
 
+            {
+                int q;
+                for (q = 0; q < gpu_clears; q++) gl[k].Clear(0x4000u);
+            }
             if (miss_every >= 10 && i >= 60 && i % miss_every >= miss_every - 3) {
                 int q;
                 for (q = 0; q < 1500; q++) gl[k].Clear(0x4000u);
@@ -543,8 +566,14 @@ int main(int argc, char** argv) {
 #endif
     code_risk = yscr_code_risk(&scr[0]);
     for (i = 0; i < n_screens; i++) {
+        yscr_sync_info si;
         yscr_describe(&scr[i], line, sizeof line);
         printf("%s\n", line);
+        /* v0.4.2: a legitimate run must give the guard no evidence */
+        yscr_sync_check(&scr[i], &si);
+        printf("sync guard: %s; %u flips with an OS time, evidence: same refresh %u, no vblank wait %u, torn %u; "
+               "at most %d of 64 at once (32 fire)\n", si.untimed ? "FIRED" : "not fired", (unsigned)si.observed,
+               (unsigned)si.same_refresh, (unsigned)si.no_wait, (unsigned)si.torn, si.peak);
         yscr_close(&scr[i]);
     }
     drain();
@@ -620,7 +649,8 @@ int main(int argc, char** argv) {
         for (i = 0; i < g_ncf; i++) e[ne++] = g_cost_flip[i];
         printf("planned at or before the previous frame's vblank: %d; records seen in f.done %d\n", g_same_vb, g_done_n);
         printf("records %d (frames run %d): late targets %d, dropped %d, early %d, estimated %d, off-grid %d, "
-               "occluded %d\n", g_nrec, ran, late, dropped, early, est, unstable, occl);
+               "occluded %d; depth changes %d\n", g_nrec, ran, late, dropped, early, est, unstable, occl,
+               g_depth_changes);
         if (g_timeouts) printf("begin timeouts (the swap path freed no slot in time): %d\n", g_timeouts);
         if (codes) {
             uint32_t chk = 0, bad = 0;

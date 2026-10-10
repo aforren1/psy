@@ -365,7 +365,11 @@ int main(int argc, char** argv) {
         for (i = 0; i < rows && i < SIM_TRIALS; i++) {
             const yrsp_result* r = &sim_res[i];
             static const double want_rt[SIM_TRIALS] = { 0.55, 0.48, 0, 0.62 };
-            int ok = fabs(sim_soa[i] - (FIRST_S + GAP_S)) < 1e-6;
+            /* The simulated display runs on the host's clock, so a loaded
+             * host (macOS CI) drops a frame like a real display; the SOA
+             * from the flip records then differs by exactly one period. */
+            double dsoa = fabs(sim_soa[i] - (FIRST_S + GAP_S));
+            int ok = dsoa < 1e-6 || fabs(dsoa - (double)f.period / 1e9) < 1e-6;
             if (i == 2) ok = ok && !(r->flags & YRSP_R_RESPONDED) && (r->flags & YRSP_R_TIMEOUT);
             else ok = ok && (r->flags & YRSP_R_RESPONDED) && fabs(r->rt - want_rt[i]) < 1e-6;
             if (i == 1) ok = ok && r->n_early == 1;

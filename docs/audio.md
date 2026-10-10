@@ -74,8 +74,9 @@ time is the device-clock fit's, the frame was confirmed played without an
 underrun by later position reports, and the digital loopback test found
 every burst at its planned frame and the time 67 us p99 from its median
 at idle and 20 us under load in one run, against a one-frame bar of 20.8
-us. Exclusive mode is tier 3: the loopback capture cannot see it, and it
-did not run usably here. Every unconfirmed onset (no report past its
+us. Exclusive mode is tier 3: the loopback capture cannot see it, and on
+this laptop it is slower than shared mode (Periods and buffers). Every
+unconfirmed onset (no report past its
 frame, an underrun, callback times only) is tier 3 and carries
 YAU_ONSET_UNCONFIRMED.
 
@@ -186,16 +187,16 @@ tell which. It is not a latency.
 
 Lead: with the default 10 ms period, the shortest lead with no LATE
 record was 43.5 to 54.5 ms (three runs), against 50 to 55 ms from
-`yau_lead_ns()` in the same runs. That is what `ytl_peek()` must look ahead for audio on this
+`yau_lead_ns()` in the same runs. (v0.3.0: 40 ms at the default queue, 30
+ms at queue 1; Periods and buffers.) That is what `ytl_peek()` must look ahead for audio on this
 machine; `ytl_peek()` does not exist yet in ysp/timeline.h v0.2.0
 (rig_spec.md 4.5.1).
 
 ## Callbacks (M2, M3) and cost (M6, M8)
 
 Shared mode ran at a 10 ms period whatever was asked: 240 and 96 frames
-gave the same 480-frame callbacks (low-latency shared mode was not
-offered for this endpoint, or miniaudio did not take it). So the default
-period is 10 ms and the other periods are not offered.
+gave the same 480-frame callbacks. The endpoint offers a 480-frame
+engine period only (Periods and buffers). So the default period is 10 ms.
 
 | Run | Callbacks | Interval p1 / p50 / p99 / p99.9 / max ms | Underruns |
 |---|---|---|---|
@@ -228,7 +229,9 @@ max 98 to 101 ms), there were 2 underruns per run, `GetPosition` took up
 to 45 ms, and the fit could not settle (spread 9 ms). Exclusive mode
 through miniaudio 0.11.25 does not work on this machine; the header
 still opens it, and its records say so (XRUN, a fit spread in the describe
-line). Not fixed in v0.1.
+line). Not fixed in v0.1. v0.3.0 asks for one period per buffer, which
+removes the underruns and puts every onset on its plan, but the driver
+still buffers about 100 ms (Periods and buffers).
 
 Cost per callback (render, without `GetPosition`), MSVC /O2:
 
@@ -604,6 +607,336 @@ Not run: the line-in check of a stream (`tests/loopback/audio_loopback.c
 WASAPI's loopback capture with a stream was not run either, because it
 needs the endpoint unmuted.
 
+## Periods and buffers (v0.3.0)
+
+The question: why the shortest safe lead in WASAPI shared mode was about
+50 ms here, and whether it can go under 10 ms. Conditions: the laptop
+above, 2026-10-09, on AC power, MSVC 19.44 /O2 unless a row says gcc
+(MinGW gcc 16.1 -O2), the measurement lock held for each row. Every run
+played silence or a -40 dBFS tone at endpoint volume 0. "Load" is the
+load of the earlier sections: 8 threads spinning at normal priority and a
+60 Hz frame loop at TIME_CRITICAL that spins 8 ms of each frame.
+
+### What the endpoint offers
+
+`examples/audio/wasapi_periods.c` (`audio_wasapi_periods --init
+--exclusive`) asks each render endpoint with
+`IAudioClient3::GetSharedModeEnginePeriod` for its mix format, and
+initializes (never starts) shared and exclusive streams to read the
+buffer each one gets.
+
+| Endpoint | Mix format | Device format | Engine period: default / fundamental / min / max (frames) | `GetDevicePeriod` default / min |
+|---|---|---|---|---|
+| Speakers (Realtek(R) Audio), the default | float, 48000 Hz, 2 ch | int 32 (24 valid), 48000 Hz, 2 ch | 480 / 480 / 480 / 480 | 10 ms / 3 ms |
+| Pico Streaming Speaker, Steam Streaming Speakers, Steam Streaming Microphone (virtual) | float, 48000 Hz, 2 ch | int 16 or 32 | 480 / 480 / 480 / 480 | 10 ms / 3 ms |
+
+No endpoint offers a shared-mode period under 10 ms. The 3 ms minimum of
+`GetDevicePeriod` is exclusive mode's.
+
+| Stream on the Realtek endpoint (initialized, not started) | Buffer frames | `GetStreamLatency` |
+|---|---|---|
+| shared, `Initialize` with a buffer of 0, 10 or 20 ms | 1056 (22 ms) | 0 |
+| shared, `Initialize` with 30 ms | 1440 (30 ms) | 0 |
+| shared, `InitializeSharedAudioStream` at 480 | 1056 (22 ms) | 0 |
+| exclusive, event-driven, period 3 ms | 144 (3 ms) | 3 ms |
+| exclusive, event-driven, period 10 ms | 480 (10 ms) | 10 ms |
+
+### miniaudio's choice
+
+In miniaudio 0.11.25, shared mode calls
+`IAudioClient3::InitializeSharedAudioStream` when `GetSharedModeEnginePeriod`
+succeeds and the period asked for, rounded down to a multiple of the
+fundamental period and then clamped to the minimum and maximum, is at
+least the period asked for. Otherwise it falls back to
+`IAudioClient::Initialize` at `periods` (3) times the period. The
+`AUTOCONVERTPCM` flag also blocks the IAudioClient3 path; the header never
+sets it. Here the endpoint offers 480 frames only, so every period asked
+for became 480: that is why 240 and 96 frames gave 480-frame callbacks
+(Callbacks, above). The header got the IAudioClient3 stream (buffer 1056),
+not the 1440-frame buffer, which was exclusive mode's. Nothing in the
+header or in miniaudio blocks a smaller period on this endpoint: the
+driver has none. On an endpoint that offers small periods, `desc.period`
+must be a multiple of the fundamental period (or under the minimum, which
+gives the minimum); any other value silently falls back to the default
+period. The Realtek driver is the vendor's; whether Microsoft's in-box
+HD Audio driver offers small periods on this codec was not tried, because
+it means changing the machine's driver.
+
+### Where the 39.5 ms went
+
+At callback entry the stream frames written stood 1898 frames (39.5 ms)
+ahead of the device position (10 minutes idle, p50; 1884 p1, 1901 p99).
+miniaudio's WASAPI loop renders a block, then waits for room for it. So
+each block waited one period in miniaudio, then went into the buffer
+behind one queued period, then passed the engine's own pipeline (about 20
+ms from the engine's pass to the position). With the period of phase
+before the next callback, the lead was 50 ms.
+
+v0.3.0 holds the render in the header's miniaudio callback until the
+engine has taken the buffer down to `desc.queue - 1` periods, waiting on
+the WASAPI event that miniaudio would wait on. miniaudio then finds room
+at once and never waits on the event itself. A raw WASAPI loop (scratch,
+gcc, 20 s), which writes at each event, gave the same steps: written
+minus position after the write 2186 frames with 2 periods kept queued and
+1707 with 1.
+
+### Queue depth: lead against margin
+
+`audio_clockstats --queue Q`; queue 0 is miniaudio's own order (the v0.2
+behavior, removed in v0.3.0).
+
+| Queue | Run | Callbacks | Interval p1 / p50 / p99 / p99.9 / max ms | Written minus position, p50 frames (ms) | Underruns |
+|---|---|---|---|---|---|
+| 0 (v0.2) | idle, 10 min | 60066 | 9.66 / 10.00 / 10.34 / 10.70 / 12.47 | 1898 (39.5) | 0 |
+| 2 (default) | idle, 10 min | 60066 | 9.72 / 10.00 / 10.28 / 10.60 / 11.65 | 1418 (29.5) | 0 |
+| 1 | idle, 10 min | 60065 | 9.70 / 10.00 / 10.31 / 10.63 / 11.73 | 938 (19.5) | 0 |
+| 0 (v0.2) | load, 3 min | 18067 | 9.84 / 10.00 / 10.17 / 10.74 / 12.26 | 1895 (39.5) | 0 |
+| 2 (default) | load, 3 min | 18088 | 9.84 / 10.00 / 10.17 / 10.53 / 11.63 | 1415 (29.5) | 0 |
+| 1 | load, 3 min | 18086 | 9.82 / 10.00 / 10.19 / 10.66 / 12.27 | 934 (19.5) | 0 |
+
+Render cost per callback was 2.9 to 3.4 us mean idle and 6.2 to 7.1 us
+under load at every queue; the gate's wait is outside it.
+
+The margin: `--stall-at 15 --stall MS` sleeps once in one callback. A
+stall that the queue does not ride out halts the position; the table
+gives the position's shift against its line after the stall (20 to 25 s
+runs, with `--csv`).
+
+| Stall | Queue 0 | Queue 2 | Queue 1 |
+|---|---|---|---|
+| 8 ms | ridden out | ridden out | ridden out (shift +8 frames) |
+| 15 ms | ridden out | ridden out (-2 frames) | halted: -491 frames |
+| 25 ms | ridden out (+4 frames) | halted: -502 frames | halted |
+| 35 ms | halted: -495 frames | | |
+
+Each period less in the queue is 10 ms less lead and 10 ms less margin.
+In every load run of this note with MMCSS, the latest callback came at
+most 8 ms late (an 18.03 ms interval, "final header" above); in this
+session at most 2.3 ms.
+
+v0.3.0 gave no XRUN record for any of these halts (xruns 0 in each). It
+saw an underrun only when a report reached the frames written. After a
+stall of one or two periods the late block is in the buffer before the
+next report, so the position halts one block short of the frames written
+and moves on, and every later onset time was off by the halt (10 ms)
+while its record said tier 2. The 60 ms stall of M0 was seen because the
+position stood at the frames written. Before v0.3.0 this took a stall of
+about 30 ms; at the default it takes about 20 ms, at queue 1 about 10 ms.
+v0.3.1 finds these halts (Halts, below).
+
+### Shortest safe lead
+
+`audio_schedule --queue Q`: 10 silent sounds per lead, leads from 200 to
+5 ms; the shortest lead with no LATE record at it or any longer lead. Two
+runs per queue, interleaved. Residual is fit onset minus plan for the 14
+scheduled sounds of the run; every one was tier 2.
+
+| Queue | Shortest safe lead | LATE at the next shorter lead | `yau_lead_ns()` at the handovers, min / median / max ms | Residual, min to max us |
+|---|---|---|---|---|
+| 0 (v0.2) | 50 ms, 50 ms | 3 and 5 of 10 at 45 ms | 49.3 / 54.5 / 59.3 | -24.7 to +10.0 |
+| 2 (default) | 40 ms, 40 ms | 6 and 6 of 10 at 35 ms | 39.5 / 44.3 / 49.5 | -32.1 to +9.5 |
+| 1 | 30 ms, 30 ms | 6 and 6 of 10 at 25 ms | 29.5 / 34.5 / 39.6 | -0.5 to +21.3 |
+
+A third run with the final v0.3.0 build at the default: 40 ms, residuals
+-6.8 to +26.7 us, tier 2. The residuals stay within the earlier runs'
+range (the one-frame rounding allows +-10.4 us; the fit adds tens of
+microseconds), so the shorter queue costs no precision. `yau_lead_ns()`
+stays a conservative bound: its minimum is the measured safe lead.
+
+Decision: queue 2 is the default. It saves 10 ms of lead, and its 20 ms
+margin is more than twice the latest callback measured with MMCSS. Queue
+1 saves 10 ms more, but its 10 ms margin is close to that 8 ms, so it is
+opt-in. (v0.3.0 also gave as a reason that an underrun at queue 1 was not
+detected; v0.3.1 detects it, and the decision stays: see Halts.) Queue 0
+had a 10 ms larger margin and no fewer underruns in any run, so it was
+deleted.
+
+### Under 10 ms
+
+Not on this endpoint in shared mode: the engine runs a 10 ms period, and
+from the engine's pass to the position is about 20 ms more, whatever the
+client does. The ways under 10 ms are a driver that offers small shared
+periods (run `audio_wasapi_periods`), or exclusive mode on a driver that
+handles it.
+
+### Exclusive mode
+
+Why it "opened but did not work": miniaudio's exclusive mode makes one
+buffer of `periods` (3) periods, event-driven, and fills the whole buffer
+at each event in three callbacks back to back. v0.3.0 asks for one
+period per buffer. 60 s runs at idle, gcc builds, then `audio_schedule
+--exclusive`:
+
+| Run | Buffer | Callbacks | Interval p50 / p99 / max ms | Written minus position p50 (min to max) frames | Underruns | Shortest safe lead | Residual, 14 sounds |
+|---|---|---|---|---|---|---|---|
+| 3 periods of 480 (v0.2) | 1440 | 6069 | 0.10 / 81.4 / 103.7 | 5212 (-5188 to 8089) | 3, and 3 in the schedule run | none up to 200 ms | -7.1 us to +62.3 ms |
+| 1 period of 480 | 480 | 6081 | 0.23 / 75.2 / 90.9 | 4602 (958 to 5715) | 0 | 125 ms | -5.2 to +7.9 us |
+| 1 period of 144 | 144 | 20308 | 0.10 / 74.7 / 88.1 | 3934 (284 to 5132) | 0 | 125 ms | -7.1 to +4.4 us |
+
+With one period the stream runs and every onset is on its plan, so the
+change is kept. The callbacks still come in bursts about 75 ms apart, and
+the driver holds 30 to 110 ms. A raw WASAPI exclusive loop (scratch, gcc,
+10 s, event-driven, buffer prefilled before Start, MMCSS) showed the
+same: at 144 frames, events p50 0.13 ms and p99 74.7 ms apart, written
+minus position 1511 to 5085 frames; at 480 frames 1850 to 5417. So the
+bursts are the driver's, not miniaudio's. `GetPosition` took up to 45 ms
+in the miniaudio runs and 0.1 ms in the raw loop; that was not traced.
+
+Two more raw findings, not used by the header. Exclusive mode without the
+event (the client polls every 1 ms and keeps 2 periods of 144 frames in
+the buffer) ran smoothly, with written minus position 583 frames (12 ms)
+p50; miniaudio has no such mode. And in exclusive mode the position
+counts the silence of an underrun: with 1 period kept, it ran up to 50778
+frames past the frames written. Exclusive mode stays opt-in, tier 3
+(the loopback capture cannot see it), and on this laptop it is slower
+than shared mode.
+
+### Files
+
+`examples/audio/wasapi_periods.c` (the probe), `audio_clockstats
+--queue --long`, `audio_schedule --exclusive --period --queue` and its
+leads from 200 down to 5 ms. The core test checks that desc.queue reaches
+the device and the caps (0 means 2), the refusal of values out of 0..2,
+and the gate's threshold (`YAU__QUEUE_PAD`); the gate's wait and the
+exclusive buffer run only on hardware. Mutations: 7 more in
+`tests/mutate/audio.toml` (11 in all), 11 killed.
+
+## Halts (v0.3.1)
+
+The problem (Queue depth, above): a stall of a period or two halts the
+WASAPI position short of the frames written, so v0.3.0 saw no underrun,
+and every later onset time was off by the halt while its record said
+tier 2. Conditions: the laptop above, 2026-10-09, AC power, MSVC 19.44
+/O2, the measurement lock held for each run.
+
+### What a halt looks like
+
+In the v0.3.0 stall runs (`audio_clockstats --csv`), against a line
+through the reports of the second before the stall:
+
+| Stall, queue | Report of the stalled callback | Next reports |
+|---|---|---|
+| 20 ms, queue 1 | position at frames written minus 480, +0.4 ms | moved 4 frames in 10 ms, then +10.3 ms late, and stay there |
+| 25 ms, queue 2 | position at frames written minus 480, 4.1 ms early | one report that did not move, then +10.3 ms late |
+| 35 ms, queue 0 (v0.2) | the same, 4.0 ms early | +10.3 ms late |
+
+So after a halt every report is late by the halt, for good. Without a
+halt, over the long runs below, no report was more than 0.72 ms late
+against a least-squares line through its own 10 s, and the least late of
+any 3 moving reports in a row was at most 0.23 ms late.
+
+### The rule
+
+A moving report (its position past the last one) late against the fit
+by more than half a period (5 ms here) starts a run. Three in a row are
+a halt; any report that is not late ends the run. Until the third, the
+reports stay out of the fit and confirm no onset. Then:
+
+- one XRUN record: `u.i64[2]` the halt in ns, the least late report of
+  the run but its first (the first can be the halt half over: the
+  position moved, then stood); `u.i64[3]` the position of the first late
+  report; counted in `caps.xruns`;
+- the fit starts over from that report, at once, as after any underrun;
+- every sound in flight is flagged XRUN, UNCONFIRMED, tier 3, and gets
+  its time from the new fit.
+
+The check runs only while the fit is ready, so not for 0.5 s after open
+or after a restart. Three reports and half a period are what the data
+above allow: one late report can be a call preempted between the
+position and its stamp, and 5 ms is 7 times the latest report measured
+without a halt. A shorter run was not needed: every halt here was found
+49 to 70 ms after the stall.
+
+At queue 2, a 20 ms stall made the stalled callback's report 9.3 ms
+early (the position jumped to the frames written minus 480, then
+stood 19 ms): the existing check for early reports writes an XRUN record
+for it, and the halt that follows continues that record (the same aux)
+and is not counted again.
+
+### Catch rate
+
+`audio_clockstats --stall-at 3 --stall-every 3 --stall MS --csv`, 63 s,
+21 stalls a run. A stall halted the position when the reports from 0.3
+to 1.3 s after it were off the line of the second before it by more than
+2.5 ms (median report).
+
+| Stall | Queue 1: halted, found | Queue 2: halted, found |
+|---|---|---|
+| 5 ms (0.5 period) | 0 of 21, no record | 0 of 21, no record |
+| 10 ms (1 period) | 21 of 21 (halt 10 ms), 21 | 0 of 21, no record |
+| 15 ms (1.5 periods) | 21 of 21 (10 ms), 21 | 0 of 21, no record |
+| 20 ms (2 periods) | 21 of 21 (20 ms), 21 | 21 of 21 (10 ms), 21 (an early record first) |
+| 30 ms (3 periods) | 21 of 21 (30 ms), 21 | 21 of 21 (20 ms), 21 |
+
+126 of 126 halts found, no record for the 84 stalls the queue rode out.
+Each found 49 to 70 ms after the stall. The halt in the record minus the
+position's shift: -0.19 to +0.36 ms (median +0.11). A stall at queue 1 is
+ridden out at 5 ms (and at 8 ms in v0.3.0) and halts at 10 ms; at queue 2
+it is ridden out at 15 ms and halts at 20 ms.
+
+### False records
+
+The long runs of v0.3.0, again, with the rule: 10 minutes idle and 3
+minutes under load (8 spinning threads, a 60 Hz frame loop spinning 8 ms
+and playing a sound each frame) at queue 2 and at queue 1, 156,325
+callbacks: 0 XRUN records. Exclusive mode (480 frames, 60 s, callbacks
+in bursts about 75 ms apart): 0 records. `audio_schedule` again: shortest
+safe lead 40 ms at queue 2 and 30 ms at queue 1, as in v0.3.0; every
+onset tier 2, residuals -53.2 to +9.3 us at queue 2 and -6.7 to +0.8 us
+at queue 1.
+
+### The onsets a halt affects
+
+`--frame-work 0` plays a sound each frame (lead plus 20 ms) through 21
+halts a run. Truth for the time of a frame: a least-squares line through
+the reports from 0.3 s after its halt to the next stall. Offsets are p1 to
+p99 against that line, whose mean report lateness puts every onset about 130
+us early, flagged or not.
+
+| Run | Flagged XRUN, tier 3 | Their time against the line | Not flagged |
+|---|---|---|---|
+| Queue 1, 10 ms stalls | 63 (3 a halt), residual +9.99 to +10.44 ms | -150 to +161 us | 3679 tier 2, -230 to +98 us; 34 LATE |
+| Queue 2, 20 ms stalls | 105 (5 a halt) | 80 of them -147 to +131 us; 25 of them -10.49 to -10.07 ms | 3636 tier 2, -261 to +85 us; 35 LATE |
+
+At queue 1 every flagged onset has the new timing: its residual says the
+sound played 10 ms after its target, and its time is right. At queue 2,
+80 of the 105 do too; the other 25 completed on the early report, before
+the halt was found, with the old fit's time, 10.1 ms before the line.
+They are frames the position passed in its jump; whether they reached
+the output before or after the halt is not known (no loopback ran), and
+their records say XRUN, tier 3. One sound a halt (21 a run) became LATE:
+its target came before the first frame the new timing could reach. No
+tier 2 onset's time moved with a halt.
+
+### Queue 1 stays opt-in
+
+The rule makes an underrun at either queue visible and its data correctly
+labeled, but the sound still has a gap of a period or more. So the
+choice is still lead against margin: queue 1 saves 10 ms of lead (30
+against 40 ms), and its margin, 8 to 10 ms of callback lateness, is at
+the latest callback measured with MMCSS (8 ms late); queue 2's, 15 to 20
+ms, is twice that. In this session no callback was more than 2.2 ms late
+(18,086 under load at queue 1, 0 underruns), which is not enough to call
+8 ms the worst case. Queue 1 stays opt-in, for a machine whose
+`audio_clockstats --queue 1` under the experiment's load shows no
+callback 8 ms late.
+
+### Tests and files
+
+The scripted device of the core test gained the WASAPI halt: the engine
+reads `halt_pipe` frames ahead of the position, so a late block halts the
+position that far short of the frames written, for whole periods, and its
+report reads the position standing (on time, late, or ahead); and stale
+reports, late by 9 ms with no halt. `test_halt` checks halts of 1, 2 and 3
+periods (a sound planned before the halt on a frame it moved: XRUN,
+UNCONFIRMED, tier 3, its time within 60 us of the truth; the record's
+halt within 60 us; one count; a later sound on the truth's frame, tier
+2), a stall the queue rides out (no record), the early report before a
+halt (two records, one count), two stale reports in a row and four
+single ones (no record, the sound they pass tier 2). Mutations: 9 more in
+`tests/mutate/audio.toml` (20 in all), 20 killed. `audio_clockstats
+--stall-every` repeats the stall and lists every XRUN record.
+
 ## Not measured
 
 - Latency to sound. No loopback cable; `--line` is built, not run. It
@@ -611,7 +944,13 @@ needs the endpoint unmuted.
   `--line --stream` (stream placement and latency) is built, not run.
 - CoreAudio, ALSA, PulseAudio, Web Audio: compiled, never run. PulseAudio
   under WSLg plays to the Windows speakers and was not run.
-- Exclusive mode beyond the 3 runs above.
+- Exclusive mode beyond the 60 s runs of "Periods and buffers"; under
+  load, never.
+- Whether the in-box Microsoft HD Audio driver offers shared periods under
+  10 ms on this codec.
 - Whether the sound follows a WASAPI position jump under load: the jump
   happened once, in a run without the loopback capture.
+- When the frames that a report passes in its jump just before a halt
+  (Halts, queue 2) reach the output, before or after the halt. A
+  line-in loopback with a stall would show it.
 - Any other machine, driver, rate or channel count.

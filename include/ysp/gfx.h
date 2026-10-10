@@ -1,4 +1,4 @@
-/* ysp/gfx.h - v0.10.3 - public domain single-header stimulus graphics library
+/* ysp/gfx.h - v0.10.5 - public domain single-header stimulus graphics library
  *   (with MIT-licensed parts: see below)
  *
  *   Stimuli on GL ES 3.0, on top of ysp/screen.h: signed-distance shapes
@@ -37,6 +37,28 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.10.5 - VIDEO: an R8 or RG8 texture may state an encoding (matrix
+ *          RGB, primaries DEVICE: gray is the display's white), drawn as a
+ *          color image through the video program with the level in r and
+ *          alpha in g. A pack's TEXTURE entry (docs/pack.md 4.9) now goes
+ *          into ygfx_texture() as stored: an 8-bit gray PNG is sRGB codes,
+ *          which the tool could linearize to 8 bits only by merging the
+ *          dark codes. Other primaries on a gray texture are refused. An
+ *          encoded texture used as a modulation, add, coverage or shader
+ *          texture is refused as before, with a message that says why.
+ *          YGFX_SHADER_CONTRACT is 2 (decided 2026-10-09 by the user): a
+ *          body that samples ysp_tex0 needs v0.10.4's binding, and a
+ *          contract-1 player would run it and read garbage.
+ *   v0.10.4 - SHADER CONTRACT: stim.tex (user_desc.tex) is the body's
+ *          ysp_tex0, ysp_utex0 for an R16UI texture: an uploaded texture
+ *          or a render target. Before, a USER draw bound no texture, so
+ *          ysp_tex0 read what the previous draw had left on its unit, and
+ *          the feedback check could not see a body that sampled its own
+ *          target. A tex that is not this gfx's, or a video texture, is
+ *          refused (YGFX_ERR_ARG); a draw into the target it samples is
+ *          YGFX_ERR_ORDER, as for an image. Found by
+ *          examples/gfx/gratings.c (docs/rig_spec.md 15.6). The contract's
+ *          version stays 1: the wrapper's text did not change.
  *   v0.10.3 - YGFX_SHADER_CONTRACT, the shader contract's version (1). A
  *          pack records it with each shader (docs/pack.md, SHADER) and the
  *          player refuses a shader built for another contract. It changes
@@ -713,8 +735,8 @@
  *            coverage by tint.a; for a modulation, dir by tint.rgb and the
  *            amplitude by tint.a (the same as dir and contrast); for add,
  *            the increment by tint.rgb and tint.a. 16-bit planes are R16UI,
- *            read as k / 65535. Values are linear: an 8-bit sRGB photograph
- *            is the pack tool's to linearize.
+ *            read as k / 65535. Values are linear, unless texture_desc.enc
+ *            states a transfer (an 8-bit sRGB photograph: VIDEO).
  *   NOISE    per check of `check` px from the box's top-left corner (its
  *            key ygfx_hash2(cx, cy, seed): independent checks, no row or
  *            frame a copy of another; v0.9):
@@ -1240,8 +1262,12 @@
  *                replicated with chroma_nearest.
  *   R'G'B' is clamped to 0..1 before the transfer. An RGBA8, RGBA16F or
  *   RGBA32F texture may state an encoding too (matrix RGB), to show a frame
- *   sequence in linear light; all zero keeps the old meaning (the values
- *   are linear). The values of the YGFX_MATRIX_, _RANGE_, _TRC_, _PRIM_
+ *   sequence or an sRGB image in linear light; all zero keeps the old
+ *   meaning (the values are linear). So may an R8 or RG8 texture (v0.10.5):
+ *   gray, its level in r and alpha in g, primaries DEVICE (gray is the
+ *   display's white at each level; others refused). An encoded texture
+ *   draws as a color image only. A pack's TEXTURE entry stores these bytes
+ *   as ygfx_texture() takes them (docs/pack.md 4.9). The values of the YGFX_MATRIX_, _RANGE_, _TRC_, _PRIM_
  *   and _SITING_ names are ysp/video.h's. A planar texture updates by
  *   ygfx_texture_update_planes() (each plane, one call) or
  *   ygfx_texture_update_plane() (a rectangle of one plane).
@@ -1361,6 +1387,11 @@
  *       ysp_tex0..2, ysp_utex0 (unsigned), ysp_PI, ysp_sdf, ysp_sdf_at,
  *       ysp_coverage, ysp_aperture, ysp_bilinear (four texelFetch,
  *       clamped to a rectangle)
+ *   stim.tex (v0.10.4) is ysp_tex0, or ysp_utex0 for an R16UI texture:
+ *   an image, or a target (its rows top first, premultiplied, scene-space
+ *   values). texelFetch reads it 1:1; ysp_bilinear interpolates. ysp_tex1
+ *   is the mask of MASK_TEX. Without stim.tex, ysp_tex0 is unbound: what
+ *   it reads is undefined.
  *   Identifiers with two underscores in a row are reserved in GLSL (ANGLE
  *   warns): the contract has none.
  *   The wrapper puts "#line 1" before the body, so the compiler's log
@@ -1369,7 +1400,9 @@
  *   YGFX_SHADER_CONTRACT (v0.10.3) is the contract's version: it changes
  *   when what the wrapper does to a body changes (the names above, their
  *   meaning, the blend), not when its text changes otherwise. A pack
- *   stores it with each shader; a player refuses another version.
+ *   stores it with each shader; a player refuses another version. It is 2
+ *   from v0.10.5: a body that samples ysp_tex0 (stim.tex, v0.10.4) read
+ *   garbage under contract 1.
  *   A time-dependent pattern takes its phase in ysp_param() from the CPU,
  *   not from ysp_time. A slow shader is its writer's timing problem, and
  *   the flip record's phases are where it shows.
@@ -1477,8 +1510,8 @@
 
 #define YGFX_VERSION_MAJOR 0
 #define YGFX_VERSION_MINOR 10
-#define YGFX_VERSION_PATCH 3
-#define YGFX_VERSION_STRING "0.10.3"
+#define YGFX_VERSION_PATCH 5
+#define YGFX_VERSION_STRING "0.10.5"
 
 #include "ysp/screen.h"
 #include "ysp/color.h"
@@ -1622,8 +1655,9 @@ typedef struct ygfx_texture_desc {
                                   * DIST (v0.4): twice its padding; rectangles
                                   * and glyph runs on a DIST atlas need it      */
     /* v0.4 */
-    ygfx_encoding enc;         /* VIDEO: required for NV12 and I420; RGBA8,
-                                  * RGBA16F: all 0 = values are linear          */
+    ygfx_encoding enc;         /* VIDEO: required for NV12 and I420; R8, RG8
+                                  * (v0.10.5), RGBA8, RGBA16F, RGBA32F: all 0 =
+                                  * values are linear                           */
     const ygfx_planes* planes; /* NV12, I420: the first frame; NULL = black   */
 } ygfx_texture_desc;
 
@@ -1984,7 +2018,7 @@ typedef struct ygfx_stim {
     float       seed;         /* NOISE: an integer below 2^24                   */
     float       check;        /* NOISE check size, px; 0 = 1                    */
     float       p[32];        /* USER parameters; POLYGON vertices              */
-    ygfx_tex  tex;          /* IMAGE                                          */
+    ygfx_tex  tex;          /* IMAGE; USER: ysp_tex0 (v0.10.4)                */
     ygfx_buf  buf;          /* DOTS: x, y float pairs, units, from x, y       */
     uint32_t    count;        /* DOTS                                           */
     ygfx_pipe pipe;         /* USER                                           */
@@ -2260,6 +2294,7 @@ typedef struct ygfx_user_desc {
     float color[3]; float dir[3]; const float* p; int n_p;
     float stroke; ygfx_stroke_align stroke_align; ygfx_tex mask; const ygfx_group* group;
     float shape_p[4];                                          /* v0.4: the aperture's */
+    ygfx_tex tex;                                              /* v0.10.4: ysp_tex0 */
 } ygfx_user_desc;
 
 /* --- user shaders ---------------------------------------------------------- */
@@ -2762,8 +2797,9 @@ YGFX_API void        ygfx_pipeline_free(ygfx_gfx* g, ygfx_pipe p);
  * pack tool validates the same text. Returns the length, or a negative code
  * when cap is too small (the length needed is then -return - 1000). */
 YGFX_API int ygfx_shader_wrap(const char* body, ygfx_shader_mode mode, char* out, size_t cap);
-/* The SHADER CONTRACT's version (v0.10.3). */
-#define YGFX_SHADER_CONTRACT 1
+/* The SHADER CONTRACT's version (v0.10.3); 2 from v0.10.5 (stim.tex is the
+ * body's ysp_tex0, v0.10.4). */
+#define YGFX_SHADER_CONTRACT 2
 
 /* The output stage's table: lut holds n values per channel, red first, linear
  * to device value 0..1, 2 <= n <= 4096. Between frames. */
@@ -6178,6 +6214,7 @@ YGFX_API ygfx_stim ygfx_user(const ygfx_user_desc* d) {
     if (d->p) for (i = 0; i < d->n_p && i < 32; i++) s.p[i] = d->p[i];
     s.stroke = d->stroke; s.stroke_align = (uint8_t)d->stroke_align; s.mask = d->mask; s.group = d->group;
     memcpy(s.shape_p, d->shape_p, sizeof s.shape_p);
+    s.tex = d->tex;
     return s;
 }
 
@@ -6792,7 +6829,8 @@ static uint32_t ygfx__pack(ygfx_gfx* g, const ygfx_stim* s, float* b, ygfx__cmd*
         mod = (s->flags & YGFX_STIM_MODULATION) != 0;
         if (r->enc.matrix) {
             if (mod || (s->flags & YGFX_STIM_ADD))
-                return ygfx__refuse(g, why, YGFX_ERR_ARG, "an encoded (video) texture draws as a color image only");
+                return ygfx__refuse(g, why, YGFX_ERR_ARG, "an encoded texture (video, or a stated transfer) draws as a color image only: "
+                                                             "a modulation, add, coverage or shader texture holds linear values (enc all zero)");
             pipe = g->video_pipe;
             cmd->tex[0] = r->bid; cmd->tex[2] = r->plane_bid[0]; cmd->tex[4] = r->plane_bid[1]; cmd->tex[5] = g->eotf;
             ygfx__video_consts(g, r, b);
@@ -6807,7 +6845,7 @@ static uint32_t ygfx__pack(ygfx_gfx* g, const ygfx_stim* s, float* b, ygfx__cmd*
         b[30] = (s->flags & YGFX_STIM_PREMULTIPLIED) ? 1.0f : 0.0f;
         if (s->flags & YGFX_STIM_COVERAGE) {
             if (b[28] != 1.0f || mod || (s->flags & YGFX_STIM_ADD) || r->enc.matrix)
-                return ygfx__refuse(g, why, YGFX_ERR_ARG, "coverage is the red channel of a 1-channel texture drawn as a color image");
+                return ygfx__refuse(g, why, YGFX_ERR_ARG, "coverage is the red channel of a 1-channel texture of linear values (enc all zero) drawn as a color image");
             b[31] = 1.0f;
         }
         /* the source rectangle, whole texels inside the texture */
@@ -6837,6 +6875,19 @@ static uint32_t ygfx__pack(ygfx_gfx* g, const ygfx_stim* s, float* b, ygfx__cmd*
             return ygfx__refuse(g, why, YGFX_ERR_ARG, "a user stimulus needs a pipeline of this gfx (pipe)");
         pipe = g->pipe[s->pipe.id - 1].bid;
         mod = g->pipe[s->pipe.id - 1].flags != YGFX_COLOR;
+        /* stim.tex is the body's ysp_tex0: bound here, so the feedback
+         * check below sees a body that samples its own target */
+        if (s->tex.id) {
+            const ygfx__res* r;
+            if (s->tex.id > YGFX_MAX_TEXTURES || !g->tex[s->tex.id - 1].used)
+                return ygfx__refuse(g, why, YGFX_ERR_ARG, "a user stimulus's tex is not a texture of this gfx");
+            r = &g->tex[s->tex.id - 1];
+            if (r->view) r = &g->tex[r->view - 1];
+            if (r->enc.matrix)
+                return ygfx__refuse(g, why, YGFX_ERR_ARG, "an encoded texture (video, or a stated transfer) draws as a color image only: "
+                                                             "a modulation, add, coverage or shader texture holds linear values (enc all zero)");
+            if (r->format == YGFX_R16UI) cmd->tex[3] = r->bid; else cmd->tex[0] = r->bid;
+        }
         break;
     default:
         return 0;
@@ -7039,7 +7090,12 @@ static const char ygfx__body_image_video[] =
     "    int kind = int(F.x);\n"
     "    vec3 e;\n"
     "    float a = 1.0;\n"
-    "    if (kind == 0) { e = y.rgb * K.x + K.y; a = y.a; }\n"
+    /* a gray texture's one or two channels: the level in r, alpha in g */
+    "    if (kind == 0) {\n"
+    "        int ch = int(ysp_misc.x);\n"
+    "        vec4 v = ch == 1 ? vec4(y.rrr, 1.0) : (ch == 2 ? vec4(y.rrr, y.g) : y);\n"
+    "        e = v.rgb * K.x + K.y; a = v.a;\n"
+    "    }\n"
     "    else {\n"
     "        vec2 Lc = lin ? L : vec2(t) + 0.5;\n"
     "        vec2 c0 = floor(sr.xy * 0.5);\n"
@@ -7637,29 +7693,35 @@ static void ygfx__plane_dims(int format, int w, int h, int plane, int* pw, int* 
 }
 
 /* An encoding is all or nothing, stated (rig_spec principles 4 and 5):
- * every field of a planar one; an RGB texture's all zero (linear values) or
- * all set with matrix RGB. Primaries other than the display's own need the
- * calibration's chromaticities. */
+ * every field of a planar one; an RGB or gray texture's all zero (linear
+ * values) or all set with matrix RGB. Primaries other than the display's
+ * own need the calibration's chromaticities. A gray texture (R8, RG8) has
+ * no chromaticity of its own: its light is the display's white, so its
+ * primaries are DEVICE; a pack's 8-bit gray PNG arrives as sRGB codes, and
+ * linearizing it to 8 bits in the tool would merge the dark codes. */
 static int ygfx__enc_check(ygfx_gfx* g, int format, const ygfx_encoding* e) {
     const char* msg = NULL;
     int any = e->matrix || e->range || e->transfer || e->primaries || e->siting || e->chroma_nearest;
+    int gray = format == YGFX_R8 || format == YGFX_RG8;
     if (!ygfx__planar(format) && !any) return YGFX_OK;
-    if (!ygfx__planar(format) && format != YGFX_RGBA8 && format != YGFX_RGBA16F && format != YGFX_RGBA32F)
-        msg = "an encoding is for NV12, I420, RGBA8, RGBA16F and RGBA32F textures";
+    if (!ygfx__planar(format) && !gray && format != YGFX_RGBA8 && format != YGFX_RGBA16F && format != YGFX_RGBA32F)
+        msg = "an encoding is for NV12, I420, R8, RG8, RGBA8, RGBA16F and RGBA32F textures";
     else if (ygfx__planar(format) && !(e->matrix >= YGFX_MATRIX_BT601 && e->matrix <= YGFX_MATRIX_BT2020))
         msg = "a planar texture needs enc.matrix (BT601, BT709 or BT2020)";
     else if (!ygfx__planar(format) && e->matrix != YGFX_MATRIX_RGB)
-        msg = "an RGB texture's enc.matrix is YGFX_MATRIX_RGB";
+        msg = "an RGB or gray texture's enc.matrix is YGFX_MATRIX_RGB";
     else if (!(e->range >= YGFX_RANGE_LIMITED && e->range <= YGFX_RANGE_FULL))
         msg = "enc.range is unspecified (LIMITED or FULL)";
     else if (!(e->transfer >= YGFX_TRC_DEVICE && e->transfer <= YGFX_TRC_GAMMA22))
         msg = "enc.transfer is unspecified (DEVICE, BT1886, SRGB, LINEAR or GAMMA22)";
     else if (!(e->primaries >= YGFX_PRIM_DEVICE && e->primaries <= YGFX_PRIM_BT2020))
         msg = "enc.primaries is unspecified: YGFX_PRIM_DEVICE passes the source's RGB through as the display's";
+    else if (gray && e->primaries != YGFX_PRIM_DEVICE)
+        msg = "a gray texture (R8, RG8) is the display's white at each level: enc.primaries is YGFX_PRIM_DEVICE";
     else if (ygfx__planar(format) && !(e->siting >= YGFX_SITING_LEFT && e->siting <= YGFX_SITING_TOP_LEFT))
         msg = "a 4:2:0 texture needs enc.siting (LEFT, CENTER or TOP_LEFT)";
     else if (!ygfx__planar(format) && e->siting > YGFX_SITING_NONE)
-        msg = "an RGB texture is not subsampled: enc.siting 0 or NONE";
+        msg = "an RGB or gray texture is not subsampled: enc.siting 0 or NONE";
     else if (e->chroma_nearest > 1)
         msg = "enc.chroma_nearest is 0 or 1";
     else if (e->primaries != YGFX_PRIM_DEVICE && !g->has_xyz)

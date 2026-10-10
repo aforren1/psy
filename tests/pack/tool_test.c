@@ -334,8 +334,8 @@ static const char* g_desc =
     "    {\"kind\": \"audio\", \"source\": \"audio/f64.wav\"},\n"
     "    {\"kind\": \"shader\", \"source\": \"shaders/plaid.glsl\", \"mode\": \"modulation\"},\n"
     "    {\"kind\": \"texture\", \"source\": \"img/gray.png\"},\n"
-    "    {\"kind\": \"texture\", \"source\": \"img/rgba.png\", \"compression\": \"qoi\"},\n"
-    "    {\"kind\": \"texture\", \"name\": \"img/rgba_raw.ysptex\", \"source\": \"img/rgba.png\"},\n"
+    "    {\"kind\": \"texture\", \"source\": \"img/rgba.png\", \"compression\": \"qoi\", \"primaries\": \"bt709\"},\n"
+    "    {\"kind\": \"texture\", \"name\": \"img/rgba_raw.ysptex\", \"source\": \"img/rgba.png\", \"primaries\": \"device\"},\n"
     "    {\"kind\": \"texture\", \"source\": \"img/gray16.png\", \"encoding\": \"linear\"},\n"
     "    {\"kind\": \"texture\", \"source\": \"img/rgb16.png\", \"format\": \"rgba32f\", \"encoding\": \"linear\"},\n"
     "    {\"kind\": \"file\", \"source\": \"readme.txt\"},\n"
@@ -350,6 +350,11 @@ static int build_text(const char* text, const char* out, char* err, size_t cap) 
 static const void* entry(ypak_pack* p, const char* name, ypak_entry* e) {
     if (ypak_find(p, name, e) != 0) { CHECK(0, "no entry %s: %s", name, ypak_error(p)); return NULL; }
     return ypak_data(p, e);
+}
+
+/* matrix, range, transfer, primaries; the other four bytes 0 */
+static int enc_is(const uint8_t* enc, int m, int r, int t, int pr) {
+    return enc[0] == m && enc[1] == r && enc[2] == t && enc[3] == pr && !enc[4] && !enc[5] && !enc[6] && !enc[7];
 }
 
 static void check_entries(const char* path) {
@@ -454,27 +459,29 @@ static void check_entries(const char* path) {
     if ((x = entry(&p, "img/rgba.ysptex", &e)) != NULL) {
         ypak_texture t;
         static uint8_t dec[sizeof g_rgba];
-        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.compression == YPAK_TEX_QOI && t.w == 33 && t.enc[2] == 3, "qoi texture: %s", err);
+        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.compression == YPAK_TEX_QOI && t.w == 33 && enc_is(t.enc, 1, 2, 3, 2), "qoi texture: %s", err);
         CHECK(ypak_qoi_decode(&t, dec, sizeof dec, err, sizeof err) == 0 && memcmp(dec, g_rgba, sizeof g_rgba) == 0, "qoi texels: %s", err);
     }
     if ((x = entry(&p, "img/rgba_raw.ysptex", &e)) != NULL) {
         ypak_texture t;
-        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.compression == YPAK_TEX_RAW && memcmp(t.data, g_rgba, sizeof g_rgba) == 0, "raw texture");
+        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.compression == YPAK_TEX_RAW && memcmp(t.data, g_rgba, sizeof g_rgba) == 0 &&
+              enc_is(t.enc, 1, 2, 3, 1), "raw texture");
         CHECK(((uintptr_t)t.data & 15u) == 0, "texture data alignment");
     }
     if ((x = entry(&p, "img/gray.ysptex", &e)) != NULL) {
         ypak_texture t;
-        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.format == YPAK_TEX_R8 && memcmp(t.data, g_gray, sizeof g_gray) == 0, "gray texture");
+        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.format == YPAK_TEX_R8 && memcmp(t.data, g_gray, sizeof g_gray) == 0 &&
+              enc_is(t.enc, 1, 2, 3, 1), "gray texture: sRGB, primaries DEVICE");
     }
     if ((x = entry(&p, "img/gray16.ysptex", &e)) != NULL) {
         ypak_texture t;
-        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.format == YPAK_TEX_R16UI && t.enc[2] == 4 &&
+        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.format == YPAK_TEX_R16UI && enc_is(t.enc, 0, 0, 0, 0) &&
               t.data[0] == g_g16[1] && t.data[1] == g_g16[0], "gray16 texture is little-endian");
     }
     if ((x = entry(&p, "img/rgb16.ysptex", &e)) != NULL) {
         ypak_texture t;
         float f0;
-        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.format == YPAK_TEX_RGBA32F, "rgb16 texture");
+        CHECK(ypak_texture_view(x, e.size, &t, err, sizeof err) == 0 && t.format == YPAK_TEX_RGBA32F && enc_is(t.enc, 0, 0, 0, 0), "rgb16 texture: linear, no encoding");
         memcpy(&f0, t.data, 4);
         CHECK(f0 == (float)((g_c16[0] << 8) | g_c16[1]) / 65535.0f, "rgb16 to float");
         memcpy(&f0, t.data + 12, 4);
@@ -486,6 +493,64 @@ static void check_entries(const char* path) {
         CHECK(src && n == (size_t)e.size && memcmp(src, x, n) == 0 && e.chunk_first != YPAK_NO_CHUNK, "big file");
         free(src);
     }
+    ypak_close(&p);
+}
+
+/* Every texture of the corpus into ygfx_texture() as stored, the
+ * documented load path (docs/pack.md 6), on the null backend: the encoding
+ * bytes go in unchanged. BT.709 primaries need a calibration with
+ * chromaticities: refused without one, taken with one. */
+static void gfx_round_trip(const char* path) {
+    static const char* const names[5] = { "img/gray.ysptex", "img/gray16.ysptex", "img/rgb16.ysptex", "img/rgba.ysptex", "img/rgba_raw.ysptex" };
+    static const float xy[4][2] = { { 0.64f, 0.33f }, { 0.30f, 0.60f }, { 0.15f, 0.06f }, { 0.3127f, 0.3290f } };
+    static uint8_t dec[sizeof g_rgba];
+    static yscr_screen scr;
+    static ygfx_gfx g;
+    static ycol_cal cal;
+    yscr_desc sd;
+    ygfx_desc gd;
+    ypak_pack p;
+    ypak_desc d;
+    char err[512];
+    int cal_on, i, made = 0;
+    memset(&d, 0, sizeof d);
+    d.path = path;
+    d.verify = YPAK_VERIFY_OPEN;
+    memset(&sd, 0, sizeof sd);
+    sd.backend = YSCR_BACKEND_SIM;
+    sd.sim_period_ns = 1000000;
+    CHECK(ycol_cal_nominal(&cal, xy, 80.0f, 2.2) == 0, "nominal calibration");
+    if (ypak_open(&p, &d) != 0 || !yscr_open(&scr, &sd)) { CHECK(0, "round trip: open"); return; }
+    for (cal_on = 0; cal_on < 2; cal_on++) {
+        memset(&gd, 0, sizeof gd);
+        gd.screen = &scr;
+        gd.cal = cal_on ? &cal : NULL;
+        if (!ygfx_open(&g, &gd)) { CHECK(0, "round trip: ygfx_open"); break; }
+        for (i = 0; i < 5; i++) {
+            ypak_entry e;
+            ypak_texture t;
+            ygfx_texture_desc td;
+            ygfx_tex x;
+            const void* v = ypak_find(&p, names[i], &e) == 0 ? ypak_data(&p, &e) : NULL;
+            if (!v || ypak_texture_view(v, e.size, &t, err, sizeof err) != 0) { CHECK(0, "round trip: %s", names[i]); continue; }
+            memset(&td, 0, sizeof td);
+            td.w = (int32_t)t.w; td.h = (int32_t)t.h; td.format = (ygfx_format)t.format; td.data = t.data;
+            memcpy(&td.enc, t.enc, sizeof td.enc);
+            if (t.compression == YPAK_TEX_QOI) {
+                CHECK(ypak_qoi_decode(&t, dec, sizeof dec, err, sizeof err) == 0, "round trip qoi: %s", err);
+                td.data = dec;
+            }
+            x = ygfx_texture(&g, &td);
+            if (i == 3 && !cal_on)
+                CHECK(x.id == 0 && strstr(ygfx_error(&g), "calibration") != NULL, "BT.709 without a calibration refused: %s", ygfx_error(&g));
+            else
+                CHECK(x.id != 0, "%s into ygfx_texture()%s: %s", names[i], cal_on ? " with a calibration" : "", ygfx_error(&g));
+            if (x.id) { made++; ygfx_texture_free(&g, x); }
+        }
+        ygfx_close(&g);
+    }
+    CHECK(made == 9, "round trip: %d of 9 textures made", made);
+    yscr_close(&scr);
     ypak_close(&p);
 }
 
@@ -518,6 +583,14 @@ static void test_refusals(void) {
     expect_refusal("16-bit encoding", "{\"kind\": \"texture\", \"source\": \"img/gray16.png\"}", "no default encoding", 0);
     expect_refusal("iccp", "{\"kind\": \"texture\", \"source\": \"img/iccp.png\"}", "ICC profile", 0);
     expect_refusal("narrowing", "{\"kind\": \"texture\", \"source\": \"img/rgba.png\", \"format\": \"r8\"}", "would drop", 0);
+    expect_refusal("rgb srgb primaries", "{\"kind\": \"texture\", \"source\": \"img/rgba.png\"}", "need \"primaries\"", 0);
+    expect_refusal("gray primaries", "{\"kind\": \"texture\", \"source\": \"img/gray.png\", \"primaries\": \"device\"}", "a gray texture is the display's white", 0);
+    expect_refusal("linear primaries", "{\"kind\": \"texture\", \"source\": \"img/rgba.png\", \"encoding\": \"linear\", \"primaries\": \"bt709\"}",
+                   "linear values carry no encoding", 0);
+    expect_refusal("device primaries", "{\"kind\": \"texture\", \"source\": \"img/rgba.png\", \"encoding\": \"device\", \"primaries\": \"device\"}",
+                   "device codes are the display's", 0);
+    expect_refusal("primaries name", "{\"kind\": \"texture\", \"source\": \"img/rgba.png\", \"primaries\": \"p3\"}", "primaries must be bt709 or device", 0);
+    expect_refusal("r16ui srgb", "{\"kind\": \"texture\", \"source\": \"img/gray16.png\", \"encoding\": \"srgb\"}", "r16ui holds linear values", 0);
     expect_refusal("qoi gray", "{\"kind\": \"texture\", \"source\": \"img/gray.png\", \"compression\": \"qoi\"}", "QOI is for rgba8", 0);
     expect_refusal("restricted font", "{\"kind\": \"font\", \"source\": \"fonts/restricted.ttf\"}", "forbids embedding", 0);
     expect_refusal("shader mode", "{\"kind\": \"shader\", \"source\": \"shaders/plaid.glsl\", \"mode\": \"blend\"}", "mode must be", 0);
@@ -591,6 +664,7 @@ int main(void) {
     if (rc == 0) {
         FILE* rep;
         check_entries(W "/corpus.ysppak");
+        gfx_round_trip(W "/corpus.ysppak");
         /* the same bytes again */
         CHECK(build_text(g_desc, W "/again.ysppak", err, sizeof err) == 0 && same_file(W "/corpus.ysppak", W "/again.ysppak"), "build twice: same bytes");
         /* verify */

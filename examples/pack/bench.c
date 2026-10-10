@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
             order[i] = order[j]; order[j] = t;
         }
         {
-            ypak_entry e;
+            ypak_entry e = { 0 };   /* gcc -O2 cannot see ypak_at() fill it */
             char name[YPAK_MAX_NAME + 1];
             uint64_t t1;
             size_t* lens = (size_t*)malloc(sizeof(size_t) * n);

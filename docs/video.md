@@ -458,6 +458,64 @@ compositor showed 3.6 s of flips one or two vblanks late (+16.5 and
 records report both as they happened. Both belong to the composed path,
 not to the lock.
 
+### Rerun: the early flips (2026-10-09)
+
+The same run (the A/V clip, DXVA, UPLOAD, the soundtrack, the 60 s
+script) was done again on ysp/screen.h v0.4.3, with a scratch tool that
+logs every flip record, the scanout's vblanks (`D3DKMTGetScanLine` polled
+on its own thread, as in docs/screen.md, "Held frames a vblank early"),
+the console display state and the session lock. The display was on and
+the session unlocked from the start to the end of every run below. Same
+laptop, AC, 640 x 360 window or fullscreen. The ysp/screen.h in the tree
+then (14:53) was v0.4.3 with another worker's depth changes in progress:
+by default the path sets the depth, and `desc.depth_learn` keeps
+v0.4.3's learner. Both were run. "Early" is a flip whose OS time is on
+the scanout vblank before its planned one; the records' EARLY flag and
+the scanout agreed on every flip.
+
+| Configuration | Runs | Early flips a run | Late flips a run |
+|---|---|---|---|
+| DXGI_FLIP, window in the foreground, v0.4.3 learner | 4 | 3, 3, 3, 3 | 0 |
+| DXGI_FLIP, window in the foreground, path sets the depth | 9 | 6 in 6 runs; 108, 112, 116 in 3 runs | 0 to 2, at frames 0 and 1 |
+| DXGI_FLIP, fullscreen, v0.4.3 learner | 3 | 0, 1, 3 (frames 3 to 5) | 0 to 1, at frame 0 |
+| DXGI_FLIP, fullscreen, path sets the depth | 4 | 0 | 0 to 2 at frames 0 and 1; in 1 run 4 more at 19.5 s |
+| COMPOSITION, window or fullscreen | 8 | 0 | 0, except 1 run: 1 at frame 0 and 1 at 19.3 s |
+| DXGI_FLIP, window or fullscreen in the background | 7 | not known: 93% of flips had no statistic (ESTIMATED) | not known |
+| COMPOSITION, window or fullscreen in the background | 4 | not known: no statistic; one frame each 4 vblanks | not known |
+
+A run in the foreground used the tool's `--topmost`, which is
+`screen_flipstats --topmost` (one zero-size mouse move takes the
+foreground). Without it, 11 of 18 runs stayed in the background,
+mostly the second and third of a set; those are the background rows.
+
+The early flips have one cause, the depth rule of ysp/screen.h, not its
+grid (no flip in these runs is held, so the v0.4.3 grid fix does not
+apply) and not ysp/video.h (it calls `yscr_flip()` with no target and
+reads only `f.onset`). At 1.7 to 1.9 s the system takes the window from
+the composed path to an overlay plane. From then on a present shows on
+the first vblank after it (depth 1), but `GetFrameStatisticsMedia` still
+reports the composed path for 5 more flips. The flips planned at depth 2
+show a vblank early:
+
+- v0.4.3's learner sees no path change, so it needs 3 flips in a row at
+  depth 1 to lower the depth: 3 early flips. This is the finding of
+  2026-10-06 (then at about 1.3 s).
+- With the path setting the depth, the depth falls only when the report
+  says overlay: 6 early flips. When open() learned depth 3 on the
+  composed path (3 runs in 9), every composed flip was early (about 105),
+  and the flips at the change 2 vblanks early; nothing lowers the depth
+  until the path changes.
+
+In fullscreen the learner showed the same thing at open: the window
+is composed for its first frames, and 1 or 3 flips showed early at
+frames 3 to 5. Without the scanout thread the counts were the same (6,
+6, 116 in a window). The one late flip after the early ones and the
+3.6 s of late flips of 2026-10-06 did not come again in 39 runs (28 in
+the foreground): late flips came alone or 2 in a row. A window in the
+background gave no statistic for 93% of its flips, so a late run there
+would not be seen; the run of 2026-10-06 may have been one of those.
+Nothing in ysp/video.h changed.
+
 ## Base rates
 
 Round 2, with ysp/timeline.h v0.4.0 (`ytl_rate`, `ytl_get_rate`,

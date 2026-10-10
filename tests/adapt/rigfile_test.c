@@ -909,6 +909,103 @@ static void check_damage(void) {
     printf("  damage: 20000 edits of the golden profile, %d still valid, each canonical and stable\n", ok);
 }
 
+/* ------------------------------------------------- lsl roles (v0.2.0) */
+
+static void check_lsl(void) {
+    static const char T[] =
+        "{\n"
+        "  \"format\": \"ysp-rig 1\",\n"
+        "  \"rig\": \"r\",\n"
+        "  \"roles\": {\n"
+        "    \"lat\": {\n"
+        "      \"family\": \"lsl\",\n"
+        "      \"key\": \"lsl:Latencies:::\"\n"
+        "    },\n"
+        "    \"ref\": {\n"
+        "      \"bounds\": {\n"
+        "        \"date\": \"2026-10-09T09:00:00Z\",\n"
+        "        \"hi_s\": 0.0002,\n"
+        "        \"lo_s\": -0.0001,\n"
+        "        \"n\": 300,\n"
+        "        \"sha256\": \"" B64 "\"\n"
+        "      },\n"
+        "      \"family\": \"lsl\",\n"
+        "      \"key\": \"lsl:Data::LabStreamer:\",\n"
+        "      \"options\": {\n"
+        "        \"buttons\": {\n"
+        "          \"1\": \"photodiode\"\n"
+        "        }\n"
+        "      }\n"
+        "    }\n"
+        "  },\n"
+        "  \"written\": \"2026-10-09T14:03:00Z\"\n"
+        "}\n";
+    static char t[4096];
+    ydev_desc d;
+    yin_source s;
+    size_t n;
+    /* read, written back to the same bytes */
+    CHECK_I(yrig_parse(&g_q, T, strlen(T), NULL, g_err, sizeof g_err), YRIG_OK);
+    CHECK_I(g_q.n_roles, 2);
+    CHECK_I(yrig_find(&g_q, "ref")->family_id, YRIG_FAMILY_LSL);
+    CHECK_S(yrig_find(&g_q, "ref")->family, "lsl");
+    n = yrig_write(&g_q, g_buf, sizeof g_buf);
+    CHECK(n == strlen(T) && memcmp(g_buf, T, n) == 0);
+    /* the binding: refused for ysp/device.h, with the header to use */
+    memset(&d, 0, sizeof d);
+    CHECK_I(yrig_desc(&g_q, "ref", &d, g_err, sizeof g_err), YRIG_ERR_FORMAT);
+    CHECK_HAS(g_err, "roles.ref is an LSL stream: start it with ysp/net.h");
+    CHECK(d.key == NULL);
+    /* the tier by role name: 1 only when the bounds checked */
+    memset(&s, 0, sizeof s);
+    s.kind = YIN_KIND_SYNC;
+    s.tier = YIN_TIER_2;
+    s.note = "the inlet's";
+    CHECK_I(yrig_source_role(&g_q, "ref", s).tier, YIN_TIER_UNKNOWN);   /* NOT_RUN */
+    yrig_find(&g_q, "ref")->bounds.check = YRIG_CHECK_OK;
+    s = yrig_source_role(&g_q, "ref", s);
+    CHECK(s.tier == YIN_TIER_1 && s.lo_us == -100 && s.hi_us == 200 && s.kind == YIN_KIND_SYNC);
+    CHECK_I(yrig_source_role(&g_q, "lat", s).tier, YIN_TIER_UNKNOWN);   /* no bounds */
+    CHECK_I(yrig_source_role(&g_q, "nobody", s).tier, YIN_TIER_UNKNOWN);
+    CHECK_I(yrig_source_role(NULL, "ref", s).tier, YIN_TIER_UNKNOWN);
+    /* refusals */
+#define LSL_REFUSE(find, repl, says) do { \
+        const char* at_ = strstr(T, find); \
+        size_t pre_ = at_ ? (size_t)(at_ - T) : 0; \
+        g_checks++; \
+        if (!at_) { fprintf(stderr, "rigfile_test: FAIL at line %d: not in T\n", __LINE__); g_failures++; break; } \
+        memcpy(t, T, pre_); strcpy(t + pre_, repl); strcat(t, at_ + strlen(find)); \
+        g_err[0] = '\0'; \
+        if (yrig_parse(&g_q, t, strlen(t), NULL, g_err, sizeof g_err) != YRIG_ERR_FORMAT || !strstr(g_err, says)) { \
+            fprintf(stderr, "rigfile_test: FAIL at line %d: '%s' (want '%s')\n", __LINE__, g_err, says); g_failures++; } \
+    } while (0)
+    LSL_REFUSE("\"key\": \"lsl:Latencies:::\"", "\"key\": \"serial:0403:6001::\"", "roles.lat.key: an lsl key is lsl:");
+    LSL_REFUSE("\"key\": \"lsl:Latencies:::\"", "\"key\": \"lsl:o'brien\"", "roles.lat.key: an lsl key is lsl:");
+    LSL_REFUSE("\"family\": \"lsl\",\n      \"key\": \"lsl:Latencies", "\"family\": \"line\",\n      \"key\": \"lsl:Latencies",
+               "roles.lat.key: an lsl key needs the family lsl");
+    LSL_REFUSE("\"key\": \"lsl:Latencies:::\"", "\"key\": \"lsl:Latencies:::\", \"pulse_s\": 0.002", "roles.lat.pulse_s: an lsl role has no pulse");
+    LSL_REFUSE("\"buttons\": {", "\"baud\": 9600, \"buttons\": {", "roles.ref.options: an lsl role has no serial options");
+    LSL_REFUSE("\"buttons\": {", "\"latched\": false, \"buttons\": {", "roles.ref.options: an lsl role has no serial options");
+    LSL_REFUSE("\"family\": \"lsl\",\n      \"key\": \"lsl:Lat", "\"family\": \"lsll\",\n      \"key\": \"lsl:Lat",
+               "\"lsll\" is not a ysp/box.h family or lsl");
+#undef LSL_REFUSE
+    /* bind: family and key must agree; a new lsl binding drops serial options */
+    yrig_init(&g_q, "r");
+    CHECK_I(yrig_bind(&g_q, "ref", YRIG_FAMILY_LSL, "lsl:Data::"), YRIG_OK);
+    CHECK_S(yrig_find(&g_q, "ref")->family, "lsl");
+    CHECK_I(yrig_bind(&g_q, "ref", YRIG_FAMILY_LSL, "serial:0403:6001::"), YRIG_ERR_ARG);
+    CHECK_I(yrig_bind(&g_q, "ref", YBOX_LINE, "lsl:Data::"), YRIG_ERR_ARG);
+    CHECK_I(yrig_bind(&g_q, "ref", YRIG_FAMILY_LSL, "lsl:it's"), YRIG_ERR_ARG);
+    CHECK_I(yrig_bind(&g_q, "ref", 63, "lsl:Data::"), YRIG_ERR_ARG);
+    CHECK_I(yrig_bind(&g_q, "x", YBOX_XID, "serial:0403:6001:FT1:"), YRIG_OK);
+    yrig_find(&g_q, "x")->baud = 115200;
+    yrig_find(&g_q, "x")->pulse_ns = 2000000;
+    CHECK_I(yrig_bind(&g_q, "x", YRIG_FAMILY_LSL, "lsl:Markers"), YRIG_OK);
+    CHECK(yrig_find(&g_q, "x")->baud == 0 && yrig_find(&g_q, "x")->pulse_ns == -1);
+    n = yrig_write(&g_q, g_buf, sizeof g_buf);
+    CHECK(n > 0 && yrig_parse(&g_p, g_buf, n, NULL, g_err, sizeof g_err) == YRIG_OK);
+}
+
 int main(void) {
     printf("ysp_rig %s (ysp_json %s, ysp_device %s)\n", yrig_version(), yjs_version(), ydev_version());
     CHECK_S(yrig_version(), YRIG_VERSION_STRING);
@@ -919,6 +1016,7 @@ int main(void) {
     check_files();
     check_user_folder();
     check_binding();
+    check_lsl();
     check_damage();
     if (g_failures) {
         fprintf(stderr, "rigfile_test: %d of %d checks FAILED\n", g_failures, g_checks);

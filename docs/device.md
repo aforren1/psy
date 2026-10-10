@@ -1,7 +1,7 @@
 # ysp/device.h
 
-Status: v0.2.0, 2026-10-08; the rig profile, `ysp/rigfile.h` v0.1.0,
-2026-10-09. The headers' manuals are the reference (OUTPUTS, AT THE FLIP
+Status: v0.2.0, 2026-10-08; the rig profile, `ysp/rigfile.h` v0.2.0,
+2026-10-09 (v0.2.0 adds roles bound to LSL streams, docs/net.md). The headers' manuals are the reference (OUTPUTS, AT THE FLIP
 and ROLES of `ysp/device.h`; THE FILE, CHECKS AT LOAD and BINDING of
 `ysp/rigfile.h`). This page records the decisions the plan
 (`docs/devices_spec.md`, steps 2 and 3 of section 14.2, and 11.2) left
@@ -204,6 +204,7 @@ checked.
 | Writing | `yrig_save()` reads its own bytes back before it writes, sets `written`, makes the folder (0700 on POSIX), writes a temporary file and renames it | A profile that would not load is never written; a reader never sees half a file |
 | The folder | `yrt_user_dir(YRT_DIR_CONFIG, "rig")` only; refused means `YRIG_ERR_FOLDER`, no other folder | A folder another user can write may hold a planted profile (POSIX; on Windows `yrt_user_dir` reads no ACL) |
 | Limits | 1 MiB of text, 32 roles (`ydev_roles`), 16 buttons, nesting 8 | A profile is a few KB; bounds keep a hostile file cheap |
+| LSL streams (v0.2.0) | Family `lsl` (`YRIG_FAMILY_LSL`, 64: no `ysp/box.h` number), key `lsl:<name>:<type>:<source_id>:<hostname>` without a quote; no `baud`, `ftdi_latency_s`, `latched` or `pulse_s`; `yrig_desc()` and `yrig_start()` refuse it and name `ysp/net.h`; `yrig_source_role()` gives the tier rule by role name, and counts `lsl` as a device clock | A rig profile names a stream as it names a port. The file format does not change, so v0.1.0 profiles load unchanged. `ysp/rigfile.h` does not include `ysp/net.h`: the player passes the role's key to the inlet |
 
 ## Results
 
@@ -269,6 +270,15 @@ on WSL2.
 | Fuzzing (`tests/fuzz/json_fuzz.c`, target 2) | MSVC libFuzzer with ASan, all four targets (JSON in a fixed arena, in a heap arena with a depth from the input, the rig profile, the latency file and the number parsers): 14,150,487 inputs in 1501 s, no crash and no broken round trip; the 2166 corpus files replayed on WSL2 gcc under ASan and UBSan with no report |
 | Mutants (`tests/mutate/rigfile.toml`) | 24 of 24 caught on the first run |
 
+v0.2.0 (2026-10-09, MSVC 19.44 and MinGW-w64 gcc 16.1 on Windows 11, gcc
+11.4 on WSL2): 403 checks on MSVC and MinGW, 410 on WSL2: a profile with
+two `lsl` roles read and written back to the same bytes; refused for
+`ysp/device.h` with the header to use; tier 1 by role name only when the
+bounds checked; 7 refusals (a serial key, a quote, an `lsl:` key on a box
+family, `pulse_s`, `baud`, `latched`, a misspelled family); bindings that
+check family against key. Mutants: 28 of 28 caught (`rig-25` to `rig-28`
+new; the anchors of `rig-04`, `rig-13` and `rig-14` moved with the code).
+
 Costs (`examples/rigfile/bench.c`, Iris Xe laptop on AC, under the measurement lock (load 9 %), 21 rounds, MSVC 19.44 /O2 and MinGW-w64 gcc 16.1 -O2; a 3453-byte profile with 4 roles and every field): `yrig_parse()` of a 3453-byte profile with 4 roles, every field checked: 23.3 us (MSVC) and 17.7 us (MinGW), medians; the JSON parse alone 4.9 and 4.4 us; `yrig_write()` 7.0 and 6.6 us; `yrig_hash()` 43 us. docs/json.md has the table.
 
 ## What needs the user's hardware
@@ -281,13 +291,13 @@ Costs (`examples/rigfile/bench.c`, Iris Xe laptop on AC, under the measurement l
 | A Teensy, Pico or Arduino board alone | The board's outputs (`o`, `p`, `O`) and its own write-to-edge | Upload the new `firmware/ysp_line/`, wire pin 3 to pin 2, run `device_out_latency --out line:<board key>`. A classic Arduino (ATmega, USB-serial chip) works too, but its USB bridge adds its own latency |
 | A trigger box at a flip | The trigger channel with a real output | `device_trigger_flip --out lines:<adapter key>` (simulated display; a windowed program sets only `sd.backend`) |
 | A Cedrus box (XID) | The decoder on real bytes, `_c1` and `_d` answers, the 1 ms byte gap, brackets behind the FTDI latency timer | `photodiode_check --family xid --key serial:0403:6001:<serial>: --monitor 30`, pressing buttons |
-| The LabStreamer | An independent reference for the same flips | After LSL exists (step 4) |
+| The LabStreamer | An independent reference for the same flips | `net_labstreamer_flip` (docs/net.md, "LabStreamer hand test") |
 
 ## Not done
 
 - The `ysp/screen.h` match key for keyboard-mode boxes; HID, network and
-  vendor transports; LSL and EyeLink markers (`ydev_out_mark()` text goes
-  to the log only).
+  vendor transports; EyeLink markers. LSL markers are `ysp/net.h`'s
+  (`ynet_out_mark()`); `ydev_out_mark()` text still goes to the log only.
 - The parallel transport (`ydev_parallel_transport()`): compiled with
   MSVC, MinGW and gcc, never run (no LPT port here; devices_spec 16,
   decision 12).
