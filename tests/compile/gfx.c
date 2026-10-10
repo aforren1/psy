@@ -9,6 +9,14 @@
 #define YSP_GFX_IMPLEMENTATION
 #include "ysp/gfx.h"
 
+/* v0.11.1: the gfx starts in the screen's hook; ygfx_open() finishes it */
+typedef struct start_ctx { ygfx_gfx* g; ygfx_desc* d; int ok; } start_ctx;
+static void start_gfx(void* ctx, yscr_screen* s) {
+    start_ctx* c = (start_ctx*)ctx;
+    c->d->screen = s;
+    c->ok = ygfx_open_start(c->g, c->d);
+}
+
 int main(void) {
     yscr_screen s;
     yscr_desc d;
@@ -29,6 +37,8 @@ int main(void) {
     static const float zero[4] = { 0, 0, 0, 0 };
     static const uint8_t mask[4] = { 0, 255, 255, 0 };
     float sdf[16];
+    start_ctx sc;
+    char line[700];
     int i, n = 0, m = 0, k = 0;
     memset(&s, 0, sizeof s);
     memset(&d, 0, sizeof d);
@@ -42,9 +52,14 @@ int main(void) {
     memset(&xd, 0, sizeof xd);
     d.backend = YSCR_BACKEND_SIM;
     d.sim_period_ns = 2000000;
+    sc.g = &g; sc.d = &gd; sc.ok = 0;
+    d.on_context = start_gfx;
+    d.on_context_ctx = &sc;
     if (!yscr_open(&s, &d)) return 1;
-    gd.screen = &s;
+    if (!sc.ok || ygfx_is_open(&g)) return 18;
     if (!ygfx_open(&g, &gd)) return 2;
+    ygfx_describe(&g, line, sizeof line);   /* the null backend: no parallel compile */
+    if (!strstr(line, "open_start=serial(")) return 19;
     gab.sf = 1.0f / 32.0f;
     gab.sigma = 32.0f;
     gab.group = &grp;

@@ -1,6 +1,6 @@
 
 # ysp/gfx.h mutants: the v0.4 list (docs/gfx.md, "v0.4 mutations"), then
-# later lists by prefix (pr-: v0.11 prime).
+# later lists by prefix (pr-: v0.11 prime; os-: v0.11.1 open start).
 # The v0.3 list (mutate03.py) was lost; docs/gfx.md keeps its table.
 # YGFX_TEST_PARTS limits a run to the parts that can see the fault, and
 # "none" runs the CPU half alone. YGFX_TEST_DEVICES=hardware is the GPU
@@ -877,10 +877,8 @@ name = "the describe line's hits and misses swapped"
 test = "gfx"
 env = { YGFX_TEST_PARTS = "none", YGFX_TEST_DEVICES = "none" }
 why = "The describe line is how a user sees that the second run loaded its programs; swapped counts say the opposite."
-find = '''                    g->progs.loaded, g->progs.compiled, g->progs.rejected);
-}'''
-replace = '''                    g->progs.compiled, g->progs.loaded, g->progs.rejected);
-}'''
+find = "                    g->progs.loaded, g->progs.compiled, g->progs.rejected,"
+replace = "                    g->progs.compiled, g->progs.loaded, g->progs.rejected,"
 
 [[mutant]]
 id = "v10-07"
@@ -985,3 +983,87 @@ env = { YGFX_TEST_PARTS = "v0.11 prime", YGFX_TEST_DEVICES = "hardware" }
 why = "v0.11: the instanced programs had the largest first draws (14 to 27 ms with no program cache)."
 find = '    for (i = 0; i <= YGFX__N_BUILTIN; i++) if (g->inst_pipe[i]) { inst[n] = 1; ids[n++] = g->inst_pipe[i]; }'
 replace = ''
+
+# v0.11.1 (os-): ygfx_open_start() (OPEN START). The CPU half (fake backend
+# with and without parallel compile) and the GL part "v0.11.1 start".
+
+[[mutant]]
+id = "os-01"
+name = "the start submits nothing"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.11.1 start", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.11.1: the compiles would start only after yscr_open(), as before (2.0 s lost in a window, measured)."
+find = "    if (g->caps.parallel_compile) {"
+replace = "    if (0) {"
+
+[[mutant]]
+id = "os-02"
+name = "the start ignores the extension"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.11.1 start", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.11.1: without parallel compile, a submit in the hook compiles there and holds the settle loop."
+find = "    if (g->caps.parallel_compile) {"
+replace = "    if (1) {"
+
+[[mutant]]
+id = "os-03"
+name = "the GL backend always claims parallel compile"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.11.1 start", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.11.1: the fallback depends on GL_KHR_parallel_shader_compile in the extension string."
+find = '    caps->parallel_compile = ygfx__gl_ext(gl, "GL_KHR_parallel_shader_compile") != 0 && !ygfx__test_serial;'
+replace = "    caps->parallel_compile = true;"
+
+[[mutant]]
+id = "os-04"
+name = "the handle is open between start and finish"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.11.1 start", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.11.1: a draw or prime before ygfx_open() would use programs whose link status nobody asked for."
+find = "    g->open = 0;   /* nothing but ygfx_open() and ygfx_close() until it finishes */"
+replace = ""
+
+[[mutant]]
+id = "os-05"
+name = "the serial finish takes the caller's desc"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "none" }
+why = "v0.11.1: the start's desc is the one that counts; the finish's may be NULL or another."
+find = "        if (st == YGFX__START_SERIAL && !ygfx__open_b(g, &g->sdesc)) return false;"
+replace = "        if (st == YGFX__START_SERIAL && !ygfx__open_b(g, d ? d : &g->sdesc)) return false;"
+
+[[mutant]]
+id = "os-06"
+name = "the finish does not see a closed screen"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "none" }
+why = "v0.11.1: yscr_open() can fail after its hook; the finish would then call GL in a context that is gone."
+find = "        if (g->screen && (!yscr_is_open(g->screen) || yscr_gl_generation(g->screen) != g->generation)) {"
+replace = "        if (0) {"
+
+[[mutant]]
+id = "os-07"
+name = "close deletes in a context that is gone"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "none" }
+why = "v0.11.1: after a failed yscr_open() the GL objects went with the context; deleting their names is a call into a dead context."
+find = "        gone = g->screen && (!yscr_is_open(g->screen) || yscr_gl_generation(g->screen) != g->generation);"
+replace = "        gone = 0;"
+
+[[mutant]]
+id = "os-08"
+name = "close skips a started handle"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "none" }
+why = "v0.11.1: a handle closed between start and finish still owns its buffers, textures and programs."
+find = "    if ((g->open || g->started) && g->be) {"
+replace = "    if (g->open && g->be) {"
+
+[[mutant]]
+id = "os-09"
+name = "the describe line hides the fallback"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "none" }
+why = "v0.11.1: a data file's header must say whether the compiles overlapped settling."
+find = '''                    : g->start_mode == YGFX__START_SERIAL ? ", open_start=serial(no GL_KHR_parallel_shader_compile)" : "");'''
+replace = '''                    : "");'''

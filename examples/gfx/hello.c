@@ -26,6 +26,17 @@
 static yscr_screen scr;
 static ygfx_gfx gfx;
 
+/* yscr_open() calls this once its GL context exists, before it settles
+ * the display (0.5 to 2.5 s). The gfx submits its programs and returns; the
+ * driver compiles them on its own threads while the display settles, and
+ * ygfx_open() waits for the rest (ysp/screen.h CONTEXT HOOK, ysp/gfx.h
+ * OPEN START). A failure here is reported by ygfx_open(). */
+static void start_gfx(void* ctx, yscr_screen* s) {
+    ygfx_desc* gd = (ygfx_desc*)ctx;
+    gd->screen = s;
+    ygfx_open_start(&gfx, gd);
+}
+
 int main(int argc, char** argv) {
     yscr_desc sd;
     ygfx_desc gd;
@@ -55,15 +66,18 @@ int main(int argc, char** argv) {
         cache = ygfx_file_cache_init(&pcache, cache_dir);
 
     /* In C99 these are compound literals with designated initializers:
-     *   yscr_open(&scr, &(yscr_desc){ .windowed = true });
-     *   ygfx_open(&gfx, &(ygfx_desc){ .screen = &scr, .background = { 0.5f, 0.5f, 0.5f } });
+     *   ygfx_desc gd = { .background = { 0.5f, 0.5f, 0.5f } };
+     *   yscr_open(&scr, &(yscr_desc){ .windowed = true, .on_context = start_gfx, .on_context_ctx = &gd });
+     *   ygfx_open(&gfx, &gd);
      *   ygfx_gabor(&(ygfx_gabor_desc){ .sf = 1 / 32.0f, .sigma = 32, .contrast = 0.5f });
      * Written out field by field here so the file also builds as C++17. */
-    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_hello: %s\n", yscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
-    gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.5f;
     gd.cache = cache;
+    sd.on_context = start_gfx;
+    sd.on_context_ctx = &gd;
+    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_hello: %s\n", yscr_error(&scr)); ygfx_close(&gfx); return 1; }
+    gd.screen = &scr;
     if (!ygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_hello: %s\n", ygfx_error(&gfx)); return 1; }
     memset(&gab, 0, sizeof gab);
     gab.sf = 1 / 32.0f;

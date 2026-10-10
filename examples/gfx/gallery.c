@@ -89,6 +89,17 @@ static void take_foreground(SDL_Window* w) {
 static yscr_screen scr;
 static ygfx_gfx gfx;
 static ycol_cal cal;
+
+/* yscr_open() calls this once its GL context exists, before it settles
+ * the display (0.5 to 2.5 s). The gfx submits its programs and returns; the
+ * driver compiles them on its own threads while the display settles, and
+ * ygfx_open() waits for the rest (ysp/screen.h CONTEXT HOOK, ysp/gfx.h
+ * OPEN START). A failure here is reported by ygfx_open(). */
+static void start_gfx(void* ctx, yscr_screen* s) {
+    ygfx_desc* gd = (ygfx_desc*)ctx;
+    gd->screen = s;
+    ygfx_open_start(&gfx, gd);
+}
 static ytl_timeline tl;
 static ytl_event tl_storage[4];   /* tracks and tweens only: no events */
 
@@ -2559,14 +2570,16 @@ int main(int argc, char** argv) {
         SendInput(1, &in0, sizeof in0);
     }
 #endif
-    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_gallery: %s\n", yscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
-    gd.screen = &scr;
     rgb(gd.background, BG);
     gd.cal = &cal;
     gd.width = WIN_W; gd.height = WIN_H;   /* the simulated display's size */
     gd.cache = cache;                      /* NULL: compile every program */
     cache_on = cache != NULL;
+    sd.on_context = start_gfx;
+    sd.on_context_ctx = &gd;
+    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_gallery: %s\n", yscr_error(&scr)); ygfx_close(&gfx); return 1; }
+    gd.screen = &scr;
     if (!ygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_gallery: %s\n", ygfx_error(&gfx)); yscr_close(&scr); return 1; }
     yscr_describe(&scr, line, sizeof line);
     printf("%s\n", line);

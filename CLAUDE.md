@@ -18,6 +18,9 @@ anything; some options were measured and reversed, and the specs say why.
 
 - No commits, pushes, stashes, resets or other git state changes unless
   the user says so. Read-only git is fine.
+  Standing exception (2026-10-10): agents may create git worktrees and
+  local branches and commit to those branches. Never commit to, merge
+  into or rebase `main`, and never push, without the user's say-so.
 - Be terse and critical. US English. No em dashes, no emojis.
 - Docs follow ASD-STE100 and the Google developer style guide, with
   Diataxis structure. Code comments say why, not how.

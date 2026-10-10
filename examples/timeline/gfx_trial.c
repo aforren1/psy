@@ -45,6 +45,17 @@ static const ygfx_bind binds[] = {
     { .stim = &grating, .param = YGFX_P_CONTRAST, .channel = CONTRAST   },
 };
 
+/* yscr_open() calls this once its GL context exists, before it settles
+ * the display (0.5 to 2.5 s). The gfx submits its programs and returns; the
+ * driver compiles them on its own threads while the display settles, and
+ * ygfx_open() waits for the rest (ysp/screen.h CONTEXT HOOK, ysp/gfx.h
+ * OPEN START). A failure here is reported by ygfx_open(). */
+static void start_gfx(void* ctx, yscr_screen* s) {
+    ygfx_desc* gd = (ygfx_desc*)ctx;
+    gd->screen = s;
+    ygfx_open_start(&gfx, gd);
+}
+
 static ytl_event ev(int64_t t, int kind, int target, int code) {
     ytl_event e;
     memset(&e, 0, sizeof e);
@@ -91,11 +102,13 @@ int main(int argc, char** argv) {
     ytl_add_n(&tl, e, 5);
     ytl_set_keys(&tl, CONTRAST, TRIAL, ramp, 4);
 
-    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_trial: %s\n", yscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
-    gd.screen = &scr;
     gd.background[0] = gd.background[1] = gd.background[2] = 0.5f;
     gd.cache = cache;
+    sd.on_context = start_gfx;
+    sd.on_context_ctx = &gd;
+    if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_trial: %s\n", yscr_error(&scr)); ygfx_close(&gfx); return 1; }
+    gd.screen = &scr;
     if (!ygfx_open(&gfx, &gd)) { fprintf(stderr, "gfx_trial: %s\n", ygfx_error(&gfx)); return 1; }
     ygfx_describe(&gfx, line, sizeof line);
     printf("%s\n", line);

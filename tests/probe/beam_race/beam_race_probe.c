@@ -11,7 +11,8 @@
  *                   [--drift S] [--static-check] [--guard ROWS]
  *                   [--no-flicker] [--yes] [--buffers N] [--monitor N]
  *                   [--draw-lead US] [--lead US] [--cost-slices N] [--no-flush]
- *                   [--vary-clear] [--patch] [--exclusive]
+ *                   [--vary-clear] [--patch] [--exclusive] [--seam-lines N]
+ *                   [--sweep-lead A:B:STEP] [--ruler]
  *
  *   --out DIR       results folder (default beam_<date>_<time>)
  *   --only LIST     sections, comma-separated: path, recipes, raster, psr,
@@ -23,7 +24,17 @@
  *                   a wrong color elsewhere: a tear line that lands where
  *                   planned is invisible, a miss shows as a stripe
  *   --guard ROWS    rows of the picture drawn beyond each slice edge in
- *                   --static-check (default 8): the misses it hides
+ *                   --static-check (default 8): the misses it hides. The
+ *                   guard wraps: the last slice also draws rows 0..ROWS and
+ *                   slice 0 the last ROWS rows, for the seam between refreshes
+ *   --seam-lines N  slice 0 aims N lines before the first active line, inside
+ *                   the vertical blanking (default 0: at line 0)
+ *   --sweep-lead A:B:STEP  tear section: one pass per lead from A to B us in
+ *                   steps of STEP, --seconds each, the lead shown large on
+ *                   screen; no calibration pass
+ *   --ruler         ticks at the right edge every 8 rows from 64 rows above to
+ *                   128 below each slice's target row (long tick at the target,
+ *                   medium every 32 rows), the same in every frame
  *   --no-flicker    low-contrast colors only (photosensitivity)
  *   --yes           skip the 5-second warning countdown
  *   --buffers N     swapchain buffers (default 2)
@@ -298,7 +309,8 @@ typedef struct {
     int slices[8]; int n_slices;
     double seconds, drift_s;
     int static_check, guard, no_flicker, yes, buffers, monitor, cost_slices, exclusive, flush, vary_clear, patch;
-    double draw_lead_us, lead_us;
+    int seam_lines, ruler, sweep;
+    double draw_lead_us, lead_us, sweep_a, sweep_b, sweep_step;
 } options;
 static options O;
 
@@ -1206,17 +1218,73 @@ static void band_color(int k, int n, float c[4]) {
 /* the photodiode patch rows: a tenth, half and nine tenths down */
 static int patch_row(int j) { return j == 0 ? g_H / 10 : j == 1 ? g_H / 2 : g_H * 9 / 10; }
 
+/* The overlay: ruler ticks and the swept lead's digits, one ClearView with
+ * a rect list. It is the same in every frame of a pass, so a tear never
+ * cuts it, and it is drawn last so it shows over the wrong color too. */
+#define OV_CAP 1024
+static D3D11_RECT g_ov[OV_CAP];
+static UINT g_ov_n;
+static void ov_add(int x0, int y0, int x1, int y1) {
+    D3D11_RECT r;
+    r.left = x0 < 0 ? 0 : x0; r.right = x1 > g_W ? g_W : x1; r.top = y0 < 0 ? 0 : y0; r.bottom = y1 > g_H ? g_H : y1;
+    if (r.right > r.left && r.bottom > r.top && g_ov_n < OV_CAP) g_ov[g_ov_n++] = r;
+}
+/* seven segments a..g in bits 0..6 */
+static void ov_digit(int x, int y, int w, int h, int t, unsigned m) {
+    if (m & 0x01) ov_add(x, y, x + w, y + t);
+    if (m & 0x02) ov_add(x + w - t, y, x + w, y + h / 2);
+    if (m & 0x04) ov_add(x + w - t, y + h / 2, x + w, y + h);
+    if (m & 0x08) ov_add(x, y + h - t, x + w, y + h);
+    if (m & 0x10) ov_add(x, y + h / 2, x + t, y + h);
+    if (m & 0x20) ov_add(x, y, x + t, y + h / 2);
+    if (m & 0x40) ov_add(x, y + h / 2 - t / 2, x + w, y + h / 2 + t / 2);
+}
+static int slice_target(int k, int n) { return k == 0 ? -O.seam_lines : k * g_H / n; }
+static void overlay_build(int n, double lead_ns) {
+    static const unsigned seg[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+    int k, off;
+    g_ov_n = 0;
+    if (O.ruler) {
+        for (k = 0; k < n; k++) {
+            int y = k * g_H / n;   /* slice 0: row 0, also with --seam-lines (the first row it must cover) */
+            for (off = -64; off <= 128; off += 8) {
+                int len = off == 0 ? 96 : off % 32 == 0 ? 48 : 20;
+                if (y + off < 0) continue;
+                ov_add(g_W - len, y + off, g_W, y + off + 2);
+            }
+        }
+    }
+    if (O.sweep) {   /* the lead in us, large: read by eye during a sweep */
+        char buf[16]; int i, h = g_H / 8, w = h / 2, t = h / 10, x, y = g_H * 3 / 8 - h / 2;
+        snprintf(buf, sizeof buf, "%d", (int)floor(lead_ns * 1e-3 + 0.5));
+        x = g_W / 3;
+        for (i = 0; buf[i]; i++, x += w + h / 4)
+            ov_digit(x, y, w, h, t, buf[i] == '-' ? 0x40u : seg[(buf[i] - '0') % 10]);
+    }
+}
+
 /* One frame for slice k of n: in --static-check, the picture in the
  * slice's rows (plus the guard) and a wrong color elsewhere. */
+static void paint_rows(int draw, const float c[4], const float bar[4], float phase, int ya, int yb) {
+    int x;
+    if (yb <= ya) return;
+    /* the slice's rows only: a ClearView of the whole surface flipped at the
+     * vblank like a full clear to a new color (recipes section) */
+    if (draw == DRAW_BANDS && !O.vary_clear) clear_rows(c, ya, yb);
+    else if (draw == DRAW_SLICE_SHADER) draw_shader(c, phase, ya, yb, 0);
+    if (O.static_check && !g_no_bars)   /* vertical bars: structure a stripe would cut */
+        for (x = g_W / 16; x < g_W; x += g_W / 8) clear_rect(bar, x, ya, x + g_W / 64, yb);
+}
 static void draw_slice(int draw, int k, int n, int y0, int y1, int cur_x, int cur_y, float phase) {
-    float c[4], bar[4], cur[4];   /* the wrong color of --static-check is k_base */
-    int g = O.static_check ? O.guard : 0, x;
+    float c[4], bar[4], cur[4], ov[4];   /* the wrong color of --static-check is k_base */
+    int g = O.static_check ? O.guard : 0;
+    float ph = O.static_check ? 0.0f : phase;
     if (O.no_flicker) {
-        bar[0] = bar[1] = bar[2] = 0.42f; cur[0] = cur[1] = cur[2] = 0.50f;
+        bar[0] = bar[1] = bar[2] = 0.42f; cur[0] = cur[1] = cur[2] = 0.50f; ov[0] = ov[1] = ov[2] = 0.55f;
     } else {
-        bar[0] = bar[1] = bar[2] = 0.85f; cur[0] = cur[1] = cur[2] = 1;
+        bar[0] = bar[1] = bar[2] = 0.85f; cur[0] = cur[1] = cur[2] = 1; ov[0] = ov[1] = ov[2] = 1;
     }
-    bar[3] = cur[3] = 1;
+    bar[3] = cur[3] = ov[3] = 1;
     if (O.static_check) { c[0] = c[1] = c[2] = 0.35f; c[3] = 1; }
     else band_color(k, n, c);
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_rtv, NULL);
@@ -1226,23 +1294,17 @@ static void draw_slice(int draw, int k, int n, int y0, int y1, int cur_x, int cu
      * section); --vary-clear clears to the slice's color to show it. */
     if (O.vary_clear) clear_all(c);
     else clear_all(k_base);
-    switch (draw) {
-    case DRAW_BANDS:
-        /* the slice's rows only: a ClearView of the whole surface flipped at
-         * the vblank like a full clear to a new color (recipes section) */
-        if (!O.vary_clear) clear_rows(c, y0 - g, y1 + g);
-        break;
-    case DRAW_SLICE_SHADER:
-        draw_shader(c, O.static_check ? 0.0f : phase, y0 - g, y1 + g, 0);
-        break;
-    default:
-        draw_shader(c, O.static_check ? 0.0f : phase, 0, g_H, 1);
-        break;
-    }
-    if (O.static_check && !g_no_bars) {   /* vertical bars: structure a stripe would cut */
-        for (x = g_W / 16; x < g_W; x += g_W / 8) clear_rect(bar, x, y0 - g, x + g_W / 64, y1 + g);
+    if (draw == DRAW_FULL_SHADER) draw_shader(c, ph, 0, g_H, 1);
+    paint_rows(draw, c, bar, ph, y0 - g, y1 + g);
+    /* The guard wraps between refreshes: a late slice-0 tear shows the last
+     * slice's frame in the top rows, an early one shows slice 0's frame in
+     * the bottom rows of the refresh before. */
+    if (g > 0 && n > 1) {
+        if (k == n - 1) paint_rows(draw, c, bar, ph, 0, g);
+        if (k == 0) paint_rows(draw, c, bar, ph, g_H - g, g_H);
     }
     if (cur_y >= y0 - g && cur_y < y1 + g) clear_rect(cur, cur_x - 8, cur_y - 8, cur_x + 8, cur_y + 8);
+    if (g_ov_n) ID3D11DeviceContext1_ClearView(g_ctx1, (ID3D11View*)g_rtv, ov, g_ov, g_ov_n);
     if (O.patch) {   /* photodiode patches: the slice that covers a patch row draws it, light on even refreshes */
         int j; float pc[4];
         pc[0] = pc[1] = pc[2] = (g_refresh & 1) ? (O.no_flicker ? 0.35f : 0.0f) : (O.no_flicker ? 0.45f : 1.0f); pc[3] = 1;
@@ -1268,6 +1330,7 @@ static void run_pass(pass* ps, int N, int draw, double lead_ns, double sec) {
     ps->rec = (prec*)calloc(ps->cap, sizeof *ps->rec);
     if (!ps->rec) return;
     for (i = 0; i < QRING; i++) g_q[i].idx = -1;
+    overlay_build(N, lead_ns);
     g_cal0 = gpu_calibrate(40);
     now = (double)((int64_t)yrt_now_ns() - g_tbase);
     Tn = m_entry_before(&g_m, now) + 2 * g_m.P;
@@ -1275,7 +1338,7 @@ static void run_pass(pass* ps, int N, int draw, double lead_ns, double sec) {
         /* behind by a refresh or more (a Present that waited for a vblank):
          * plan the next refresh that can still be met, and count the skip */
         now = (double)((int64_t)yrt_now_ns() - g_tbase);
-        while (m_time(&g_m, Tn, 0.0) - lead_ns - dl < now) { Tn += g_m.P; ps->skipped++; }
+        while (m_time(&g_m, Tn, (double)slice_target(0, N)) - lead_ns - dl < now) { Tn += g_m.P; ps->skipped++; }
         for (k = 0; k < N; k++) {
             prec* p = &ps->rec[ps->n];
             int y0 = k * g_H / N, y1 = (k + 1) * g_H / N, slot = (int)(qi % QRING);
@@ -1283,9 +1346,9 @@ static void run_pass(pass* ps, int N, int draw, double lead_ns, double sec) {
             DXGI_FRAME_STATISTICS_MEDIA st;
             POINT cp;
             samp sr;
-            p->r = r; p->k = k; p->target = y0;
+            p->r = r; p->k = k; p->target = slice_target(k, N);   /* slice 0 may aim inside the vblank: a negative line */
             g_refresh = r;
-            p->t_line = m_time(&g_m, Tn, (double)y0);
+            p->t_line = m_time(&g_m, Tn, (double)p->target);
             p->t_target = p->t_line - lead_ns;
             if (q->idx >= 0) {   /* the slot's previous timestamps, long since done */
                 D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj; UINT64 a, b;
@@ -1453,6 +1516,23 @@ static void pass_report(const pass* ps, const char* label) {
     if (s.gpu.n)
         say("    GPU per slice, on screen, p50 %.1f p99 %.1f max %.1f us; GPU done before the raster reached the slice's first row: margin p01 %.0f p50 %.0f us\n",
             s.gpu.p50, s.gpu.p99, s.gpu.max, s.margin.p01, s.margin.p50);
+    if (ps->N > 1) {   /* the seam between refreshes apart from the other slice edges */
+        double* v = (double*)malloc((ps->n + 1) * sizeof *v);
+        size_t i, n0 = 0, n1 = ps->n;
+        if (v) {
+            dist d0, d1;
+            for (i = 0; i < ps->n; i++) {
+                const prec* p = &ps->rec[i];
+                if (p->r < 2) continue;
+                if (p->k == 0) v[n0++] = miss_lines(p);
+                else v[--n1] = miss_lines(p);
+            }
+            d0 = dist_of(v, n0); d1 = dist_of(v + n1, ps->n - n1);
+            say("    slice 0 (target line %d): miss p50 %+.1f p99 %+.1f lines; other slices p50 %+.1f p99 %+.1f lines\n",
+                slice_target(0, ps->N), d0.p50, d0.p99, d1.p50, d1.p99);
+            free(v);
+        }
+    }
 }
 
 /* latency, software terms: input read to the raster reaching each row, for
@@ -1486,12 +1566,56 @@ static dist beam_latency(const pass* ps) {
 
 static double g_lead_cal[16];
 
+/* One pass per lead, for an eye test: the lead is on screen, and each
+ * step's start goes to the console with the run time and the wall clock,
+ * so a report such as "the stripes went at 800" maps to a pass. */
+static void sweep_lead(int N) {
+    enum { MAXSTEP = 200 };
+    static double lead_us[MAXSTEP], t0_s[MAXSTEP], p50[MAXSTEP], p99[MAXSTEP], shown[MAXSTEP];
+    static int late[MAXSTEP];
+    int n = (int)floor((O.sweep_b - O.sweep_a) / O.sweep_step + 1e-9) + 1, s;
+    if (n > MAXSTEP) n = MAXSTEP;
+    say("sweep: N=%d, lead %.0f to %.0f us in steps of %.0f us, %d steps of %.0f s (plus 1 s of model refit between steps, a plain gray screen)\n",
+        N, O.sweep_a, O.sweep_b, O.sweep_step, n, O.seconds);
+    for (s = 0; s < n && !g_abort; s++) {
+        pass p; char nm[96], lb[64]; double shift; SYSTEMTIME lt; pass_stats st;
+        memset(&p, 0, sizeof p);
+        lead_us[s] = O.sweep_a + s * O.sweep_step;
+        shift = model_reanchor();   /* a 1-s fit drifts by about a line in 5 s, not in 30 */
+        GetLocalTime(&lt);
+        t0_s[s] = (double)((int64_t)yrt_now_ns() - g_tbase) * 1e-9;
+        say("  step %d of %d: lead %.0f us, from %.1f s (local %02u:%02u:%02u), model re-anchored %+.2f us\n", s + 1, n,
+            lead_us[s], t0_s[s], (unsigned)lt.wHour, (unsigned)lt.wMinute, (unsigned)lt.wSecond, shift);
+        run_pass(&p, N, DRAW_BANDS, lead_us[s] * 1e3, O.seconds);
+        snprintf(lb, sizeof lb, "lead %.0f us", lead_us[s]);
+        pass_report(&p, lb);
+        snprintf(nm, sizeof nm, "tear_N%d_sweep%02d_lead%.0fus.csv", N, s, lead_us[s]);
+        pass_csv(&p, nm);
+        st = pass_summary(&p);
+        p50[s] = st.miss.p50; p99[s] = st.miss.p99; shown[s] = st.shown_per_refresh; late[s] = p.late;
+        free(p.rec);
+    }
+    g_ov_n = 0;
+    say("sweep table, N=%d (scanline after Present minus target; the real tear is later, see the doc):\n", N);
+    say("  step  lead_us  start_s  scan_p50  scan_p99  shown/refresh  late\n");
+    for (n = s, s = 0; s < n; s++)
+        say("  %4d  %7.0f  %7.1f  %+8.1f  %+8.1f  %13.2f  %4d\n", s + 1, lead_us[s], t0_s[s], p50[s], p99[s], shown[s], late[s]);
+}
+
 static void section_tear(void) {
     int i;
     say("\n== tear: present so the tear line lands on chosen scanlines ==\n");
-    say("draw lead %.0f us (input read and draw before the present); %s; guard %d rows\n",
-        O.draw_lead_us, O.static_check ? "static check" : "bands", O.guard);
+    say("draw lead %.0f us (input read and draw before the present); %s; guard %d rows (wraps between refreshes); slice 0 target line %d%s; ruler %s\n",
+        O.draw_lead_us, O.static_check ? "static check" : "bands", O.guard, -O.seam_lines,
+        O.seam_lines > 0 ? " (inside the vblank)" : "", O.ruler ? "on" : "off");
+    if (g_m.ok && O.seam_lines > (int)floor(-g_m.a))
+        say("  note: --seam-lines %d is more than the %.1f blanking lines; slice 0 aims into the last rows of the refresh before\n",
+            O.seam_lines, -g_m.a);
     if (!g_tearing) say("  tearing is not supported: presents flip at vblanks, so the tear placement below cannot work\n");
+    if (O.sweep) {
+        for (i = 0; i < O.n_slices && !g_abort; i++) sweep_lead(O.slices[i]);
+        return;
+    }
     for (i = 0; i < O.n_slices && !g_abort; i++) {
         pass p1, p2; char nm[64]; double shift; pass_stats s1;
         int N = O.slices[i];
@@ -1694,12 +1818,23 @@ static int parse_args(int argc, char** argv) {
         else if (!strcmp(a, "--no-flush")) O.flush = 0;
         else if (!strcmp(a, "--vary-clear")) O.vary_clear = 1;
         else if (!strcmp(a, "--patch")) O.patch = 1;
+        else if (!strcmp(a, "--ruler")) O.ruler = 1;
+        else if (!strcmp(a, "--seam-lines") && v) { O.seam_lines = atoi(v); i++; }
+        else if (!strcmp(a, "--sweep-lead") && v) {
+            if (sscanf(v, "%lf:%lf:%lf", &O.sweep_a, &O.sweep_b, &O.sweep_step) != 3 || O.sweep_step == 0) {
+                fprintf(stderr, "--sweep-lead wants A:B:STEP in us, STEP not 0 (for example 0:1500:100)\n"); return 0;
+            }
+            if ((O.sweep_b - O.sweep_a) * O.sweep_step < 0) O.sweep_step = -O.sweep_step;
+            O.sweep = 1; i++;
+        }
         else { fprintf(stderr, "unknown or incomplete option %s (see the top of beam_race_probe.c)\n", a); return 0; }
     }
     if (O.buffers < 2) O.buffers = 2;
     if (O.buffers > 8) O.buffers = 8;
     if (O.drift_s < 1) O.drift_s = 1;
     if (O.seconds < 1) O.seconds = 1;
+    if (O.guard < 0) O.guard = 0;
+    if (O.seam_lines < 0) O.seam_lines = 0;
     return 1;
 }
 
@@ -1735,8 +1870,11 @@ int main(int argc, char** argv) {
         pw.BatteryLifePercent == 255 ? -1 : (int)pw.BatteryLifePercent);
     say("options: slices");
     { int i; for (i = 0; i < O.n_slices; i++) say(" %d", O.slices[i]); }
-    say(", %.0f s per pass, drift %.0f s, %s%s, buffers %d\n", O.seconds, O.drift_s,
-        O.static_check ? "static check" : "bands", O.no_flicker ? ", no flicker" : "", O.buffers);
+    say(", %.0f s per pass, drift %.0f s, %s%s, buffers %d, guard %d, seam lines %d%s\n", O.seconds, O.drift_s,
+        O.static_check ? "static check" : "bands", O.no_flicker ? ", no flicker" : "", O.buffers, O.guard, O.seam_lines,
+        O.ruler ? ", ruler" : "");
+    if (O.sweep) say("lead sweep: %.0f to %.0f us in steps of %.0f us\n", O.sweep_a, O.sweep_b, O.sweep_step);
+    else if (O.lead_us >= 0) say("lead: %.1f us (no calibration pass)\n", O.lead_us);
     g_st_th = CreateThread(NULL, 0, st_main, NULL, 0, NULL);
     yrt_timer_resolution_begin();
     pol = yrt_thread_elevate(NULL);

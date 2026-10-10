@@ -3434,6 +3434,109 @@ static ygfx_pipe user_pipe(ygfx_gfx* g, const char* body) {
     return ygfx_pipeline(g, &d);
 }
 
+/* v0.11.1 (OPEN START): ygfx_open_start() submits every program on a
+ * backend that compiles in parallel and returns; ygfx_open() finishes it.
+ * On a backend that does not, the start submits nothing and ygfx_open()
+ * does it all. */
+static int g_fb_parallel, g_fb_makes, g_fb_finishes, g_fb_closes;
+static void fb_close(void* c) {
+    g_fb_closes++;
+    ygfx__null_backend.close(c);
+}
+static int fb_open_p(void* c, const ygfx_backend_open* in, ygfx_backend_caps* caps, char* err, size_t cap) {
+    int rc = fb_open(c, in, caps, err, cap);
+    caps->parallel_compile = g_fb_parallel != 0;
+    return rc;
+}
+static int fb_make_p(void* c, const ygfx_pipeline_src* d, uint32_t* id, char* err, size_t cap) {
+    g_fb_makes++;
+    return fb_make(c, d, id, err, cap);
+}
+static int fb_finish(void* c, uint32_t id, char* err, size_t cap) {
+    (void)c; (void)id; (void)err; (void)cap;
+    g_fb_finishes++;
+    return YGFX_OK;
+}
+
+static void test_v11_start_cpu(void) {
+    static ygfx_gfx g;
+    static yscr_screen scr;
+    yscr_desc d;
+    ygfx_desc gd;
+    char line[700];
+    g_fb = ygfx__null_backend;
+    g_fb.open = fb_open_p; g_fb.pipeline_make = fb_make_p; g_fb.pipeline_binary = fb_binary;
+    g_fb.pipeline_finish = fb_finish; g_fb.close = fb_close;
+    memset(&d, 0, sizeof d);
+    d.backend = YSCR_BACKEND_SIM;
+    CHECK(yscr_open(&scr, &d));
+    memset(&gd, 0, sizeof gd);
+    gd.screen = &scr; gd.width = 64; gd.height = 64;
+    gd.backend = &g_fb; gd.backend_ctx = &g_fb_ctx;
+    /* parallel: every program submitted at the start, finished at open */
+    g_fb_parallel = 1; g_fb_makes = g_fb_finishes = 0;
+    CHECK(ygfx_open_start(&g, &gd));
+    CHECK(!ygfx_is_open(&g));
+    CHECK(g_fb_makes == FB_PROGS && g_fb_finishes == 0);
+    CHECK(ygfx_prime(&g) == YGFX_ERR_CLOSED);       /* nothing else until open */
+    CHECK(!ygfx_open_start(&g, &gd));                /* already started */
+    CHECK(strstr(ygfx_error(&g), "already open") != NULL);
+    gd.background[0] = 2.0f;                         /* the start's desc counts */
+    CHECK(ygfx_open(&g, &gd));
+    gd.background[0] = 0.0f;
+    CHECK(ygfx_is_open(&g));
+    CHECK(g_fb_makes == FB_PROGS && g_fb_finishes == FB_PROGS);
+    ygfx_describe(&g, line, sizeof line);
+    CHECK(strstr(line, ", open_start=parallel") != NULL);
+    ygfx_close(&g);
+    /* serial: nothing at the start */
+    g_fb_parallel = 0; g_fb_makes = g_fb_finishes = 0;
+    CHECK(ygfx_open_start(&g, &gd));
+    CHECK(!ygfx_is_open(&g));
+    CHECK(g_fb_makes == 0 && g_fb_finishes == 0);
+    gd.background[0] = 0.25f;                        /* made from the start's desc */
+    CHECK(ygfx_open(&g, &gd));
+    gd.background[0] = 0.0f;
+    CHECK(g.bg[0] == 0.0f);
+    CHECK(g_fb_makes == FB_PROGS && g_fb_finishes == FB_PROGS);
+    ygfx_describe(&g, line, sizeof line);
+    CHECK(strstr(line, ", open_start=serial(no GL_KHR_parallel_shader_compile)") != NULL);
+    ygfx_close(&g);
+    /* the blocking open: no token */
+    g_fb_parallel = 1;
+    CHECK(ygfx_open(&g, &gd));
+    ygfx_describe(&g, line, sizeof line);
+    CHECK(strstr(line, "open_start") == NULL);
+    ygfx_close(&g);
+    /* a start refused (a bad desc) leaves a closed handle */
+    gd.background[0] = 2.0f;
+    CHECK(!ygfx_open_start(&g, &gd));
+    gd.background[0] = 0.0f;
+    CHECK(ygfx_open(&g, &gd));
+    ygfx_close(&g);
+    /* a started handle closed: its objects are deleted */
+    g_fb_closes = 0;
+    CHECK(ygfx_open_start(&g, &gd));
+    ygfx_close(&g);
+    CHECK(g_fb_closes == 1);
+    /* the screen closed after the start (yscr_open() failed after its
+     * hook): open names it, and nothing is deleted in a context that is
+     * gone */
+    CHECK(ygfx_open_start(&g, &gd));
+    yscr_close(&scr);
+    g_fb_finishes = g_fb_closes = 0;
+    CHECK(!ygfx_open(&g, NULL));
+    CHECK(strstr(ygfx_error(&g), "the screen closed after ygfx_open_start()") != NULL);
+    CHECK(g_fb_finishes == 0 && g_fb_closes == 0);
+    ygfx_close(&g);
+    CHECK(yscr_open(&scr, &d));
+    CHECK(ygfx_open_start(&g, &gd));
+    yscr_close(&scr);
+    ygfx_close(&g);
+    CHECK(g_fb_closes == 0 && !ygfx_is_open(&g));
+    g_fb_parallel = 0;
+}
+
 /* v0.10.1: the per-user folder from the environment, and none (never a
  * shared one) when the environment gives no private one. The process's
  * environment is changed and put back. */
@@ -5306,6 +5409,7 @@ static void s10_report(void);
 static void gl_v10_simplex(stats* st);
 static void gl_v10_user_tex(stats* st);
 static void gl_v11_prime(stats* st);
+static void gl_v11_start(stats* st);
 static void s11_report(void);
 static void test_v10_simplex_cpu(void);
 typedef struct stats9 {
@@ -5507,13 +5611,13 @@ static int gl_suite(const char* name, ygfx_hl_device dev) {
                                                  gl_alpha_passes, gl_edge_truth, gl_v03_kinds, gl_v03_truth, gl_v03_fx, gl_v03_paint, gl_v03_msdf,
                                                  gl_v04_cache, gl_v04_fixes, gl_v04_video, gl_v04_inst, gl_v04_order, gl_v05_color,
                                                  gl_v06_text, gl_v06_blur, gl_v05_kinds, gl_v08, gl_v10_simplex, gl_v10_user_tex,
-                                                 gl_v11_prime };
+                                                 gl_v11_prime, gl_v11_start };
         static const char* const names[] = { "shapes", "gratings", "gabors", "dots", "images", "noise",
                                              "output", "user+batch+rows", "strokes", "masks", "sprites", "tint",
                                              "groups", "targets", "alpha+passes", "edge truth", "v0.3 kinds", "v0.3 truth", "v0.3 fx", "v0.3 paint", "v0.3 msdf",
                                              "v0.4 cache", "v0.4 fixes", "v0.4 video", "v0.4 inst", "v0.4 order", "v0.5 color",
                                              "v0.6 text", "v0.6 blur", "vspec", "v0.8", "v0.10 simplex", "v0.10 user tex",
-                                             "v0.11 prime" };
+                                             "v0.11 prime", "v0.11.1 start" };
         int k;
         memset(&S2, 0, sizeof S2);
         memset(&S3, 0, sizeof S3);
@@ -7686,6 +7790,93 @@ static void gl_v11_prime(stats* st) {
     ygfx_close(&R->g);
 }
 
+/* v0.11.1 (OPEN START): the start and the finish draw what a blocking open
+ * draws, bit for bit, with the parallel compile and without; a screen
+ * opened with desc.on_context ends its open with the default framebuffer
+ * bound, whatever the hook bound. */
+typedef struct v111_hook { ygfx_desc d; int ok, calls; } v111_hook;
+static void v111_start(void* ctx, yscr_screen* s) {
+    v111_hook* h = (v111_hook*)ctx;
+    h->calls++;
+    h->d.screen = s;
+    h->ok = ygfx_open_start(&R->g, &h->d);
+}
+static void gl_v11_start(stats* st) {
+    static float a_scene[W * H * 4];
+    static unsigned char a_out[W * H * 4];
+    static v111_hook hk;
+    ygfx_shape_desc sd;
+    ygfx_gabor_desc gb;
+    ygfx_stim s[2];
+    ygfx_desc d;
+    yscr_desc sdesc;
+    char line[700];
+    long bad[3] = { 0, 0, 0 };
+    int k, i, fb = -1, parallel = 0;
+    (void)st;
+    memset(&sd, 0, sizeof sd);
+    sd.shape = YGFX_CIRCLE; sd.w = 20; sd.color[0] = 0.8f; sd.x = -30;
+    s[0] = ygfx_shape(&sd);
+    memset(&gb, 0, sizeof gb);
+    gb.sigma = 4; gb.sf = 0.125f; gb.contrast = 0.3f; gb.x = 20;
+    s[1] = ygfx_gabor(&gb);
+    if (!gl_open(1, YGFX_RGBA16F, YGFX_DITHER_NONE)) return;
+    gl_frame(s, 2);
+    memcpy(a_scene, R->scene, sizeof a_scene);
+    memcpy(a_out, R->out, sizeof a_out);
+    ygfx_close(&R->g);
+    memset(&d, 0, sizeof d);
+    d.screen = &R->scr;
+    d.background[0] = d.background[1] = d.background[2] = 0.5f;
+    d.seed = 99;
+    d.cache = test_cache();
+    for (k = 0; k < 3; k++) {
+        if (k < 2) {   /* the start on the open screen; then the seam: no parallel compile */
+            ygfx__test_serial = k;
+            CHECK(ygfx_open_start(&R->g, &d));
+            CHECK(!ygfx_is_open(&R->g));
+            CHECK(ygfx_open(&R->g, NULL));
+            ygfx__test_serial = 0;
+        } else {       /* the screen again, with the start in its hook */
+            yscr_close(&R->scr);
+            memset(&sdesc, 0, sizeof sdesc);
+            sdesc.backend = YSCR_BACKEND_CUSTOM;
+            sdesc.presenter = &ygfx_headless_presenter;
+            sdesc.presenter_ctx = &R->hl;
+            sdesc.sim_period_ns = 1000000;
+            sdesc.on_context = v111_start;
+            sdesc.on_context_ctx = &hk;
+            hk.d = d;
+            hk.calls = 0;
+            if (!yscr_open(&R->scr, &sdesc)) {
+                fprintf(stderr, "gfx_test [%s]: reopen: %s\n", g_where, yscr_error(&R->scr));
+                g_failures++;
+                return;
+            }
+            CHECK(hk.calls == 1 && hk.ok);
+            {
+                typedef void (YGFX__APIENTRY * geti_fn)(unsigned, int*);
+                geti_fn geti = (geti_fn)yscr_gl_proc(&R->scr, "glGetIntegerv");
+                if (geti) geti(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &fb);
+                CHECK(fb == 0);
+            }
+            CHECK(ygfx_open(&R->g, NULL));
+        }
+        ygfx_describe(&R->g, line, sizeof line);
+        if (k == 0) parallel = strstr(line, ", open_start=parallel") != NULL;
+        CHECK(strstr(line, k == 1 ? ", open_start=serial(no GL_KHR_parallel_shader_compile)"
+                                  : parallel ? ", open_start=parallel" : ", open_start=serial(") != NULL);
+        gl_frame(s, 2);
+        for (i = 0; i < W * H * 4; i++)
+            bad[k] += memcmp(&a_scene[i], &R->scene[i], sizeof(float)) != 0 || a_out[i] != R->out[i];
+        CHECK(bad[k] == 0);
+        ygfx_close(&R->g);
+    }
+    printf("  measured: open_start %s; values that differ from a blocking open: %ld, serial %ld, in the hook %ld; "
+           "framebuffer after the hook's open %d\n", parallel ? "parallel" : "serial (no KHR_parallel_shader_compile)",
+           bad[0], bad[1], bad[2], fb);
+}
+
 static void s11_report(void) {
     if (!S11.ran) return;
     printf("  v0.10 simplex: GPU against ygfx_simplex_value(), 6 fields: wrong %ld of %ld; turned: largest |value| %.3f, "
@@ -7850,6 +8041,7 @@ int main(void) {
     test_null_and_ring();
     test_v03_cpu();
     test_v04_cache_cpu();
+    test_v11_start_cpu();
     test_v04_fixes_cpu();
     test_v04_inst_cpu();
     test_v06_cset_cpu();

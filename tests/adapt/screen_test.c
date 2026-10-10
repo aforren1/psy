@@ -64,6 +64,10 @@ static int g_unsynced_fires;
 static const char* g_env = "off";
 static int test_getenv(const char* name, char* out, int cap);
 #define YSCR__GETENV(name, out, cap) test_getenv((name), (out), (int)(cap))
+/* How the window got the foreground, as the OS would have answered:
+ * -1 = the header's own answer (n/a without a window). */
+static int g_fg = -1;
+#define YSCR__FOREGROUND(s) (g_fg >= 0 ? (uint32_t)g_fg : yscr__foreground(s))
 
 #define YSP_SCREEN_IMPLEMENTATION
 #include "ysp/screen.h"
@@ -3578,6 +3582,7 @@ static bool open_settle(yscr_screen* s, script* c, int windowed, int settle, int
 /* The YSCR_EV_SETTLE records in g_ev[0..n): their count, and the last. */
 static int settle_events(int n, yrt_event* last) {
     int j, k = 0;
+    if (last) memset(last, 0, sizeof *last);   /* none found: zeros, not stack bytes */
     for (j = 0; j < n; j++)
         if (g_ev[j].source == YRT_SRC_SCREEN && g_ev[j].kind == YSCR_EV_SETTLE) {
             k++;
@@ -3608,6 +3613,9 @@ static void test_settle_clean(void) {
     ring_reset();
     CHECK(open_settle(&s, &c, 0, 0, 0, 0));
     if (!yscr_is_open(&s)) { g_env = "off"; return; }
+    /* v0.5.1: open() returns holding a slot, so the bound back buffer is
+     * free for a draw before the first begin() (ygfx_prime) */
+    CHECK_I(s.slot_held, 1);
     yscr_settle_check(&s, &si);
     CHECK_I(si.result, YSCR_SETTLED);
     CHECK_I(si.mode, YSCR_SETTLE_STRICT);
@@ -3764,6 +3772,85 @@ static void test_settle_late_change(void) {
 /* YSP_SETTLE overrides desc.settle, every override is in the describe
  * line, and a bad value fails open(). SIM skips. An abort ends settling
  * and stays for the caller's begin(). The fields are checked. */
+/* v0.5.1 (FOREGROUND): the outcome reaches the describe line, the
+ * settle record and yscr_settle_check(); the mode AUTO applies; a
+ * refused foreground does not fail open(); a bad desc.foreground does. */
+static bool open_fg(yscr_screen* s, script* c, int windowed, int mode, int fg) {
+    yscr_desc d;
+    memset(s, 0, sizeof *s);
+    memset(&d, 0, sizeof d);
+    d.backend = YSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted;
+    d.presenter_ctx = c;
+    d.ring = &g_ring;
+    d.windowed = windowed != 0;
+    d.settle_min_ns = -1;
+    d.foreground = mode;
+    g_fg = fg;
+    return yscr_open(s, &d);
+}
+
+static void test_foreground(void) {
+    static script c;
+    yscr_screen s;
+    yscr_settle_info si;
+    yrt_event e;
+    char line[1024];
+    int n;
+    static const struct { int windowed, mode, fg; uint32_t applied; const char* name; } k[] = {
+        { 0, YSCR_FOREGROUND_AUTO,  YSCR_FG_REFUSED, YSCR_FOREGROUND_FORCE, "foreground=refused" },
+        { 0, YSCR_FOREGROUND_AUTO,  YSCR_FG_FORCED,  YSCR_FOREGROUND_FORCE, "foreground=forced" },
+        { 1, YSCR_FOREGROUND_AUTO,  YSCR_FG_REFUSED, YSCR_FOREGROUND_HONOR, "foreground=refused" },
+        { 0, YSCR_FOREGROUND_HONOR, YSCR_FG_GRANTED, YSCR_FOREGROUND_HONOR, "foreground=granted" },
+        { 1, YSCR_FOREGROUND_FORCE, YSCR_FG_GRANTED, YSCR_FOREGROUND_FORCE, "foreground=granted" },
+    };
+    int i;
+    g_env = NULL;
+    /* no window: n/a, and the record's mode is 0 */
+    script_clean(&c);
+    ring_reset();
+    CHECK(open_fg(&s, &c, 0, YSCR_FOREGROUND_AUTO, -1));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    CHECK_I(si.foreground, YSCR_FG_NA);
+    n = ring_drain();
+    CHECK_I(settle_events(n, &e), 1);
+    CHECK_I(e.u.u32[8], YSCR_FG_NA);
+    CHECK_I(e.u.u32[9], 0);
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, " foreground=n/a ") != NULL);
+    CHECK(strstr(line, "WARNING=not-foreground") == NULL);
+    CHECK(strstr(line, "idle_wake") == NULL);   /* COMPOSITION only */
+    yscr_close(&s);
+    for (i = 0; i < (int)(sizeof k / sizeof k[0]); i++) {
+        script_clean(&c);
+        ring_reset();
+        CHECK(open_fg(&s, &c, k[i].windowed, k[i].mode, k[i].fg));
+        if (!yscr_is_open(&s)) continue;
+        yscr_settle_check(&s, &si);
+        CHECK_I(si.result, YSCR_SETTLED);            /* refused does not fail open */
+        CHECK_I(si.foreground, (uint32_t)k[i].fg);
+        n = ring_drain();
+        CHECK_I(settle_events(n, &e), 1);
+        CHECK_I(e.u.u32[8], (uint32_t)k[i].fg);
+        CHECK_I(e.u.u32[9], k[i].applied);
+        CHECK(yscr_describe(&s, line, sizeof line) > 0);
+        CHECK(strstr(line, k[i].name) != NULL);
+        CHECK((strstr(line, " WARNING=not-foreground") != NULL) == (k[i].fg == (int)YSCR_FG_REFUSED));
+        yscr_close(&s);
+        yscr_settle_check(&s, &si);
+        CHECK_I(si.foreground, 0);                   /* closed */
+    }
+    /* out of range */
+    script_clean(&c);
+    CHECK(!open_fg(&s, &c, 0, 3, -1));
+    CHECK(strstr(yscr_error(&s), "desc.foreground") != NULL);
+    CHECK(!open_fg(&s, &c, 0, -1, -1));
+    CHECK(strstr(yscr_error(&s), "desc.foreground") != NULL);
+    g_fg = -1;
+    g_env = "off";
+}
+
 static void test_settle_modes(void) {
     static script c;
     yscr_screen s;
@@ -3832,6 +3919,123 @@ static void test_settle_modes(void) {
     CHECK(yscr_open(&s, &d));
     CHECK(yscr_describe(&s, line, sizeof line) > 0);
     CHECK(strstr(line, "settle=SKIPPED(sim)") != NULL);
+    yscr_close(&s);
+    g_virtual = 1;
+    g_env = "off";
+}
+
+/* desc.on_context (CONTEXT HOOK): once per open, with the screen open,
+ * before the first present (the warm-up's). Its time is added to the cap
+ * and not to the minimum. */
+typedef struct hook_rec {
+    int      calls, open_in_hook, settling;
+    uint64_t presents;        /* presents before the hook: none          */
+    int64_t  lose;            /* virtual ns the hook takes                */
+    void*    ctx;
+} hook_rec;
+static hook_rec g_hook;
+static void hook_fn(void* ctx, yscr_screen* s) {
+    g_hook.calls++;
+    g_hook.ctx = ctx;
+    g_hook.open_in_hook = yscr_is_open(s);
+    g_hook.settling = s->settling;
+    g_hook.presents = s->next_id;
+    if (g_hook.lose) vlose(g_hook.lose);
+}
+static bool open_hooked(yscr_screen* s, script* c, int windowed, int settle, int64_t lose) {
+    yscr_desc d;
+    memset(s, 0, sizeof *s);
+    memset(&d, 0, sizeof d);
+    memset(&g_hook, 0, sizeof g_hook);
+    g_hook.lose = lose;
+    d.backend = YSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted;
+    d.presenter_ctx = c;
+    d.ring = &g_ring;
+    d.windowed = windowed != 0;
+    d.settle = settle;
+    d.on_context = hook_fn;
+    d.on_context_ctx = &g_hook;
+    return yscr_open(s, &d);
+}
+
+static void test_context_hook(void) {
+    static script c;
+    yscr_screen s;
+    yscr_settle_info si;
+    yscr_desc d;
+    char line[1024];
+    g_env = NULL;
+    /* fullscreen: called once, before the warm-up and settling */
+    script_clean(&c);
+    CHECK(open_hooked(&s, &c, 0, 0, 0));
+    yscr_settle_check(&s, &si);
+    CHECK_I(g_hook.calls, 1);
+    CHECK(g_hook.ctx == &g_hook);
+    CHECK_I(g_hook.open_in_hook, 1);
+    CHECK_I(g_hook.settling, 0);
+    CHECK_I(g_hook.presents, 0);
+    CHECK(si.flips >= 12);                        /* the warm-up's 6, then settling's */
+    CHECK_I(si.result, YSCR_SETTLED);
+    CHECK_I(si.hook_ns, 0);
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, " flips,hook=0.000s)") != NULL);
+    yscr_close(&s);
+    /* a hook of 2.95 s: the cap moves by its time, so it still settles */
+    script_clean(&c);
+    CHECK(open_hooked(&s, &c, 0, 0, 2950000000LL));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    CHECK_I(si.hook_ns, 2950000000LL);
+    CHECK_I(si.max_ns, 3000000000LL + 2950000000LL);
+    CHECK(si.ns > 2950000000LL && si.ns < 3400000000LL);
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, ",hook=2.950s)") != NULL);
+    yscr_close(&s);
+    /* a window: the minimum stays from the open() call */
+    script_clean(&c);
+    CHECK(open_hooked(&s, &c, 1, 0, 1000000000LL));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    CHECK(si.ns >= 2500000000LL && si.ns < 2520000000LL);
+    CHECK_I(si.max_ns, 4000000000LL + 1000000000LL);
+    yscr_close(&s);
+    /* settling fails after the hook: the hook ran, the presenter closed */
+    script_clean(&c);
+    c.path = YSCR_PATH_COMPOSED;
+    c.depth = 2;
+    CHECK(!open_hooked(&s, &c, 0, 0, 0));
+    CHECK_I(g_hook.calls, 1);
+    CHECK_I(c.closed, 1);
+    /* settling off: called all the same */
+    script_clean(&c);
+    CHECK(open_hooked(&s, &c, 0, YSCR_SETTLE_OFF, 0));
+    CHECK_I(g_hook.calls, 1);
+    yscr_close(&s);
+    /* an open refused before the context: never called */
+    script_clean(&c);
+    CHECK(!open_hooked(&s, &c, 0, 4, 0));
+    CHECK_I(g_hook.calls, 0);
+    CHECK_I(c.opened, 0);
+    /* no hook: no token */
+    script_clean(&c);
+    CHECK(open_settle(&s, &c, 0, 0, 0, 0));
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, "hook=") == NULL);
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.max_ns, 3000000000LL);
+    yscr_close(&s);
+    /* SIM: no context, no settling; the hook still runs once */
+    memset(&s, 0, sizeof s);
+    memset(&d, 0, sizeof d);
+    memset(&g_hook, 0, sizeof g_hook);
+    d.backend = YSCR_BACKEND_SIM;
+    d.sim_period_ns = P_NS;
+    d.on_context = hook_fn;
+    g_virtual = 0;
+    CHECK(yscr_open(&s, &d));
+    CHECK_I(g_hook.calls, 1);
+    CHECK(g_hook.ctx == NULL);
     yscr_close(&s);
     g_virtual = 1;
     g_env = "off";
@@ -3952,7 +4156,9 @@ int main(void) {
     test_settle_fail(YSCR_SETTLE_C_UNSYNCED);
     test_settle_late_change();
     test_settle_modes();
+    test_foreground();
     test_stale_statistics();
+    test_context_hook();
     /* no case but the forced-off ones fired the guard */
     CHECK_I(g_unsynced_fires, g_unsynced_want);
     if (g_failures) {

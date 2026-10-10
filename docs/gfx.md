@@ -3016,6 +3016,101 @@ module it unloads, which a suppression cannot name, so the test runs GL
 under a sanitizer only when `YGFX_TEST_DEVICES` asks for it. Locally,
 with GL on, everything passed under ASan and UBSan apart from that leak.
 
+## v0.11.1: the open in two calls
+
+`ygfx_open_start()` does the first half of `ygfx_open()`: the desc's
+checks, the backend, the buffers and textures, and every built-in program
+submitted with `pipeline_src.deferred`. `ygfx_open()` on the started
+handle does the rest: `pipeline_finish` on each program (the link status),
+the cache's stores and the open record. Called from ysp/screen.h v0.5.2's
+`desc.on_context`, the 14 programs compile on ANGLE's threads while
+`yscr_open()` settles (docs/screen.md, "Compiles during settling", for
+the hook and its measurements).
+
+### Design
+
+- The start copies the desc. `ygfx_open()` on a started handle uses the
+  copy and may get NULL, so a hook may pass a desc on its stack. What the
+  desc points to (the cache, the calibration, the ring) must live until
+  `ygfx_open()` returns, as before.
+- Between the two calls the handle is not open: `ygfx_is_open()` is false
+  and every call but `ygfx_open()` and `ygfx_close()` returns
+  `YGFX_ERR_CLOSED`. No program has a link status yet, so a draw then
+  would use programs nobody checked.
+- The start submits only on a backend that reports
+  `caps.parallel_compile`; the GL backend reports it when the context
+  lists `GL_KHR_parallel_shader_compile` (ANGLE on D3D11 hardware and
+  WARP, Mesa llvmpipe: all have it). Without it, `glLinkProgram()` may
+  compile at once, and a 2 s compile in the hook would hold the warm-up
+  and settling; the start then makes nothing and `ygfx_open()` does the
+  whole open after settling, as v0.11.0 did. The describe line ends with
+  `open_start=parallel` or
+  `open_start=serial(no GL_KHR_parallel_shader_compile)`; a blocking open
+  adds nothing.
+- Program binaries from the cache load in the start too (16 to 40 ms for
+  14 on the Iris Xe; ANGLE reports the link status of a binary at once),
+  so with a warm cache `ygfx_open()` has nothing left to do.
+- A start whose screen then fails to open (strict settling) leaves GL
+  objects in a context that is gone. `ygfx_close()` now checks the
+  screen: when it is closed or its GL generation moved, it frees the
+  memory and deletes nothing. `ygfx_open()` on such a handle fails with
+  "the screen closed after ygfx_open_start()".
+- `ygfx_program_stats().open_ns` is the two calls' time together, not the
+  settling between them.
+- `caps.parallel_compile` is a new field at the end of
+  `ygfx_backend_caps`; the backend version stays 3. A backend that does
+  not set it gets the v0.11.0 open.
+
+### Measured
+
+This laptop (Iris Xe, ANGLE 2.1.23876), on battery, the guard held, the
+session unlocked and the display on, 2026-10-10; 10 opens per row,
+interleaved; the probe and the conditions are in docs/screen.md. ms from
+the `yscr_open()` call until `ygfx_open()` returned, median (range):
+
+| Configuration | Cache | One after the other | Start in the hook | `ygfx_open()` after `yscr_open()`, hook |
+|---|---|---|---|---|
+| COMPOSITION window | cold | 5374 (5184 to 5614) | 3405 (3266 to 3588) | 886 (740 to 1068) |
+| DXGI_FLIP window | cold | 5396 (5263 to 5609) | 3407 (3301 to 3685) | 880 (776 to 1156) |
+| COMPOSITION fullscreen | cold | 3852 (3794 to 3971) | 3468 (3335 to 3636) | 2668 (2522 to 2830) |
+| DXGI_FLIP fullscreen | cold | 3887 (3629 to 4145) | 3459 (3241 to 3626) | 2794 (2579 to 2972) |
+| COMPOSITION window | warm | 2546 (2540 to 2554) | 2520 (2517 to 2530) | 0 |
+| DXGI_FLIP window | warm | 2553 (2549 to 2560) | 2524 (2517 to 2532) | 0 |
+| COMPOSITION fullscreen | warm | 805 (759 to 905) | 781 (762 to 828) | 0 |
+| DXGI_FLIP fullscreen | warm | 717 (671 to 853) | 666 (648 to 741) | 0 |
+
+The same on AC (the laptop was plugged in later the same morning), cold
+cache, 5 opens per row, interleaved:
+
+| Configuration | One after the other | Start in the hook | `ygfx_open()` after `yscr_open()`, hook |
+|---|---|---|---|
+| COMPOSITION window | 4832 (4712 to 5027) | 2567 (2561 to 2572) | 38 (36 to 52) |
+| DXGI_FLIP window | 4787 (4733 to 4815) | 2567 (2561 to 2572) | 41 (34 to 44) |
+| COMPOSITION fullscreen | 2908 (2901 to 3257) | 2466 (2447 to 2638) | 1780 (1762 to 1970) |
+| DXGI_FLIP fullscreen | 2865 (2774 to 2989) | 2459 (2383 to 2619) | 1890 (1815 to 2035) |
+
+The start took 9 to 48 ms in the hook. The compiles took 2.2 to 2.3 s on
+AC and 2.8 to 3.2 s on battery: on AC a window's end within 0.04 s of its
+2.5 s minimum, on battery 0.9 s after it. Without the extension (a test seam), the hook
+gave the times of one after the other (docs/screen.md, "Without parallel
+compile").
+
+### Tests
+
+`test_v11_start_cpu` (a fake backend, with and without
+`caps.parallel_compile`): the start submits 14 programs and finishes none,
+or submits nothing; `ygfx_open()` finishes either with the start's desc;
+the handle is closed between the calls; a second start is refused; a
+failed start leaves a closed handle; a started handle closed deletes its
+objects; after the screen closed, `ygfx_open()` fails and names it and
+`ygfx_close()` deletes nothing; the describe tokens. The GL part
+`v0.11.1 start`: the start and the finish draw the frame of a blocking
+open bit for bit, with the extension, with the seam (serial), and with
+the start in a screen's hook (ANGLE D3D11 hardware and WARP, MinGW and
+MSVC; Mesa llvmpipe on WSL2), and the hook's open ends with the default
+framebuffer bound. Mutants `os-01` to `os-09`, all caught; `v10-06`'s
+anchor moved with the describe line.
+
 ## v0.11: priming
 
 `ygfx_prime()` draws once with every program the gfx has made so far: the
@@ -3080,16 +3175,23 @@ before it (`gl_v11_prime` in the test). Kept: it moves 2.5 to 12.9 ms per
 program out of the first trials, the frame budget is 16.7 ms, and the
 first frame of a trial is the one a task cannot afford to lose.
 
-### Not solved: the first frame after a long setup
+### The first frame after a long setup
 
 The first frame after the setup (frame 0) was late or dropped in 21 of 22
 runs whose setup took 2.2 s or more (no cache, cold cache) and in 0 of 13
 runs with a warm cache, with and without the prime. `ygfx_end()` and the
 GPU were then 0.1 and 1.7 ms: the swap path, not the program, was slow
 after 2 s without a present. ysp/screen.h v0.5.0 settles the display in
-`yscr_open()`; a long setup after it leaves the swap path idle again. Not
-measured: which part wakes slowly (GPU clocks, the compositor). Until it is,
-show a few frames (an instruction screen) before the first timed trial.
+`yscr_open()`; a long setup after it leaves the swap path idle again.
+
+Found and fixed in ysp/screen.h v0.5.1 (docs/screen.md, "The first frame
+after a gap"): on the composition swapchain the first present after 67 ms
+or more without one showed a vblank late, whatever the CPU and GPU did; a
+thread that waits on the vblank event removes it. Also fixed there:
+`ygfx_prime()` right after `ygfx_open()` hung on the composition swapchain
+with ysp/screen.h v0.5.0, whose `yscr_open()` ended with the presented
+back buffer bound. With v0.5.1, a cold cache, with and without the prime:
+frame 0 late or dropped in 0 of 8 runs of the probe above.
 
 ## v0.10.5: a pack's textures load as stored; shader contract 2
 

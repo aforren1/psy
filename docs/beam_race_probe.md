@@ -64,7 +64,10 @@ screen. Options after the folder go to the probe:
 | `--seconds S` | Seconds per tear or cost pass (default 5) |
 | `--drift S` | Seconds of raster sampling for the drift (default 60) |
 | `--static-check` | Each slice draws one fixed picture in its own rows (plus a guard band) and a wrong color elsewhere. A tear line where planned is invisible; a miss shows as a stripe of the wrong color |
-| `--guard ROWS` | Rows of the picture beyond each slice edge in `--static-check` (default 8) |
+| `--guard ROWS` | Rows of the picture beyond each slice edge in `--static-check` (default 8). The guard wraps between refreshes: the last slice also draws rows 0 to ROWS, slice 0 also draws the last ROWS rows |
+| `--seam-lines N` | Slice 0 aims N lines before the first active line, inside the vertical blanking (default 0: at line 0). See 3.6 |
+| `--sweep-lead A:B:STEP` | Tear section only: one pass per lead from A to B us in steps of STEP, `--seconds` each, with the lead shown large on the screen. No calibration pass. See 3.6 |
+| `--ruler` | Ticks at the right edge every 8 rows, from 64 rows above to 128 rows below each slice's target row. Long tick at the target row, medium tick every 32 rows |
 | `--patch` | Three 48 x 48 photodiode patches at the left edge, at 1/10, 1/2 and 9/10 of the height, drawn by the slice that covers them, light on even refreshes (30 Hz). Their planned times go to `patch_*.csv` |
 | `--draw-lead US` | Wake this long before a present to read input and draw (default 1000) |
 | `--lead US` | Present this long before the raster reaches the target line; skips the calibration pass |
@@ -84,7 +87,7 @@ Output files:
 | `raster_vblanks.csv` | Every vblank entry the sampler saw, with its bracket |
 | `raster_reads_fit.csv` | Every 4th scanline read of the 2-s fit window, with the model's line |
 | `raster_drift.csv` | The 2-s model's error per second over the drift run |
-| `tear_N<n>_lead0.csv`, `tear_N<n>_cal.csv` | One row per present: planned and actual times, the scanline after Present, GPU begin and end, DXGI's statistics |
+| `tear_N<n>_lead0.csv`, `tear_N<n>_cal.csv`, `tear_N<n>_sweep<i>_lead<us>us.csv` | One row per present: planned and actual times, the scanline after Present, GPU begin and end, DXGI's statistics |
 | `cost_N<n>_<light,slice,full>.csv` | The same for the cost passes |
 | `patch_*.csv` | With `--patch`: per patch and refresh, the time the raster reaches the patch row, on the ysp_rt clock |
 
@@ -173,6 +176,38 @@ Present returns, when the GPU work and the kernel's flip are done. DXGI
 stamps its statistics at vblanks, also for these flips (section 4.4), so
 no software source gives the time of a mid-frame flip. The static check
 and a photodiode can (section 6).
+
+**The seam between refreshes.** Slice 0 starts a new refresh. If its
+tear lands below row 0, rows 0 to the tear show the frame of the last
+slice of the refresh before. Before 2026-10-10 the guard did not wrap, so
+those rows showed the wrong color at any guard (section 4.9). Now the last
+slice also draws rows 0 to the guard, and slice 0 draws the last guard
+rows (for an early tear, which lands in the bottom rows of the refresh
+before). `--seam-lines N` moves slice 0's target N lines before line 0,
+into the vertical blanking (35 lines here). There, a tear that lands up
+to N lines late changes no visible row. The target line in the CSV files
+is then negative (-N), and the scanline read is in the blanking
+(1200 to 1234 here: the same line modulo the vertical total). A value
+larger than the blanking aims into the bottom rows of the refresh
+before; the probe prints a note.
+
+**The lead sweep.** `--sweep-lead A:B:STEP` runs one pass per lead, each
+for `--seconds`, and refits the model for 1 s before each step (a plain
+gray screen between steps). The lead shows in us as large seven-segment
+digits at a third of the width and three eighths of the height, the same
+in every frame of the step, so a tear does not cut them. Each step's
+start goes to the console and `summary.txt` with the seconds since time
+zero and the local clock time, and a table at the end gives the scanline
+offsets per step. Use it with `--static-check` to find by eye the lead at
+which the stripes go.
+
+**The ruler.** `--ruler` draws the same ticks in every frame, so the
+ticks show the rows of a stripe: count from the long tick at the target
+row (8 rows per tick, a medium tick every 32 rows). The ruler and the
+digits are one ClearView with a list of rects. In one A/B pair (N = 4,
+lead 20 us, 3 s) the GPU time per slice was p50 246 us without the ruler
+and 317 us with it (254 us in a third run with it). The GPU was done
+273 us or more before the raster reached the slice at p01 in all three.
 
 ### 3.7 cost
 
@@ -384,6 +419,41 @@ frame in self refresh would show each row at its own time, not at the
 GPU raster's. The photodiode test in 6.2 decides it. Until then, any
 row-dependent onset on this panel is a model, not a measurement.
 
+### 4.9 Eye test of the static check (2026-10-10)
+
+The user watched `--only tear --slices 4 --static-check` (magenta as the
+wrong color) on the built-in panel, PSR2 enabled, with the calibrated
+lead, before the guard wrapped:
+
+| Guard | What showed |
+|---|---|
+| 8 rows | Steady magenta stripes at every slice edge |
+| 32 rows | 4 stripes all the time. The top stripe is thick, the others thinner |
+| 64 rows | The top stripe thick and all the time; the bottom stripe some of the time; the middle stripes gone |
+
+In the same conditions the scanline read after Present was within 1 to 3
+lines of the target at p99 (4.4). Interpretation, not measured: the real
+tear lands about 50 to 70 rows (0.7 to 0.9 ms) after that read, with a
+spread of some rows. A stripe shows the rows between the target plus the
+guard and the real tear, so guard 64 hides most of them. The top stripe is
+the slice-0 seam: rows 0 to the tear show the last slice's frame, which
+did not draw the top rows, so no guard hid it. The guard now wraps, and
+`--seam-lines` aims slice 0 into the blanking (3.6). The scanline read is
+a lower bound of the tear, as 3.6 says; on this panel it is short by
+about 0.8 ms. If the photodiode test (6.2) confirms it, a mode in the
+header cannot learn its lead from the scanline read alone.
+
+Check runs of the new options (2026-10-09, 22:14 to 22:20, quiet
+machine, `--no-flicker`, nobody watching): a sweep of 0, 200 and 400 us
+(2 s each) gave 3.99 presents shown per refresh in each step, no late
+slice, and scanline offsets of p50 +5, -11 and -25 lines (14.8 lines
+per 200 us, as the line time predicts). With `--seam-lines 20 --lead 20`
+slice 0's scanline read was in the blanking on 177 of 716 presents (the
+slice-0 share at N = 4), its miss p50 +1 p99 +4 lines against -20, and
+3.99 (N = 4) and 9.99 (N = 10) presents shown per refresh. The new
+options do not change the path: every present still went to an overlay
+plane.
+
 ## 5. What this decides for ysp/screen.h
 
 An opt-in beam-racing present mode, `DXGI_FLIP` only:
@@ -404,9 +474,12 @@ An opt-in beam-racing present mode, `DXGI_FLIP` only:
    scanline read after each present. The vertical total and line rate
    from `QueryDisplayConfig` check the fit.
 4. **Plan per slice.** Present at the model's time for the slice's first
-   row minus a learned lead (13.5 to 54 us here), flush the draw at once,
-   draw only the slice's rows, wake one draw budget early. Slice 0 aims
-   inside the vblank.
+   row minus a learned lead, flush the draw at once, draw only the
+   slice's rows, wake one draw budget early. Slice 0 aims inside the
+   vblank. The lead from the scanline read is 13.5 to 54 us here, but the
+   eye test (4.9) puts the real tear about 0.8 ms later: the lead must
+   come from light (a photodiode, or the static check by eye), not from
+   the scanline read alone.
 5. **Record per slice.** Present call and return times, the scanline and
    vblank flag read after Present, the rows the slice covers, the target
    line and lead, the GPU's end (timestamp queries) when available, the
@@ -430,14 +503,25 @@ An opt-in beam-racing present mode, `DXGI_FLIP` only:
 
 ### 6.1 Static check, by eye
 
-1. Run `beam_race_probe --only tear --slices 4 --seconds 30 --static-check`
-   (without `--no-flicker` the wrong color is magenta; read the warning).
-2. Expect a steady gray picture with vertical bars, and no magenta.
-3. Run it again with `--guard 0`. Magenta stripes at the slice edges show
-   tears that land off the planned rows; their height is the miss.
-4. Run it with `--slices 10` and with `--vary-clear`.
-5. Record what you saw (stripes, their place and height) with the
-   `summary.txt` of each run.
+Without `--no-flicker` the wrong color is magenta; read the warning. The
+first results are in 4.9. Record what you see (stripes, their place and
+height in ruler ticks) with the `summary.txt` of each run.
+
+1. **The wrap.** Run
+   `beam_race_probe --only tear --slices 4 --seconds 30 --static-check --guard 64 --ruler`.
+   Before the guard wrapped, the top stripe stayed at guard 64. If 4.9 is
+   right, the top stripe now goes like the middle ones.
+2. **The lead sweep, guard 8.** Run
+   `beam_race_probe --only tear --slices 4 --seconds 5 --static-check --guard 8 --ruler --sweep-lead 0:1500:100`
+   (about 100 s). Write down the lead on the screen when the stripes go,
+   and when stripes come back above the long ticks (the tear is then
+   early). If 4.9 is right, they go near 700 to 900 us.
+3. **The seam, on and off.** With the best lead L from step 2, run
+   `beam_race_probe --only tear --slices 4 --seconds 30 --static-check --guard 8 --ruler --lead L`,
+   then the same with `--seam-lines 20`. Without the seam, the top edge
+   shows a stripe when slice 0's tear is late by more than 8 rows. With
+   it, a tear up to 20 lines late lands in the blanking.
+4. Run step 2 with `--slices 10` and with `--vary-clear`.
 
 ### 6.2 Photodiode at three heights
 

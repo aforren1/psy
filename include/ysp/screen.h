@@ -1,4 +1,4 @@
-/* ysp/screen.h - v0.5.0 - public domain single-header display library
+/* ysp/screen.h - v0.5.2 - public domain single-header display library
  *
  *   The window, the GL ES 3.0 context, the display mode and the swap path
  *   of a stimulus display, with flip at a time: each frame learns the
@@ -22,6 +22,39 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.5.2 - desc.on_context (CONTEXT HOOK; decided 2026-10-10): open()
+ *          calls it once when the GL context exists, before the warm-up
+ *          and settling, so the caller's work on other threads overlaps
+ *          them; ysp/gfx.h v0.11.1's ygfx_open_start() submits its
+ *          programs there. Its time is added to the settle cap; the
+ *          describe line (settle=...,hook=0.015s) and
+ *          yscr_settle_info.hook_ns report it. Measured on the Iris Xe
+ *          (docs/screen.md, "Compiles during settling"), cold program
+ *          cache, on AC: gfx ready 2.57 s after the open() call in a
+ *          window (4.79 to 4.83 s without), 2.46 to 2.47 s fullscreen
+ *          (2.87 to 2.91 s); on battery 3.41 s (5.37 to 5.40) and 3.46
+ *          to 3.47 s (3.85 to 3.89); a warm cache 24 to 51 ms earlier.
+ *          Settling took the same time and presents with the compiles
+ *          running; every one of 260 opens settled.
+ *   v0.5.1 - The foreground (FOREGROUND; decided 2026-10-10): desc.foreground
+ *          AUTO forces the raise fullscreen (SDL_HINT_FORCE_RAISEWINDOW)
+ *          and honors the OS policy in a window; HONOR and FORCE. The
+ *          describe line (foreground=granted, forced or refused, and
+ *          WARNING=not-foreground), YSCR_EV_SETTLE's u.u32[8] and
+ *          yscr_settle_info.foreground say how the window got it. A
+ *          forced raise gives the foreground back at close to the window
+ *          that had it. Measured from a background launch (docs/screen.md,
+ *          "The foreground"): the OS refused 20 of 21, open() still
+ *          settled, and the keys went to the other program; forced,
+ *          25 of 25 got it. Fixed
+ *          (IDLE WAKE): on COMPOSITION the first frame after 67 ms or
+ *          more without a present showed one vblank late (72 of 72 after
+ *          a gap); a thread now waits on the display's vblank event
+ *          while the screen is open: 0 of 36. DXGI_FLIP was not
+ *          affected (0 of 54). Fixed: open() returned with the back
+ *          buffer it had just presented bound, so a draw before the
+ *          first begin() (ygfx_prime) waited forever on COMPOSITION;
+ *          open() now holds a free slot, as the warm-up did.
  *   v0.5.0 - open() settles the start of the run (SETTLE; decided
  *          2026-10-09): black frames until an OS time, 6 clean flips on
  *          one path and depth, the spread of the last 20 vblank intervals
@@ -559,6 +592,56 @@
  *     ring's flip records, and the first frame after open() is frame 0.
  *     A statistic for a present that already completed (COMPOSITION in a
  *     window repeated each flip as an overlay frame) changes no path.
+ *     open() returns holding a free back buffer, so GL work before the
+ *     first begin() (ygfx_prime) draws into a buffer no present holds.
+ *
+ *   FOREGROUND
+ *     Windows gives the foreground (the keyboard) only to a program that
+ *     the foreground program started or that had the last input. A
+ *     program started by a scheduler, a remote shell, a test runner or
+ *     any process in the background does not get it: measured, the OS
+ *     refused 20 of 21 such opens, open() settled anyway, the window
+ *     showed under the other program's window and the taskbar in the
+ *     z-order, and the keys went to the other program (docs/screen.md,
+ *     "The foreground"). desc.foreground decides what open() does:
+ *       AUTO   (0, default) FORCE fullscreen, HONOR in a window.
+ *       HONOR  ask once; take what the OS gives.
+ *       FORCE  ask once; if the OS refuses, raise again with SDL's
+ *              SDL_HINT_FORCE_RAISEWINDOW (it attaches to the foreground
+ *              thread's input), then put the hint back as it was.
+ *     The describe line says foreground=granted, forced or refused
+ *     (refused adds WARNING=not-foreground), and so do YSCR_EV_SETTLE's
+ *     u.u32[8] and yscr_settle_info.foreground (YSCR_FG_*). Measured, a
+ *     forced raise left the program that had the foreground without it
+ *     after close (9 of 9); so close() gives it back to that window when
+ *     the raise was forced and the screen still has the foreground. A
+ *     refused foreground does not fail open(); settling decides that.
+ *     Other platforms and a screen without a window report n/a.
+ *
+ *   CONTEXT HOOK (v0.5.2)
+ *     open() settles for 0.5 to 0.8 s fullscreen and 2.5 s in a window.
+ *     desc.on_context lets other work use that time: open() calls it
+ *     once, when the GL context exists (current on the calling thread),
+ *     before the warm-up's first present. Give it work that runs on other
+ *     threads, such as ysp/gfx.h's ygfx_open_start() (ANGLE compiles the
+ *     programs on its own threads while open() settles), and let open()
+ *     go on; finish the work after open() returns (ygfx_open()). Do not
+ *     present, call begin() or close the screen in the hook. Work that
+ *     holds the thread delays the warm-up and settling: open() adds the
+ *     hook's time to the cap, so a slow hook cannot fail settling, but
+ *     the minimum (2.5 s in a window) stays from the open() call. After
+ *     the hook, open() binds the default framebuffer, so its black frames
+ *     clear the back buffer whatever the hook bound. Every open that gets
+ *     a context calls it, also SIM and settle OFF; an open refused before
+ *     that does not. If open() fails after the hook, the context is gone:
+ *     ygfx_close() then frees the gfx and deletes nothing. The describe
+ *     line adds the hook's time to the settle token
+ *     (settle=0.78s(25 flips,hook=0.015s)); yscr_settle_info.hook_ns
+ *     has it. Measured on the Iris Xe, 160 opens (docs/screen.md,
+ *     "Compiles during settling"): settling took the same time and the
+ *     same presents with ysp/gfx.h's compiles running, and every open
+ *     settled; the hook before the warm-up gave the compiles 0.2 s more
+ *     than one after it.
  *
  *   PREDICTION
  *     yscr_begin() predicts the first vblank a present made now can
@@ -769,6 +852,12 @@
  *     C++ methods return them through a hidden pointer;
  *     tests/compile/screen_com.cpp checks every slot against the SDK.
  *     AUTO picks it where it opens with independent flip.
+ *     IDLE WAKE: measured, the first present after 67 ms or more without
+ *     one (4 vblanks; 50 ms was fine) showed one vblank after its target,
+ *     on independent flip, also with the CPU or the GPU busy and
+ *     no present. A thread that waits on the display's vblank event
+ *     (D3DKMTWaitForVerticalBlankEvent) while the screen is open removed
+ *     it, so the header runs one; the describe line says idle_wake=on.
  *   YSCR_BACKEND_SIM
  *     No window, no GL: a vblank grid on the ysp_rt clock with
  *     desc.sim_period_ns (default 1/60 s), which shows every frame on the
@@ -1523,8 +1612,8 @@
 
 #define YSCR_VERSION_MAJOR 0
 #define YSCR_VERSION_MINOR 5
-#define YSCR_VERSION_PATCH 0
-#define YSCR_VERSION_STRING "0.5.0"
+#define YSCR_VERSION_PATCH 2
+#define YSCR_VERSION_STRING "0.5.2"
 
 #include "ysp/rt.h"
 #include "ysp/input.h"
@@ -1730,8 +1819,22 @@ typedef yin_mouse_report yscr_mouse_event;
  * condition, u.i64[1] ns from the open() call, u.u32[4] presents since the
  * open() call, [5] clean flips in a row at the end, [6] the spread's SD in
  * ns (0xFFFFFFFF: fewer than 20 intervals), u.i32[7] the mean interval
- * minus the mode's period, ns. */
+ * minus the mode's period, ns, u.u32[8] how the window got the foreground
+ * (YSCR_FG_*, FOREGROUND), [9] desc.foreground as applied (HONOR or
+ * FORCE; 0 without a window). */
 #define YSCR_EV_SETTLE 16u
+
+/* desc.foreground (FOREGROUND). */
+#define YSCR_FOREGROUND_AUTO  0   /* FORCE fullscreen, HONOR in a window */
+#define YSCR_FOREGROUND_HONOR 1   /* take what the OS policy gives       */
+#define YSCR_FOREGROUND_FORCE 2   /* raise again with SDL's force hint   */
+
+/* How the window got the foreground: yscr_settle_info.foreground and
+ * YSCR_EV_SETTLE's u.u32[8]. */
+#define YSCR_FG_NA      0u   /* no window (SIM, CUSTOM), or not Windows      */
+#define YSCR_FG_GRANTED 1u   /* the OS gave it at the first raise            */
+#define YSCR_FG_FORCED  2u   /* the OS refused; the forced raise took it     */
+#define YSCR_FG_REFUSED 3u   /* another window has it: keys go there         */
 
 /* What open's settling did (SETTLE), from yscr_settle_check(). */
 typedef struct yscr_settle_info {
@@ -1743,10 +1846,11 @@ typedef struct yscr_settle_info {
     int32_t  flips;           /* presents since the open() call             */
     int32_t  run;             /* clean flips in a row at the end            */
     int32_t  need;            /* the run asked for (desc.settle_flips)      */
-    int32_t  reserved_;
+    uint32_t foreground;      /* YSCR_FG_* (FOREGROUND)                     */
     int64_t  min_ns, max_ns;  /* the minimum and the cap applied            */
     int64_t  spread_sd_ns;    /* -1: fewer than 20 intervals                */
     int64_t  spread_mean_ns;  /* mean interval minus the mode's period      */
+    int64_t  hook_ns;         /* desc.on_context's time; added to the cap  */
     char     message[256];    /* what happened, for the operator            */
 } yscr_settle_info;
 
@@ -1814,6 +1918,11 @@ typedef struct yscr_abort_keys {
 } yscr_abort_keys;
 
 typedef void (*yscr_panic_fn)(void* ctx);
+
+/* desc.on_context (CONTEXT HOOK): once per open, when the GL context
+ * exists, before the warm-up and settling. */
+struct yscr_screen;
+typedef void (*yscr_context_fn)(void* ctx, struct yscr_screen* s);
 
 /* Patch corners. */
 #define YSCR_TOP_LEFT     0
@@ -2174,6 +2283,11 @@ typedef struct yscr_desc {
                                       * window, none fullscreen; < 0 = none   */
     int64_t        settle_max_ns;    /* the cap from the open() call; 0 = 3 s
                                       * fullscreen, 4 s in a window; <= 60 s  */
+    /* the foreground (FOREGROUND) */
+    int32_t        foreground;       /* YSCR_FOREGROUND_*; 0 = AUTO          */
+    /* work that overlaps settling (CONTEXT HOOK) */
+    yscr_context_fn on_context;     /* once, before the warm-up; NULL = none */
+    void*          on_context_ctx;
 } yscr_desc;
 
 /* Private. One flip between flip_at() and its completion. */
@@ -2383,6 +2497,12 @@ typedef struct yscr_screen {
     int64_t                 st_t0, st_min, st_max, st_ns, st_sd, st_mean;
     int64_t                 st_ts[21];    /* the newest OS vblank times, oldest first */
     char                    st_env[16];   /* YSP_SETTLE as read                  */
+    /* the foreground (FOREGROUND) and the vblank waiter (IDLE WAKE) */
+    uint32_t                fg, fg_mode;  /* YSCR_FG_*; HONOR or FORCE applied  */
+    void*                   fg_prev;      /* the foreground window before open  */
+    void*                   wake;         /* the waiter's state; NULL = none     */
+    int32_t                 hooked;       /* desc.on_context ran (CONTEXT HOOK)  */
+    int64_t                 hook_ns;      /* ... for this long                   */
 } yscr_screen;
 
 /* --- API ----------------------------------------------------------------- */
@@ -2419,9 +2539,10 @@ YSCR_API int yscr_mode_multiple_in(const yscr_mode* modes, int n,
                                        int32_t num, int32_t den, int32_t w, int32_t h,
                                        double tol_ppm, yscr_mode* out, double* err_ppm);
 
-/* Opens the window, the context and the swap path, presents a few black
- * frames to find the vblank grid and the depth (about 0.1 to 0.7 s), and
- * returns true. On false, yscr_error() says why. The handle must be zeroed
+/* Opens the window, the context and the swap path, presents black frames
+ * to find the vblank grid and the depth and to settle the display (SETTLE:
+ * 0.5 to 0.8 s fullscreen, 2.5 s in a window), and returns true. Calls
+ * desc.on_context once before it settles (CONTEXT HOOK). On false, yscr_error() says why. The handle must be zeroed
  * or closed. Refuses desc.vrr, a desc.mode that is not a listed mode of the
  * display, a lead outside 0, (0, 1) or YSCR_LEAD_NONE, and a backend that
  * v0.1 does not have. */
@@ -5221,6 +5342,8 @@ typedef BOOL (WINAPI *yscr__PostMessageW_fn)(HWND, UINT, WPARAM, LPARAM);
 typedef BOOL (WINAPI *yscr__PostThreadMessageW_fn)(DWORD, UINT, WPARAM, LPARAM);
 typedef SHORT (WINAPI *yscr__GetAsyncKeyState_fn)(int);
 typedef HWND (WINAPI *yscr__GetForegroundWindow_fn)(void);
+typedef BOOL (WINAPI *yscr__SetForegroundWindow_fn)(HWND);
+typedef BOOL (WINAPI *yscr__IsWindow_fn)(HWND);
 typedef DWORD (WINAPI *yscr__GetWindowThreadProcessId_fn)(HWND, LPDWORD);
 typedef BOOL (WINAPI *yscr__IsHungAppWindow_fn)(HWND);
 typedef HICON (WINAPI *yscr__CreateIconIndirect_fn)(PICONINFO);
@@ -5254,6 +5377,8 @@ static struct yscr__winapi {
     yscr__PostThreadMessageW_fn          post_thread;
     yscr__GetAsyncKeyState_fn            key_state;
     yscr__GetForegroundWindow_fn         foreground;
+    yscr__SetForegroundWindow_fn         set_foreground;
+    yscr__IsWindow_fn                    is_window;
     yscr__GetWindowThreadProcessId_fn    window_pid;
     yscr__IsHungAppWindow_fn             is_hung;
     yscr__GetClassNameW_fn               class_name;
@@ -5298,6 +5423,8 @@ static void yscr__win_load(void) {
         yscr__win.post_thread = (yscr__PostThreadMessageW_fn)(yscr_proc)GetProcAddress(u, "PostThreadMessageW");
         yscr__win.key_state = (yscr__GetAsyncKeyState_fn)(yscr_proc)GetProcAddress(u, "GetAsyncKeyState");
         yscr__win.foreground = (yscr__GetForegroundWindow_fn)(yscr_proc)GetProcAddress(u, "GetForegroundWindow");
+        yscr__win.set_foreground = (yscr__SetForegroundWindow_fn)(yscr_proc)GetProcAddress(u, "SetForegroundWindow");
+        yscr__win.is_window = (yscr__IsWindow_fn)(yscr_proc)GetProcAddress(u, "IsWindow");
         yscr__win.window_pid = (yscr__GetWindowThreadProcessId_fn)(yscr_proc)GetProcAddress(u, "GetWindowThreadProcessId");
         yscr__win.is_hung = (yscr__IsHungAppWindow_fn)(yscr_proc)GetProcAddress(u, "IsHungAppWindow");
         yscr__win.class_name = (yscr__GetClassNameW_fn)(yscr_proc)GetProcAddress(u, "GetClassNameW");
@@ -5948,6 +6075,118 @@ static void yscr__push_flip(yscr_screen* s, const yscr_record* r) {
     ev.u.u32[9] = (uint32_t)(r->index & 0xFFFFFFFF);
     yscr__push(s, &ev);
 }
+
+/* --- the foreground (FOREGROUND) and the vblank waiter (IDLE WAKE) ------- */
+
+#if defined(YSCR__DXGI)
+typedef struct { WCHAR DeviceName[32]; UINT hAdapter; LUID AdapterLuid; UINT VidPnSourceId; } yscr__kmt_open;
+typedef struct { UINT hAdapter; UINT hDevice; UINT VidPnSourceId; } yscr__kmt_wait;
+typedef struct { UINT hAdapter; } yscr__kmt_close;
+typedef LONG (APIENTRY *yscr__kmt_open_fn)(yscr__kmt_open*);
+typedef LONG (APIENTRY *yscr__kmt_wait_fn)(const yscr__kmt_wait*);
+typedef LONG (APIENTRY *yscr__kmt_close_fn)(const yscr__kmt_close*);
+typedef struct yscr__wake_t {
+    volatile int32_t   stop;
+    yscr__kmt_wait     w;
+    yscr__kmt_wait_fn  wait;
+    yscr__kmt_close_fn close;
+    HANDLE             thread;
+} yscr__wake_t;
+
+static DWORD WINAPI yscr__wake_main(LPVOID p) {
+    yscr__wake_t* k = (yscr__wake_t*)p;
+    /* A failed wait (the display off) would spin: back off instead. */
+    while (!yscr__a_load(&k->stop)) if (k->wait(&k->w) != 0) Sleep(4);
+    return 0;
+}
+
+/* COMPOSITION showed the first present after 4 idle vblanks one vblank
+ * late; a waiter on the vblank event keeps that from happening (IDLE
+ * WAKE). Without the entry points or the adapter the screen runs as
+ * before, and the describe line says idle_wake=off. */
+static void yscr__wake_start(yscr_screen* s) {
+    HMODULE g = GetModuleHandleW(L"gdi32.dll");
+    yscr__kmt_open_fn op = g ? (yscr__kmt_open_fn)(yscr_proc)GetProcAddress(g, "D3DKMTOpenAdapterFromGdiDisplayName") : NULL;
+    yscr__kmt_wait_fn wt = g ? (yscr__kmt_wait_fn)(yscr_proc)GetProcAddress(g, "D3DKMTWaitForVerticalBlankEvent") : NULL;
+    yscr__kmt_close_fn cl = g ? (yscr__kmt_close_fn)(yscr_proc)GetProcAddress(g, "D3DKMTCloseAdapter") : NULL;
+    HMONITOR mon;
+    MONITORINFOEXW mi;
+    yscr__kmt_open o;
+    yscr__wake_t* k;
+    yscr__win_load();
+    if (!op || !wt || !cl || !s->hwnd || !yscr__win.monitor_from_window || !yscr__win.monitor_info) return;
+    mon = yscr__win.monitor_from_window((HWND)s->hwnd, MONITOR_DEFAULTTONEAREST);
+    memset(&mi, 0, sizeof mi);
+    mi.cbSize = sizeof mi;
+    if (!mon || !yscr__win.monitor_info(mon, (LPMONITORINFO)&mi)) return;
+    memset(&o, 0, sizeof o);
+    memcpy(o.DeviceName, mi.szDevice, sizeof o.DeviceName);
+    if (op(&o) != 0) return;
+    k = (yscr__wake_t*)calloc(1, sizeof *k);
+    if (k) {
+        k->w.hAdapter = o.hAdapter;
+        k->w.VidPnSourceId = o.VidPnSourceId;
+        k->wait = wt;
+        k->close = cl;
+        k->thread = CreateThread(NULL, 0, yscr__wake_main, k, 0, NULL);
+    }
+    if (!k || !k->thread) {
+        yscr__kmt_close c;
+        c.hAdapter = o.hAdapter;
+        cl(&c);
+        free(k);
+        return;
+    }
+    s->wake = k;
+}
+
+static void yscr__wake_stop(yscr_screen* s) {
+    yscr__wake_t* k = (yscr__wake_t*)s->wake;
+    if (!k) return;
+    s->wake = NULL;
+    yscr__a_store(&k->stop, 1);
+    /* The wait returns at the next vblank. With the display off it may
+     * not return: then the thread keeps its state and the adapter. */
+    if (WaitForSingleObject(k->thread, 250) == WAIT_OBJECT_0) {
+        yscr__kmt_close c;
+        c.hAdapter = k->w.hAdapter;
+        k->close(&c);
+        CloseHandle(k->thread);
+        free(k);
+    } else {
+        CloseHandle(k->thread);
+    }
+}
+#endif
+
+/* How the window got the foreground (FOREGROUND); raises it again with
+ * SDL's force hint when the mode is FORCE and the OS refused. */
+static uint32_t yscr__foreground(yscr_screen* s) {
+#if defined(YSCR__DXGI)
+    HWND h = (HWND)s->hwnd;
+    if (!s->window || !h || !yscr__win.foreground) return YSCR_FG_NA;
+    if (yscr__win.foreground() == h) return YSCR_FG_GRANTED;
+    if (s->fg_mode != YSCR_FOREGROUND_FORCE) return YSCR_FG_REFUSED;
+    {   /* SDL reads the hint at the raise; the caller's value goes back */
+        const char* v = SDL_GetHint(SDL_HINT_FORCE_RAISEWINDOW);
+        char keep[16];
+        int had = v != NULL;
+        if (had) yscr__copy(keep, sizeof keep, v);
+        SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
+        SDL_RaiseWindow(s->window);
+        if (had) SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, keep);
+        else SDL_ResetHint(SDL_HINT_FORCE_RAISEWINDOW);
+    }
+    return yscr__win.foreground() == h ? YSCR_FG_FORCED : YSCR_FG_REFUSED;
+#else
+    (void)s;
+    return YSCR_FG_NA;
+#endif
+}
+/* The core test replaces it. */
+#ifndef YSCR__FOREGROUND
+#define YSCR__FOREGROUND(s) yscr__foreground(s)
+#endif
 
 /* --- settling at open (SETTLE) -------------------------------------------- */
 
@@ -7195,7 +7434,8 @@ static void yscr__warmup(yscr_screen* s) {
 static void yscr__settle_token(const yscr_screen* s, char* b, size_t cap) {
     const char* mode = s->st_mode == YSCR_SETTLE_STRICT ? "strict" : s->st_mode == YSCR_SETTLE_WARN ? "warn" : "off";
     const char* src = s->st_src == YSCR_SETTLE_SRC_ENV ? ":env" : s->st_src == YSCR_SETTLE_SRC_DESC ? ":desc" : "";
-    char why[64];
+    char why[64], hk[32] = "";
+    if (s->hooked) snprintf(hk, sizeof hk, ",hook=%.3fs", (double)s->hook_ns * 1e-9);
     if (s->st_cond == YSCR_SETTLE_C_SPREAD && s->st_sd >= 0)
         snprintf(why, sizeof why, "spread,sd=%.1fus,mean%+.1fus", (double)s->st_sd * 1e-3, (double)s->st_mean * 1e-3);
     else if (s->st_cond == YSCR_SETTLE_C_SPREAD)
@@ -7205,8 +7445,8 @@ static void yscr__settle_token(const yscr_screen* s, char* b, size_t cap) {
                  (int)s->st_bad, (int)s->st_run, (int)s->st_need);
     switch (s->st_result) {
     case YSCR_SETTLED:
-        snprintf(b, cap, "%.2fs(%d flips%s%s%s)", (double)s->st_ns * 1e-9, (int)s->st_flips,
-                 s->st_src ? "," : "", s->st_src ? mode : "", src);
+        snprintf(b, cap, "%.2fs(%d flips%s%s%s%s)", (double)s->st_ns * 1e-9, (int)s->st_flips,
+                 s->st_src ? "," : "", s->st_src ? mode : "", src, hk);
         break;
     case YSCR_SETTLE_FAILED:
         snprintf(b, cap, "FAILED(%s,%s%s)", why, mode, src);
@@ -7264,6 +7504,8 @@ static void yscr__settle_push(yscr_screen* s) {
     ev.u.u32[5] = (uint32_t)s->st_run;
     ev.u.u32[6] = s->st_sd < 0 ? 0xFFFFFFFFu : (uint32_t)(s->st_sd > 0xFFFFFFFELL ? 0xFFFFFFFELL : s->st_sd);
     ev.u.i32[7] = (int32_t)(s->st_mean > INT32_MAX ? INT32_MAX : s->st_mean < -INT32_MAX ? -INT32_MAX : s->st_mean);
+    ev.u.u32[8] = s->fg;
+    ev.u.u32[9] = s->fg ? s->fg_mode : 0u;
     yscr__push(s, &ev);
 }
 
@@ -7300,6 +7542,15 @@ static int yscr__settle(yscr_screen* s) {
         s->index = -1;
         if (rc < 0) break;
     }
+    /* Hold a slot, as the warm-up does: after the last settle flip the bound
+     * back buffer is the one just presented, and a draw into it before the
+     * first begin() (ygfx_prime()) waited forever on COMPOSITION. */
+    if (rc >= 0 && !s->slot_held) {
+        yscr_vblank newest;
+        newest.t_ns = 0;
+        if (s->pr->acquire(s->pr_ctx, yscr__now() + (int64_t)(8 * s->period_f) + 200000000, &newest) == YSCR_OK)
+            s->slot_held = 1;
+    }
     s->settling = 0;
     s->index = 0;
     s->st_ns = yscr__now() - s->st_t0;
@@ -7333,6 +7584,9 @@ static const char* yscr__settle_desc(yscr_screen* s, const yscr_desc* d) {
     if (d->settle_flips < 0 || d->settle_flips > 64) return "ysp_screen: desc.settle_flips must be 0 (6) to 64";
     if (d->settle_max_ns < 0 || d->settle_max_ns > 60000000000LL || d->settle_min_ns > 60000000000LL)
         return "ysp_screen: desc.settle_max_ns must be 0 (the default) to 60 s, and settle_min_ns at most 60 s";
+    if (d->foreground < 0 || d->foreground > YSCR_FOREGROUND_FORCE)
+        return "ysp_screen: desc.foreground must be a YSCR_FOREGROUND_* value";
+    s->fg_mode = (uint32_t)(d->foreground ? d->foreground : d->windowed ? YSCR_FOREGROUND_HONOR : YSCR_FOREGROUND_FORCE);
     s->st_src = d->settle ? YSCR_SETTLE_SRC_DESC : YSCR_SETTLE_SRC_DEFAULT;
     env = YSCR__GETENV("YSP_SETTLE", s->st_env, sizeof s->st_env);
     if (env) {
@@ -7497,6 +7751,25 @@ static void yscr__rm_check(yscr_screen* s) {
     (void)&yscr__rm_guard; (void)&yscr__mouse_decode; (void)&yscr__rm_log;
     (void)s;
 #endif
+}
+
+/* desc.on_context (CONTEXT HOOK), before the warm-up: the caller submits
+ * work that runs on other threads (ANGLE's compiles) while open() settles;
+ * before the warm-up it had 0.2 s more (measured, docs/screen.md). The
+ * hook's own time is added to the cap, so a slow hook cannot fail
+ * settling; the minimum stays from the open() call, as the window's move
+ * to an overlay counts from its creation. */
+static void yscr__context_hook(yscr_screen* s, const yscr_desc* desc) {
+    int64_t t;
+    if (!desc->on_context) return;
+    t = yscr__now();
+    desc->on_context(desc->on_context_ctx, s);
+    s->hook_ns = yscr__now() - t;
+    s->hooked = 1;
+    s->st_max += s->hook_ns;
+    /* settle frames clear the back buffer: the hook may have bound a target */
+    if (s->gl[YSCR__GL_BINDFRAMEBUFFER])
+        ((yscr__glBindFramebuffer_fn)s->gl[YSCR__GL_BINDFRAMEBUFFER])(YSCR__GL_DRAW_FRAMEBUFFER, 0);
 }
 
 YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
@@ -7692,6 +7965,10 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
                 return false;
             }
         }
+#if defined(YSCR__DXGI)
+        yscr__win_load();   /* the window a forced raise gives the foreground back to */
+        s->fg_prev = yscr__win.foreground ? (void*)yscr__win.foreground() : NULL;
+#endif
         props = SDL_CreateProperties();
         SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "ysp_screen");
         SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, (Sint64)SDL_WINDOWPOS_CENTERED_DISPLAY(id));
@@ -7787,6 +8064,10 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
     }
     s->caps.backend = s->backend;
     hw_onset = s->caps.hw_onset;
+    s->fg = YSCR__FOREGROUND(s);
+#if defined(YSCR__DXGI)
+    if (s->backend == YSCR_BACKEND_COMPOSITION) yscr__wake_start(s);
+#endif
     if (s->caps.mode.period_ns == 0) s->caps.mode = want;
     if (s->caps.period_ns == 0) s->caps.period_ns = s->caps.mode.period_ns;
     if (s->caps.period_ns <= 0) s->caps.period_ns = 16666667;
@@ -7878,6 +8159,7 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
         ev.u.i32[5] = s->auto_pick;
         yscr__push(s, &ev);
     }
+    yscr__context_hook(s, desc);
     yscr__warmup(s);
     /* Settling (SETTLE): skipped where it cannot run or was turned off,
      * and recorded either way. */
@@ -7945,7 +8227,16 @@ YSCR_API void yscr_close(yscr_screen* s) {
 #if defined(YSCR__DXGI)
     yscr__wd_disarm(s);
     yscr__win_gamma_release(s);
+    yscr__wake_stop(s);
+    /* A forced raise took the foreground from another window: give it back
+     * while this one still has it (measured: else the system picked a
+     * third program in 9 of 9 forced opens). */
+    if (s->fg == YSCR_FG_FORCED && s->fg_prev && s->hwnd && yscr__win.foreground && yscr__win.is_window &&
+        yscr__win.set_foreground && yscr__win.foreground() == (HWND)s->hwnd && yscr__win.is_window((HWND)s->fg_prev))
+        yscr__win.set_foreground((HWND)s->fg_prev);
 #endif
+    s->fg = 0;
+    s->fg_prev = NULL;
     s->panic_armed = 0;
 #if !defined(YSCR_NO_SDL)
     if (s->abort_slot && yscr__slot[s->abort_slot - 1].win && --yscr__abort_windows == 0)
@@ -8049,6 +8340,10 @@ YSCR_API void yscr_sync_check(const yscr_screen* s, yscr_sync_info* out) {
     }
 }
 
+static const char* yscr__fg_name(uint32_t fg) {
+    return fg == YSCR_FG_GRANTED ? "granted" : fg == YSCR_FG_FORCED ? "forced" : fg == YSCR_FG_REFUSED ? "refused" : "n/a";
+}
+
 YSCR_API int yscr_describe(const yscr_screen* s, char* buf, size_t cap) {
     char extra[448], abort_s[40], settle_s[96];
     double hz, ppm;
@@ -8096,7 +8391,7 @@ YSCR_API int yscr_describe(const yscr_screen* s, char* buf, size_t cap) {
         }
     }
     return snprintf(buf, cap, "ysp_screen %s: backend=%s%s%s%s %s mode=%dx%d@%d/%d measured=%.4fHz(%+.0fppm) "
-                    "path=%s depth=%d(%s,%u changes) settle=%s lead=%.2f worst_tier=%d abort=%s panic=%s%s%s%s%s",
+                    "path=%s depth=%d(%s,%u changes) settle=%s foreground=%s%s lead=%.2f worst_tier=%d abort=%s panic=%s%s%s%s%s%s",
                     YSCR_VERSION_STRING, s->pr->name,
                     s->auto_pick == YSCR_AUTO_COMPOSITION ? "(auto)"
                         : s->auto_pick == YSCR_AUTO_FALLBACK ? "(auto,composition-refused:\"" : "",
@@ -8105,12 +8400,15 @@ YSCR_API int yscr_describe(const yscr_screen* s, char* buf, size_t cap) {
                     s->caps.mode.refresh_num, s->caps.mode.refresh_den, hz, ppm,
                     yscr__path_name(s->path), s->depth,
                     s->depth_pin ? "pin" : s->depth_learn ? "learner" : "path", (unsigned)s->depth_changes,
-                    settle_s, s->lead < 0 ? -1.0 : s->lead, s->worst_tier, abort_s,
+                    settle_s, yscr__fg_name(s->fg),
+                    s->backend != YSCR_BACKEND_COMPOSITION ? "" : s->wake ? " idle_wake=on" : " idle_wake=off",
+                    s->lead < 0 ? -1.0 : s->lead, s->worst_tier, abort_s,
                     s->panic_armed == 1 ? "armed" : s->panic_armed == 2 ? "idle(windowed)" : s->panic_armed == 3 ? "n/a" : "off",
                     s->sync_off ? " WARNING=not-vsynced(driver-setting?)" : "",
                     s->unstable ? " WARNING=off-grid-vblanks" : "",
                     (ppm > 200 || ppm < -200) ? " WARNING=period-differs-from-mode" : "",
-                    s->st_result == YSCR_SETTLE_FAILED ? " WARNING=not-settled" : "");
+                    s->st_result == YSCR_SETTLE_FAILED ? " WARNING=not-settled" : "",
+                    s->fg == YSCR_FG_REFUSED ? " WARNING=not-foreground" : "");
 }
 
 YSCR_API void yscr_settle_check(const yscr_screen* s, yscr_settle_info* out) {
@@ -8125,10 +8423,12 @@ YSCR_API void yscr_settle_check(const yscr_screen* s, yscr_settle_info* out) {
     out->flips = s->st_flips;
     out->run = s->st_run;
     out->need = s->st_need;
+    out->foreground = s->fg;
     out->min_ns = s->st_min;
     out->max_ns = s->st_max;
     out->spread_sd_ns = s->st_sd;
     out->spread_mean_ns = s->st_mean;
+    out->hook_ns = s->hook_ns;
     yscr__settle_message(s, out->message, sizeof out->message);
 }
 

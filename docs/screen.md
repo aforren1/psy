@@ -2245,6 +2245,414 @@ event and `AllowSetForegroundWindow(ASFW_ANY)` before it starts the
 program, as the examples with `--topmost` now do for themselves; or set
 `YSP_SETTLE=warn`.
 
+v0.5.1 forces the foreground of a fullscreen screen by default ([The
+foreground](#the-foreground-v051)).
+
+## The foreground (v0.5.1)
+
+Windows gives the foreground, and with it the keyboard, only to some
+programs: the foreground program and the programs it starts, the program
+that got the last input, and a few more cases. Up to v0.5.0,
+`yscr_open()` called `SDL_RaiseWindow()` once and did not check the
+result. Decided 2026-10-10 (user): `desc.foreground` AUTO forces the raise
+in fullscreen and honors the OS policy in a window; HONOR and FORCE set
+it. The describe line and the settle record say how the window got the
+foreground.
+
+### Launches measured
+
+All runs: this laptop, AC, the guard held, the session unlocked and the
+display on in every run, the user idle for 0.6 to 1.3 s (the probe's own
+input). The probe (`C:\tmp\psy-work\v051\fg.c`, not in the repository)
+opens a fullscreen screen with the default settling, runs 150 frames and
+closes. A second program (`victim.c`) has the foreground and a text box
+with the keyboard focus before each open. 1 s after the open, one F24 key
+goes to the foreground window, and one more after the close. "Forced" is
+`SDL_HINT_FORCE_RAISEWINDOW`, set by the probe (phase 1) or by the header
+(v0.5.1). The foreground lock time-out is the system's (2147483647 ms).
+
+| Launch | Default policy | Forced |
+|---|---|---|
+| A program in front starts it (a terminal) | granted 5 of 5 | granted 5 of 5 |
+| A background process starts it (the shell of a tool) | refused 6 of 7 | foreground 9 of 9 |
+| A detached process (parent gone) starts it | refused 7 of 7 | foreground 9 of 9 |
+| Task Scheduler, `/it`, a program without a console | refused 7 of 7 | foreground 7 of 7 |
+| Task Scheduler, a console program, or a `.cmd` file | granted 10 of 10 | granted 10 of 10 |
+
+The scheduler's console window took the foreground first, so the program
+it started was granted. Over all launches from the background without a
+console: refused 20 of 21 (phase 1 and v0.5.1 HONOR), and forcing got the
+foreground 25 of 25.
+
+When the OS refused:
+
+- Settling passed in every run (0.49 to 0.57 s, 22 presents), every flip
+  was an independent flip, tier 1, and no record was bad. So settling does
+  not detect it.
+- The other program's window and the taskbar were above the screen's
+  window in the z-order.
+- The F24 key went to the other program in all 20. The screen got no key
+  event, so Shift+Esc would not reach it either.
+
+When the raise was forced:
+
+- The key went to the screen.
+- After the close, the foreground went to a third program (here the code
+  editor), not to the program that had it, in 9 of 9 phase-1 runs from the
+  background. That program's text box kept no focus.
+- With `SetForegroundWindow()` to the previous window at the close, while
+  the screen still had the foreground, it went back in 15 of 15 runs, and
+  the key reached it.
+
+A window of 800 x 600 behaved the same (2 runs per cell): refused from
+the background, settled at 2.5 s, the key to the other program.
+
+### The rule
+
+- AUTO: FORCE fullscreen, HONOR in a window. A fullscreen screen is the
+  participant's whole display; a program that started it from a scheduler
+  or a remote tool wants it in front. A window shares the desktop with
+  the operator, so the OS policy stands.
+- The header asks once with SDL's default. If the OS refuses and the mode
+  is FORCE, it sets the hint, raises again and puts the hint back as it
+  was (the caller's value, or unset). So "forced" in the record means the
+  OS refused first.
+- `close()` gives the foreground back to the window that had it before the
+  open, but only after a forced raise, while the screen still has it, and
+  while that window exists.
+- A refused foreground does not fail `yscr_open()`. The describe line adds
+  `WARNING=not-foreground`; settling decides whether the display is fit.
+
+Checked again on v0.5.1, 24 launches of the matrix above with
+`desc.foreground` HONOR and FORCE: every record said granted, forced or
+refused as the OS did, and the foreground went back to the previous
+window 24 of 24. AUTO from the background: 3 forced, 1 granted
+fullscreen; refused in a window.
+
+### Tests
+
+`test_foreground` plays each outcome through a test seam
+(`YSCR__FOREGROUND`): the describe token, the warning, `u.u32[8]` and
+`[9]` of the settle record, `yscr_settle_check()`, the mode AUTO applies
+and a bad `desc.foreground`. Mutants `fg-01` to `fg-06`, all caught. The
+raise itself needs a display: hand tests below.
+
+### Hand tests
+
+1. Start `screen_flipstats` from a terminal in front: `foreground=granted`.
+2. Start it with `schtasks /create /tn t /tr "<path>\screen_flipstats.exe
+   --frames 300" /sc once /st 23:59 /it` and `schtasks /run /tn t` while
+   another window is in front: `foreground=granted` (its console takes the
+   foreground first).
+3. Start it from a background process, for example
+   `Start-Process -WindowStyle Hidden` in a script that a scheduler runs, or
+   over a remote shell into the console session: `foreground=forced`; at
+   the end the window that was in front has the keyboard again.
+4. The same with `--windowed`: `foreground=refused` and
+   `WARNING=not-foreground`.
+
+## The first frame after a gap (v0.5.1)
+
+ysp/gfx.h v0.11 found the first frame after a setup of 2 s or more late
+or dropped in 21 of 22 runs (docs/gfx.md). The cause is not the program
+or the GPU. It is the composition swapchain after a time without a
+present.
+
+### The probe
+
+`C:\tmp\psy-work\v051\gap.c` (not in the repository) opens a fullscreen
+screen (settled), then repeats items in a random order: 30 frames, a gap
+of G seconds without a present, then frame M0 and 9 more. The scanout's
+own vblanks are polled with `D3DKMTGetScanLine` on a thread. Modes of the
+gap: sleep; the frame thread busy (as a shader compile); GPU work into an
+offscreen target with `glFinish()` every 4 ms; black frames on every
+vblank; one black frame every 100 or 250 ms; 1 or 2 black frames just
+before M0; M0 targeted one vblank later; a thread in
+`D3DKMTWaitForVerticalBlankEvent` during the gap. This laptop, AC,
+2026-10-09 and 10, 4 to 6 repetitions per item.
+
+M0 late or dropped:
+
+| Gap, sleep | COMPOSITION | DXGI_FLIP |
+|---|---|---|
+| 0 to 50 ms | 0 of 26 | 0 of 17 |
+| 67 ms | 6 of 6 | 0 of 3 |
+| 83 ms to 3 s | 66 of 66 | 0 of 51 |
+
+Other modes, COMPOSITION, gap 0.5 and 2.5 s:
+
+| During the gap | M0 late or dropped |
+|---|---|
+| frame thread busy | 7 of 8 |
+| GPU work, no present | 8 of 8 |
+| a black frame every 250 ms / 100 ms | 7 of 8 / 8 of 8 |
+| a black frame on every vblank | 0 of 8 |
+| 1 or 2 black frames before M0 | 0 of 22 (the first black frame dropped instead) |
+| M0 targeted one vblank later | 0 of 12 |
+| a thread waiting on the vblank event | 0 of 12 |
+
+Every late M0 was one vblank late (dropped 1), on independent flip, tier
+1, with 10 to 16 ms between the present call's return and the planned
+vblank; the present call took 0.4 to 0.9 ms, as on other frames. The
+scanout's vblank intervals stayed within 1 to 50 us of the period through
+every gap, and the vblanks after a gap were within 4 us of the grid of
+those before it: the panel did not stop or shift (no self-refresh exit, no
+refresh change), and the grid needs no new anchor. CPU and GPU load do not
+matter; only the time without a present does, from about 4 vblanks. A
+waiter on the display's vblank event during the gap removes it; so the
+likely cause is that the vblank event (its interrupt) goes idle when
+nothing waits on it, and the first present after that misses its target.
+That cause is inferred, not observed. DXGI_FLIP waits on its own
+frame-latency object, which may explain why it is not affected.
+
+### The mitigation
+
+| Option | Effect | Cost |
+|---|---|---|
+| Keep-alive frames | fixes it if every vblank | the caller's frame loop must run through setup |
+| A warm frame before the first real one | fixes M0, the warm frame drops | a frame of black; the header cannot know the content |
+| Plan the first frame after a gap one vblank later | fixes it | a frame of latency after each gap; a threshold that may differ elsewhere |
+| A thread waiting on the vblank event | fixes it | a thread that wakes 60 times a second while the screen is open |
+
+Kept: the waiter, on COMPOSITION only (IDLE WAKE in the header). It
+changes no frame and no prediction. With it, on v0.5.1: 0 of 36 M0 late
+or dropped after gaps of 67 ms to 2 s, 0 of 30 with the other modes. A
+failed wait (display off) backs off 4 ms; `close()` waits 250 ms for the
+thread and otherwise leaves it its state.
+
+### A hang after settling
+
+While checking this on the original case, every program that called
+`ygfx_prime()` right after `ygfx_open()` hung in its `glReadPixels()` on
+COMPOSITION (gfx_hello, gfx_trial and the probe; 20 of 20, with the v0.5.0
+header too). Settling ended after a flip, so the back buffer bound at the
+end of `yscr_open()` was the one just presented; the prime's output pass
+drew into it and the GPU waited for the presentation to release it,
+which no later present did. v0.4.4's warm-up ended holding a free slot,
+which is why earlier probes did not hang. v0.5.1 holds a slot at the end
+of settling too (`fg-07`). Then the original case, a cold program cache
+(2.2 s of compiles after `yscr_open()`): frame 0 late or dropped in 0 of 8
+gfxwarm runs with and without the prime (21 of 22 in v0.5.0's runs), and
+in 2 of 25 runs of the compile probe (1 dropped, 1 a late target; with
+and without the waiter alike, 1 of 12 each).
+
+## Compiles during settling (v0.5.2)
+
+`yscr_open()` settles for 0.5 to 0.8 s fullscreen and 2.5 s in a window;
+then `ygfx_open()` compiles its 14 programs (2.2 s with a cold cache on
+AC, 2.8 to 3.2 s on battery). ANGLE exposes `GL_KHR_parallel_shader_compile`
+here and compiles on its own threads: `ygfx_open()` submits every program
+before it asks for a status. A scratch probe of v0.5.1
+(`C:\tmp\psy-work\v051\par.c`) submitted gfx's programs at the first
+settle frame, let settling go on, and asked for the statuses after
+`yscr_open()`. No program cache, 10 opens each, interleaved, AC, ms from
+the `yscr_open()` call:
+
+| | Settled | gfx ready, median (range) |
+|---|---|---|
+| Fullscreen, one after the other | 667 to 782 | 2900 (2854 to 3022; 1 run 5404) |
+| Fullscreen, compiles during settling | 648 to 808 | 2700 (2604 to 3523; 1 run 5257) |
+| Window, one after the other | 2503 to 2516 | 4683 (4628 to 4702; 1 run 7148) |
+| Window, compiles during settling | 2505 to 2516 | 2730 (2662 to 3361; 1 run 5237) |
+
+Decided 2026-10-10 (user): build it, for fullscreen and windows.
+
+### The hook
+
+`desc.on_context` (a function and its context pointer) is the whole API in
+this header. `yscr_open()` calls it once, when the GL context exists and
+before the warm-up's first present. ysp/gfx.h v0.11.1's
+`ygfx_open_start()` goes in it: it submits every program and returns, and
+`ygfx_open()` after `yscr_open()` waits for the statuses.
+
+- A callback in each settle frame was the other candidate. Nothing has to
+  run per frame (the compiles run on ANGLE's threads), so a call once is
+  enough, and a per-frame call would let a caller's work change the load
+  that settling measures.
+- Settling as a state (the sketch below) would also give the time, but it
+  moves the strict failure into the frame loop and every example must wait
+  for it. The hook keeps "`yscr_open()` returned, so the display is
+  settled".
+- The hook's time is added to the cap. Without that, a hook that holds the
+  thread (a compile without parallel compile, 2 s or more) would fail a
+  strict fullscreen open on time it did not spend settling. The minimum
+  stays from the `yscr_open()` call: the move of a window to an overlay
+  counts from the window's creation.
+- After the hook, `yscr_open()` binds the default framebuffer:
+  `ygfx_open_start()` leaves its scene target bound, and the black frames
+  of the warm-up and settling would clear that target and present a back
+  buffer that nobody cleared.
+- `yscr_open()` can fail after the hook (strict settling). Then the
+  context is gone with every object the hook made: ysp/gfx.h's
+  `ygfx_close()` frees its memory and deletes nothing, and `ygfx_open()`
+  on the started handle fails and says so.
+
+### Before or after the warm-up
+
+The warm-up (6 or more black frames, about 0.2 s) measures the depth and
+anchors the grid. All runs in this section: this laptop (Iris Xe, Docker's
+ANGLE 2.1.23876), on battery (the guard logged it; AC was not available),
+the guard held, the session unlocked and the console display on in every
+run (logged by the probe), the window in front (one input event before the
+open), 2026-10-10. The probe (`C:\tmp\psy-work\pc\ovl.c`, not in the
+repository) opens a screen with the given backend, opens the gfx one after
+the other or through the hook, primes it, and draws 120 to 180 frames of a
+drifting gabor, counting records that are early, late, estimated, off the
+grid or dropped. Cold cache: an empty file cache folder before each open.
+
+Hook before against after the warm-up, cold cache, 5 opens each, ms from
+the `yscr_open()` call, median (range):
+
+| Configuration | Hook at, before / after | gfx ready, before | gfx ready, after |
+|---|---|---|---|
+| COMPOSITION fullscreen | 225 to 256 / 464 to 596 | 3484 (3297 to 3576) | 3703 (3563 to 3883) |
+| COMPOSITION window | 212 to 333 / 438 to 463 | 3423 (3366 to 4042) | 3778 (3589 to 3929) |
+| DXGI_FLIP fullscreen | 229 to 323 / 399 to 430 | 3645 (3357 to 3811) | 3537 (3494 to 3705) |
+| DXGI_FLIP window | 214 to 263 / 368 to 563 | 3432 (3321 to 3647) | 3696 (3548 to 3758) |
+
+All 40 settled; each configuration ended on one path (independent flip on
+COMPOSITION, overlay on DXGI_FLIP) at depth 1, before as after. Kept:
+before the warm-up (0.2 s more for the compiles; DXGI_FLIP fullscreen's
+difference is within its spread).
+
+### Before and after v0.5.2
+
+10 opens per row, interleaved; "one after the other" is `yscr_open()` then
+`ygfx_open()`; "hook" is `ygfx_open_start()` in `desc.on_context`. Warm
+cache: the folder a cold open filled. ms from the `yscr_open()` call,
+median (range):
+
+| Configuration | Cache | Settled at, one after the other | Settled at, hook | gfx ready, one after the other | gfx ready, hook |
+|---|---|---|---|---|---|
+| COMPOSITION fullscreen | cold | 782 (743 to 870) | 798 (760 to 844) | 3852 (3794 to 3971) | 3468 (3335 to 3636) |
+| COMPOSITION fullscreen | warm | 781 (741 to 876) | 781 (762 to 828) | 805 (759 to 905) | 781 (762 to 828) |
+| COMPOSITION window | cold | 2525 (2519 to 2527) | 2520 (2516 to 2532) | 5374 (5184 to 5614) | 3405 (3266 to 3588) |
+| COMPOSITION window | warm | 2521 (2517 to 2530) | 2520 (2517 to 2530) | 2546 (2540 to 2554) | 2520 (2517 to 2530) |
+| DXGI_FLIP fullscreen | cold | 708 (652 to 756) | 664 (653 to 750) | 3887 (3629 to 4145) | 3459 (3241 to 3626) |
+| DXGI_FLIP fullscreen | warm | 695 (641 to 813) | 666 (648 to 741) | 717 (671 to 853) | 666 (648 to 741) |
+| DXGI_FLIP window | cold | 2527 (2518 to 2532) | 2526 (2517 to 2530) | 5396 (5263 to 5609) | 3407 (3301 to 3685) |
+| DXGI_FLIP window | warm | 2528 (2523 to 2532) | 2524 (2517 to 2532) | 2553 (2549 to 2560) | 2524 (2517 to 2532) |
+
+- Settling: 160 of 160 settled. The presents per open were the same with
+  and without the compiles (fullscreen 25 on COMPOSITION and 24 on
+  DXGI_FLIP in every open; windows 126 to 138), so were the clean flips in
+  a row at the end (16 and 14 fullscreen; 115 to 125 in a window), the
+  path and the depth (one per configuration, depth 1). The spread's SD at
+  the end: at most 11.3 us one after the other and 25.1 us with the
+  compiles (1 DXGI_FLIP fullscreen open; the next largest 16.7 us); the
+  limit is 50 us.
+- Cold cache: the compiles take 3.1 s on battery, so in a window they end
+  0.9 s after the 2.5 s minimum (2.0 s gained) and fullscreen 0.4 s is
+  hidden. On AC (below) they end within 0.04 s of the minimum.
+- Warm cache: the 14 loads (16 to 40 ms) run in the hook, before the
+  warm-up; `ygfx_open()` then returns at once. 24 to 51 ms gained.
+- `ygfx_prime()` after it: 49 to 107 ms in every condition.
+- After the open: frame 0 was dropped (one vblank late) in 3 of 80 hook
+  opens and 8 of 80 opens one after the other, on both backends, with a
+  cold and a warm cache; these 11 were the only bad records of 28640.
+  Not studied further here.
+
+On AC (the laptop was plugged in later the same morning), cold cache, 5
+opens per row, interleaved, the same probe:
+
+| Configuration | Settled at, one after the other | Settled at, hook | gfx ready, one after the other | gfx ready, hook |
+|---|---|---|---|---|
+| COMPOSITION fullscreen | 662 (651 to 696) | 680 (668 to 685) | 2908 (2901 to 3257) | 2466 (2447 to 2638) |
+| COMPOSITION window | 2524 (2516 to 2525) | 2528 (2517 to 2531) | 4832 (4712 to 5027) | 2567 (2561 to 2572) |
+| DXGI_FLIP fullscreen | 570 (550 to 610) | 568 (564 to 584) | 2865 (2774 to 2989) | 2459 (2383 to 2619) |
+| DXGI_FLIP window | 2527 (2522 to 2532) | 2528 (2520 to 2532) | 4787 (4733 to 4815) | 2567 (2561 to 2572) |
+
+All 40 settled, with the same presents per configuration (24 or 25
+fullscreen, 135 to 143 in a window). After the open: frame 0 dropped or
+late in 1 hook open and 2 opens one after the other; in 1 DXGI_FLIP window
+open one after the other, frames 0 to 16 were off the grid (tier 2) after
+the 2.3 s without a present. With the hook, a window's `ygfx_open()`
+returns 34 to 52 ms after `yscr_open()`, so that gap is gone.
+
+### Without parallel compile
+
+`ygfx_open_start()` submits only when the backend reports
+`caps.parallel_compile` (the extension in the GL context's list).
+Otherwise it makes nothing, and `ygfx_open()` does the whole open after
+settling. A test seam hides the extension; COMPOSITION, cold cache, 5
+opens each, ms from the `yscr_open()` call, median (range):
+
+| | gfx ready, one after the other | gfx ready, hook without the extension |
+|---|---|---|
+| Fullscreen | 3802 (3735 to 3871) | 4073 (3752 to 4256) |
+| Window | 5348 (5270 to 5583) | 5297 (5278 to 5354) |
+
+The ranges overlap. The describe line says
+`open_start=serial(no GL_KHR_parallel_shader_compile)`, and the settle
+token shows `hook=0.000s`.
+
+### Tests
+
+`test_context_hook` (`tests/adapt/screen_test.c`, virtual clock): called
+once, with the screen open, before the first present; a hook of 2.95 s
+still settles fullscreen (the cap is 5.95 s); in a window the minimum
+stays 2.5 s from the call; an open that fails at the cap after the hook
+closes the presenter; settle OFF and SIM call it; an open refused before
+the context does not; the describe token and `hook_ns`. ysp/gfx.h's GL
+test `v0.11.1 start` reopens its headless screen with the hook and checks
+the default framebuffer is bound after `yscr_open()`. Mutants `ch-01` to
+`ch-07`, all caught.
+
+### Settling as a state (sketch; not built)
+
+`yscr_open()` would return after the warm-up; `yscr_begin()` would hand
+out frames with `f.settling` set until the rule holds, and then report the
+outcome (a strict failure as an error from `yscr_begin()`). The caller
+compiles, uploads and loads the pack, and may draw a loading screen,
+meanwhile.
+
+- For callers: every loop must check `f.settling` and not start a trial;
+  `yscr_open()` no longer proves the display fit; the strict failure moves
+  from open to the frame loop; the describe line is final only after
+  settling. Settle frames are not records, so `f.index` must not count
+  them, and `f.done` must hide them, as now.
+- For the examples: each one's first trial must wait for settling, and
+  the data header written at open must be written after it.
+- Risks: content drawn during settling changes the GPU load that settling
+  measures (a heavy loading screen could fail it or pass it under load
+  that the trials do not have); a caller that ignores the flag runs trials
+  on an unsettled display; ysp/timeline.h anchors must not use settle
+  frames; the abort path and the panic watchdog run in a new state.
+
+## SIM on a virtual clock (design note; not built)
+
+`--sim` self-checks flaked on slow CI hosts (macOS, twice): the SIM
+presenter sleeps to a vblank grid on the real clock, so a slow host drops
+whole frames. A virtual clock would advance one period per flip and never
+sleep. What reads the real clock in a `--sim` run:
+
+- ysp/screen.h: `yscr__now()` at about 60 places through one compile-time
+  macro (`YSCR__NOW`), for every screen at once: the SIM presenter, the
+  core's prediction (`yscr__count_at(s, now + margin)`), `flip_at()`, the
+  waits, the trigger worker's deadlines, ring stamps. A virtual SIM
+  needs a clock per screen threaded through the core; a CUSTOM presenter
+  (`screen_sync_check --sim-vsync-off`) and the abort and raw-input state,
+  which have no screen, must stay real.
+- ysp/audio.h: the null device is miniaudio's real-time thread, and the
+  callback stamp reads `yrt_now_ns()` with no hook. `trial_audio_keyboard`,
+  `trial_stop_signal` and `audio_av_sync` compare audio onsets with flip
+  onsets (10 ms and 2 ms limits), so they break unless the audio null
+  device runs on the same virtual clock.
+- ysp/video.h: decode-ahead runs on its own thread; a frame loop that
+  never sleeps outruns it (more repeats). `video_play --sim` checks only
+  for no error, so it should pass.
+- ysp/gfx.h: shader time 0 is `yrt_now_ns()` at open; a virtual epoch
+  must start there.
+- ysp/timeline.h, ysp/response.h, ysp/trials.h, ysp/input.h: no clock;
+  nothing to change. The response examples stamp their synthetic events
+  from `f.onset`, so they would become exact.
+- ysp/rt.h has no clock override at all.
+
+So it is not contained: it changes the core's clock in every function,
+and three examples need a virtual audio device. Until then, the
+examples tolerate whole-frame drops (`trial_same_different`,
+`trial_sternberg`).
+
 ## Not measured
 
 - Light. No photodiode was attached. `tests/loopback/screen_loopback.c`

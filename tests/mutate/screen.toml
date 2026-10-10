@@ -5,7 +5,7 @@
 # v0.3.5's 5 (raw mice; the 2 on its queue went with the queue),
 # v0.4.0's 6 (the input bridge), v0.4.1's 15 (the key filter, kd-) and
 # v0.4.2's 3 (kd-16 to kd-18, the key-up fix) and 13 (the sync guard,
-# sg-), v0.4.3's 9 (eg-, held frames), v0.4.4's 20 (dp-, the depth policy, the guessed grid, early flips), v0.5.0's 20 (st-, settling at open). The 29 earlier mutants (docs/screen.md,
+# sg-), v0.4.3's 9 (eg-, held frames), v0.4.4's 20 (dp-, the depth policy, the guessed grid, early flips), v0.5.0's 20 (st-, settling at open), v0.5.1's 7 (fg-, the foreground and the slot held after settling), v0.5.2's 7 (ch-, the context hook; ch-06 runs the gfx test). The 29 earlier mutants (docs/screen.md,
 # "Mutations") were run from scripts that were not kept.
 header = "ysp/screen.h"
 
@@ -15,6 +15,14 @@ compiler = "gcc"
 flags = ["-std=c11", "-O1", "-w"]
 libs = ["-lm"]
 timeout = 300
+
+# The gfx test sees what only a GL context shows (ch-06).
+[test.gfx]
+source = "tests/adapt/gfx_test.c"
+compiler = "msvc"
+flags = ["/O1", "/W3", "/D_CRT_SECURE_NO_WARNINGS"]
+timeout = 600
+env_default = { YSCR_ANGLE_DIR = "C:/Program Files/Docker/Docker/frontend" }
 
 [[mutant]]
 id = "abort-00"
@@ -964,3 +972,118 @@ test = "screen"
 why = "Every override is in the describe line (the PTB SkipSyncTests lesson)."
 find = '    const char* src = s->st_src == YSCR_SETTLE_SRC_ENV ? ":env" : s->st_src == YSCR_SETTLE_SRC_DESC ? ":desc" : "";'
 replace = '    const char* src = "";'
+
+[[mutant]]
+id = "fg-01"
+name = "AUTO honors fullscreen"
+test = "screen"
+why = "AUTO forces the raise fullscreen (decided 2026-10-10): a refused foreground sends the participant's keys to another program."
+find = "    s->fg_mode = (uint32_t)(d->foreground ? d->foreground : d->windowed ? YSCR_FOREGROUND_HONOR : YSCR_FOREGROUND_FORCE);"
+replace = "    s->fg_mode = (uint32_t)(d->foreground ? d->foreground : YSCR_FOREGROUND_HONOR);"
+
+[[mutant]]
+id = "fg-02"
+name = "a bad desc.foreground passes"
+test = "screen"
+why = "An unknown mode must fail open(), not act as one of the others."
+find = "    if (d->foreground < 0 || d->foreground > YSCR_FOREGROUND_FORCE)"
+replace = "    if (d->foreground < 0)"
+
+[[mutant]]
+id = "fg-03"
+name = "no warning when refused"
+test = "screen"
+why = "A refused foreground is in the describe line, which goes into every data file."
+find = '''                    s->fg == YSCR_FG_REFUSED ? " WARNING=not-foreground" : "");'''
+replace = '''                    "");'''
+
+[[mutant]]
+id = "fg-04"
+name = "the record loses the outcome"
+test = "screen"
+why = "YSCR_EV_SETTLE carries how the window got the foreground."
+find = "    ev.u.u32[8] = s->fg;"
+replace = "    ev.u.u32[8] = 0;"
+
+[[mutant]]
+id = "fg-05"
+name = "the record's mode is always set"
+test = "screen"
+why = "Without a window the mode applied is 0, as the record's comment says."
+find = "    ev.u.u32[9] = s->fg ? s->fg_mode : 0u;"
+replace = "    ev.u.u32[9] = s->fg_mode;"
+
+[[mutant]]
+id = "fg-06"
+name = "settle_check drops the outcome"
+test = "screen"
+why = "yscr_settle_check() reports the foreground."
+find = "    out->foreground = s->fg;"
+replace = ""
+
+[[mutant]]
+id = "fg-07"
+name = "no slot held after settling"
+test = "screen"
+why = "Measured: after the last settle flip the bound back buffer was the one presented, and ygfx_prime() before the first begin() hung (COMPOSITION, gfx_hello)."
+find = "    if (rc >= 0 && !s->slot_held) {"
+replace = "    if (0) {"
+
+# v0.5.2 (ch-): desc.on_context, the hook before settling (CONTEXT HOOK).
+
+[[mutant]]
+id = "ch-01"
+name = "the hook is not called"
+test = "screen"
+why = "v0.5.2: the caller's compiles would not start until open() returns."
+find = "    desc->on_context(desc->on_context_ctx, s);"
+replace = ""
+
+[[mutant]]
+id = "ch-02"
+name = "the hook's time counts against the cap"
+test = "screen"
+why = "v0.5.2: a slow hook (a compile without parallel compile, 2 s and more) would fail a strict open on time it did not spend settling."
+find = "    s->st_max += s->hook_ns;"
+replace = ""
+
+[[mutant]]
+id = "ch-03"
+name = "the hook's time moves the minimum too"
+test = "screen"
+why = "v0.5.2: the window's minimum counts from its creation (the move to an overlay at 1.7 to 1.9 s); moving it costs a window the hook's time."
+find = "    s->st_max += s->hook_ns;"
+replace = "    s->st_max += s->hook_ns;\n    s->st_min += s->hook_ns;"
+
+[[mutant]]
+id = "ch-04"
+name = "settle_check drops the hook's time"
+test = "screen"
+why = "v0.5.2: yscr_settle_check() reports the hook's time and the cap it moved."
+find = "    out->hook_ns = s->hook_ns;"
+replace = ""
+
+[[mutant]]
+id = "ch-05"
+name = "the describe line hides the hook"
+test = "screen"
+why = "v0.5.2: a data file's header must say that settling ran with the caller's work in the background."
+find = '    if (s->hooked) snprintf(hk, sizeof hk, ",hook=%.3fs", (double)s->hook_ns * 1e-9);'
+replace = ""
+
+[[mutant]]
+id = "ch-06"
+name = "settle frames clear the hook's target"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.11.1 start", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.5.2: ygfx_open_start() leaves its scene target bound; settle frames would clear it and present a back buffer nobody cleared."
+find = "        ((yscr__glBindFramebuffer_fn)s->gl[YSCR__GL_BINDFRAMEBUFFER])(YSCR__GL_DRAW_FRAMEBUFFER, 0);"
+replace = "        (void)0;"
+
+[[mutant]]
+id = "ch-07"
+name = "the hook after the warm-up"
+test = "screen"
+why = "v0.5.2: before the warm-up the compiles got 0.2 s more (measured, docs/screen.md); after it they start later."
+find = "    yscr__context_hook(s, desc);\n    yscr__warmup(s);"
+replace = "    yscr__warmup(s);\n    yscr__context_hook(s, desc);"

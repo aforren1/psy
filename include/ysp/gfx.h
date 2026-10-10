@@ -1,4 +1,4 @@
-/* ysp/gfx.h - v0.11.0 - public domain single-header stimulus graphics library
+/* ysp/gfx.h - v0.11.1 - public domain single-header stimulus graphics library
  *   (with MIT-licensed parts: see below)
  *
  *   Stimuli on GL ES 3.0, on top of ysp/screen.h: signed-distance shapes
@@ -37,6 +37,21 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.11.1 - ygfx_open_start() (OPEN START): the open in two calls, so
+ *          the programs compile while ysp/screen.h v0.5.2's open()
+ *          settles. Called from desc.on_context, it submits every built-in
+ *          program and returns; ygfx_open() then waits for the link
+ *          statuses. Without GL_KHR_parallel_shader_compile it submits
+ *          nothing and ygfx_open() does the whole open, as before; the
+ *          describe line says which (open_start=parallel or
+ *          open_start=serial(...)). caps.parallel_compile in the backend
+ *          interface (version unchanged). ygfx_close() deletes nothing
+ *          when the screen's context is gone. Measured on the Iris Xe
+ *          (docs/gfx.md, "v0.11.1"), cold program cache, on AC: gfx
+ *          ready 2.57 s after yscr_open() was called in a window, was
+ *          4.79 to 4.83 s; 2.46 to 2.47 s fullscreen, was 2.87 to 2.91 s
+ *          (on battery 3.41 against 5.37 to 5.40 s, and 3.46 to 3.47
+ *          against 3.85 to 3.89 s); a warm cache 24 to 51 ms earlier.
  *   v0.11.0 - ygfx_prime() (PRIME): draws every program made so far once,
  *          as zero-size quads, and waits for the GPU, so a kind's first
  *          trial frame does not pay ANGLE's first draw. Measured on the
@@ -467,10 +482,18 @@
  *       static yscr_screen scr;
  *       static ygfx_gfx gfx;
  *
+ *       // yscr_open() calls it before it settles: the programs compile
+ *       // meanwhile (OPEN START)
+ *       static void start_gfx(void* gd, yscr_screen* s) {
+ *           ((ygfx_desc*)gd)->screen = s;
+ *           ygfx_open_start(&gfx, (ygfx_desc*)gd);
+ *       }
+ *
  *       int main(void) {
- *           if (!yscr_open(&scr, &(yscr_desc){ .windowed = true })) return 1;
- *           if (!ygfx_open(&gfx, &(ygfx_desc){ .screen = &scr,
- *                                   .background = { 0.5f, 0.5f, 0.5f } })) return 1;
+ *           ygfx_desc gd = { .background = { 0.5f, 0.5f, 0.5f } };
+ *           if (!yscr_open(&scr, &(yscr_desc){ .windowed = true,
+ *                              .on_context = start_gfx, .on_context_ctx = &gd })) return 1;
+ *           if (!ygfx_open(&gfx, &gd)) return 1;
  *           ygfx_stim g = ygfx_gabor(&(ygfx_gabor_desc){
  *               .sf = 1 / 32.0f, .sigma = 32, .contrast = 0.5f });
  *           yscr_frame f;
@@ -1254,6 +1277,55 @@
  *   the instanced programs use the same cache. WebGL has no
  *   binaries: the cache is then unused (YGFX_FEAT_PROGRAM_CACHE clear).
  *
+ *   OPEN START (v0.11.1)
+ *   ---------------------------------------------------------------------
+ *   With a cold cache the built-in programs take 2.2 to 3.2 s to compile
+ *   on the Iris Xe (AC to battery), and ysp/screen.h's open() settles for 0.5 to 0.8 s
+ *   fullscreen and 2.5 s in a window. ygfx_open_start() lets the two
+ *   overlap: called from the screen's desc.on_context (ysp/screen.h
+ *   CONTEXT HOOK), it checks the desc, makes the buffers and textures,
+ *   submits every built-in program and returns; ANGLE compiles them on
+ *   its own threads while open() settles. ygfx_open() on the started
+ *   handle waits for the link statuses, stores the cache entries and
+ *   opens it. It uses the start's desc (copied at the start; the desc it
+ *   gets may be NULL), so the cache, the calibration and the ring the
+ *   desc points to must stay valid until it returns:
+ *       static ygfx_desc gd;                        // .background, .cache
+ *       static void start(void* ctx, yscr_screen* s) {
+ *           ((ygfx_desc*)ctx)->screen = s;
+ *           ygfx_open_start(&gfx, (ygfx_desc*)ctx);  // returns in 14 to 48 ms
+ *       }
+ *       yscr_open(&scr, &(yscr_desc){ .on_context = start, .on_context_ctx = &gd });
+ *       ygfx_open(&gfx, &gd);                       // waits for the rest
+ *       ... stimuli, ygfx_prime(&gfx)
+ *   A start that fails leaves the handle closed with ygfx_error() set;
+ *   ygfx_open() then tries the whole open again and reports it. Between
+ *   the start and ygfx_open() the handle is not open: every other call
+ *   returns YGFX_ERR_CLOSED; ygfx_close() deletes what the start made.
+ *   If the screen closed in between (its open() failed after the hook),
+ *   ygfx_open() fails and names it, and ygfx_close() frees the memory
+ *   and deletes nothing: the objects went with the context.
+ *   Only a backend with caps.parallel_compile (the GL backend when the
+ *   context has GL_KHR_parallel_shader_compile; ANGLE's D3D11 and Mesa's
+ *   llvmpipe have it) submits at the start; on another the start makes
+ *   nothing and ygfx_open() does the whole open after settling, as
+ *   before. The describe line ends with open_start=parallel or
+ *   open_start=serial(no GL_KHR_parallel_shader_compile).
+ *   ygfx_program_stats().open_ns is the time of the two calls together,
+ *   not the settling between them.
+ *   Measured on the Iris Xe (docs/gfx.md, "v0.11.1"), ms from the
+ *   yscr_open() call until ygfx_open() returned, median of the two
+ *   backends, before (one after the other) and with the start in the hook:
+ *     cold cache, window, AC           4787 to 4832 -> 2567
+ *     cold cache, fullscreen, AC       2865 to 2908 -> 2459 to 2466
+ *     cold cache, window, battery      5374 to 5396 -> 3405 to 3407
+ *     cold cache, fullscreen, battery  3852 to 3887 -> 3459 to 3468
+ *     warm cache, window, battery      2546 to 2553 -> 2520 to 2524
+ *     warm cache, fullscreen, battery   717 to  805 ->  666 to  781
+ *   On AC a window's compiles end within 0.04 s of its 2.5 s minimum;
+ *   fullscreen 0.4 s of 2.3 s is hidden. Settling took the same time with
+ *   the compiles running.
+ *
  *   ---------------------------------------------------------------------
  *   VIDEO (v0.4)
  *   ---------------------------------------------------------------------
@@ -1449,7 +1521,10 @@
  *   this.
  *   open() starts every built-in program with pipeline_src.deferred set,
  *   then calls pipeline_finish on each: a driver that compiles in parallel
- *   (ANGLE does) then overlaps them. A backend without it sets
+ *   (ANGLE does) then overlaps them. caps.parallel_compile (v0.11.1) says
+ *   pipeline_make returns before the compile ends; only then does
+ *   ygfx_open_start() submit (OPEN START). A backend that leaves it false
+ *   gets today's open. A backend without it sets
  *   pipeline_finish NULL and completes each pipeline_make. bindings.blend
  *   overrides a pipeline's blend for one draw (BLEND). The built-in one is GL ES 3.0 through
  *   yscr_gl_proc() (or desc.gl_proc, headless); on a screen with no GL
@@ -1533,8 +1608,8 @@
 
 #define YGFX_VERSION_MAJOR 0
 #define YGFX_VERSION_MINOR 11
-#define YGFX_VERSION_PATCH 0
-#define YGFX_VERSION_STRING "0.11.0"
+#define YGFX_VERSION_PATCH 1
+#define YGFX_VERSION_STRING "0.11.1"
 
 #include "ysp/screen.h"
 #include "ysp/color.h"
@@ -1794,7 +1869,8 @@ typedef struct ygfx_programs {
     uint32_t rejected;              /* an entry was there and was not used      */
     uint32_t stored, store_failed;
     int64_t  store_ns;              /* of open_ns: reading binaries back, storing */
-    int64_t  open_ns;               /* ygfx_open()'s wall time                */
+    int64_t  open_ns;               /* ygfx_open()'s wall time; with
+                                     * ygfx_open_start(), both calls' time  */
 } ygfx_programs;
 
 /* --- stimuli -------------------------------------------------------------- */
@@ -2412,6 +2488,8 @@ typedef struct ygfx_backend_caps {
     uint32_t binary_format;
     uint32_t features;             /* YGFX_FEAT_IMPORT_*                       */
     int32_t  max_texture;          /* v0.6: GL_MAX_TEXTURE_SIZE; 0 = 2048         */
+    bool     parallel_compile;     /* v0.11.1: pipeline_make returns while the
+                                    * driver compiles (KHR_parallel_shader_compile) */
 } ygfx_backend_caps;
 
 #define YGFX_BLEND_NONE  0
@@ -2563,6 +2641,9 @@ typedef struct ygfx__cs {
 /* A batch being gathered by the reorder (DRAW ORDER). */
 typedef struct ygfx__rbatch { int32_t head, tail, count, pad_; float box[4]; } ygfx__rbatch;
 
+/* A program's cache entry, kept from its make to its store. */
+typedef struct ygfx__prec { uint64_t key, key2; uint32_t material; int store; } ygfx__prec;
+
 /* The gfx. Caller-allocated and zeroed; every field is private. */
 typedef struct ygfx_gfx {
     int                    open;
@@ -2647,6 +2728,11 @@ typedef struct ygfx_gfx {
                                                      * the first .rays run      */
     uint32_t               blur_pipe;               /* BLUR, at the first blur   */
     float                  ppu_keep;                /* px per unit outside a 2x layer */
+    /* v0.11.1: ygfx_open_start() to ygfx_open() (OPEN START) */
+    int32_t                started;                 /* YGFX__START_*; open is 0 */
+    int32_t                start_mode;              /* what the start did, for describe */
+    ygfx_desc            sdesc;                   /* the start's desc         */
+    ygfx__prec           prec[YGFX__N_BUILTIN + 1], vprec[YGFX__N_VSPEC];
     char                   error[512];
     uint64_t               backend_mem[YGFX__BACKEND_WORDS];
 } ygfx_gfx;
@@ -2666,6 +2752,13 @@ YGFX_API const char* ygfx_strerror(int code);
  * screen without GL (SIM) it opens the null backend: everything runs, nothing
  * is drawn. */
 YGFX_API bool        ygfx_open(ygfx_gfx* g, const ygfx_desc* d);
+/* The open's first half (OPEN START): the desc's checks, the buffers and
+ * textures, and every built-in program submitted, without waiting for the
+ * compiles. Call it from ysp/screen.h's desc.on_context; ygfx_open() on the
+ * handle finishes it with the desc given here (it may get NULL). Without
+ * parallel compile in the backend it submits nothing. False with
+ * ygfx_error() set, as ygfx_open(); the handle is then closed. */
+YGFX_API bool        ygfx_open_start(ygfx_gfx* g, const ygfx_desc* d);
 YGFX_API void        ygfx_close(ygfx_gfx* g);
 YGFX_API const char* ygfx_error(const ygfx_gfx* g);
 YGFX_API bool        ygfx_is_open(const ygfx_gfx* g);
@@ -3218,6 +3311,9 @@ static void ygfx__gl_reset(void* c) {
     for (i = 0; i < 2; i++) gl->c_range_buf[i] = gl->c_range_off[i] = -1;
 }
 
+/* A test seam: the GL backend reports no parallel compile (OPEN START). */
+static int ygfx__test_serial = 0;
+
 static int ygfx__gl_open(void* c, const ygfx_backend_open* in, ygfx_backend_caps* caps, char* err, size_t cap) {
     ygfx__gl* gl = (ygfx__gl*)c;
     const char* missing = NULL;
@@ -3237,6 +3333,7 @@ static int ygfx__gl_open(void* c, const ygfx_backend_open* in, ygfx_backend_caps
     caps->color_buffer_float = ygfx__gl_ext(gl, "GL_EXT_color_buffer_float") != 0;
     caps->float_blend = ygfx__gl_ext(gl, "GL_EXT_float_blend") != 0;
     caps->float_linear = ygfx__gl_ext(gl, "GL_OES_texture_float_linear") != 0;
+    caps->parallel_compile = ygfx__gl_ext(gl, "GL_KHR_parallel_shader_compile") != 0 && !ygfx__test_serial;
     gl->f.GetIntegerv(YGFX__GL_UBO_ALIGN, &caps->ubo_align);
     gl->f.GetIntegerv(YGFX__GL_MAX_UBO_SIZE, &caps->max_ubo);
     gl->f.GetIntegerv(YGFX__GL_MAX_TEXTURE_SIZE, &caps->max_texture);
@@ -5325,8 +5422,6 @@ static uint64_t ygfx__fnv64(const void* data, size_t n) {
 }
 
 /* What a build left to store once its program is finished. */
-typedef struct ygfx__prec { uint64_t key, key2; uint32_t material; int store; } ygfx__prec;
-
 static void ygfx__prog_store2(ygfx_gfx* g, uint32_t id, const ygfx__prec* r) {
     ygfx__prog_head h;
     unsigned char* buf;
@@ -5586,15 +5681,15 @@ static char* ygfx__builtin_body(int i) {
     return out;
 }
 
-YGFX_API bool ygfx_open(ygfx_gfx* g, const ygfx_desc* d) {
+#define YGFX__START_PARALLEL 1   /* every program submitted               */
+#define YGFX__START_SERIAL   2   /* nothing submitted: no parallel compile */
+
+/* The open's first part: the desc's checks and the backend. False with the
+ * error set; nothing to undo then. */
+static bool ygfx__open_a(ygfx_gfx* g, const ygfx_desc* d) {
     ygfx_backend_open in;
-    ygfx_texture_src ts;
     int rc, i;
-    int64_t t_start = (int64_t)yrt_now_ns();
-    ygfx__prec prec[YGFX__N_BUILTIN + 1], vprec[YGFX__N_VSPEC];
-    static const float identity[6] = { 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f };
-    if (!g) return false;
-    if (g->open) { ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: already open"); return false; }
+    if (g->open || g->started) { ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: already open"); return false; }
     memset(g, 0, sizeof *g);
     if (!d) { ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: no desc"); return false; }
     g->cache = d->cache;
@@ -5668,6 +5763,14 @@ YGFX_API bool ygfx_open(ygfx_gfx* g, const ygfx_desc* d) {
 #if defined(YSCR_HAS_GL_EPOCH)
     if (g->screen) { g->epoch = yscr_gl_epoch(g->screen); g->generation = yscr_gl_generation(g->screen); }
 #endif
+    return true;
+}
+
+/* The resources, and every program submitted; ygfx_close() on a failure. */
+static bool ygfx__open_b(ygfx_gfx* g, const ygfx_desc* d) {
+    ygfx_texture_src ts;
+    int rc, i;
+    static const float identity[6] = { 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f };
     if (!g->caps.color_buffer_float) {
         ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: GL_EXT_color_buffer_float is missing (%s)", g->caps.renderer);
         goto fail;
@@ -5781,7 +5884,7 @@ YGFX_API bool ygfx_open(ygfx_gfx* g, const ygfx_desc* d) {
         char* src = ygfx__builtin_body(i);
         if (!src) { ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: out of memory"); goto fail; }
         rc = ygfx__make_pipe(g, ygfx__builtins[i].defs, src, ygfx__builtins[i].mode, ygfx__builtins[i].inst, 1,
-                               &g->builtin[i], ygfx__builtins[i].name, &prec[i]);
+                               &g->builtin[i], ygfx__builtins[i].name, &g->prec[i]);
         free(src);
         if (rc < 0) goto fail;
     }
@@ -5789,11 +5892,26 @@ YGFX_API bool ygfx_open(ygfx_gfx* g, const ygfx_desc* d) {
         char* src = ygfx__builtin_body(YGFX__B_VECTOR);
         if (!src) { ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: out of memory"); goto fail; }
         for (i = 0; i < YGFX__N_VSPEC && rc >= 0; i++)
-            rc = ygfx__make_pipe(g, ygfx__vspecs[i].defs, src, -1, 0, 1, &g->vspec[i], ygfx__vspecs[i].name, &vprec[i]);
+            rc = ygfx__make_pipe(g, ygfx__vspecs[i].defs, src, -1, 0, 1, &g->vspec[i], ygfx__vspecs[i].name, &g->vprec[i]);
         free(src);
         if (rc < 0) goto fail;
     }
-    if (ygfx__make_output(g, &prec[YGFX__N_BUILTIN]) < 0) goto fail;
+    if (ygfx__make_output(g, &g->prec[YGFX__N_BUILTIN]) < 0) goto fail;
+    return true;
+fail:
+    {
+        char keep[sizeof g->error];
+        memcpy(keep, g->error, sizeof keep);
+        ygfx_close(g);
+        memcpy(g->error, keep, sizeof keep);
+    }
+    return false;
+}
+
+/* The statuses, the cache's stores and the open record; t_start is the
+ * call that finishes. */
+static bool ygfx__open_c(ygfx_gfx* g, const ygfx_desc* d, int64_t t_start) {
+    int i;
     if (g->be->pipeline_finish) {   /* the statuses, once every program is under way */
         for (i = 0; i < YGFX__N_BUILTIN; i++) {
             if (g->be->pipeline_finish(g->bctx, g->builtin[i], g->error, sizeof g->error) < 0) {
@@ -5815,16 +5933,16 @@ YGFX_API bool ygfx_open(ygfx_gfx* g, const ygfx_desc* d) {
         }
         if (g->be->pipeline_finish(g->bctx, g->output_pipe, g->error, sizeof g->error) < 0) { g->output_pipe = 0; goto fail; }
     }
-    for (i = 0; i < YGFX__N_VSPEC; i++) ygfx__prog_store(g, g->vspec[i], &vprec[i]);
-    for (i = 0; i < YGFX__N_BUILTIN; i++) ygfx__prog_store(g, g->builtin[i], &prec[i]);
-    ygfx__prog_store(g, g->output_pipe, &prec[YGFX__N_BUILTIN]);
+    for (i = 0; i < YGFX__N_VSPEC; i++) ygfx__prog_store(g, g->vspec[i], &g->vprec[i]);
+    for (i = 0; i < YGFX__N_BUILTIN; i++) ygfx__prog_store(g, g->builtin[i], &g->prec[i]);
+    ygfx__prog_store(g, g->output_pipe, &g->prec[YGFX__N_BUILTIN]);
     g->be->reset(g->bctx);
     g->error[0] = '\0';
     {
         uint32_t u[10];
         u[0] = (uint32_t)g->lut_n; u[1] = (uint32_t)g->dither; u[2] = (uint32_t)d->output;
         u[3] = g->cal_crc; u[4] = d->cal ? d->cal->flags : 0u; u[5] = (uint32_t)g->w; u[6] = (uint32_t)g->h;
-        g->progs.open_ns = (int64_t)yrt_now_ns() - t_start;
+        g->progs.open_ns += (int64_t)yrt_now_ns() - t_start;
         u[7] = g->progs.loaded; u[8] = g->progs.compiled; u[9] = (uint32_t)(g->progs.open_ns / 1000000);
         ygfx__push(g, (uint16_t)YGFX_EV_OPEN, 0, (uint32_t)g->scene_format, u, 10, 0);
         if (g->has_color) {
@@ -5844,11 +5962,59 @@ fail:
     return false;
 }
 
+YGFX_API bool ygfx_open(ygfx_gfx* g, const ygfx_desc* d) {
+    int64_t t_start = (int64_t)yrt_now_ns();
+    if (!g) return false;
+    if (g->started) {   /* after ygfx_open_start(): its desc, not this one */
+        int st = g->started;
+        g->started = 0;
+        g->open = 1;
+#if defined(YSCR_HAS_GL_EPOCH)
+        if (g->screen && (!yscr_is_open(g->screen) || yscr_gl_generation(g->screen) != g->generation)) {
+            g->open = 0;   /* the context and every object are gone */
+            ygfx_close(g);
+            ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: the screen closed after ygfx_open_start()");
+            return false;
+        }
+#endif
+        if (st == YGFX__START_SERIAL && !ygfx__open_b(g, &g->sdesc)) return false;
+        return ygfx__open_c(g, &g->sdesc, t_start);
+    }
+    if (!ygfx__open_a(g, d)) return false;
+    if (!ygfx__open_b(g, d)) return false;
+    return ygfx__open_c(g, d, t_start);
+}
+
+YGFX_API bool ygfx_open_start(ygfx_gfx* g, const ygfx_desc* d) {
+    int64_t t_start = (int64_t)yrt_now_ns();
+    if (!g) return false;
+    if (!ygfx__open_a(g, d)) return false;
+    g->sdesc = *d;
+    if (g->caps.parallel_compile) {
+        if (!ygfx__open_b(g, d)) return false;
+        g->started = YGFX__START_PARALLEL;
+    } else {
+        g->started = YGFX__START_SERIAL;
+    }
+    g->start_mode = g->started;
+    g->open = 0;   /* nothing but ygfx_open() and ygfx_close() until it finishes */
+    g->progs.open_ns = (int64_t)yrt_now_ns() - t_start;
+    return true;
+}
+
 YGFX_API void ygfx_close(ygfx_gfx* g) {
     if (!g) return;
-    if (g->open && g->be) {
-        if (g->screen) yscr_bind(g->screen);
-        g->be->close(g->bctx);
+    if ((g->open || g->started) && g->be) {
+        int gone = 0;
+#if defined(YSCR_HAS_GL_EPOCH)
+        /* a screen that closed (yscr_open() failed after the hook) took
+         * the context and every object with it */
+        gone = g->screen && (!yscr_is_open(g->screen) || yscr_gl_generation(g->screen) != g->generation);
+#endif
+        if (!gone) {
+            if (g->screen) yscr_bind(g->screen);
+            g->be->close(g->bctx);
+        }
     }
     free(g->staging);
     free(g->cmds);
@@ -5891,12 +6057,14 @@ YGFX_API int ygfx_describe(const ygfx_gfx* g, char* buf, size_t cap) {
     if (g->cache && g->cache->load == ygfx__fc_load) where = ((const ygfx_file_cache*)g->cache->user)->dir;
     else if (g->cache) where = "(caller)";
     if (g->cache && (!g->caps.binary_format || !g->be->pipeline_binary)) unused = " (unused: no binary format)";
-    return snprintf(buf, cap, "ysp_gfx %s: %s, %s, %dx%d, scene %s, CLUT %d%s, dither %s, %.4g px/unit, origin %s, program cache %s%s: %u hit / %u miss (%u rejected)",
+    return snprintf(buf, cap, "ysp_gfx %s: %s, %s, %dx%d, scene %s, CLUT %d%s, dither %s, %.4g px/unit, origin %s, program cache %s%s: %u hit / %u miss (%u rejected)%s",
                     YGFX_VERSION_STRING, g->be->name, g->caps.renderer, g->w, g->h,
                     g->scene_format == YGFX_RGBA32F ? "RGBA32F" : "RGBA16F", g->lut_n,
                     g->cal_crc ? " (calibration)" : " (identity)", dith[g->dither <= 2 ? g->dither : 0],
                     (double)g->ppu, g->origin_top ? "top" : "bottom", where, unused,
-                    g->progs.loaded, g->progs.compiled, g->progs.rejected);
+                    g->progs.loaded, g->progs.compiled, g->progs.rejected,
+                    g->start_mode == YGFX__START_PARALLEL ? ", open_start=parallel"
+                    : g->start_mode == YGFX__START_SERIAL ? ", open_start=serial(no GL_KHR_parallel_shader_compile)" : "");
 }
 #if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 7
 #pragma GCC diagnostic pop

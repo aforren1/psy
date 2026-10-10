@@ -814,6 +814,18 @@ common case.
 - **The player is not an engine.** It is a few headers around a frame
   loop whose flip times, onsets and trigger edges are measured and
   logged.
+- **The runner gives the player the foreground** (decided 2026-10-10).
+  `ysp/screen.h` v0.5.0 settles at open and fails a fullscreen open
+  strictly when the OS gives no vblank statistics, which is what a
+  covered or background window gets (5 of 5 DXGI_FLIP and 8 of 8
+  COMPOSITION covered opens failed; v0.4.4 opened them and then gave
+  seconds of off-grid or missing onsets). From v0.5.1 a fullscreen open
+  forces the raise by default (`desc.foreground`), and the runner still
+  grants the foreground before it starts the player
+  (`AllowSetForegroundWindow`, or it runs in the interactive session),
+  so a launch from the designer's Run view, a scheduler or a remote
+  shell settles like a launch from a terminal. `YSP_SETTLE=warn` is the
+  development escape, and it is recorded in the data file.
 
 ### 6.1 Script API, draft
 
