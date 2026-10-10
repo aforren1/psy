@@ -126,6 +126,14 @@ static void sec(char* out, size_t cap, double s) {
     else snprintf(out, cap, "%.9f", s);
 }
 
+/* --sim's check: x equals want plus a whole number of display periods,
+ * at most 6 (frames a loaded host dropped). */
+static int whole_frames(double x, double want, int64_t period_ns) {
+    double p = (double)period_ns / 1e9, d = (x - want) / p;
+    double m = floor(d + 0.5);
+    return p > 0 && fabs(m) <= 6 && fabs(x - (want + m * p)) < 1e-6;
+}
+
 int main(int argc, char** argv) {
     yscr_desc sd;
     ygfx_desc gd;
@@ -366,12 +374,12 @@ int main(int argc, char** argv) {
             const yrsp_result* r = &sim_res[i];
             static const double want_rt[SIM_TRIALS] = { 0.55, 0.48, 0, 0.62 };
             /* The simulated display runs on the host's clock, so a loaded
-             * host (macOS CI) drops a frame like a real display; the SOA
-             * from the flip records then differs by exactly one period. */
-            double dsoa = fabs(sim_soa[i] - (FIRST_S + GAP_S));
-            int ok = dsoa < 1e-6 || fabs(dsoa - (double)f.period / 1e9) < 1e-6;
+             * host (macOS CI) drops frames like a real display: the SOA and
+             * the RT (from the actual onset) then differ from the script by
+             * a whole number of periods. A logic error does not. */
+            int ok = whole_frames(sim_soa[i], FIRST_S + GAP_S, f.period);
             if (i == 2) ok = ok && !(r->flags & YRSP_R_RESPONDED) && (r->flags & YRSP_R_TIMEOUT);
-            else ok = ok && (r->flags & YRSP_R_RESPONDED) && fabs(r->rt - want_rt[i]) < 1e-6;
+            else ok = ok && (r->flags & YRSP_R_RESPONDED) && whole_frames(r->rt, want_rt[i], f.period);
             if (i == 1) ok = ok && r->n_early == 1;
             ok = ok && sim_correct[i] == (i < 2);
             ok = ok && r->onset_tier == YSCR_TIER_SIM && r->onset_src == YRSP_ONSET_FLIP;

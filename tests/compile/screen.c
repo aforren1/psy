@@ -11,6 +11,7 @@ int main(void) {
     yscr_desc d;
     yscr_frame f;
     yscr_sync_info si;
+    yscr_settle_info st;
     char line[1024];
     int i, n = 0;
     memset(&s, 0, sizeof s);
@@ -18,6 +19,8 @@ int main(void) {
     d.backend = YSCR_BACKEND_SIM;
     d.sim_period_ns = 2000000;
     d.depth = 2;   /* v0.4.4: a pinned depth */
+    d.settle = YSCR_SETTLE_STRICT;   /* v0.5.0: SIM skips settling, recorded */
+    d.settle_flips = 6;
     if (!yscr_open(&s, &d)) return 1;
     for (i = 0; i < 3; i++) {
         if (yscr_begin(&s, &f) != YSCR_OK) return 2;
@@ -27,6 +30,8 @@ int main(void) {
     if (si.untimed || si.fired_index != -1) return 5;
     yscr_describe(&s, line, sizeof line);
     if (!strstr(line, "depth=2(pin,0 changes)")) return 6;
+    yscr_settle_check(&s, &st);
+    if (st.result != YSCR_SETTLE_SKIPPED || !strstr(line, "settle=SKIPPED(sim)")) return 7;
     yscr_close(&s);
     return yscr_params(&n) && n > 0 ? 0 : 4;
 }

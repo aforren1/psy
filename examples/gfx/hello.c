@@ -70,6 +70,7 @@ int main(int argc, char** argv) {
     gab.sigma = 32;
     gab.contrast = 0.5f;
     g = ygfx_gabor(&gab);
+    ygfx_prime(&gfx);   /* each program's first draw now, not in the first frames */
     ygfx_describe(&gfx, line, sizeof line);
     printf("%s\n", line);
 

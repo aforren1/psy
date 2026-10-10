@@ -1,4 +1,4 @@
-/* ysp/gfx.h - v0.10.5 - public domain single-header stimulus graphics library
+/* ysp/gfx.h - v0.11.0 - public domain single-header stimulus graphics library
  *   (with MIT-licensed parts: see below)
  *
  *   Stimuli on GL ES 3.0, on top of ysp/screen.h: signed-distance shapes
@@ -37,6 +37,14 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
+ *   v0.11.0 - ygfx_prime() (PRIME): draws every program made so far once,
+ *          as zero-size quads, and waits for the GPU, so a kind's first
+ *          trial frame does not pay ANGLE's first draw. Measured on the
+ *          Iris Xe (docs/gfx.md, "Priming"): each kind's first frame cost
+ *          2.5 to 12.9 ms more CPU in ygfx_end() without it, from a warm
+ *          program cache too, and 0.09 to 0.42 ms with it; the prime of 20
+ *          programs took 63 to 73 ms. With ysp/screen.h v0.5.0 (open()
+ *          settles the display).
  *   v0.10.5 - VIDEO: an R8 or RG8 texture may state an encoding (matrix
  *          RGB, primaries DEVICE: gray is the display's white), drawn as a
  *          color image through the video program with the level in r and
@@ -1181,6 +1189,21 @@
  *   A blur is of linear light: the physical blur of the displayed pattern.
  *
  *   ---------------------------------------------------------------------
+ *   PRIME (v0.11)
+ *   ---------------------------------------------------------------------
+ *   A cache entry or a compile gives a program; ANGLE still makes its D3D
+ *   shader objects at the program's first draw. On the Iris Xe that cost
+ *   2.5 to 12.9 ms of CPU in the first ygfx_end() of each kind, from a
+ *   warm cache too (docs/gfx.md, "v0.11: priming"). ygfx_prime() draws
+ *   every program made so far once, as zero-size quads, and waits for the
+ *   GPU (63 to 73 ms for 20 programs). Call it after making the stimuli,
+ *   before the first trial:
+ *       ... ygfx_open(), textures, curve sets, ygfx_instances(), pipelines
+ *       ygfx_prime(&g);
+ *   The first frame after a setup of 2 s or more was still late or
+ *   dropped (21 of 22 runs, prime or not): show a few frames before the
+ *   first timed trial.
+ *
  *   PROGRAM CACHE (v0.4)
  *   ---------------------------------------------------------------------
  *   Each built-in program costs ANGLE 0.15 to 0.75 s to compile at open.
@@ -1509,9 +1532,9 @@
 #define YSP_GFX_H_INCLUDED
 
 #define YGFX_VERSION_MAJOR 0
-#define YGFX_VERSION_MINOR 10
-#define YGFX_VERSION_PATCH 5
-#define YGFX_VERSION_STRING "0.10.5"
+#define YGFX_VERSION_MINOR 11
+#define YGFX_VERSION_PATCH 0
+#define YGFX_VERSION_STRING "0.11.0"
 
 #include "ysp/screen.h"
 #include "ysp/color.h"
@@ -2739,6 +2762,17 @@ YGFX_API int  ygfx_end(ygfx_gfx* g);
  * neither the scene, the output stage nor the frame count. */
 YGFX_API int  ygfx_begin_setup(ygfx_gfx* g);
 YGFX_API int  ygfx_end_setup(ygfx_gfx* g);
+/* v0.11, PRIME: draws once with every program made so far (the built-in
+ * kinds, the specialized vector programs, the instanced, video, text and
+ * blur programs made so far, the caller's pipelines, the output stage) as
+ * zero-size quads into the scene, then waits for the GPU. Nothing is
+ * shown. ANGLE makes a program's D3D shader objects at its first draw:
+ * on the Iris Xe each kind's first frame cost 2.5 to 12.9 ms more CPU in
+ * ygfx_end(), from a warm program cache too; after a prime, 0.09 to 0.42
+ * ms. The prime of 20 programs took 63 to 73 ms. Call it outside a frame,
+ * after making the stimuli and before the first trial; again after making
+ * a new kind. Returns the programs drawn, or < 0. */
+YGFX_API int  ygfx_prime(ygfx_gfx* g);
 /* After your own GL calls between frames: forget the cached GL state. */
 YGFX_API void ygfx_reset_state(ygfx_gfx* g);
 /* Draws that may have left 0..1 since open (a CPU bound per draw). */
@@ -7672,6 +7706,64 @@ static int ygfx__end(ygfx_gfx* g, int setup) {
     }
     YRT_ZONE_END(z);
     return YGFX_OK;
+}
+
+/* PRIME. Zero-size quads: the stim block is zeros, so no fragment runs and
+ * no shader loops over data, but each program is bound and drawn once. */
+YGFX_API int ygfx_prime(ygfx_gfx* g) {
+    ygfx_bindings bd;
+    uint32_t ids[YGFX__N_BUILTIN * 2 + YGFX__N_VSPEC + 8 + 2 * YGFX_MAX_PIPELINES];
+    unsigned char inst[sizeof ids / sizeof ids[0]];
+    int n = 0, i, rc;
+    float px[4];
+    if (!g || !g->open) return YGFX_ERR_CLOSED;
+    if (g->in_frame) {
+        ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: prime inside a frame or a setup pass");
+        return YGFX_ERR_ORDER;
+    }
+    if (g->screen) yscr_bind(g->screen);
+    if (ygfx__sync(g) < 0) return YGFX_ERR_LOST;
+    for (i = 0; i < YGFX__N_BUILTIN; i++) if (g->builtin[i]) { inst[n] = 0; ids[n++] = g->builtin[i]; }
+    for (i = 0; i < YGFX__N_VSPEC; i++) if (g->vspec[i]) { inst[n] = 0; ids[n++] = g->vspec[i]; }
+    for (i = 0; i <= YGFX__N_BUILTIN; i++) if (g->inst_pipe[i]) { inst[n] = 1; ids[n++] = g->inst_pipe[i]; }
+    if (g->video_pipe) { inst[n] = 0; ids[n++] = g->video_pipe; }
+    if (g->text_pipe) { inst[n] = 0; ids[n++] = g->text_pipe; }
+    if (g->text_rays_pipe) { inst[n] = 0; ids[n++] = g->text_rays_pipe; }
+    if (g->blur_pipe) { inst[n] = 0; ids[n++] = g->blur_pipe; }
+    for (i = 0; i < YGFX_MAX_PIPELINES; i++) {
+        if (g->pipe[i].used && g->pipe[i].bid) { inst[n] = 0; ids[n++] = g->pipe[i].bid; }
+        if (g->pipe_inst[i]) { inst[n] = 1; ids[n++] = g->pipe_inst[i]; }
+    }
+    memset(g->staging, 0, YGFX__FRAME_BYTES + YGFX__STIM_RANGE);
+    rc = g->be->buffer_update(g->bctx, g->ubo[g->ubo_i], 0, g->staging, YGFX__FRAME_BYTES + YGFX__STIM_RANGE);
+    if (rc < 0) return YGFX_ERR_GL;
+    memset(&bd, 0, sizeof bd);
+    bd.ubo = g->ubo[g->ubo_i];
+    bd.frame_size = YGFX__BLOCK;
+    bd.stim_off = YGFX__FRAME_BYTES;
+    bd.stim_size = YGFX__STIM_RANGE;
+    g->be->pass_begin(g->bctx, g->scene, g->w, g->h, NULL);
+    for (i = 0; i < n; i++) {
+        bd.pipeline = ids[i];
+        bd.instances = inst[i] ? g->inst_buf[0] : 0;
+        g->be->apply(g->bctx, &bd);
+        g->be->draw(g->bctx, 4, 1);
+    }
+    g->be->pass_end(g->bctx);
+    /* the output stage, into the back buffer: the next frame redraws every pixel */
+    memset(&bd, 0, sizeof bd);
+    bd.pipeline = g->output_pipe;
+    bd.ubo = g->ubo[g->ubo_i];
+    bd.frame_size = YGFX__BLOCK;
+    bd.tex[0] = g->scene;
+    bd.tex[1] = g->lut;
+    g->be->pass_begin(g->bctx, 0, g->w, g->h, NULL);
+    g->be->apply(g->bctx, &bd);
+    g->be->draw(g->bctx, 3, 1);
+    g->be->pass_end(g->bctx);
+    /* a read waits for the GPU, so the cost lands here, not in a trial */
+    if (g->be->read) g->be->read(g->bctx, g->scene, 0, 0, 1, 1, YGFX_READ_FLOAT, px);
+    return n + 1;
 }
 
 /* --- resources ---------------------------------------------------------------- */

@@ -5,7 +5,7 @@
 # v0.3.5's 5 (raw mice; the 2 on its queue went with the queue),
 # v0.4.0's 6 (the input bridge), v0.4.1's 15 (the key filter, kd-) and
 # v0.4.2's 3 (kd-16 to kd-18, the key-up fix) and 13 (the sync guard,
-# sg-), v0.4.3's 9 (eg-, held frames), v0.4.4's 20 (dp-, the depth policy, the guessed grid, early flips). The 29 earlier mutants (docs/screen.md,
+# sg-), v0.4.3's 9 (eg-, held frames), v0.4.4's 20 (dp-, the depth policy, the guessed grid, early flips), v0.5.0's 20 (st-, settling at open). The 29 earlier mutants (docs/screen.md,
 # "Mutations") were run from scripts that were not kept.
 header = "ysp/screen.h"
 
@@ -790,3 +790,177 @@ test = "screen"
 why = "A flip that waited behind the one before shows a depth too large; open() takes the smallest depth 2 of its flips showed."
 find = '            if (s->warm_seen[k] >= 2) { d = k; break; }'
 replace = ''
+
+[[mutant]]
+id = "st-01"
+name = "no run of clean flips"
+test = "screen"
+why = "Settling needs desc.settle_flips clean flips in a row; without it a display that keeps breaking the run (off-grid times, drops, path flaps) passes."
+find = '        if (s->st_run >= s->st_need && spread && el >= s->st_min) {'
+replace = '        if (spread && el >= s->st_min) {'
+
+[[mutant]]
+id = "st-02"
+name = "no spread"
+test = "screen"
+why = "The spread catches a period that differs from the mode's and the drifting times after a covered COMPOSITION open."
+find = '        if (s->st_run >= s->st_need && spread && el >= s->st_min) {'
+replace = '        if (s->st_run >= s->st_need && el >= s->st_min) {'
+
+[[mutant]]
+id = "st-03"
+name = "no minimum time"
+test = "screen"
+why = "A window moved from the composed path to an overlay 1.7 to 1.9 s after open under decode load; the window waits 2.5 s."
+find = '        if (s->st_run >= s->st_need && spread && el >= s->st_min) {'
+replace = '        if (s->st_run >= s->st_need && spread) {'
+
+[[mutant]]
+id = "st-04"
+name = "a window needs tier 1"
+test = "screen"
+why = "A window may stay on the composed path (tier 2 on DXGI_FLIP) and must still settle."
+find = '    s->st_tier = d->windowed ? YSCR_TIER_2 : YSCR_TIER_1;'
+replace = '    s->st_tier = YSCR_TIER_1;'
+
+[[mutant]]
+id = "st-05"
+name = "path changes ignored"
+test = "screen"
+why = "A path change moves the depth; the run must start again on the new path."
+find = '    else if (s->st_have && r->path != s->st_path) c = YSCR_SETTLE_C_PATH;'
+replace = ''
+
+[[mutant]]
+id = "st-06"
+name = "off-grid times ignored"
+test = "screen"
+why = "An OS time off the grid (a covered COMPOSITION open drifted for seconds) is not a settled display."
+find = '    else if (f & YSCR_FLIP_GRID_UNSTABLE) c = YSCR_SETTLE_C_GRID;'
+replace = ''
+
+[[mutant]]
+id = "st-07"
+name = "drops ignored"
+test = "screen"
+why = "A dropped flip breaks the run."
+find = '    else if (r->dropped || (f & YSCR_FLIP_LATE_TARGET)) c = YSCR_SETTLE_C_LATE;'
+replace = ''
+
+[[mutant]]
+id = "st-08"
+name = "missing statistics ignored"
+test = "screen"
+why = "A flip with no OS statistic says nothing about the display."
+find = '    else if (f & (YSCR_FLIP_ESTIMATED | YSCR_FLIP_OCCLUDED | YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED)) c = YSCR_SETTLE_C_STATS;'
+replace = ''
+
+[[mutant]]
+id = "st-09"
+name = "the guard not named"
+test = "screen"
+why = "A driver that forces vsync off fires the sync guard during settling; the error must name it."
+find = '''
+    if (s->sync_off || (f & YSCR_FLIP_UNSYNCED)) c = YSCR_SETTLE_C_UNSYNCED;
+    else if (f & (YSCR_FLIP_ESTIMATED'''
+replace = '''
+    if (0) c = YSCR_SETTLE_C_UNSYNCED;
+    else if (f & (YSCR_FLIP_ESTIMATED'''
+
+[[mutant]]
+id = "st-10"
+name = "stale statistics change the path"
+test = "screen"
+why = "COMPOSITION in a window reported each flip again as an overlay frame: 9 to 13 depth changes per open."
+find = '    stale = !p && v->present_id && v->present_id <= s->done_id;'
+replace = '    stale = false;'
+
+[[mutant]]
+id = "st-11"
+name = "YSP_SETTLE ignored"
+test = "screen"
+why = "The variable lets a developer turn settling off without a rebuild."
+find = '    env = YSCR__GETENV("YSP_SETTLE", s->st_env, sizeof s->st_env);'
+replace = '    env = 0;'
+
+[[mutant]]
+id = "st-12"
+name = "SIM settles"
+test = "screen"
+why = "The simulated display has nothing to settle; the user decided it skips."
+find = '    if (s->backend == YSCR_BACKEND_SIM || !hw_onset) {'
+replace = '    if (0) {'
+
+[[mutant]]
+id = "st-13"
+name = "strict does not fail"
+test = "screen"
+why = "Fullscreen fails open() at the cap by default (decided 2026-10-09)."
+find = '    if (s->st_result == YSCR_SETTLE_FAILED && s->st_mode == YSCR_SETTLE_STRICT) {'
+replace = '    if (0) {'
+
+[[mutant]]
+id = "st-14"
+name = "AUTO warns fullscreen"
+test = "screen"
+why = "AUTO is strict fullscreen, warn in a window."
+find = '    if (mode == YSCR_SETTLE_AUTO) mode = d->windowed ? YSCR_SETTLE_WARN : YSCR_SETTLE_STRICT;'
+replace = '    if (mode == YSCR_SETTLE_AUTO) mode = YSCR_SETTLE_WARN;'
+
+[[mutant]]
+id = "st-15"
+name = "settle frames reported"
+test = "screen"
+why = "Open's frames are not the caller's records: none in f.done, none in the ring."
+find = '''
+        if (s->settling) yscr__settle_flip(s, p, r);
+        return;
+'''
+replace = '''
+        if (s->settling) yscr__settle_flip(s, p, r);
+'''
+
+[[mutant]]
+id = "st-16"
+name = "frame numbers go on"
+test = "screen"
+why = "The caller's first frame is frame 0."
+find = '''
+    s->settling = 0;
+    s->index = 0;
+'''
+replace = '''
+    s->settling = 0;
+'''
+
+[[mutant]]
+id = "st-17"
+name = "the abort is taken"
+test = "screen"
+why = "An abort during settling must reach the caller's first begin()."
+find = '        if (yscr__a_load(&yscr__ab.seq) != s->abort_seen) { s->st_result = YSCR_SETTLE_ABORTED; break; }'
+replace = ''
+
+[[mutant]]
+id = "st-18"
+name = "a flip with no statistic sets the path"
+test = "screen"
+why = "An estimated flip has no path; it must not count as a path change."
+find = '    if (c != YSCR_SETTLE_C_STATS) {   /* a flip with no statistic has no path */'
+replace = '    if (1) {'
+
+[[mutant]]
+id = "st-19"
+name = "the mean is not checked"
+test = "screen"
+why = "A display whose period differs from the mode's has on-grid times and a small SD; only the mean shows it."
+find = '    return v <= YSCR__SETTLE_SD_NS && fabs(m - s->nominal_f) <= YSCR__SETTLE_MEAN_NS;'
+replace = '    return v <= YSCR__SETTLE_SD_NS;'
+
+[[mutant]]
+id = "st-20"
+name = "overrides not recorded"
+test = "screen"
+why = "Every override is in the describe line (the PTB SkipSyncTests lesson)."
+find = '    const char* src = s->st_src == YSCR_SETTLE_SRC_ENV ? ":env" : s->st_src == YSCR_SETTLE_SRC_DESC ? ":desc" : "";'
+replace = '    const char* src = "";'

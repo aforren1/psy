@@ -611,6 +611,7 @@ static void test_null_and_ring(void) {
         CHECK(yscr_flip(&scr) == YSCR_OK);
     }
     CHECK(ygfx_clipped(&g) == 1);
+    CHECK(ygfx_prime(&g) == YGFX__N_BUILTIN + YGFX__N_VSPEC + 1);   /* v0.11: and the output stage */
     CHECK(ygfx_read_scene(&g, 0, 0, 1, 1, px) == YGFX_ERR_NOT_IMPLEMENTED);
     n = yrt_ring_drain(&ring, ev, 16);
     for (i = 0; i < n; i++) {
@@ -5304,6 +5305,7 @@ static void gl_v08(stats* st);
 static void s10_report(void);
 static void gl_v10_simplex(stats* st);
 static void gl_v10_user_tex(stats* st);
+static void gl_v11_prime(stats* st);
 static void s11_report(void);
 static void test_v10_simplex_cpu(void);
 typedef struct stats9 {
@@ -5504,12 +5506,14 @@ static int gl_suite(const char* name, ygfx_hl_device dev) {
                                                  gl_strokes, gl_masks, gl_sprites, gl_tint, gl_groups, gl_targets,
                                                  gl_alpha_passes, gl_edge_truth, gl_v03_kinds, gl_v03_truth, gl_v03_fx, gl_v03_paint, gl_v03_msdf,
                                                  gl_v04_cache, gl_v04_fixes, gl_v04_video, gl_v04_inst, gl_v04_order, gl_v05_color,
-                                                 gl_v06_text, gl_v06_blur, gl_v05_kinds, gl_v08, gl_v10_simplex, gl_v10_user_tex };
+                                                 gl_v06_text, gl_v06_blur, gl_v05_kinds, gl_v08, gl_v10_simplex, gl_v10_user_tex,
+                                                 gl_v11_prime };
         static const char* const names[] = { "shapes", "gratings", "gabors", "dots", "images", "noise",
                                              "output", "user+batch+rows", "strokes", "masks", "sprites", "tint",
                                              "groups", "targets", "alpha+passes", "edge truth", "v0.3 kinds", "v0.3 truth", "v0.3 fx", "v0.3 paint", "v0.3 msdf",
                                              "v0.4 cache", "v0.4 fixes", "v0.4 video", "v0.4 inst", "v0.4 order", "v0.5 color",
-                                             "v0.6 text", "v0.6 blur", "vspec", "v0.8", "v0.10 simplex", "v0.10 user tex" };
+                                             "v0.6 text", "v0.6 blur", "vspec", "v0.8", "v0.10 simplex", "v0.10 user tex",
+                                             "v0.11 prime" };
         int k;
         memset(&S2, 0, sizeof S2);
         memset(&S3, 0, sizeof S3);
@@ -7619,6 +7623,66 @@ static void gl_v10_user_tex(stats* st) {
     CHECK(ygfx_end(&R->g) == YGFX_OK);
     CHECK(yscr_flip(&R->scr) == YSCR_OK);
     printf("  measured: user ysp_tex0 against the image %.2e, against the target %.2e\n", d_img, d_tg);
+    ygfx_close(&R->g);
+}
+
+/* v0.11 PRIME: every program drawn once as a zero-size quad; the frames
+ * before and after are bit-identical, and it is refused inside a frame. */
+static void gl_v11_prime(stats* st) {
+    static float a_scene[W * H * 4];
+    static unsigned char a_out[W * H * 4];
+    static const char* body = "float ysp_main(vec2 p) { return sin(p.x * 0.2); }\n";
+    ygfx_shape_desc sd;
+    ygfx_gabor_desc gd;
+    ygfx_pipeline_desc pd;
+    ygfx_user_desc ud;
+    ygfx_instances_desc id;
+    ygfx_inst el[4];
+    ygfx_stim s[4];
+    long scene_bad = 0, out_bad = 0;
+    int i, n;
+    (void)st;
+    if (!gl_open(1, YGFX_RGBA16F, YGFX_DITHER_NONE)) return;
+    CHECK(ygfx_prime(NULL) == YGFX_ERR_CLOSED);
+    memset(&sd, 0, sizeof sd);
+    sd.shape = YGFX_CIRCLE; sd.w = 20; sd.color[0] = 0.8f; sd.x = -30;
+    s[0] = ygfx_shape(&sd);
+    memset(&gd, 0, sizeof gd);
+    gd.sigma = 4; gd.sf = 0.125f; gd.contrast = 0.3f; gd.x = 20;
+    s[1] = ygfx_gabor(&gd);
+    memset(&pd, 0, sizeof pd);
+    pd.body = body; pd.mode = YGFX_MODULATION; pd.name = "prime";
+    memset(&ud, 0, sizeof ud);
+    ud.pipe = ygfx_pipeline(&R->g, &pd);
+    CHECK(ud.pipe.id != 0);
+    ud.w = ud.h = 16; ud.contrast = 0.4f; ud.y = 20;
+    s[2] = ygfx_user(&ud);
+    ygfx_inst_grid(el, 2, 2, 10, 10);
+    memset(&id, 0, sizeof id);
+    id.inst = el; id.n = 4; id.fields = YGFX_I_XY;
+    sd.x = 0; sd.y = -20; sd.w = 6;
+    s[3] = ygfx_shape(&sd);
+    s[3] = ygfx_instances(&R->g, &s[3], &id);
+    CHECK(s[3].n_inst == 4);
+    gl_frame(s, 4);
+    memcpy(a_scene, R->scene, sizeof a_scene);
+    memcpy(a_out, R->out, sizeof a_out);
+    n = ygfx_prime(&R->g);
+    /* 10 built-in, 3 specialized, 1 instanced, 1 user, the output stage */
+    CHECK(n == YGFX__N_BUILTIN + YGFX__N_VSPEC + 1 + 1 + 1);
+    gl_frame(s, 4);
+    for (i = 0; i < W * H * 4; i++) {
+        scene_bad += memcmp(&a_scene[i], &R->scene[i], sizeof(float)) != 0;
+        out_bad += a_out[i] != R->out[i];
+    }
+    CHECK(scene_bad == 0 && out_bad == 0);
+    CHECK(yscr_begin(&R->scr, &R->f) == YSCR_OK);
+    CHECK(ygfx_begin(&R->g, &R->f) == YGFX_OK);
+    CHECK(ygfx_prime(&R->g) == YGFX_ERR_ORDER);
+    CHECK(ygfx_end(&R->g) == YGFX_OK);
+    CHECK(yscr_flip(&R->scr) == YSCR_OK);
+    printf("  measured: prime drew %d programs; frames before and after: %ld scene and %ld output values differ\n",
+           n, scene_bad, out_bad);
     ygfx_close(&R->g);
 }
 

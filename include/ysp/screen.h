@@ -1,4 +1,4 @@
-/* ysp/screen.h - v0.4.4 - public domain single-header display library
+/* ysp/screen.h - v0.5.0 - public domain single-header display library
  *
  *   The window, the GL ES 3.0 context, the display mode and the swap path
  *   of a stimulus display, with flip at a time: each frame learns the
@@ -22,7 +22,21 @@
  *   ---------------------------------------------------------------------
  *   CHANGELOG
  *   ---------------------------------------------------------------------
- *   v0.4.4 - The depth comes from the path, never from misses (DEPTH;
+ *   v0.5.0 - open() settles the start of the run (SETTLE; decided
+ *          2026-10-09): black frames until an OS time, 6 clean flips on
+ *          one path and depth, the spread of the last 20 vblank intervals
+ *          and, in a window, 2.5 s; capped at 3 s (4 s in a window). At
+ *          the cap AUTO fails open() fullscreen and warns in a window;
+ *          desc.settle, settle_flips, settle_min_ns, settle_max_ns and the
+ *          YSP_SETTLE variable change it. Every outcome is in the describe
+ *          line, a YSCR_EV_SETTLE ring record and yscr_settle_check().
+ *          Measured before (docs/screen.md, "Settling at open"): every bad
+ *          record, path and depth change of 120 opens came in the first
+ *          0.66 s. Fixed: COMPOSITION in a window reported each flip a
+ *          second time as an overlay frame, and the path and depth flapped
+ *          on frames 0 to 5 (9 to 13 depth changes per open); a statistic
+ *          for a completed present now changes no path.
+ *   v0.4.4 -The depth comes from the path, never from misses (DEPTH;
  *          decided 2026-10-09): measured at open on DXGI_FLIP (never above
  *          the smallest depth 2 of open's flips showed), the path's on
  *          COMPOSITION (independent flip 1, composed and overlay 2), the
@@ -509,6 +523,42 @@
  *     When open() gets no OS time (a window covered at open, or
  *     COMPOSITION's first statistics late), the grid is a guess and onsets
  *     are tier 3; the first OS time replaces the guess.
+ *
+ *   SETTLE
+ *     The start of a run is not settled when open's depth is measured:
+ *     a window moves from the composed path to an overlay plane after
+ *     0.5 to 0.7 s (1.7 to 1.9 s under decode load), a window covered at
+ *     open gets off-grid times for seconds, and the first flips can be
+ *     early, late or without a statistic (docs/screen.md, "Settling at
+ *     open"). So open() presents black frames after the depth until all
+ *     of these hold at once, like Psychtoolbox's sync tests:
+ *       - an OS vblank time (no guessed grid);
+ *       - desc.settle_flips (default 6) flips in a row, each with an OS
+ *         statistic, on the grid, not early, not late, tier 1 (2 in a
+ *         window), on one path and one depth;
+ *       - the last 20 vblank intervals: SD at most 50 us and mean within
+ *         10 us of the mode's period (120 opens in front: at most 13.5
+ *         and 6.7 us; settled, about 1 us);
+ *       - the minimum time from the open() call: 2.5 s in a window, none
+ *         fullscreen (desc.settle_min_ns; < 0 removes it).
+ *     The cap (desc.settle_max_ns) is 3 s fullscreen and 4 s in a window,
+ *     from the open() call. At the cap, desc.settle decides: STRICT makes
+ *     open() fail with an error that names the condition, WARN opens and
+ *     reports it, AUTO (the default) is STRICT fullscreen and WARN in a
+ *     window, OFF skips settling. The environment variable YSP_SETTLE
+ *     (off, warn or strict) overrides desc.settle, so a developer can turn
+ *     it off without a rebuild; any other value fails open(). The SIM
+ *     backend and a presenter without OS vblank times skip it. An abort
+ *     during settling ends it; the first begin() reports the abort.
+ *     Every outcome is recorded, overrides and skips too: the describe
+ *     line says settle=0.66s(24 flips), settle=FAILED(grid,flip41,2/6-
+ *     clean,warn), settle=SKIPPED(env YSP_SETTLE=off) or ABORTED; a
+ *     failure adds WARNING=not-settled; the ring gets one YSCR_EV_SETTLE
+ *     record; yscr_settle_check() gives the numbers and a message.
+ *     Settle frames are not records: they reach neither f.done nor the
+ *     ring's flip records, and the first frame after open() is frame 0.
+ *     A statistic for a present that already completed (COMPOSITION in a
+ *     window repeated each flip as an overlay frame) changes no path.
  *
  *   PREDICTION
  *     yscr_begin() predicts the first vblank a present made now can
@@ -1472,9 +1522,9 @@
 #define YSP_SCREEN_H_INCLUDED
 
 #define YSCR_VERSION_MAJOR 0
-#define YSCR_VERSION_MINOR 4
-#define YSCR_VERSION_PATCH 4
-#define YSCR_VERSION_STRING "0.4.4"
+#define YSCR_VERSION_MINOR 5
+#define YSCR_VERSION_PATCH 0
+#define YSCR_VERSION_STRING "0.5.0"
 
 #include "ysp/rt.h"
 #include "ysp/input.h"
@@ -1638,6 +1688,67 @@ typedef yin_mouse_report yscr_mouse_event;
 #define YSCR_DEPTH_PIN     3u   /* desc.depth, at open                    */
 #define YSCR_DEPTH_LEARNER 4u   /* desc.depth_learn: misses or evidence   */
 #define YSCR_DEPTH_EARLY   5u   /* DXGI_FLIP: a flip not held showed early */
+
+/* --- settling at open (SETTLE) ------------------------------------------- */
+
+/* desc.settle, and the YSP_SETTLE environment variable (off, warn,
+ * strict), which overrides it. */
+#define YSCR_SETTLE_AUTO   0   /* strict fullscreen; warn in a window      */
+#define YSCR_SETTLE_STRICT 1   /* open() fails and names the condition     */
+#define YSCR_SETTLE_WARN   2   /* open() succeeds; describe and ring say so */
+#define YSCR_SETTLE_OFF    3   /* no settling; recorded as SKIPPED          */
+
+/* yscr_settle_info.result; YSCR_EV_SETTLE's u.u16[0]. */
+#define YSCR_SETTLED        1u
+#define YSCR_SETTLE_FAILED  2u   /* the cap came first                       */
+#define YSCR_SETTLE_SKIPPED 3u   /* off, SIM, or no OS vblank times          */
+#define YSCR_SETTLE_ABORTED 4u   /* an abort came; begin() reports it         */
+
+/* Where the mode came from: u.u16[2]. */
+#define YSCR_SETTLE_SRC_DEFAULT 0u   /* desc.settle AUTO                     */
+#define YSCR_SETTLE_SRC_DESC    1u   /* desc.settle named it                 */
+#define YSCR_SETTLE_SRC_ENV     2u   /* YSP_SETTLE                           */
+#define YSCR_SETTLE_SRC_BACKEND 3u   /* SIM, or a presenter without OS times */
+
+/* The condition not met at the cap, or the last that broke a run of clean
+ * flips: u.u16[3]. */
+#define YSCR_SETTLE_C_NONE     0u
+#define YSCR_SETTLE_C_ANCHOR   1u   /* no OS vblank time yet: a guessed grid */
+#define YSCR_SETTLE_C_STATS    2u   /* no OS statistic, or occluded          */
+#define YSCR_SETTLE_C_EARLY    3u
+#define YSCR_SETTLE_C_LATE     4u   /* dropped, or a late target            */
+#define YSCR_SETTLE_C_GRID     5u   /* an OS time off the grid               */
+#define YSCR_SETTLE_C_TIER     6u   /* above 1 fullscreen, above 2 a window  */
+#define YSCR_SETTLE_C_PATH     7u
+#define YSCR_SETTLE_C_DEPTH    8u
+#define YSCR_SETTLE_C_SPREAD   9u   /* the last 20 vblank intervals          */
+#define YSCR_SETTLE_C_UNSYNCED 10u  /* the sync guard fired                  */
+
+/* YSCR_EV_SETTLE: open's settling, once per open, at its end (also when
+ * skipped). t_ns then, aux desc.display_index, u.u16[0] the result, [1]
+ * the mode applied (STRICT, WARN or OFF), [2] the source, [3] the
+ * condition, u.i64[1] ns from the open() call, u.u32[4] presents since the
+ * open() call, [5] clean flips in a row at the end, [6] the spread's SD in
+ * ns (0xFFFFFFFF: fewer than 20 intervals), u.i32[7] the mean interval
+ * minus the mode's period, ns. */
+#define YSCR_EV_SETTLE 16u
+
+/* What open's settling did (SETTLE), from yscr_settle_check(). */
+typedef struct yscr_settle_info {
+    uint32_t result;          /* YSCR_SETTLED ...; 0 when not open          */
+    uint32_t mode;            /* applied: STRICT, WARN or OFF               */
+    uint32_t source;          /* YSCR_SETTLE_SRC_*                          */
+    uint32_t condition;       /* YSCR_SETTLE_C_*                            */
+    int64_t  ns;              /* from the open() call to the result         */
+    int32_t  flips;           /* presents since the open() call             */
+    int32_t  run;             /* clean flips in a row at the end            */
+    int32_t  need;            /* the run asked for (desc.settle_flips)      */
+    int32_t  reserved_;
+    int64_t  min_ns, max_ns;  /* the minimum and the cap applied            */
+    int64_t  spread_sd_ns;    /* -1: fewer than 20 intervals                */
+    int64_t  spread_mean_ns;  /* mean interval minus the mode's period      */
+    char     message[256];    /* what happened, for the operator            */
+} yscr_settle_info;
 
 /* What the sync guard saw (SYNC GUARD), from yscr_sync_check(). Counts are
  * of flips with an OS time since open, after open's own black frames. */
@@ -2056,6 +2167,13 @@ typedef struct yscr_desc {
     /* the depth (DEPTH) */
     int32_t        depth;            /* 0 = from the path; 1 to 8 pins it    */
     bool           depth_learn;      /* misses raise it (opt-in; not with a pin) */
+    /* settling at open (SETTLE) */
+    int32_t        settle;           /* YSCR_SETTLE_*; 0 = AUTO; YSP_SETTLE overrides */
+    int32_t        settle_flips;     /* clean flips in a row; 0 = 6; at most 64 */
+    int64_t        settle_min_ns;    /* from the open() call; 0 = 2.5 s in a
+                                      * window, none fullscreen; < 0 = none   */
+    int64_t        settle_max_ns;    /* the cap from the open() call; 0 = 3 s
+                                      * fullscreen, 4 s in a window; <= 60 s  */
 } yscr_desc;
 
 /* Private. One flip between flip_at() and its completion. */
@@ -2254,6 +2372,17 @@ typedef struct yscr_screen {
     uint64_t                backend_mem[YSCR__BACKEND_WORDS];
     int32_t                 auto_pick;    /* YSCR_AUTO_*: what AUTO did */
     char                    auto_why[96]; /* why AUTO fell back to DXGI_FLIP */
+    /* settling at open (SETTLE) */
+    uint64_t                done_id;      /* the newest present completed: a
+                                           * statistic for an older one is stale */
+    int32_t                 settling;     /* 1 while open() presents settle frames */
+    uint32_t                st_result, st_mode, st_src, st_cond;
+    int32_t                 st_need, st_run, st_tier, st_window, st_have, st_depth, st_flips, st_nts;
+    int32_t                 st_bad;       /* the present whose flip set st_cond  */
+    uint8_t                 st_path;
+    int64_t                 st_t0, st_min, st_max, st_ns, st_sd, st_mean;
+    int64_t                 st_ts[21];    /* the newest OS vblank times, oldest first */
+    char                    st_env[16];   /* YSP_SETTLE as read                  */
 } yscr_screen;
 
 /* --- API ----------------------------------------------------------------- */
@@ -2319,6 +2448,10 @@ YSCR_API int         yscr_describe(const yscr_screen* s, char* buf, size_t cap);
  * the evidence, and a message for the operator. Zeroes (fired_index -1)
  * when the screen is not open. */
 YSCR_API void        yscr_sync_check(const yscr_screen* s, yscr_sync_info* out);
+
+/* What open's settling did (SETTLE): the result, the condition, the times
+ * and a message for the operator. Zeroes when the screen is not open. */
+YSCR_API void        yscr_settle_check(const yscr_screen* s, yscr_settle_info* out);
 
 /* Starts a frame. Pumps SDL's events (read them with yscr_poll()), waits
  * until the swap path takes a frame (at most one is in flight), completes
@@ -5816,6 +5949,82 @@ static void yscr__push_flip(yscr_screen* s, const yscr_record* r) {
     yscr__push(s, &ev);
 }
 
+/* --- settling at open (SETTLE) -------------------------------------------- */
+
+/* The spread rule's numbers (docs/screen.md, "Settling at open"): over the
+ * first 20 intervals from open's first OS time the SD was at most 13.5 us
+ * and the mean at most 6.7 us off the period in 120 opens with the window
+ * in front; once settled the SD is about 1 us. The drift after a covered
+ * COMPOSITION open gave 170 to 1800 us. */
+#define YSCR__SETTLE_N       20
+#define YSCR__SETTLE_SD_NS   50000.0
+#define YSCR__SETTLE_MEAN_NS 10000.0
+
+static const char* const yscr__settle_cname[11] = {
+    "none", "anchor", "statistics", "early", "late", "grid", "tier", "path", "depth", "spread", "unsynced"
+};
+
+/* An OS vblank time from open's black frames, for the spread. */
+static void yscr__settle_time(yscr_screen* s, int64_t t) {
+    if (s->st_nts == 21) {
+        memmove(s->st_ts, s->st_ts + 1, sizeof(int64_t) * 20);
+        s->st_nts = 20;
+    }
+    s->st_ts[s->st_nts++] = t;
+}
+
+/* The last 20 intervals between OS times, each divided by the vblanks it
+ * spans: 1 when their SD and the mean's distance from the mode's period
+ * are within the rule. Sets st_sd (-1: too few) and st_mean. */
+static int yscr__settle_spread(yscr_screen* s) {
+    double iv[YSCR__SETTLE_N], m = 0, v = 0;
+    int i, n = 0;
+    s->st_sd = -1;
+    s->st_mean = 0;
+    for (i = 1; i < s->st_nts && n < YSCR__SETTLE_N; i++) {
+        int64_t d = s->st_ts[i] - s->st_ts[i - 1];
+        int64_t k = (int64_t)llround((double)d / s->nominal_f);
+        if (k >= 1) iv[n++] = (double)d / (double)k;
+    }
+    if (n < YSCR__SETTLE_N) return 0;
+    for (i = 0; i < n; i++) m += iv[i];
+    m /= n;
+    for (i = 0; i < n; i++) v += (iv[i] - m) * (iv[i] - m);
+    v = sqrt(v / n);
+    s->st_sd = (int64_t)llround(v);
+    s->st_mean = (int64_t)llround(m - s->nominal_f);
+    return v <= YSCR__SETTLE_SD_NS && fabs(m - s->nominal_f) <= YSCR__SETTLE_MEAN_NS;
+}
+
+/* One settle frame's record: clean, or the condition it breaks. A run of
+ * st_need clean flips on one path and one depth is half the rule; the
+ * spread and the minimum time are the rest (yscr__settle). */
+static void yscr__settle_flip(yscr_screen* s, const yscr__pend* p, const yscr_record* r) {
+    uint32_t c = YSCR_SETTLE_C_NONE;
+    uint16_t f = r->flags;
+    if (s->sync_off || (f & YSCR_FLIP_UNSYNCED)) c = YSCR_SETTLE_C_UNSYNCED;
+    else if (f & (YSCR_FLIP_ESTIMATED | YSCR_FLIP_OCCLUDED | YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED)) c = YSCR_SETTLE_C_STATS;
+    else if (s->anchor_guessed) c = YSCR_SETTLE_C_ANCHOR;
+    else if (f & YSCR_FLIP_EARLY) c = YSCR_SETTLE_C_EARLY;
+    else if (r->dropped || (f & YSCR_FLIP_LATE_TARGET)) c = YSCR_SETTLE_C_LATE;
+    else if (f & YSCR_FLIP_GRID_UNSTABLE) c = YSCR_SETTLE_C_GRID;
+    else if (r->tier < YSCR_TIER_1 || r->tier > s->st_tier) c = YSCR_SETTLE_C_TIER;
+    else if (s->st_have && r->path != s->st_path) c = YSCR_SETTLE_C_PATH;
+    else if (s->st_have && s->depth != s->st_depth) c = YSCR_SETTLE_C_DEPTH;
+    if (c != YSCR_SETTLE_C_STATS) {   /* a flip with no statistic has no path */
+        s->st_path = r->path;
+        s->st_depth = s->depth;
+        s->st_have = 1;
+    }
+    if (c) {
+        s->st_run = 0;
+        s->st_cond = c;
+        s->st_bad = (int32_t)p->id;
+    } else {
+        s->st_run++;
+    }
+}
+
 /* The tier of a flip: the presenter's, else its path's, and never 1 for a
  * time that is an estimate or a plan (TIERS in the manual). */
 static uint8_t yscr__tier(const yscr_screen* s, const yscr_record* r) {
@@ -5845,6 +6054,7 @@ static void yscr__finish(yscr_screen* s, yscr__pend* p, int64_t shown) {
     r->flags = (uint16_t)(r->flags & ~YSCR_FLIP_PENDING);
     r->residual = (r->flags & (YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED)) ? 0 : r->onset - r->target;
     if (shown > s->prev_shown) s->prev_shown = shown;
+    if (p->id > s->done_id) s->done_id = p->id;
     p->used = 0;
     if (s->warming) return;
     /* the rate block counts every present that completed, shown or not,
@@ -5857,6 +6067,11 @@ static void yscr__finish(yscr_screen* s, yscr__pend* p, int64_t shown) {
         s->sync_p++;
     }
     if (s->sync_off) r->flags |= YSCR_FLIP_UNSYNCED;
+    if (r->index < 0) {   /* open's settle frames: judged, never reported */
+        if (!(r->flags & (YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED))) r->tier = yscr__tier(s, r);
+        if (s->settling) yscr__settle_flip(s, p, r);
+        return;
+    }
     if (!(r->flags & (YSCR_FLIP_SKIPPED | YSCR_FLIP_CANCELED))) {
         r->tier = yscr__tier(s, r);
         if (r->tier > s->worst_tier) s->worst_tier = r->tier;
@@ -6136,7 +6351,7 @@ static void yscr__complete(yscr_screen* s, const yscr_vblank* v) {
     int i;
     yscr__pend* p = NULL;
     int64_t count = v->count, t = v->t_ns, onset;
-    bool unstable = false, guessed = false;
+    bool unstable = false, guessed = false, stale;
     for (i = 0; i < YSCR__MAX_PEND; i++) {
         yscr__pend* q = &s->pend[i];
         if (!q->used) continue;
@@ -6152,7 +6367,14 @@ static void yscr__complete(yscr_screen* s, const yscr_vblank* v) {
         if (!oldest) break;
         yscr__estimate(s, oldest);
     }
-    if (v->path != s->path) {
+    /* A statistic for a present that already completed is stale: in a
+     * window, COMPOSITION reported each independent flip a second time,
+     * as an overlay frame planned for the next vblank, and the path and
+     * the depth flapped 1, 2, 1 on 6 frames of every open (9 to 13 depth
+     * changes; docs/screen.md, "Settling at open"). It moves no path. */
+    stale = !p && v->present_id && v->present_id <= s->done_id;
+    if (t && !stale && (s->warming || s->settling)) yscr__settle_time(s, t);
+    if (v->path != s->path && !stale) {
         yrt_event ev;
         memset(&ev, 0, sizeof ev);
         ev.t_ns = (uint64_t)t;
@@ -6969,6 +7191,175 @@ static void yscr__warmup(yscr_screen* s) {
     }
 }
 
+/* The settle= token of the describe line (SETTLE). */
+static void yscr__settle_token(const yscr_screen* s, char* b, size_t cap) {
+    const char* mode = s->st_mode == YSCR_SETTLE_STRICT ? "strict" : s->st_mode == YSCR_SETTLE_WARN ? "warn" : "off";
+    const char* src = s->st_src == YSCR_SETTLE_SRC_ENV ? ":env" : s->st_src == YSCR_SETTLE_SRC_DESC ? ":desc" : "";
+    char why[64];
+    if (s->st_cond == YSCR_SETTLE_C_SPREAD && s->st_sd >= 0)
+        snprintf(why, sizeof why, "spread,sd=%.1fus,mean%+.1fus", (double)s->st_sd * 1e-3, (double)s->st_mean * 1e-3);
+    else if (s->st_cond == YSCR_SETTLE_C_SPREAD)
+        snprintf(why, sizeof why, "spread,fewer-than-%d-intervals", YSCR__SETTLE_N);
+    else
+        snprintf(why, sizeof why, "%s,flip%d,%d/%d-clean", yscr__settle_cname[s->st_cond < 11 ? s->st_cond : 0],
+                 (int)s->st_bad, (int)s->st_run, (int)s->st_need);
+    switch (s->st_result) {
+    case YSCR_SETTLED:
+        snprintf(b, cap, "%.2fs(%d flips%s%s%s)", (double)s->st_ns * 1e-9, (int)s->st_flips,
+                 s->st_src ? "," : "", s->st_src ? mode : "", src);
+        break;
+    case YSCR_SETTLE_FAILED:
+        snprintf(b, cap, "FAILED(%s,%s%s)", why, mode, src);
+        break;
+    case YSCR_SETTLE_ABORTED:
+        snprintf(b, cap, "ABORTED(%.2fs)", (double)s->st_ns * 1e-9);
+        break;
+    case YSCR_SETTLE_SKIPPED:
+        if (s->st_src == YSCR_SETTLE_SRC_ENV) snprintf(b, cap, "SKIPPED(env YSP_SETTLE=%s)", s->st_env);
+        else if (s->st_src == YSCR_SETTLE_SRC_DESC) snprintf(b, cap, "SKIPPED(desc)");
+        else snprintf(b, cap, "SKIPPED(%s)", s->backend == YSCR_BACKEND_SIM ? "sim" : "no-os-vblank-times");
+        break;
+    default:
+        snprintf(b, cap, "none");
+        break;
+    }
+}
+
+/* The sentence for the operator (yscr_settle_check, and open()'s error). */
+static void yscr__settle_message(const yscr_screen* s, char* b, size_t cap) {
+    char tok[96];
+    yscr__settle_token(s, tok, sizeof tok);
+    if (s->st_result != YSCR_SETTLE_FAILED) {
+        snprintf(b, cap, "settle=%s", tok);
+    } else if (s->st_cond == YSCR_SETTLE_C_SPREAD) {
+        snprintf(b, cap, "the display did not settle in %.1f s (%s, %s): spread: the last %d vblank intervals had an SD of "
+                 "%.1f us (limit %.0f) and a mean %+.1f us from the mode's period (limit %.0f)",
+                 (double)s->st_max * 1e-9, s->st_window ? "window" : "fullscreen",
+                 s->st_mode == YSCR_SETTLE_STRICT ? "strict" : "warn", YSCR__SETTLE_N, (double)s->st_sd * 1e-3,
+                 YSCR__SETTLE_SD_NS * 1e-3, (double)s->st_mean * 1e-3, YSCR__SETTLE_MEAN_NS * 1e-3);
+    } else {
+        snprintf(b, cap, "the display did not settle in %.1f s (%s, %s): %s at present %d; %d of %d clean flips "
+                 "in a row at the cap%s",
+                 (double)s->st_max * 1e-9, s->st_window ? "window" : "fullscreen",
+                 s->st_mode == YSCR_SETTLE_STRICT ? "strict" : "warn",
+                 yscr__settle_cname[s->st_cond < 11 ? s->st_cond : 0], (int)s->st_bad, (int)s->st_run, (int)s->st_need,
+                 /* COMPOSITION gives a covered window no statistic */
+                 s->st_cond == YSCR_SETTLE_C_STATS || s->st_cond == YSCR_SETTLE_C_ANCHOR
+                     ? " (is the window covered, or the program in the background?)" : "");
+    }
+}
+
+static void yscr__settle_push(yscr_screen* s) {
+    yrt_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.source = (uint16_t)YRT_SRC_SCREEN;
+    ev.kind = (uint16_t)YSCR_EV_SETTLE;
+    ev.aux = s->display_index;
+    ev.u.u16[0] = (uint16_t)s->st_result;
+    ev.u.u16[1] = (uint16_t)s->st_mode;
+    ev.u.u16[2] = (uint16_t)s->st_src;
+    ev.u.u16[3] = (uint16_t)s->st_cond;
+    ev.u.i64[1] = s->st_ns;
+    ev.u.u32[4] = (uint32_t)s->st_flips;
+    ev.u.u32[5] = (uint32_t)s->st_run;
+    ev.u.u32[6] = s->st_sd < 0 ? 0xFFFFFFFFu : (uint32_t)(s->st_sd > 0xFFFFFFFELL ? 0xFFFFFFFELL : s->st_sd);
+    ev.u.i32[7] = (int32_t)(s->st_mean > INT32_MAX ? INT32_MAX : s->st_mean < -INT32_MAX ? -INT32_MAX : s->st_mean);
+    yscr__push(s, &ev);
+}
+
+/* Black frames after the warm-up until the start of the run has settled
+ * (SETTLE): st_need clean flips in a row on one path and one depth, the
+ * spread of the last 20 intervals, and the minimum time; or the cap. An
+ * abort ends it at once and stays pending, so the caller's first begin()
+ * reports it. Returns 0, or < 0 when the swap path failed. */
+static int yscr__settle(yscr_screen* s) {
+    yscr_frame f;
+    int rc = 0;
+    s->settling = 1;
+    s->index = -1;
+    for (;;) {
+        int64_t el = yscr__now() - s->st_t0;
+        int spread = yscr__settle_spread(s);
+        if (yscr__a_load(&yscr__ab.seq) != s->abort_seen) { s->st_result = YSCR_SETTLE_ABORTED; break; }
+        if (s->st_run >= s->st_need && spread && el >= s->st_min) {
+            s->st_result = YSCR_SETTLED;
+            s->st_cond = YSCR_SETTLE_C_NONE;
+            break;
+        }
+        if (el >= s->st_max) {
+            s->st_result = YSCR_SETTLE_FAILED;
+            if (s->st_run >= s->st_need) s->st_cond = YSCR_SETTLE_C_SPREAD;
+            else if (!s->st_cond) s->st_cond = s->anchor_guessed ? YSCR_SETTLE_C_ANCHOR : YSCR_SETTLE_C_STATS;
+            break;
+        }
+        rc = yscr_begin(s, &f);
+        if (rc == YSCR_QUIT) { s->st_result = YSCR_SETTLE_ABORTED; rc = 0; break; }
+        if (rc < 0) break;
+        yscr__clear_black(s);
+        rc = yscr_flip_at(s, f.onset, NULL);
+        s->index = -1;
+        if (rc < 0) break;
+    }
+    s->settling = 0;
+    s->index = 0;
+    s->st_ns = yscr__now() - s->st_t0;
+    s->st_flips = (int32_t)s->next_id;
+    s->depth_changes = 0;   /* the describe line counts the run's */
+    return rc < 0 ? rc : 0;
+}
+
+/* YSP_SETTLE, read once per open; 0 when unset. The core test replaces it. */
+#ifndef YSCR__GETENV
+static int yscr__getenv(const char* name, char* out, size_t cap) {
+#if defined(_WIN32)
+    DWORD n = GetEnvironmentVariableA(name, out, (DWORD)cap);
+    if (n == 0 || n >= cap) { out[0] = 0; return n >= cap ? -1 : 0; }
+    return 1;
+#else
+    const char* v = getenv(name);
+    if (!v) { out[0] = 0; return 0; }
+    if (strlen(v) >= cap) { out[0] = 0; return -1; }
+    memcpy(out, v, strlen(v) + 1);
+    return 1;
+#endif
+}
+#define YSCR__GETENV(name, out, cap) yscr__getenv((name), (out), (cap))
+#endif
+
+/* desc.settle and its fields, YSP_SETTLE over them; the error, or NULL. */
+static const char* yscr__settle_desc(yscr_screen* s, const yscr_desc* d) {
+    int env, mode = d->settle;
+    if (d->settle < 0 || d->settle > YSCR_SETTLE_OFF) return "ysp_screen: desc.settle must be a YSCR_SETTLE_* value";
+    if (d->settle_flips < 0 || d->settle_flips > 64) return "ysp_screen: desc.settle_flips must be 0 (6) to 64";
+    if (d->settle_max_ns < 0 || d->settle_max_ns > 60000000000LL || d->settle_min_ns > 60000000000LL)
+        return "ysp_screen: desc.settle_max_ns must be 0 (the default) to 60 s, and settle_min_ns at most 60 s";
+    s->st_src = d->settle ? YSCR_SETTLE_SRC_DESC : YSCR_SETTLE_SRC_DEFAULT;
+    env = YSCR__GETENV("YSP_SETTLE", s->st_env, sizeof s->st_env);
+    if (env) {
+        if (env > 0 && !strcmp(s->st_env, "off")) mode = YSCR_SETTLE_OFF;
+        else if (env > 0 && !strcmp(s->st_env, "warn")) mode = YSCR_SETTLE_WARN;
+        else if (env > 0 && !strcmp(s->st_env, "strict")) mode = YSCR_SETTLE_STRICT;
+        else return "ysp_screen: the environment variable YSP_SETTLE must be off, warn or strict";
+        s->st_src = YSCR_SETTLE_SRC_ENV;
+    }
+    if (mode == YSCR_SETTLE_AUTO) mode = d->windowed ? YSCR_SETTLE_WARN : YSCR_SETTLE_STRICT;
+    s->st_mode = (uint32_t)mode;
+    s->st_window = d->windowed ? 1 : 0;
+    s->st_tier = d->windowed ? YSCR_TIER_2 : YSCR_TIER_1;
+    s->st_need = d->settle_flips ? d->settle_flips : 6;
+    /* A window: the system moved one from the composed path to an overlay
+     * plane 1.7 to 1.9 s after open under decode load (docs/video.md), so
+     * 2.5 s. The cap: every fullscreen open with the window in front settled
+     * by 0.8 s; a window's cap is 1.5 s past its minimum, above the slowest
+     * window seen (2.95 s, covered at open). */
+    s->st_min = d->settle_min_ns < 0 ? 0 : d->settle_min_ns ? d->settle_min_ns : d->windowed ? 2500000000LL : 0;
+    s->st_max = d->settle_max_ns ? d->settle_max_ns : d->windowed ? 4000000000LL : 3000000000LL;
+    if (mode != YSCR_SETTLE_OFF && s->st_min >= s->st_max)
+        return "ysp_screen: the settle minimum must be below the cap (a window's minimum is 2.5 s, "
+               "desc.settle_min_ns < 0 removes it)";
+    return NULL;
+}
+
 #if !defined(YSCR_NO_SDL)
 static void yscr__restamp_correlate(yscr_screen* s) {
     yrt_corr_desc d;
@@ -7111,11 +7502,17 @@ static void yscr__rm_check(yscr_screen* s) {
 YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
     yscr_presenter_open in;
     yscr_mode want;
-    int rc;
+    int rc, hw_onset;
+    int64_t t_open = yscr__now();
     if (!s) return false;
     if (s->open) { yscr__copy(s->error, sizeof s->error, "ysp_screen: already open"); return false; }
     memset(s, 0, sizeof *s);
+    s->st_t0 = t_open;
     if (!desc) { yscr__copy(s->error, sizeof s->error, "ysp_screen: NULL desc"); return false; }
+    {
+        const char* e = yscr__settle_desc(s, desc);
+        if (e) { yscr__copy(s->error, sizeof s->error, e); return false; }
+    }
     if (desc->vrr) {
         yscr__copy(s->error, sizeof s->error, "ysp_screen: variable refresh is refused until the panel "
                      "has passed the photodiode interval sweep and the luminance-versus-interval sweep");
@@ -7389,6 +7786,7 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
         return false;
     }
     s->caps.backend = s->backend;
+    hw_onset = s->caps.hw_onset;
     if (s->caps.mode.period_ns == 0) s->caps.mode = want;
     if (s->caps.period_ns == 0) s->caps.period_ns = s->caps.mode.period_ns;
     if (s->caps.period_ns <= 0) s->caps.period_ns = 16666667;
@@ -7481,6 +7879,31 @@ YSCR_API bool yscr_open(yscr_screen* s, const yscr_desc* desc) {
         yscr__push(s, &ev);
     }
     yscr__warmup(s);
+    /* Settling (SETTLE): skipped where it cannot run or was turned off,
+     * and recorded either way. */
+    if (s->backend == YSCR_BACKEND_SIM || !hw_onset) {
+        s->st_result = YSCR_SETTLE_SKIPPED;
+        s->st_src = YSCR_SETTLE_SRC_BACKEND;
+    } else if (s->st_mode == YSCR_SETTLE_OFF) {
+        s->st_result = YSCR_SETTLE_SKIPPED;
+    } else if ((rc = yscr__settle(s)) < 0) {
+        yscr__set_error(s->error, sizeof s->error, "ysp_screen: %s present during settling: %s", s->pr->name,
+                        yscr_strerror(rc));
+        yscr_close(s);
+        return false;
+    }
+    if (s->st_result == YSCR_SETTLE_SKIPPED) {
+        s->st_ns = yscr__now() - s->st_t0;
+        s->st_flips = (int32_t)s->next_id;
+    }
+    yscr__settle_push(s);
+    if (s->st_result == YSCR_SETTLE_FAILED && s->st_mode == YSCR_SETTLE_STRICT) {
+        char m[224];
+        yscr__settle_message(s, m, sizeof m);
+        yscr__set_error(s->error, sizeof s->error, "ysp_screen: %s. YSP_SETTLE=warn opens anyway.", m);
+        yscr_close(s);
+        return false;
+    }
     return true;
 }
 
@@ -7627,10 +8050,11 @@ YSCR_API void yscr_sync_check(const yscr_screen* s, yscr_sync_info* out) {
 }
 
 YSCR_API int yscr_describe(const yscr_screen* s, char* buf, size_t cap) {
-    char extra[448], abort_s[40];
+    char extra[448], abort_s[40], settle_s[96];
     double hz, ppm;
     if (!s || !buf || cap == 0) return YSCR_ERR_ARG;
     if (!s->open) return snprintf(buf, cap, "ysp_screen: closed");
+    yscr__settle_token(s, settle_s, sizeof settle_s);
     extra[0] = '\0';
     if (s->pr->describe) s->pr->describe(s->pr_ctx, extra, sizeof extra);
     hz = s->period_f > 0 ? 1e9 / s->period_f : 0;
@@ -7672,7 +8096,7 @@ YSCR_API int yscr_describe(const yscr_screen* s, char* buf, size_t cap) {
         }
     }
     return snprintf(buf, cap, "ysp_screen %s: backend=%s%s%s%s %s mode=%dx%d@%d/%d measured=%.4fHz(%+.0fppm) "
-                    "path=%s depth=%d(%s,%u changes) lead=%.2f worst_tier=%d abort=%s panic=%s%s%s%s",
+                    "path=%s depth=%d(%s,%u changes) settle=%s lead=%.2f worst_tier=%d abort=%s panic=%s%s%s%s%s",
                     YSCR_VERSION_STRING, s->pr->name,
                     s->auto_pick == YSCR_AUTO_COMPOSITION ? "(auto)"
                         : s->auto_pick == YSCR_AUTO_FALLBACK ? "(auto,composition-refused:\"" : "",
@@ -7681,11 +8105,31 @@ YSCR_API int yscr_describe(const yscr_screen* s, char* buf, size_t cap) {
                     s->caps.mode.refresh_num, s->caps.mode.refresh_den, hz, ppm,
                     yscr__path_name(s->path), s->depth,
                     s->depth_pin ? "pin" : s->depth_learn ? "learner" : "path", (unsigned)s->depth_changes,
-                    s->lead < 0 ? -1.0 : s->lead, s->worst_tier, abort_s,
+                    settle_s, s->lead < 0 ? -1.0 : s->lead, s->worst_tier, abort_s,
                     s->panic_armed == 1 ? "armed" : s->panic_armed == 2 ? "idle(windowed)" : s->panic_armed == 3 ? "n/a" : "off",
                     s->sync_off ? " WARNING=not-vsynced(driver-setting?)" : "",
                     s->unstable ? " WARNING=off-grid-vblanks" : "",
-                    (ppm > 200 || ppm < -200) ? " WARNING=period-differs-from-mode" : "");
+                    (ppm > 200 || ppm < -200) ? " WARNING=period-differs-from-mode" : "",
+                    s->st_result == YSCR_SETTLE_FAILED ? " WARNING=not-settled" : "");
+}
+
+YSCR_API void yscr_settle_check(const yscr_screen* s, yscr_settle_info* out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    if (!s || !s->open) return;
+    out->result = s->st_result;
+    out->mode = s->st_mode;
+    out->source = s->st_src;
+    out->condition = s->st_cond;
+    out->ns = s->st_ns;
+    out->flips = s->st_flips;
+    out->run = s->st_run;
+    out->need = s->st_need;
+    out->min_ns = s->st_min;
+    out->max_ns = s->st_max;
+    out->spread_sd_ns = s->st_sd;
+    out->spread_mean_ns = s->st_mean;
+    yscr__settle_message(s, out->message, sizeof out->message);
 }
 
 static void yscr__pump(yscr_screen* s) {
@@ -8470,6 +8914,10 @@ YSCR_API const yscr_param* yscr_params(int* n) {
         { "min_tier",        "i32",  0, 3, 0, "",                 "flag flips whose tier is worse; 0 = off" },
         { "depth",           "i32",  0, 8, 0, "vblank",           "vblanks from a present to its flip; 0 = from the path, else pinned" },
         { "depth_learn",     "bool", 0, 1, 0, "",                 "let misses raise the depth (adds latency; not with a pin)" },
+        { "settle",          "enum", 0, 3, 0, "",                 "settling at open: 0 auto (strict fullscreen, warn window), 1 strict, 2 warn, 3 off" },
+        { "settle_flips",    "i32",  0, 64, 6, "frame",           "clean flips in a row that settle the start" },
+        { "settle_min_ns",   "i64", -1, 6e10, 0, "ns",            "settle no sooner; 0 = 2.5 s in a window, none fullscreen; -1 = none" },
+        { "settle_max_ns",   "i64",  0, 6e10, 3000000000.0, "ns", "the settle cap from the open() call; 0 = 3 s fullscreen, 4 s window" },
         { "sim_period_ns",   "i64",  0, 1e10, 16666667, "ns",     "frame period of the simulated display" }
     };
     if (n) *n = (int)(sizeof table / sizeof table[0]);

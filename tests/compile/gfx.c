@@ -65,6 +65,7 @@ int main(void) {
     xd.enc.primaries = YGFX_PRIM_DEVICE;
     gray = ygfx_texture(&g, &xd);
     if (gray.id == 0) return 16;
+    if (ygfx_prime(&g) < 1) return 17;   /* v0.11: every program, once */
     ygfx_texture_free(&g, gray);
     for (i = 0; i < 3; i++) {
         if (yscr_begin(&s, &f) != YSCR_OK) return 3;

@@ -411,6 +411,16 @@ int main(int argc, char** argv) {
         if (g_csv) fprintf(g_csv, "index,display,target_ns,onset_ns,dropped,path,flags,tier,eval,script,draw,upload,swap,gpu\n");
     }
 
+#if defined(_WIN32)
+    if (topmost || cover) {   /* open() settles (ysp/screen.h v0.5.0): one input event lets this
+                     * program take the foreground during open, not after it */
+        INPUT in0;
+        memset(&in0, 0, sizeof in0);
+        in0.type = INPUT_MOUSE;
+        in0.mi.dwFlags = MOUSEEVENTF_MOVE;
+        SendInput(1, &in0, sizeof in0);
+    }
+#endif
     for (i = 0; i < n_screens; i++) {
         memset(&d, 0, sizeof d);
         d.backend = sim ? YSCR_BACKEND_SIM : backend;

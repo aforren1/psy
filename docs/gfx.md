@@ -3016,6 +3016,81 @@ module it unloads, which a suppression cannot name, so the test runs GL
 under a sanitizer only when `YGFX_TEST_DEVICES` asks for it. Locally,
 with GL on, everything passed under ASan and UBSan apart from that leak.
 
+## v0.11: priming
+
+`ygfx_prime()` draws once with every program the gfx has made so far: the
+10 built-in programs, the 3 specialized vector programs, the instanced,
+video, text and blur programs made so far, the caller's pipelines and the
+output stage. Each draw is a quad of zero size (the stimulus block is
+zeros), so no fragment runs and nothing is shown. Then it reads one pixel,
+which waits for the GPU.
+
+### What the first use costs
+
+All runs: this laptop (Iris Xe, Docker's ANGLE 2.1.23876), AC, the guard
+held, fullscreen on the composition swapchain, the window in front,
+2026-10-09. The probe (`C:\tmp\psy-work\settle\gfxwarm.c`, not in the
+repository) opens a screen and a gfx, makes 19 stimuli of every kind, then
+draws each kind alone for 1 frame (cold) and 3 more frames (warm), with 2
+empty frames between kinds. Each process is fresh. "No cache" passes no
+program cache; "cold cache" an empty folder (the run stores every
+program); "warm cache" the folder a cold run filled. 5 rounds.
+
+Setup calls, ms (minimum to maximum):
+
+| Call | No cache | Cold cache | Warm cache |
+|---|---|---|---|
+| `ygfx_open()` (14 programs) | 2216 to 2409 | 2237 to 2370 | 11.2 to 18.1 |
+| first `ygfx_cset_make()` (the text program) | 451 to 486 | 446 to 491 | 1.1 to 1.9 |
+| a second `ygfx_cset_make()` | 0.17 to 0.25 | 0.18 to 0.26 | 0.20 to 0.34 |
+| first `ygfx_crun()` with `.rays` (its program) | 160 to 168 | 162 to 188 | 0.7 to 1.2 |
+| `ygfx_instances()`, gabor and shape (each a program) | 121 to 150 | 124 to 151 | 0.8 to 1.6 |
+| `ygfx_pipeline()` | 137 to 162 | 144 to 156 | 0.6 to 1.0 |
+| first `ygfx_blur_make()` | 13.5 to 14.6 | 15.3 to 17.3 | 1.5 to 2.5 |
+
+Texture uploads, every condition (15 runs), ms including a `glFinish()`:
+512 x 512 RGBA8, the first 1.2 to 2.1, the second 0.8 to 1.2; 1920 x 1200
+RGBA8 2.4 to 4.3; `ygfx_texture_update()` of 1920 x 1200, the first 2.1 to
+3.0, then 2.0 to 2.4.
+
+The first frame of each program costs CPU in `ygfx_end()`: ANGLE makes the
+program's D3D shader objects at its first draw, from a cache entry too.
+`ygfx_end()` of the cold frame, ms; a warm frame's whole draw, end and
+`glFinish()` is 1.2 to 4.3 ms:
+
+| Kind | No cache | Warm cache | Warm cache, after `ygfx_prime()` |
+|---|---|---|---|
+| SHAPE circle (the first kind drawn) | 2.7 to 3.3 | 5.8 to 8.6 | 0.10 to 0.17 |
+| GRATING | 2.5 to 3.3 | 2.7 to 3.2 | 0.11 to 0.17 |
+| instanced gabor, 400 | 4.7 to 5.9 | 5.7 to 7.1 | 0.12 to 0.14 |
+| instanced shape, 400 | 5.1 to 5.6 | 5.9 to 7.5 | 0.10 to 0.17 |
+| USER pipeline | 2.5 to 3.9 | 3.1 to 3.4 | 0.09 to 0.11 |
+| curve run, exact area | 4.5 to 5.4 | 5.5 to 10.5 | 0.15 to 0.16 |
+| curve run, `.rays` | 4.3 to 5.1 | 5.4 to 12.9 | 0.10 to 0.42 |
+
+A kind whose program was already drawn costs nothing more (NOISE SIMPLEX
+after NOISE UNIFORM, a second image, the blur's image draw: 0.1 to 0.3
+ms). With no cache, the first process of the session also had first draws
+of 14 to 27 ms in `glFinish()` (the first shape, both instanced kinds, the
+exact-area text), and dropped 4 frames; later processes did not.
+
+The prime itself, 12 runs (no cache, cold and warm cache): 20 programs in
+63.4 to 73.4 ms. Frames drawn after it are bit-identical to frames drawn
+before it (`gl_v11_prime` in the test). Kept: it moves 2.5 to 12.9 ms per
+program out of the first trials, the frame budget is 16.7 ms, and the
+first frame of a trial is the one a task cannot afford to lose.
+
+### Not solved: the first frame after a long setup
+
+The first frame after the setup (frame 0) was late or dropped in 21 of 22
+runs whose setup took 2.2 s or more (no cache, cold cache) and in 0 of 13
+runs with a warm cache, with and without the prime. `ygfx_end()` and the
+GPU were then 0.1 and 1.7 ms: the swap path, not the program, was slow
+after 2 s without a present. ysp/screen.h v0.5.0 settles the display in
+`yscr_open()`; a long setup after it leaves the swap path idle again. Not
+measured: which part wakes slowly (GPU clocks, the compositor). Until it is,
+show a few frames (an instruction screen) before the first timed trial.
+
 ## v0.10.5: a pack's textures load as stored; shader contract 2
 
 Found by `examples/pack/trial_images.c` (docs/rig_spec.md 15.5): the

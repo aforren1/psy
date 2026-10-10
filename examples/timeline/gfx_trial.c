@@ -110,6 +110,7 @@ int main(int argc, char** argv) {
     grd.aperture = YGFX_CIRCLE; grd.edge = YGFX_EDGE_COSINE; grd.edge_width = 20;
     grating = ygfx_grating(&grd);
     fix.visible = grating.visible = 0.0f;   /* the timeline turns them on */
+    ygfx_prime(&gfx);   /* each program's first draw now, not in the trial */
 
     while (yscr_begin(&scr, &f) == YSCR_OK) {
         if (f.index == 0) { ytl_anchor(&tl, TRIAL, f.onset, 0); t0 = f.onset; }

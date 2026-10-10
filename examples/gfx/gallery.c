@@ -2549,6 +2549,16 @@ int main(int argc, char** argv) {
     else if (!cache && ygfx_default_cache_dir(cache_dir, sizeof cache_dir) == YGFX_OK)
         cache = ygfx_file_cache_init(&pcache, cache_dir);
     if (cal_setup() < 0) { fprintf(stderr, "gfx_gallery: the nominal calibration failed\n"); return 1; }
+#if defined(_WIN32)
+    if (topmost) {   /* open() settles (ysp/screen.h v0.5.0): one input event lets this
+                     * program take the foreground during open, not after it */
+        INPUT in0;
+        memset(&in0, 0, sizeof in0);
+        in0.type = INPUT_MOUSE;
+        in0.mi.dwFlags = MOUSEEVENTF_MOVE;
+        SendInput(1, &in0, sizeof in0);
+    }
+#endif
     if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_gallery: %s\n", yscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;

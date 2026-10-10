@@ -1,5 +1,6 @@
 
-# ysp/gfx.h mutants: the v0.4 list (docs/gfx.md, "v0.4 mutations").
+# ysp/gfx.h mutants: the v0.4 list (docs/gfx.md, "v0.4 mutations"), then
+# later lists by prefix (pr-: v0.11 prime).
 # The v0.3 list (mutate03.py) was lost; docs/gfx.md keeps its table.
 # YGFX_TEST_PARTS limits a run to the parts that can see the fault, and
 # "none" runs the CPU half alone. YGFX_TEST_DEVICES=hardware is the GPU
@@ -953,3 +954,34 @@ env = { YGFX_TEST_PARTS = "v0.4 video", YGFX_TEST_DEVICES = "hardware" }
 why = "v0.10.5: gray and alpha PNGs arrive as RG8; alpha is in g."
 find = '(ch == 2 ? vec4(y.rrr, y.g) : y)'
 replace = '(ch == 2 ? vec4(y.rrr, 1.0) : y)'
+
+[[mutant]]
+id = "pr-01"
+name = "prime skips the caller's pipelines"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.11 prime", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.11: a user pipeline's first trial frame would pay ANGLE's first draw (2.5 to 12.9 ms of CPU measured per kind)."
+find = '        if (g->pipe[i].used && g->pipe[i].bid) { inst[n] = 0; ids[n++] = g->pipe[i].bid; }'
+replace = ''
+
+[[mutant]]
+id = "pr-02"
+name = "prime inside a frame"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.11 prime", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.11: a prime inside a frame would overwrite the frame's uniform block and draw into the scene mid-frame."
+find = '''
+    if (g->in_frame) {
+        ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: prime inside'''
+replace = '''
+    if (0) {
+        ygfx__set_error(g->error, sizeof g->error, "ysp_gfx: prime inside'''
+
+[[mutant]]
+id = "pr-03"
+name = "prime skips the instanced programs"
+test = "gfx"
+env = { YGFX_TEST_PARTS = "v0.11 prime", YGFX_TEST_DEVICES = "hardware" }
+why = "v0.11: the instanced programs had the largest first draws (14 to 27 ms with no program cache)."
+find = '    for (i = 0; i <= YGFX__N_BUILTIN; i++) if (g->inst_pipe[i]) { inst[n] = 1; ids[n++] = g->inst_pipe[i]; }'
+replace = ''

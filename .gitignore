@@ -55,3 +55,7 @@ CMakeUserPresets.json
 # Also lodepng (tools/vendor_pack.py) and liblsl (tools/vendor_lsl.py).
 /third_party/*/
 !/third_party/patches/
+# Probe output folders (tests/probe/beam_race, tests/probe/screen_x11)
+/beam_*/
+/ysp_beam_race_*/
+/ysp_x11_probe_*/

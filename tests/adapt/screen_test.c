@@ -58,11 +58,26 @@ static int g_ti = -1;
  * fire, so main() checks the total against the fires they expect. */
 static int g_unsynced_fires;
 #define YSCR__ON_UNSYNCED(s) ((void)(s), g_unsynced_fires++)
+/* YSP_SETTLE as the header reads it: "off" for every case but the
+ * settling ones, which set it (NULL = unset), so a developer's own
+ * variable changes nothing here. */
+static const char* g_env = "off";
+static int test_getenv(const char* name, char* out, int cap);
+#define YSCR__GETENV(name, out, cap) test_getenv((name), (out), (int)(cap))
 
 #define YSP_SCREEN_IMPLEMENTATION
 #include "ysp/screen.h"
 
 static long long vnow(void) { return g_virtual ? g_vt : (long long)yrt_now_ns(); }
+
+static int test_getenv(const char* name, char* out, int cap) {
+    int i;
+    (void)name;
+    if (!g_env) { out[0] = 0; return 0; }
+    for (i = 0; g_env[i] && i < cap - 1; i++) out[i] = g_env[i];
+    out[i] = 0;
+    return g_env[i] ? -1 : 1;
+}
 
 static struct { yscr_screen* s; long long t; } g_armed[4];
 /* Wake-ups armed from the frame thread, not from the worker's own run:
@@ -139,6 +154,7 @@ typedef struct flight {
     int64_t  t;                   /* the flip's own time; 0 = its vblank's  */
     uint8_t  path;
     int      used;
+    int      dup;                 /* a stale second statistic (script.dup) */
 } flight;
 
 typedef struct script {
@@ -156,6 +172,12 @@ typedef struct script {
     int      path_lag;            /* the new path is reported this many
                                    * presents after change_id, as DXGI's
                                    * did 5 flips late in a window        */
+    int      dup;                 /* each present is reported a second
+                                   * time at the next vblank, on dup_path
+                                   * with ONSET_PLANNED, as COMPOSITION
+                                   * did in a window (stale)             */
+    uint8_t  dup_path;
+    uint64_t abort_at;            /* this present calls yscr_request_abort() */
     unsigned char drop[MAX_ID];   /* one extra vblank for this present     */
     unsigned char missing[MAX_ID];/* no statistic for this present          */
     unsigned char act[MAX_ID];    /* 1 skipped, 2 canceled, 3 no time with
@@ -276,6 +298,7 @@ static int sc_present(void* ctx, const yscr_present_req* req) {
             c->fl[i].t = c->vsync_off == 2
                 ? now_ns() + (int64_t)(((req->present_id * 2654435761u) >> 8) % (uint64_t)(3 * P_NS / 4)) : 0;
             c->fl[i].path = c->path;
+            c->fl[i].dup = 0;
             break;
         }
         c->last_shown = shown;
@@ -308,8 +331,20 @@ static int sc_present(void* ctx, const yscr_present_req* req) {
         if (c->path_lag && !c->flap && req->present_id >= c->change_id &&
             req->present_id < c->change_id + (uint64_t)c->path_lag)
             c->fl[i].path = c->path;
+        c->fl[i].dup = 0;
         break;
     }
+    for (i = 0; c->dup && i < 8; i++) {
+        if (c->fl[i].used) continue;
+        c->fl[i].used = 1;
+        c->fl[i].id = req->present_id;
+        c->fl[i].count = shown + 1;
+        c->fl[i].t = 0;
+        c->fl[i].path = c->dup_path;
+        c->fl[i].dup = 1;
+        break;
+    }
+    if (c->abort_at && req->present_id == c->abort_at) yscr_request_abort();
     c->presents++;
     return YSCR_OK;
 }
@@ -326,7 +361,9 @@ static int sc_completions(void* ctx, yscr_vblank* out, int cap) {
     for (;;) {   /* oldest first */
         int i, best = -1;
         for (i = 0; i < 8; i++)
-            if (c->fl[i].used && sc_flip_t(c, &c->fl[i]) <= now && (best < 0 || c->fl[i].id < c->fl[best].id)) best = i;
+            if (c->fl[i].used && sc_flip_t(c, &c->fl[i]) <= now &&
+                (best < 0 || c->fl[i].id < c->fl[best].id ||
+                 (c->fl[i].id == c->fl[best].id && sc_flip_t(c, &c->fl[i]) < sc_flip_t(c, &c->fl[best])))) best = i;
         if (best < 0 || n >= cap) break;
         c->fl[best].used = 0;
         if (c->fl[best].id < MAX_ID && c->missing[c->fl[best].id]) continue;
@@ -334,8 +371,8 @@ static int sc_completions(void* ctx, yscr_vblank* out, int cap) {
         out[n].t_ns = sc_flip_t(c, &c->fl[best]);
         out[n].count = c->fl[best].count - (c->fl[best].id < MAX_ID ? c->count_off[c->fl[best].id] : 0);
         out[n].path = c->fl[best].path;
-        out[n].flags = 0;
-        if (c->fl[best].id < MAX_ID) switch (c->act[c->fl[best].id]) {
+        out[n].flags = c->fl[best].dup ? YSCR_FLIP_ONSET_PLANNED : 0;
+        if (c->fl[best].id < MAX_ID && !c->fl[best].dup) switch (c->act[c->fl[best].id]) {
         case 1: out[n].flags = YSCR_FLIP_SKIPPED; out[n].t_ns = 0; break;
         case 2: out[n].flags = YSCR_FLIP_CANCELED; out[n].t_ns = 0; break;
         case 3: out[n].flags = YSCR_FLIP_OCCLUDED; out[n].t_ns = 0; break;
@@ -3519,6 +3556,323 @@ static void test_icon(void) {
     yscr_close(&s);
 }
 
+/* ------------------------------------------------------- settling at open */
+
+/* v0.5.0 (SETTLE). Opens with the mode and fields given; returns open()'s
+ * result. The caller sets g_env (NULL: YSP_SETTLE unset). */
+static bool open_settle(yscr_screen* s, script* c, int windowed, int settle, int64_t min_ns, int64_t max_ns) {
+    yscr_desc d;
+    memset(s, 0, sizeof *s);
+    memset(&d, 0, sizeof d);
+    d.backend = YSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted;
+    d.presenter_ctx = c;
+    d.ring = &g_ring;
+    d.windowed = windowed != 0;
+    d.settle = settle;
+    d.settle_min_ns = min_ns;
+    d.settle_max_ns = max_ns;
+    return yscr_open(s, &d);
+}
+
+/* The YSCR_EV_SETTLE records in g_ev[0..n): their count, and the last. */
+static int settle_events(int n, yrt_event* last) {
+    int j, k = 0;
+    for (j = 0; j < n; j++)
+        if (g_ev[j].source == YRT_SRC_SCREEN && g_ev[j].kind == YSCR_EV_SETTLE) {
+            k++;
+            if (last) *last = g_ev[j];
+        }
+    return k;
+}
+
+static void script_clean(script* c) {
+    memset(c, 0, sizeof *c);
+    c->depth = 1;
+    c->path = YSCR_PATH_OVERLAY;
+}
+
+/* A clean display settles at once in fullscreen and after the minimum in
+ * a window; nothing of open's frames reaches the caller. */
+static void test_settle_clean(void) {
+    static script c;
+    yscr_screen s;
+    yscr_settle_info si;
+    static yscr_frame f;
+    yrt_event e;
+    char line[1024];
+    int n, j, flips_in_ring = 0;
+    g_env = NULL;
+    /* fullscreen, AUTO: strict */
+    script_clean(&c);
+    ring_reset();
+    CHECK(open_settle(&s, &c, 0, 0, 0, 0));
+    if (!yscr_is_open(&s)) { g_env = "off"; return; }
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    CHECK_I(si.mode, YSCR_SETTLE_STRICT);
+    CHECK_I(si.source, YSCR_SETTLE_SRC_DEFAULT);
+    CHECK_I(si.need, 6);
+    CHECK(si.run >= 6);
+    CHECK_I(si.spread_sd_ns, 0);
+    CHECK_I(si.spread_mean_ns, 0);
+    CHECK(si.ns < 400000000);                 /* 21 OS times at 250 Hz */
+    CHECK(si.flips >= 21 && si.flips < 60);
+    CHECK_I(si.max_ns, 3000000000LL);
+    CHECK_I(si.min_ns, 0);
+    n = ring_drain();
+    CHECK_I(settle_events(n, &e), 1);
+    CHECK_I(e.u.u16[0], YSCR_SETTLED);
+    CHECK_I(e.u.u16[1], YSCR_SETTLE_STRICT);
+    CHECK_I(e.u.i64[1], si.ns);
+    CHECK_I(e.u.u32[4], (uint32_t)si.flips);
+    CHECK_I(e.u.u32[6], 0);
+    for (j = 0; j < n; j++) flips_in_ring += g_ev[j].source == YRT_SRC_SCREEN && g_ev[j].kind == YSCR_EV_FLIP;
+    CHECK_I(flips_in_ring, 0);                /* open's frames are not records */
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, " settle=") != NULL && strstr(line, " flips)") != NULL);
+    CHECK(strstr(line, "WARNING=not-settled") == NULL);
+    for (j = 0; j < 4; j++) {
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        CHECK_I(f.index, j);
+        if (j == 0) CHECK_I(f.n_done, 0);    /* open's last flips stay hidden */
+        if (j > 1) CHECK(f.last && f.last->index == j - 1);
+        CHECK_I(yscr_flip(&s), YSCR_OK);
+    }
+    yscr_close(&s);
+    /* a window: the 2.5 s minimum, WARN */
+    script_clean(&c);
+    ring_reset();
+    CHECK(open_settle(&s, &c, 1, 0, 0, 0));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    CHECK_I(si.mode, YSCR_SETTLE_WARN);
+    CHECK(si.ns >= 2500000000LL && si.ns < 2520000000LL);
+    CHECK_I(si.max_ns, 4000000000LL);
+    yscr_close(&s);
+    /* a window with no minimum */
+    script_clean(&c);
+    CHECK(open_settle(&s, &c, 1, 0, -1, 0));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    CHECK(si.ns < 400000000);
+    yscr_close(&s);
+    /* a window: tier 2 (composed) settles; fullscreen it fails on the tier */
+    script_clean(&c);
+    c.path = YSCR_PATH_COMPOSED;
+    c.depth = 2;
+    CHECK(open_settle(&s, &c, 1, 0, -1, 0));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    yscr_close(&s);
+    script_clean(&c);
+    c.path = YSCR_PATH_COMPOSED;
+    c.depth = 2;
+    ring_reset();
+    CHECK(!open_settle(&s, &c, 0, 0, 0, 0));
+    CHECK(strstr(yscr_error(&s), "did not settle in 3.0 s (fullscreen, strict): tier") != NULL);
+    CHECK(strstr(yscr_error(&s), "YSP_SETTLE=warn") != NULL);
+    CHECK_I(c.closed, 1);
+    n = ring_drain();
+    CHECK_I(settle_events(n, &e), 1);         /* recorded before the close */
+    CHECK_I(e.u.u16[0], YSCR_SETTLE_FAILED);
+    CHECK_I(e.u.u16[3], YSCR_SETTLE_C_TIER);
+    CHECK(e.u.i64[1] >= 3000000000LL);
+    g_env = "off";
+}
+
+/* Each condition that keeps the run from settling, at the cap: strict
+ * fails open() and names it; WARN opens and says so. */
+static void test_settle_fail(int cond) {
+    static script c;
+    yscr_screen s;
+    yscr_settle_info si;
+    char line[1024];
+    int k, fires = g_unsynced_fires;
+    static const char* const name[11] = {
+        "none", "anchor", "statistics", "early", "late", "grid", "tier", "path", "depth", "spread", "unsynced"
+    };
+    g_env = NULL;
+    script_clean(&c);
+    switch (cond) {
+    case YSCR_SETTLE_C_STATS: for (k = 1; k < MAX_ID; k++) c.missing[k] = (uint8_t)(k % 4 == 0); break;
+    case YSCR_SETTLE_C_LATE:  for (k = 1; k < MAX_ID; k++) c.drop[k] = (uint8_t)(k % 4 == 0); break;
+    case YSCR_SETTLE_C_GRID:  for (k = 1; k < MAX_ID; k++) c.t_off[k] = k % 3 == 0 ? P_NS * 3 / 10 : 0; break;
+    case YSCR_SETTLE_C_PATH:   /* the path flaps every 4 presents */
+        c.change_id = 1; c.flap = 4; c.path2 = YSCR_PATH_INDEPENDENT; c.depth2 = 1; break;
+    case YSCR_SETTLE_C_SPREAD:   /* vblanks 15 us longer than the mode says: on the grid, mean off */
+        for (k = 1; k < MAX_ID; k++) c.vb_off[k] = 15000LL * k;
+        break;
+    case YSCR_SETTLE_C_UNSYNCED: c.vsync_off = 1; c.path = YSCR_PATH_INDEPENDENT; break;
+    default: break;
+    }
+    ring_reset();
+    CHECK(!open_settle(&s, &c, 0, YSCR_SETTLE_STRICT, 0, 0));
+    if (!strstr(yscr_error(&s), name[cond])) {
+        printf("  settle %s: %s\n", name[cond], yscr_error(&s));
+        fail(__LINE__, "the error names the condition");
+    }
+    if (cond == YSCR_SETTLE_C_UNSYNCED) {
+        CHECK_I(g_unsynced_fires - fires, 1);
+        g_unsynced_want++;
+        fires = g_unsynced_fires;
+    }
+    /* the same display, WARN: open() succeeds and every report says so */
+    CHECK(open_settle(&s, &c, 0, YSCR_SETTLE_WARN, 0, 0));
+    if (!yscr_is_open(&s)) { g_env = "off"; return; }
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLE_FAILED);
+    CHECK_I(si.condition, (uint32_t)cond);
+    CHECK_I(si.mode, YSCR_SETTLE_WARN);
+    CHECK_I(si.source, YSCR_SETTLE_SRC_DESC);
+    CHECK(si.ns >= 3000000000LL);
+    CHECK(strstr(si.message, name[cond]) != NULL);
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, "settle=FAILED(") != NULL && strstr(line, name[cond]) != NULL);
+    CHECK(strstr(line, ",warn:desc)") != NULL);
+    CHECK(strstr(line, "WARNING=not-settled") != NULL);
+    if (cond == YSCR_SETTLE_C_SPREAD) {
+        CHECK(si.spread_mean_ns > 10000 && si.spread_mean_ns < 20000);
+        CHECK(strstr(line, "spread,sd=") != NULL);
+    }
+    yscr_close(&s);
+    if (cond == YSCR_SETTLE_C_UNSYNCED) { CHECK_I(g_unsynced_fires - fires, 1); g_unsynced_want++; }
+    g_env = "off";
+}
+
+/* A run broken late settles later: a window moves from the composed path
+ * to an overlay at present 18, after open's black frames had a run. */
+static void test_settle_late_change(void) {
+    static script c;
+    yscr_screen s;
+    yscr_settle_info si;
+    g_env = NULL;
+    script_clean(&c);
+    c.path = YSCR_PATH_COMPOSED;
+    c.depth = 2;
+    c.change_id = 18;
+    c.path2 = YSCR_PATH_OVERLAY;
+    c.depth2 = 1;
+    CHECK(open_settle(&s, &c, 1, 0, -1, 0));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    CHECK(si.flips >= 18 + 6);
+    yscr_close(&s);
+    g_env = "off";
+}
+
+/* YSP_SETTLE overrides desc.settle, every override is in the describe
+ * line, and a bad value fails open(). SIM skips. An abort ends settling
+ * and stays for the caller's begin(). The fields are checked. */
+static void test_settle_modes(void) {
+    static script c;
+    yscr_screen s;
+    yscr_settle_info si;
+    yscr_desc d;
+    static yscr_frame f;
+    char line[1024];
+    int k;
+    script_clean(&c);
+    for (k = 1; k < MAX_ID; k++) c.t_off[k] = k % 3 == 0 ? P_NS * 3 / 10 : 0;   /* never settles */
+    g_env = "warn";
+    CHECK(open_settle(&s, &c, 0, YSCR_SETTLE_STRICT, 0, 0));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLE_FAILED);
+    CHECK_I(si.source, YSCR_SETTLE_SRC_ENV);
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, ",warn:env)") != NULL);
+    yscr_close(&s);
+    g_env = "off";
+    CHECK(open_settle(&s, &c, 0, YSCR_SETTLE_STRICT, 0, 0));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLE_SKIPPED);
+    CHECK(si.ns < 200000000);
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, "settle=SKIPPED(env YSP_SETTLE=off)") != NULL);
+    yscr_close(&s);
+    g_env = "on";
+    CHECK(!open_settle(&s, &c, 0, 0, 0, 0));
+    CHECK(strstr(yscr_error(&s), "YSP_SETTLE must be off, warn or strict") != NULL);
+    g_env = NULL;
+    CHECK(open_settle(&s, &c, 0, YSCR_SETTLE_OFF, 0, 0));
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, "settle=SKIPPED(desc)") != NULL);
+    yscr_close(&s);
+    /* desc fields */
+    CHECK(!open_settle(&s, &c, 0, 4, 0, 0));
+    CHECK(!open_settle(&s, &c, 1, 0, 0, 2000000000LL));   /* the window's minimum is above this cap */
+    CHECK(strstr(yscr_error(&s), "below the cap") != NULL);
+    CHECK(!open_settle(&s, &c, 0, 0, 0, -1));
+    CHECK(!open_settle(&s, &c, 0, 0, 0, 61000000000LL));
+    memset(&s, 0, sizeof s);
+    memset(&d, 0, sizeof d);
+    d.backend = YSCR_BACKEND_CUSTOM;
+    d.presenter = &g_scripted;
+    d.presenter_ctx = &c;
+    d.settle_flips = 65;
+    CHECK(!yscr_open(&s, &d));
+    /* an abort during settling: open() succeeds, begin() reports it */
+    script_clean(&c);
+    c.abort_at = 12;
+    CHECK(open_settle(&s, &c, 1, 0, 0, 0));
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLE_ABORTED);
+    CHECK(si.ns < 1000000000LL);
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, "settle=ABORTED(") != NULL);
+    CHECK_I(yscr_begin(&s, &f), YSCR_QUIT);
+    CHECK(f.abort & YSCR_ABORT_REQUEST);
+    yscr_close(&s);
+    /* SIM skips, recorded */
+    memset(&s, 0, sizeof s);
+    memset(&d, 0, sizeof d);
+    d.backend = YSCR_BACKEND_SIM;
+    d.sim_period_ns = P_NS;
+    g_virtual = 0;
+    CHECK(yscr_open(&s, &d));
+    CHECK(yscr_describe(&s, line, sizeof line) > 0);
+    CHECK(strstr(line, "settle=SKIPPED(sim)") != NULL);
+    yscr_close(&s);
+    g_virtual = 1;
+    g_env = "off";
+}
+
+/* COMPOSITION in a window reported each flip a second time, as an overlay
+ * frame planned for the next vblank: v0.4.4 changed the path and the
+ * depth on each (9 to 13 depth changes per open). A stale statistic moves
+ * no path; the display settles. */
+static void test_stale_statistics(void) {
+    static script c;
+    yscr_screen s;
+    yscr_settle_info si;
+    static yscr_frame f;
+    yrt_event e;
+    int i, n, paths = 0;
+    script_clean(&c);
+    c.native = 1;
+    c.free_at_flip = 1;
+    c.path = YSCR_PATH_INDEPENDENT;
+    c.dup = 1;
+    c.dup_path = YSCR_PATH_OVERLAY;
+    ring_reset();
+    g_env = NULL;
+    CHECK(open_settle(&s, &c, 0, 0, 0, 0));
+    if (!yscr_is_open(&s)) { g_env = "off"; return; }
+    yscr_settle_check(&s, &si);
+    CHECK_I(si.result, YSCR_SETTLED);
+    for (i = 0; i < 100; i++) {
+        CHECK_I(yscr_begin(&s, &f), YSCR_OK);
+        CHECK_I(yscr_flip(&s), YSCR_OK);
+    }
+    n = ring_drain();
+    for (i = 0; i < n; i++) paths += g_ev[i].source == YRT_SRC_SCREEN && g_ev[i].kind == YSCR_EV_PATH;
+    CHECK_I(paths, 1);                         /* unknown to independent, at open */
+    CHECK_I(depth_events(n, &e), 1);           /* open's */
+    CHECK_I(s.depth, 1);
+    yscr_close(&s);
+    g_env = "off";
+}
+
 int main(void) {
     yrt_thread_elevate(NULL);
     test_errors();
@@ -3589,6 +3943,16 @@ int main(void) {
     test_sync_legit(3);
     test_sync_legit(4);
     test_sync_legit(5);
+    test_settle_clean();
+    test_settle_fail(YSCR_SETTLE_C_STATS);
+    test_settle_fail(YSCR_SETTLE_C_LATE);
+    test_settle_fail(YSCR_SETTLE_C_GRID);
+    test_settle_fail(YSCR_SETTLE_C_PATH);
+    test_settle_fail(YSCR_SETTLE_C_SPREAD);
+    test_settle_fail(YSCR_SETTLE_C_UNSYNCED);
+    test_settle_late_change();
+    test_settle_modes();
+    test_stale_statistics();
     /* no case but the forced-off ones fired the guard */
     CHECK_I(g_unsynced_fires, g_unsynced_want);
     if (g_failures) {

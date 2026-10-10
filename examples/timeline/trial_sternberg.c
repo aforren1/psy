@@ -464,12 +464,15 @@ int main(int argc, char** argv) {
                 yrsp_finish(&rsp, &res);
                 correct = (res.flags & YRSP_R_RESPONDED) && !strcmp(keys[res.response].key, answer);
                 sec(rt, sizeof rt, res.rt);
-                for (j = 0; j < k; j++) {
+                /* k was checked against MAX_SET when the trial began; the
+                 * clamp lets gcc see that mem cannot overflow */
+                int nk = k < 0 ? 0 : k > MAX_SET ? MAX_SET : k;
+                for (j = 0; j < nk; j++) {
                     mem[2 * j] = (char)('0' + set[j]);
                     mem[2 * j + 1] = ' ';
                     if (item_tier[j] > worst) worst = item_tier[j];
                 }
-                mem[k ? 2 * k - 1 : 0] = 0;
+                mem[nk ? 2 * nk - 1 : 0] = 0;
                 for (j = 1; j < MAX_SET; j++)   /* soa[j]: digit j's onset minus digit j-1's */
                     sec(soa[j], sizeof soa[j], j < k && item_t[j] && item_t[j - 1] ? (double)(item_t[j] - item_t[j - 1]) / 1e9 : NAN);
                 sec(soa[0], sizeof soa[0], res.t_onset && item_t[k - 1] ? (double)(res.t_onset - item_t[k - 1]) / 1e9 : NAN);

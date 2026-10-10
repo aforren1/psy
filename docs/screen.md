@@ -2095,6 +2095,156 @@ the guess keep their numbers, and that one flip gives the guard no
 evidence. `test_late_statistics` plays it on the virtual clock on both
 kinds of backend; mutants `dp-15` to `dp-17`.
 
+## Settling at open (v0.5.0)
+
+Psychtoolbox's `OpenWindow` collects at least 50 valid flip intervals (up
+to 5 s) and requires a small spread before it trusts the refresh. Up to
+v0.4.4, `yscr_open()` presented black frames only until three flips
+agreed on the depth (DXGI_FLIP, at most 40). The measurements below show
+that the start of a run is not settled then. Decided 2026-10-09 (user):
+`yscr_open()` settles the display, as described in SETTLE in the header.
+
+### What the start of a run does
+
+All runs: this laptop, AC, the guard held, the console display on and the
+session unlocked in every run (logged per run), 2026-10-09. The probe
+(`C:\tmp\psy-work\settle\settle.c`, not in the repository) is v0.4.4 with
+two log hooks. It logs every OS statistic, every completed present with
+its plan, every record, the grid at each `yscr_begin()`, the ring's path
+and depth records, and the scanout's vblanks (`D3DKMTGetScanLine` on its
+own thread). One open per process, then 5 s of frames at `f.onset`, idle,
+no holds. "In front": the program sent one input event before the open, so
+the window was in the foreground from its creation (20 opens per
+configuration, interleaved; 5 more per configuration not kept on top gave
+the same results). "Covered": started from the background, so the window
+was under another window during open and came to the front after it (9
+opens per configuration).
+
+Time from the `yscr_open()` call to the moment each condition starts and
+stays true to the end of the 5 s, in front, ms, median / p95 / max:
+
+| Configuration | `yscr_open()` | Depth fixed | Path fixed | All flips tier 1 | No early, late or estimated record |
+|---|---|---|---|---|---|
+| DXGI_FLIP fullscreen | 322 / 419 / 469 | at the end of open | 205 / 302 / 352 | 255 / 352 / 402 | at the end of open |
+| DXGI_FLIP window 800 x 600 | 306 / 456 / 562 | 504 / 582 / 627 | 554 / 631 / 661 | 554 / 631 / 661 | 537 / 615 / 661 |
+| COMPOSITION fullscreen | 395 / 505 / 538 | at the end of open | 328 / 438 / 470 | 328 / 438 / 470 | 328 / 438 / 470 |
+| COMPOSITION window | 460 / 531 / 532 | 566 / 647 / 648 | 566 / 647 / 648 | 477 / 564 / 565 | 469 / 547 / 548 |
+| AUTO fullscreen (COMPOSITION) | 394 / 438 / 505 | at the end of open | 327 / 371 / 438 | 327 / 371 / 438 | 327 / 371 / 438 |
+
+- The grid was anchored on an OS time during open in every run, within
+  about 0.1 ms of the scanout (the scanout poll's own noise).
+- DXGI_FLIP in a window: the system moved the window from the composed
+  path to an overlay plane at 0.50 to 0.66 s. Each run had 1 EARLY, 1
+  dropped and 3 ESTIMATED records in its first frames. The move at 1.7 to
+  1.9 s of docs/video.md (decode load) did not come in 34 idle window
+  opens.
+- COMPOSITION in a window: after each independent-flip statistic, a
+  second statistic for the same present came, as an overlay frame planned
+  for the next vblank. v0.4.4 changed the path and the depth on each: 9 to
+  13 depth changes and 13 to 17 path changes per open, on frames 0 to 5.
+  The records stayed clean.
+- Covered, COMPOSITION: no statistic during open, so open presented its
+  cap of 40 black frames (2.2 s). Then the OS times were up to 7.6 ms off
+  the scanout's vblanks and stayed GRID_UNSTABLE past 7 s in 4 of 9
+  fullscreen runs. DXGI_FLIP gets statistics for a covered window: its
+  covered runs settled as the ones in front did.
+
+The spread of the vblank intervals (OS times, each interval divided by the
+vblanks it spans), from the first OS time, over 100 opens in front:
+
+| Intervals | SD, us, median / p95 / max | Mean minus the scanout's period, us, median / max |
+|---|---|---|
+| 5 | 4.1 / 13.1 / 16.6 | 2.09 / 14.36 |
+| 10 | 6.0 / 12.6 / 16.6 | 1.48 / 9.62 |
+| 20 | 5.5 / 10.1 / 12.6 | 1.64 / 5.36 |
+| 50 | 4.6 / 7.2 / 8.4 | 0.80 / 2.74 |
+| 200 | 2.7 / 3.9 / 4.4 | 0.29 / 0.60 |
+
+Once settled, the SD of 50 intervals is about 1 us (p99 1.1 us). The 20
+opens not kept on top had at most 13.5 us and 6.7 us at 20 intervals.
+After a covered COMPOSITION open the SD of 50 intervals reached 170 to
+1800 us. Psychtoolbox's default limit, 1 ms, would pass all of these; the
+interval count is what costs time. So the rule takes 20 intervals (about
+0.33 s at 60 Hz) and limits of 50 us and 10 us.
+
+### The rule
+
+| Condition | Value | Why |
+|---|---|---|
+| An OS vblank time | the grid is not a guess | A guessed grid made every record tier 3 (v0.4.4). |
+| Clean flips in a row | 6 (`desc.settle_flips`): an OS statistic, on the grid, not early, not late, tier 1 fullscreen or 2 in a window, one path, one depth | Simulated on every run: 3 in a row settled 14 of 20 COMPOSITION window opens before a path flap; 6 or more never settled before a bad flip. |
+| Spread | the last 20 intervals: SD at most 50 us, mean within 10 us of the mode's period | The table above: 4 times the largest SD in front, and well under the drift after a covered open. The mean catches a mode whose period is not the panel's. |
+| Minimum time | 2.5 s in a window, none fullscreen (`desc.settle_min_ns`) | The move to an overlay at 1.7 to 1.9 s under decode load (docs/video.md). |
+| Cap | 3 s fullscreen, 4 s in a window (`desc.settle_max_ns`), from the `yscr_open()` call | Fullscreen settled by 0.8 s in every simulated open in front. A window's cap is 1.5 s above its minimum, and above the slowest window seen (2.95 s, covered). |
+| At the cap | AUTO: open fails fullscreen (STRICT), opens with a warning in a window (WARN); `desc.settle`, `YSP_SETTLE` | Decided 2026-10-09 (user). |
+
+Every outcome is recorded, so a skipped or failed settling cannot pass
+unseen (Psychtoolbox's `SkipSyncTests` is easy to leave on): the
+describe line (`settle=0.66s(24 flips)`, `settle=SKIPPED(env
+YSP_SETTLE=off)`, `settle=FAILED(grid,flip41,2/6-clean,warn)` with
+`WARNING=not-settled`, `settle=ABORTED(...)`), one `YSCR_EV_SETTLE` ring
+record, and `yscr_settle_check()`. The describe line goes into the header
+of each example's data file. Settle frames are not records. The SIM
+backend and a presenter without OS vblank times skip settling.
+
+A statistic for a present that already completed is stale and changes no
+path: the COMPOSITION window flap is gone (`test_stale_statistics`).
+
+Simulated on the 120 opens in front, the rule settled every one and no
+bad flip came after it: fullscreen DXGI_FLIP 555 / 652 / 702 ms (median /
+p95 / max), COMPOSITION 661 / 772 / 804 ms, windows 1.01 s with the old
+1 s minimum. Covered, COMPOSITION: 21 of 27 settled at 2.7 to 3.0 s, 6
+reached the cap, and the rule named the spread or the grid.
+
+### Tests
+
+`tests/adapt/screen_test.c` plays each condition on the virtual clock:
+a clean display (fullscreen settles at once; a window after 2.5 s; the
+composed path settles a window and fails fullscreen on the tier),
+statistics missing, drops, off-grid times, a flapping path, a period 15
+us longer than the mode's (on the grid, so only the spread's mean sees
+it), a driver that forces vsync off (the sync guard fires during
+settling); each fails a STRICT open with an error that names it and opens
+with WARN. Also a path change late in the black frames, YSP_SETTLE over
+the desc and a bad value, the desc's limits, an abort during settling
+(open succeeds, the first `yscr_begin()` reports it), SIM, and the stale
+statistics. Mutants `st-01` to `st-20`, all caught.
+
+### After: v0.5.0 on the same probe
+
+The same probe on v0.5.0 (the log hooks copied into it again), the same
+loop, 2026-10-09. 20 opens in front and 5 covered per configuration,
+interleaved. "After open" counts the caller's records and the ring's path
+and depth records from the end of `yscr_open()` to 5 s later.
+
+| Configuration | `yscr_open()` in front, ms, median / p95 / max (v0.4.4) | Settled | After open: records early, late, estimated or off the grid | Path and depth changes after open |
+|---|---|---|---|---|
+| DXGI_FLIP fullscreen | 562 / 664 / 684 (322 / 419 / 469) | 20 of 20, 24 presents | 0 of 6020 (v0.4.4: 0) | 0 (v0.4.4: 0) |
+| DXGI_FLIP window | 2508 / 2515 / 2516 (306 / 456 / 562) | 20 of 20, 128 to 139 presents | 0 of 6020 (v0.4.4: 96 in 20 opens) | 0 (v0.4.4: 1 and 1 per open) |
+| COMPOSITION fullscreen | 673 / 826 / 845 (395 / 505 / 538) | 20 of 20, 25 presents | 0 of 6020 (0) | 0 (0) |
+| COMPOSITION window | 2508 / 2516 / 2516 (460 / 531 / 532) | 20 of 20, 127 to 143 presents | 0 of 6020 (0) | 0 (v0.4.4: 8 to 12 of each per open) |
+| AUTO fullscreen | 671 / 755 / 791 (394 / 438 / 505) | 20 of 20, 25 presents | 0 of 6020 (0) | 0 (0) |
+
+Covered at open (started from the background; the window came to the
+front only after `yscr_open()` returned):
+
+| Configuration | Result |
+|---|---|
+| DXGI_FLIP fullscreen | 5 of 5 failed: "statistics", no flip had a statistic in 3 s |
+| COMPOSITION and AUTO fullscreen | 8 of 8 covered opens failed: "statistics"; the 2 opens that were in front settled at 0.65 s |
+| DXGI_FLIP window | 5 of 5 settled at 2.5 s (DXGI reports a covered window); when the window came to the front, 1 path and 1 depth change and 2 bad records per open |
+| COMPOSITION window | 4 of 4 covered opens reached the 4 s cap (WARN, "statistics") and opened |
+
+So a fullscreen program that starts with its window covered now fails
+`yscr_open()` with an error that names the missing statistics and asks
+whether the window is covered. v0.4.4 opened it and gave seconds of onsets
+off the grid (COMPOSITION) or without statistics. A program started by a
+person from a terminal in front gets the foreground; a scheduler, a remote
+shell or a test runner does not. Such a launcher can give it with one input
+event and `AllowSetForegroundWindow(ASFW_ANY)` before it starts the
+program, as the examples with `--topmost` now do for themselves; or set
+`YSP_SETTLE=warn`.
+
 ## Not measured
 
 - Light. No photodiode was attached. `tests/loopback/screen_loopback.c`
@@ -2141,6 +2291,10 @@ kinds of backend; mutants `dp-15` to `dp-17`.
   a window in the background got no statistic for 93% of its flips on
   DXGI_FLIP, and none on COMPOSITION, where it ran one frame each 4
   vblanks.
+  v0.5.0: `yscr_open()` settles a window for 2.5 s; in 20 idle DXGI_FLIP
+  window opens no early flip, path change or depth change came after open
+  ([Settling at open](#settling-at-open-v050)). Under decode load, not
+  measured again.
 
 ## Left out on purpose
 

@@ -198,6 +198,10 @@ int main(int argc, char** argv) {
     d.presenter = sim_off ? &off_presenter : NULL;
     d.presenter_ctx = sim_off ? &off : NULL;
     d.windowed = windowed;
+    /* this check reports a driver that forces vsync off; under the default
+     * (strict fullscreen) open() would refuse such a display (ysp/screen.h
+     * v0.5.0, SETTLE), so it warns and the verdict below says why */
+    d.settle = YSCR_SETTLE_WARN;
     if (!yscr_open(&scr, &d)) { fprintf(stderr, "screen_sync_check: %s\n", yscr_error(&scr)); return 1; }
     {
         char line[1024];

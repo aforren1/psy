@@ -123,6 +123,16 @@ int main(int argc, char** argv) {
     rd.bytes = sizeof ring_mem;
     if (!yrt_ring_open(&ring, &rd)) { fprintf(stderr, "gfx_load: ring\n"); return 1; }
     sd.ring = &ring;
+#if defined(_WIN32)
+    if (topmost) {   /* open() settles (ysp/screen.h v0.5.0): one input event lets this
+                     * program take the foreground during open, not after it */
+        INPUT in0;
+        memset(&in0, 0, sizeof in0);
+        in0.type = INPUT_MOUSE;
+        in0.mi.dwFlags = MOUSEEVENTF_MOVE;
+        SendInput(1, &in0, sizeof in0);
+    }
+#endif
     if (!yscr_open(&scr, &sd)) { fprintf(stderr, "gfx_load: %s\n", yscr_error(&scr)); return 1; }
     memset(&gd, 0, sizeof gd);
     gd.screen = &scr;
